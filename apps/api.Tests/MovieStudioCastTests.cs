@@ -7,11 +7,11 @@ using Xunit;
 
 namespace Taslim.Api.Tests;
 
-public sealed class MovieStudioCastTests : IClassFixture<GenerationJobsApiFactory>
+public sealed class MovieStudioCastTests : IClassFixture<MovieOperationalApiFactory>
 {
-    private readonly GenerationJobsApiFactory factory;
+    private readonly MovieOperationalApiFactory factory;
 
-    public MovieStudioCastTests(GenerationJobsApiFactory factory)
+    public MovieStudioCastTests(MovieOperationalApiFactory factory)
     {
         this.factory = factory;
         Task.Delay(150).GetAwaiter().GetResult();
@@ -124,7 +124,11 @@ public sealed class MovieStudioCastTests : IClassFixture<GenerationJobsApiFactor
         Assert.Equal(HttpStatusCode.Conflict, blockedState.StatusCode);
 
         var scene = await SendWithCsrf<Taslim.Api.Movies.MovieSceneDto>(client, HttpMethod.Post, $"/api/movie-studio/projects/{movie.Project.Id}/scenes", new { title = "Ferry", summary = "Mara reaches the ferry terminal." });
-        var generation = await SendWithCsrf<Taslim.Api.Movies.MovieStudioGenerationResponse>(client, HttpMethod.Post, $"/api/movie-studio/projects/{movie.Project.Id}/scenes/{scene.Id}/generate", new { title = "Continuity snapshot" });
+        var path = $"/api/movie-studio/projects/{movie.Project.Id}/scenes/{scene.Id}/generate";
+        var confirmedRequest = await MovieOperationalFixtures.BuildConfirmedMovieGenerationRequestAsync(
+            factory, path, new { title = "Continuity snapshot" });
+        var generation = await SendWithCsrf<Taslim.Api.Movies.MovieStudioGenerationResponse>(
+            client, HttpMethod.Post, path, confirmedRequest);
         var generatedClip = generation.Project.Scenes.SelectMany(item => item.Clips).Single(item => item.Id == generation.ClipId);
         Assert.Contains("Locked Mara", generatedClip.ContinuitySnapshotJson);
         Assert.Contains("Short dark hair", generatedClip.ContinuitySnapshotJson);

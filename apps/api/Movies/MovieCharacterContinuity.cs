@@ -113,12 +113,17 @@ public sealed record MovieCharacterContinuitySnapshotRequest(Guid? MovieSceneId,
 
 public sealed class MovieContinuityTargetException(string message) : Exception(message);
 
+public sealed class MovieContinuityPromptLimitException : Exception
+{
+    public MovieContinuityPromptLimitException() : base("The character-continuity context exceeds the provider prompt limit.") { }
+}
+
 public interface IMovieCharacterContinuityService
 {
     Task<MovieCharacterContinuityProjectionDto?> ProjectAsync(Guid userId, Guid movieProjectId, Guid? sceneId, Guid? shotId, CancellationToken cancellationToken = default);
     Task<MovieCharacterContinuitySnapshotDto?> BuildSnapshotAsync(Guid userId, Guid movieProjectId, Guid? sceneId, Guid? shotId, CancellationToken cancellationToken = default);
     Task<MovieCharacterContinuitySnapshotDto?> GetSnapshotAsync(Guid userId, Guid snapshotId, CancellationToken cancellationToken = default);
-    Task<MovieCharacterContinuitySnapshotDto> BuildSnapshotForTargetAsync(Guid movieProjectId, Guid? sceneId, Guid? shotId, bool persist, CancellationToken cancellationToken = default);
+    Task<MovieCharacterContinuitySnapshotDto> BuildSnapshotForTargetAsync(Guid movieProjectId, Guid? sceneId, Guid? shotId, bool persist, CancellationToken cancellationToken = default, int? maximumPromptCharacters = null);
 }
 
 public sealed class MovieCharacterContinuityService(TaslimDbContext db, WorkspaceAccessService access) : IMovieCharacterContinuityService
@@ -147,7 +152,7 @@ public sealed class MovieCharacterContinuityService(TaslimDbContext db, Workspac
             : DeserializeSnapshot(snapshot);
     }
 
-    public async Task<MovieCharacterContinuitySnapshotDto> BuildSnapshotForTargetAsync(Guid movieProjectId, Guid? sceneId, Guid? shotId, bool persist, CancellationToken cancellationToken = default)
+    public async Task<MovieCharacterContinuitySnapshotDto> BuildSnapshotForTargetAsync(Guid movieProjectId, Guid? sceneId, Guid? shotId, bool persist, CancellationToken cancellationToken = default, int? maximumPromptCharacters = null)
     {
         var target = await ResolveTargetAsync(movieProjectId, sceneId, shotId, cancellationToken);
         var projection = await BuildProjectionAsync(movieProjectId, target, cancellationToken)
@@ -164,6 +169,8 @@ public sealed class MovieCharacterContinuityService(TaslimDbContext db, Workspac
         var json = JsonSerializer.Serialize(payload);
         if (json.Length > MovieContinuitySnapshotLimits.MaxSnapshotJsonLength)
             throw new MovieContinuityTargetException("The continuity snapshot exceeded its bounded size.");
+        if (maximumPromptCharacters is { } promptLimit && json.Trim().Length > promptLimit)
+            throw new MovieContinuityPromptLimitException();
         var hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(json))).ToLowerInvariant();
         var createdAt = DateTime.UtcNow;
         if (!persist) return new MovieCharacterContinuitySnapshotDto(null, movieProjectId, target.SceneId, target.ShotId, null, hash, json, projection.Characters, projection.Warnings, createdAt);

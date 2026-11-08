@@ -474,8 +474,8 @@ public sealed class MovieProviderFakeFinalizationE2ETests : IClassFixture<MovieP
         string key,
         bool createApprovedSelect)
     {
-        var generated = await MovieOperationalFixtures.PostAsync<MovieStudioGenerationResponse>(
-            client,
+        var generated = await MovieOperationalFixtures.PostWithConfirmedMovieQuoteAsync<MovieStudioGenerationResponse>(
+            factory, client,
             $"/api/movie-studio/shots/{shotId}/generate",
             new { title = $"Fake provider {key} output" },
             idempotencyKey: $"movie-fake-video-{key}");

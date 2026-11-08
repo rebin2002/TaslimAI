@@ -1,6 +1,7 @@
 using System.Text.Json;
 using Taslim.Api.Movies;
 using Taslim.Api.Domain;
+using Taslim.Api.Tests.ProviderTesting;
 using Xunit;
 
 namespace Taslim.Api.Tests;
@@ -57,6 +58,164 @@ public sealed class MovieProductionGenerationOrchestratorTests
         MovieProductionOrchestrationState expected)
     {
         Assert.Equal(expected, MovieProductionOrchestrationStateMachine.From(status));
+    }
+
+    [Fact]
+    public void Approved_production_replay_key_requires_nonempty_value_and_is_trimmed_and_bounded_before_speculative_writes()
+    {
+        foreach (var value in new string?[] { null, "", " \t " })
+        {
+            var missing = Assert.Throws<MovieProductionValidationException>(() =>
+                MovieProductionGenerationOrchestrator.NormalizeIdempotencyKey(value));
+            Assert.Equal("IDEMPOTENCY_KEY_REQUIRED", missing.Code);
+        }
+
+        var accepted = new string('x', 80);
+        Assert.Equal(accepted,
+            MovieProductionGenerationOrchestrator.NormalizeIdempotencyKey($"  {accepted}  "));
+
+        var error = Assert.Throws<MovieProductionValidationException>(() =>
+            MovieProductionGenerationOrchestrator.NormalizeIdempotencyKey(new string('x', 81)));
+        Assert.Equal("IDEMPOTENCY_KEY_INVALID", error.Code);
+    }
+
+    [Theory]
+    [InlineData(2)]
+    [InlineData(10)]
+    public void Approved_production_admission_accepts_only_declared_single_clip_boundaries(int durationSeconds)
+    {
+        var calls = new FakeProviderCallLog();
+        var provider = new FakeMovieVideoProvider(new FakeProviderScenarioCatalog(), calls)
+        {
+            SceneClipDurationRange = new MovieClipDurationRange(2, 10),
+        };
+
+        MovieProductionGenerationOrchestrator.ValidateProductionClipAdmission(
+            provider, durationSeconds, "720p", "720p", DirectorQualityLevels.Standard,
+            "native", "16:9");
+        Assert.Equal(0, calls.Calls(FakeProviderKind.Movie));
+    }
+
+    [Theory]
+    [InlineData(1)]
+    [InlineData(11)]
+    [InlineData(60)]
+    public void Approved_production_admission_rejects_out_of_range_clip_without_provider_submission(int durationSeconds)
+    {
+        var calls = new FakeProviderCallLog();
+        var provider = new FakeMovieVideoProvider(new FakeProviderScenarioCatalog(), calls)
+        {
+            SceneClipDurationRange = new MovieClipDurationRange(2, 10),
+        };
+
+        var error = Assert.Throws<MovieProductionValidationException>(() =>
+            MovieProductionGenerationOrchestrator.ValidateProductionClipAdmission(
+                provider, durationSeconds, "720p", "720p", DirectorQualityLevels.Standard,
+                "native", "16:9"));
+
+        Assert.Equal("MOVIE_CLIP_DURATION_UNSUPPORTED", error.Code);
+        Assert.Equal(0, calls.Calls(FakeProviderKind.Movie));
+    }
+
+    [Fact]
+    public void Approved_production_admission_rejects_unavailable_provider()
+    {
+        var scenarios = new FakeProviderScenarioCatalog();
+        scenarios[FakeProviderKind.Movie] = FakeProviderScenario.AllProvidersUnavailable;
+        var calls = new FakeProviderCallLog();
+        var provider = new FakeMovieVideoProvider(scenarios, calls);
+
+        var error = Assert.Throws<MovieProductionValidationException>(() =>
+            MovieProductionGenerationOrchestrator.ValidateProductionClipAdmission(
+                provider, 5, "720p", "720p", DirectorQualityLevels.Standard, "native", "16:9"));
+
+        Assert.Equal("MOVIE_PROVIDER_UNAVAILABLE", error.Code);
+        Assert.Equal(0, calls.Calls(FakeProviderKind.Movie));
+    }
+
+    [Fact]
+    public void Approved_production_admission_rejects_unpriced_or_unsupported_execution_intent()
+    {
+        var calls = new FakeProviderCallLog();
+        var provider = new FakeMovieVideoProvider(new FakeProviderScenarioCatalog(), calls)
+        {
+            SceneClipDurationRange = new MovieClipDurationRange(2, 10),
+            SceneClipCostIntentSupported = false,
+        };
+
+        var error = Assert.Throws<MovieProductionValidationException>(() =>
+            MovieProductionGenerationOrchestrator.ValidateProductionClipAdmission(
+                provider, 5, "1080p", "1080p", DirectorQualityLevels.Cinematic,
+                "upscale", "16:9"));
+
+        Assert.Equal("MOVIE_CLIP_EXECUTION_INTENT_UNSUPPORTED", error.Code);
+        Assert.Equal(0, calls.Calls(FakeProviderKind.Movie));
+    }
+
+    [Fact]
+    public void Approved_production_admission_rejects_adapters_with_no_declared_duration_contract()
+    {
+        var calls = new FakeProviderCallLog();
+        var provider = new FakeMovieVideoProvider(new FakeProviderScenarioCatalog(), calls)
+        {
+            SceneClipDurationRange = null,
+        };
+
+        var error = Assert.Throws<MovieProductionValidationException>(() =>
+            MovieProductionGenerationOrchestrator.ValidateProductionClipAdmission(
+                provider, 5, "720p", "720p", DirectorQualityLevels.Standard,
+                "native", "16:9"));
+
+        Assert.Equal("MOVIE_CLIP_DURATION_UNSUPPORTED", error.Code);
+        Assert.Equal(0, calls.Calls(FakeProviderKind.Movie));
+    }
+
+    [Fact]
+    public void Read_only_production_admission_matches_queue_for_every_declared_provider_gate()
+    {
+        // This pure decision is intended for read-only preflight and is also
+        // consumed by the queue's throwing validator. Neither path invokes a
+        // paid provider; preflight must never promise an unsupported clip.
+        var scenarios = new FakeProviderScenarioCatalog();
+        var calls = new FakeProviderCallLog();
+        var provider = new FakeMovieVideoProvider(scenarios, calls)
+        {
+            SceneClipDurationRange = new MovieClipDurationRange(2, 10),
+        };
+
+        MovieProductionValidationException? Preview(int seconds = 5) =>
+            MovieProductionGenerationOrchestrator.EvaluateProductionClipAdmission(
+                provider, seconds, "720p", "720p", DirectorQualityLevels.Standard,
+                "native", "16:9");
+
+        void AssertSameRejection(string expectedCode, int seconds = 5)
+        {
+            var decision = Assert.IsType<MovieProductionValidationException>(Preview(seconds));
+            Assert.Equal(expectedCode, decision.Code);
+            var queueError = Assert.Throws<MovieProductionValidationException>(() =>
+                MovieProductionGenerationOrchestrator.ValidateProductionClipAdmission(
+                    provider, seconds, "720p", "720p", DirectorQualityLevels.Standard,
+                    "native", "16:9"));
+            Assert.Equal(decision.Code, queueError.Code);
+            Assert.Equal(decision.Message, queueError.Message);
+        }
+
+        Assert.Null(Preview(2));
+        Assert.Null(Preview(10));
+        MovieProductionGenerationOrchestrator.ValidateProductionClipAdmission(
+            provider, 5, "720p", "720p", DirectorQualityLevels.Standard,
+            "native", "16:9");
+
+        AssertSameRejection("MOVIE_CLIP_DURATION_UNSUPPORTED", 1);
+        AssertSameRejection("MOVIE_CLIP_DURATION_UNSUPPORTED", 11);
+        provider.SceneClipCostIntentSupported = false;
+        AssertSameRejection("MOVIE_CLIP_EXECUTION_INTENT_UNSUPPORTED");
+        provider.SceneClipCostIntentSupported = true;
+        provider.SceneClipDurationRange = null;
+        AssertSameRejection("MOVIE_CLIP_DURATION_UNSUPPORTED");
+        scenarios[FakeProviderKind.Movie] = FakeProviderScenario.AllProvidersUnavailable;
+        AssertSameRejection("MOVIE_PROVIDER_UNAVAILABLE");
+        Assert.Equal(0, calls.Calls(FakeProviderKind.Movie));
     }
 
     [Fact]

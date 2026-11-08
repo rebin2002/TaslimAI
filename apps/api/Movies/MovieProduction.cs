@@ -468,6 +468,8 @@ public sealed class MovieProductionRenderRequest
     public string? TargetResolution { get; set; }
     public string? QualityTier { get; set; }
     public bool ConfirmationAccepted { get; set; }
+    public decimal? ExpectedMaximumAmountUsd { get; set; }
+    public string? ExpectedQuoteFingerprint { get; set; }
     public bool AllowReferenceReadinessOverride { get; set; }
     public string? ReferenceReadinessOverrideReason { get; set; }
     [JsonIgnore, BindNever]

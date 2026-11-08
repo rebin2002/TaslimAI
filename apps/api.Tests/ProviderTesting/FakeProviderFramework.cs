@@ -230,8 +230,38 @@ public sealed class FakeMovieVideoProvider(
 {
     private readonly ConcurrentDictionary<string, int> polls = new();
     public string Key => "fake-movie";
+    public string? SceneClipPricingModelKey { get; set; } = "fake-model";
     public bool IsAvailable => Scenarios[FakeProviderKind.Movie] != FakeProviderScenario.AllProvidersUnavailable;
-    public IReadOnlyCollection<string> SupportedOperations { get; } = [MovieStudioOperations.QuickMovie, MovieStudioOperations.SceneClip];
+    // Test-only capability override: simulate a ready adapter advertising only Quick Movie,
+    // no operations, or case-variant SceneClip without making any provider calls.
+    public IReadOnlyCollection<string> SupportedOperations { get; set; } = [MovieStudioOperations.QuickMovie, MovieStudioOperations.SceneClip];
+    // Override in focused admission tests without invoking a paid provider.
+    public MovieClipDurationRange? SceneClipDurationRange { get; set; } = new(1, 3600);
+    // Allows provider-free HTTP admission tests to assert pre-reservation denial.
+    public int? SceneClipPromptMaxCharacters { get; set; }
+    public int SceneClipPromptFormattingOverheadCharacters { get; set; }
+    public bool SceneClipWorldContextInPrompt { get; set; }
+    // The deterministic fake can honor the requested profile for provider-free E2E.
+    // It is not an assertion about Runway or Manus capabilities.
+    public bool SceneClipCostIntentSupported { get; set; } = true;
+    public string? RequiredSceneClipSourceResolution { get; set; }
+    public string? RequiredSceneClipTargetResolution { get; set; }
+    public string? RequiredSceneClipQualityTier { get; set; }
+    public string? RequiredSceneClipProcessingPath { get; set; }
+    public string? RequiredSceneClipAspectRatio { get; set; }
+    // Test-only opt-in for the approved-keyframe reference package route.
+    public bool ReferencePackageCostIntentSupported { get; set; } = true;
+    public bool SupportsReferencePackageCostIntent => ReferencePackageCostIntentSupported;
+    public bool SupportsSceneClipCostIntent(string sourceResolution, string targetResolution,
+        string qualityTier, string processingPath, string aspectRatio) => SceneClipCostIntentSupported
+        && Matches(RequiredSceneClipSourceResolution, sourceResolution)
+        && Matches(RequiredSceneClipTargetResolution, targetResolution)
+        && Matches(RequiredSceneClipQualityTier, qualityTier)
+        && Matches(RequiredSceneClipProcessingPath, processingPath)
+        && Matches(RequiredSceneClipAspectRatio, aspectRatio);
+
+    private static bool Matches(string? required, string actual) => required is null
+        || string.Equals(required, actual, StringComparison.OrdinalIgnoreCase);
 
     public async Task<MovieVideoSubmission> SubmitAsync(MovieVideoGenerationRequest request, CancellationToken cancellationToken)
     {

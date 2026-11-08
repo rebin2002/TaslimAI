@@ -150,10 +150,18 @@ test.describe("Final integrated Last Seed acceptance", () => {
 
     await page.getByRole("link", { name: "Cast", exact: true }).click();
     await expect(page.getByRole("button", { name: /lock current guide/i })).toBeVisible({ timeout: 20_000 });
+    // The accessible name changes to "Locking guide…" while the POST is pending.
+    // Wait for the actual persistence request rather than that transient label.
+    const lockResponsePromise = page.waitForResponse((response) =>
+      response.url().includes(`/api/movie-studio/projects/${projectId}/guide/lock`)
+      && response.request().method() === "POST");
     await page.getByRole("button", { name: /lock current guide/i }).click();
+    expect((await lockResponsePromise).status()).toBe(200);
     await expect(page.getByRole("button", { name: /lock current guide/i })).toHaveCount(0, { timeout: 20_000 });
-    const lockedProject = await apiJson<MovieProject>(page.request, "GET", `/api/movie-studio/projects/${projectId}`);
-    expect(lockedProject.guide.lockedRevisionNumber).toBeTruthy();
+    await expect.poll(async () => {
+      const lockedProject = await apiJson<MovieProject>(page.request, "GET", `/api/movie-studio/projects/${projectId}`);
+      return lockedProject.guide.lockedRevisionNumber ?? null;
+    }, { timeout: 20_000 }).toBeTruthy();
     await expect(page.getByText(/needs a real shot target/i)).toHaveCount(0);
     const castDirectorButton = page.getByRole("button", { name: "Create typed proposal", exact: true });
     await expect(castDirectorButton).toBeEnabled();

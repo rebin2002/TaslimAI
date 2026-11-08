@@ -135,6 +135,40 @@ public sealed class MovieVideoExecutionStore(TaslimDbContext db, IOptions<MovieV
         }
     }
 
+    /// <summary>
+    /// Reserve the one permitted provider submission durably before sending the
+    /// request. A crashed worker can lose a provider response (and job id), so a
+    /// later claimant must not assume it is safe to submit the same billable job.
+    /// Existing provider ids remain resumable through read-only polling.
+    /// </summary>
+    public async Task MarkSubmissionAttemptAsync(MovieVideoProviderExecution execution, Guid concurrencyToken, CancellationToken cancellationToken)
+    {
+        var now = DateTime.UtcNow;
+        var marked = await db.MovieVideoProviderExecutions
+            .Where(item => item.Id == execution.Id
+                && item.GenerationJobId == execution.GenerationJobId
+                && item.ProviderJobId == null
+                && item.AttemptCount == 0
+                && item.GenerationJob.Status == GenerationJobStatus.Running
+                && item.GenerationJob.ConcurrencyToken == concurrencyToken)
+            .ExecuteUpdateAsync(setters => setters
+                .SetProperty(item => item.AttemptCount, 1)
+                .SetProperty(item => item.UpdatedAt, now), cancellationToken);
+        if (marked == 1) return;
+
+        var stillOwned = await db.GenerationJobs.AsNoTracking()
+            .AnyAsync(item => item.Id == execution.GenerationJobId
+                && item.Status == GenerationJobStatus.Running
+                && item.ConcurrencyToken == concurrencyToken, cancellationToken);
+        if (!stillOwned) throw new MovieVideoStaleWorkerException();
+
+        // No confirmed provider id exists. Reconciliation is required; another
+        // paid submit could produce a duplicate even if the first worker failed.
+        throw new MovieVideoProviderException(
+            GenerationJobErrorCodes.MovieGenerationFailed, false,
+            "An earlier video submission may already be active. Reconcile its outcome before retrying.");
+    }
+
     public async Task PersistSubmittedAsync(MovieVideoProviderExecution execution, Guid concurrencyToken, string providerJobId, CancellationToken cancellationToken)
     {
         execution.ProviderJobId = providerJobId;
@@ -144,7 +178,6 @@ public sealed class MovieVideoExecutionStore(TaslimDbContext db, IOptions<MovieV
             .ExecuteUpdateAsync(setters => setters
                 .SetProperty(item => item.ProviderJobId, providerJobId)
                 .SetProperty(item => item.Status, MovieVideoExecutionStatuses.Queued)
-                .SetProperty(item => item.AttemptCount, item => item.AttemptCount + 1)
                 .SetProperty(item => item.UpdatedAt, now), cancellationToken);
         if (persisted == 0) throw new MovieVideoStaleWorkerException();
         await db.MovieClips.Where(item => item.Id == execution.MovieClipId && db.GenerationJobs.Any(job => job.Id == execution.GenerationJobId && job.Status == GenerationJobStatus.Running && job.ConcurrencyToken == concurrencyToken))
@@ -216,6 +249,24 @@ public sealed class MovieVideoExecutionStore(TaslimDbContext db, IOptions<MovieV
             .ExecuteUpdateAsync(setters => setters.SetProperty(item => item.Status, MovieVideoExecutionStatuses.Completed).SetProperty(item => item.ProgressPercent, 100).SetProperty(item => item.CompletedAt, now).SetProperty(item => item.UpdatedAt, now), cancellationToken);
         await db.MovieClips.Where(item => item.GenerationJobId == jobId && db.GenerationJobs.Any(job => job.Id == jobId && job.Status == GenerationJobStatus.Succeeded && job.ConcurrencyToken == concurrencyToken))
             .ExecuteUpdateAsync(setters => setters.SetProperty(item => item.Status, MovieClipStatuses.Ready).SetProperty(item => item.AssetId, assetId).SetProperty(item => item.StoredFileId, storedFileId).SetProperty(item => item.DurationSeconds, item => durationSeconds ?? item.DurationSeconds).SetProperty(item => item.MetadataJson, metadataJson).SetProperty(item => item.UpdatedAt, now), cancellationToken);
+        // The first worker can finish before QueueClipAsync has saved GenerationJobId.
+        // The provider execution already durably identifies the canonical clip.
+        // Publish only to that exact unlinked clip in the job's workspace and
+        // under the winning execution token; do not adopt a clip linked elsewhere.
+        await db.MovieClips.Where(item => item.GenerationJobId == null
+            && db.MovieVideoProviderExecutions.Any(execution => execution.MovieClipId == item.Id
+                && execution.GenerationJobId == jobId
+                && execution.GenerationJob.Status == GenerationJobStatus.Succeeded
+                && execution.GenerationJob.ConcurrencyToken == concurrencyToken
+                && execution.GenerationJob.WorkspaceId == item.MovieProject.WorkspaceId))
+            .ExecuteUpdateAsync(setters => setters
+                .SetProperty(item => item.GenerationJobId, (Guid?)jobId)
+                .SetProperty(item => item.Status, MovieClipStatuses.Ready)
+                .SetProperty(item => item.AssetId, assetId)
+                .SetProperty(item => item.StoredFileId, storedFileId)
+                .SetProperty(item => item.DurationSeconds, item => durationSeconds ?? item.DurationSeconds)
+                .SetProperty(item => item.MetadataJson, metadataJson)
+                .SetProperty(item => item.UpdatedAt, now), cancellationToken);
         if (assetId.HasValue)
         {
             await db.MovieTakes.Where(item => item.GenerationJobId == jobId && db.GenerationJobs.Any(job => job.Id == jobId && job.Status == GenerationJobStatus.Succeeded && job.ConcurrencyToken == concurrencyToken)).ExecuteUpdateAsync(setters => setters
@@ -271,8 +322,109 @@ public sealed class MovieVideoGenerationJobHandler(
         var input = Deserialize(job.InputJson);
         var clip = await db.MovieClips.Include(item => item.MovieProject).FirstOrDefaultAsync(item => item.Id == input.MovieClipId && item.MovieProjectId == input.MovieProjectId, cancellationToken)
             ?? throw new MovieVideoProviderException(GenerationJobErrorCodes.MovieGenerationFailed, false, "The movie clip could not be found.");
+        // A recovered worker may legitimately see an unlinked clip while the
+        // original queue request is still publishing its job. It must never
+        // submit or poll a paid operation for a clip already owned by another
+        // job or belonging to a different workspace.
+        if (clip.MovieProject.WorkspaceId != job.WorkspaceId
+            || (clip.GenerationJobId.HasValue && clip.GenerationJobId.Value != job.Id))
+            throw new MovieVideoProviderException(
+                GenerationJobErrorCodes.MovieGenerationFailed, false,
+                "The video job no longer owns its clip and workspace. Reconcile the job before retrying.");
+        // Shot-execution persists the canonical take before queueing the job.
+        // Recover the narrow job-commit/link-save crash window only when that
+        // take proves it was created for this exact queued input. Never submit
+        // a paid provider request for an unlinked or mismatched shot candidate.
+        await EnsureShotExecutionTakeLinkedAsync(job, input, clip, cancellationToken);
+        // A priced job must not silently move to a different provider if the
+        // deployment's routing changes between admission and first submission.
+        // This check also covers jobs with no provider-execution record yet.
+        // Older persisted inputs without provider identity are left unchanged.
+        if (!string.IsNullOrWhiteSpace(input.SelectedProviderKey)
+            && !string.Equals(input.SelectedProviderKey, provider.Key, StringComparison.OrdinalIgnoreCase))
+            throw new MovieVideoProviderException(
+                GenerationJobErrorCodes.MovieProviderUnavailable, false,
+                "The selected video provider changed since this job was queued. Restore the original provider or reconcile the job.");
+        if (!string.IsNullOrWhiteSpace(input.SelectedProviderModelKey)
+            && !string.Equals(
+                MovieStudioHelpers.Clean(input.SelectedProviderModelKey),
+                MovieStudioHelpers.Clean(provider.SceneClipPricingModelKey),
+                StringComparison.OrdinalIgnoreCase))
+        {
+            await executions.MarkFailedAsync(job.Id, job.ConcurrencyToken,
+                GenerationJobErrorCodes.MovieProviderUnsupportedRequest, CancellationToken.None);
+            throw new MovieVideoProviderException(
+                GenerationJobErrorCodes.MovieProviderUnsupportedRequest, false,
+                "The selected video model changed since this job was queued. Restore the quoted model or reconcile the job.");
+        }
         if (!provider.IsAvailable || !provider.SupportedOperations.Contains(input.Operation, StringComparer.OrdinalIgnoreCase))
             throw new MovieProviderUnavailableException();
+
+        // Enforce the same fail-closed scene/shot capabilities at execution time.
+        // Older queued jobs and other admission routes must not bypass the
+        // provider's priced-output contract or submit unsupported paid work.
+        // This check intentionally precedes execution-record creation.
+        if ((string.Equals(input.Operation, MovieStudioOperations.SceneClip, StringComparison.OrdinalIgnoreCase)
+            && (provider.SceneClipDurationRange is not { } range
+                || !range.Supports(input.DurationSeconds)
+                || input.UpscalingRequested
+                // Distinct frame and multi-reference input requires explicit
+                // provider capability; all current adapters fail closed here.
+                // SourceImageUri selects an image-to-video mode and is not
+                // covered by the base scene-clip cost intent.
+                || (!string.IsNullOrWhiteSpace(input.SourceImageUri)
+                    && !provider.SupportsSceneClipSourceImageCostIntent)
+                || (!provider.SupportsSceneClipFrameReferences
+                    && (!string.IsNullOrWhiteSpace(input.FirstFrameImageUri)
+                        || !string.IsNullOrWhiteSpace(input.LastFrameImageUri)
+                        || input.ReferenceImages is { Count: > 0 }))
+                // Older queued jobs can predate admission guards. Include
+                // required continuity, scene and shot JSON in the lower bound:
+                // an apparently short description may still carry structured
+                // direction too large to send. Reject before recording or
+                // attempting an irreversible potentially billable submission.
+                || (provider.SceneClipPromptMaxCharacters is { } promptCapacity
+                    && (long)(input.Description?.Trim().Length ?? 0)
+                        + (input.Style?.Trim().Length ?? 0)
+                        + (input.AdditionalInstructions?.Trim().Length ?? 0)
+                        + (input.ContinuityGuideJson?.Trim().Length ?? 0)
+                        + (input.CharacterContinuityJson?.Trim().Length ?? 0)
+                        + (input.SceneJson?.Trim().Length ?? 0)
+                        + (input.ShotJson?.Trim().Length ?? 0)
+                        + (provider.SceneClipWorldContextInPrompt
+                            ? (input.WorldContextJson?.Trim().Length ?? 0) : 0)
+                        + Math.Max(0, provider.SceneClipPromptFormattingOverheadCharacters)
+                        > promptCapacity)
+                // The neutral request carries a separate master output tier, but
+                // no scene-clip adapter declares a verified mastering step.
+                // Never silently drop an older queued job's mastering intent.
+                || !string.IsNullOrWhiteSpace(input.MasterResolution)
+                || !provider.SupportsSceneClipCostIntent(
+                    input.SourceResolution ?? string.Empty,
+                    input.TargetResolution ?? string.Empty,
+                    input.QualityTier ?? string.Empty,
+                    input.ProcessingPath ?? string.Empty,
+                    input.AspectRatio)))
+            || (!string.IsNullOrWhiteSpace(input.ReferencePackageJson)
+                && !provider.SupportsReferencePackageCostIntent))
+        {
+            // A prior worker may already have submitted a provider operation.
+            // Continue polling that *existing* job instead of abandoning paid
+            // work remotely. Never permit a new unsupported submission.
+            var submittedProviderJobId = await db.MovieVideoProviderExecutions.AsNoTracking()
+                .Where(item => item.GenerationJobId == job.Id)
+                .Select(item => item.ProviderJobId)
+                .FirstOrDefaultAsync(cancellationToken);
+            if (string.IsNullOrWhiteSpace(submittedProviderJobId))
+            {
+                // Admission on older paths may have persisted a queued clip.
+                // Fail that clip/take under this worker claim without leaving
+                // a speculative provider-execution record or a remote job.
+                await executions.MarkFailedAsync(job.Id, job.ConcurrencyToken,
+                    GenerationJobErrorCodes.MovieProviderUnsupportedRequest, CancellationToken.None);
+                throw new MovieVideoProviderException(GenerationJobErrorCodes.MovieProviderUnsupportedRequest, false);
+            }
+        }
 
         var request = new MovieVideoGenerationRequest(
             input.Operation,
@@ -300,8 +452,27 @@ public sealed class MovieVideoGenerationJobHandler(
             input.UpscalingRequested,
             input.FirstFrameImageUri,
             input.LastFrameImageUri,
-            input.ReferenceImages);
+            input.ReferenceImages,
+            input.TargetResolution,
+            input.QualityTier,
+            input.CharacterContinuityJson);
         var execution = await executions.GetOrCreateAsync(job, clip.Id, provider.Key, cancellationToken);
+        // A persisted provider id belongs to the original adapter. After a
+        // configuration change, polling or cancelling it through another adapter
+        // can misroute a paid operation; even an unsubmitted execution must not
+        // silently change the priced provider. Reconcile with the original
+        // adapter instead of sending a second request.
+        // The execution record is durably owned by one canonical clip. A
+        // recovered job whose input points to a different clip must not poll
+        // an earlier paid task or publish its output under the wrong clip.
+        if (execution.MovieClipId != clip.Id)
+            throw new MovieVideoProviderException(
+                GenerationJobErrorCodes.MovieGenerationFailed, false,
+                "The video execution no longer matches its original clip. Reconcile the job before retrying.");
+        if (!string.Equals(execution.ProviderKey, provider.Key, StringComparison.OrdinalIgnoreCase))
+            throw new MovieVideoProviderException(
+                GenerationJobErrorCodes.MovieProviderUnavailable, false,
+                "This video job belongs to another provider. Restore the original provider or reconcile its execution.");
         var started = Stopwatch.GetTimestamp();
         var providerOperationMayBeActive = !string.IsNullOrWhiteSpace(execution.ProviderJobId);
         progress.Report(5);
@@ -310,9 +481,26 @@ public sealed class MovieVideoGenerationJobHandler(
         {
             if (string.IsNullOrWhiteSpace(execution.ProviderJobId))
             {
-                var submission = await WithTransientRetriesAsync(
-                    token => provider.SubmitAsync(request, token),
-                    cancellationToken);
+                // Persist the irreversible submit attempt before any outbound call.
+                // A fresh worker can poll a known provider id but cannot safely
+                // re-submit after an ambiguous crash or lost HTTP response.
+                await executions.MarkSubmissionAttemptAsync(
+                    execution, job.ConcurrencyToken, cancellationToken);
+                // A generation submit may have reached a billable provider even if
+                // its HTTP response was lost. Without a provider-confirmed
+                // idempotency contract, retrying here could create a second task.
+                // Retry only status polls and output retrieval, never submit.
+                MovieVideoSubmission submission;
+                try
+                {
+                    submission = await provider.SubmitAsync(request, cancellationToken);
+                }
+                catch (MovieVideoProviderException exception) when (exception.IsTransient)
+                {
+                    // An ambiguous remote submission is not safe to retry by
+                    // this worker or by any upstream transient-failure policy.
+                    throw new MovieVideoProviderException(exception.Code, false);
+                }
                 if (string.IsNullOrWhiteSpace(submission.ProviderJobId) || submission.ProviderJobId.Length > 240)
                     throw new MovieVideoProviderException(GenerationJobErrorCodes.MovieGenerationFailed, false);
                 providerOperationMayBeActive = true;
@@ -436,6 +624,113 @@ public sealed class MovieVideoGenerationJobHandler(
                 var seconds = Math.Min(Math.Max(1, settings.RetryMaxDelaySeconds), Math.Max(1, settings.RetryBaseDelaySeconds) * Math.Pow(2, attempt));
                 await Task.Delay(TimeSpan.FromSeconds(seconds), cancellationToken);
             }
+        }
+    }
+
+    private async Task EnsureShotExecutionTakeLinkedAsync(
+        GenerationJob job,
+        MovieGenerationInput input,
+        MovieClip clip,
+        CancellationToken cancellationToken)
+    {
+        // Other Movie production and selective-regeneration jobs can carry a
+        // source production version/reference package without creating a
+        // MovieTake. The paired take markers are specific to shot execution.
+        var hasShotExecutionIntent = input.TakeNumber.HasValue || input.TakeCount.HasValue;
+        if (!hasShotExecutionIntent) return;
+        if (input.Operation != MovieStudioOperations.SceneClip
+            || input.MovieSceneId is not { } sceneId
+            || input.MovieShotId is not { } shotId
+            || input.SourceProductionVersionId is not { } sourceProductionVersionId
+            || input.TakeCount is not { } takeCount
+            || input.TakeNumber is not { } takeNumber
+            || takeCount is < 1 or > 8
+            || takeNumber < 1 || takeNumber > takeCount
+            || clip.MovieSceneId != sceneId
+            || clip.MovieShotId != shotId
+            || clip.DurationSeconds != input.DurationSeconds)
+        {
+            await executions.MarkFailedAsync(job.Id, job.ConcurrencyToken,
+                GenerationJobErrorCodes.MovieProviderUnsupportedRequest, CancellationToken.None);
+            throw new MovieVideoProviderException(
+                GenerationJobErrorCodes.MovieProviderUnsupportedRequest, false,
+                "The queued shot-execution candidate is missing its canonical target identity.");
+        }
+
+        var take = await db.MovieTakes.SingleOrDefaultAsync(
+            item => item.MovieShotId == shotId && item.MovieClipId == clip.Id,
+            cancellationToken);
+        if (take is null
+            || (take.GenerationJobId.HasValue && take.GenerationJobId.Value != job.Id)
+            || (clip.GenerationJobId.HasValue && clip.GenerationJobId.Value != job.Id)
+            || take.QualityLevel != input.QualityTier
+            || take.Status is not (MovieTakeStatuses.Queued or MovieTakeStatuses.Running)
+            || !HasMatchingShotTakeMetadata(take.MetadataJson, job, input, sourceProductionVersionId, takeNumber, takeCount))
+        {
+            await executions.MarkFailedAsync(job.Id, job.ConcurrencyToken,
+                GenerationJobErrorCodes.MovieProviderUnsupportedRequest, CancellationToken.None);
+            throw new MovieVideoProviderException(
+                GenerationJobErrorCodes.MovieProviderUnsupportedRequest, false,
+                "The queued shot-execution candidate could not be linked safely. Reconcile the candidate before retrying.");
+        }
+
+        take.GenerationJobId = job.Id;
+        clip.GenerationJobId = job.Id;
+        await db.SaveChangesAsync(cancellationToken);
+        await executions.MarkRunningAsync(job.Id, job.ConcurrencyToken, cancellationToken);
+    }
+
+    private static bool HasMatchingShotTakeMetadata(
+        string? metadataJson,
+        GenerationJob job,
+        MovieGenerationInput input,
+        Guid sourceProductionVersionId,
+        int takeNumber,
+        int takeCount)
+    {
+        if (string.IsNullOrWhiteSpace(metadataJson)) return false;
+        try
+        {
+            using var metadata = JsonDocument.Parse(metadataJson);
+            var root = metadata.RootElement;
+            var execution = root.TryGetProperty("execution", out var executionValue)
+                && executionValue.ValueKind == JsonValueKind.String
+                ? executionValue.GetString()
+                : null;
+            var sourceId = root.TryGetProperty("sourceProductionVersionId", out var sourceValue)
+                && sourceValue.ValueKind == JsonValueKind.String
+                && Guid.TryParse(sourceValue.GetString(), out var parsedSourceId)
+                ? parsedSourceId
+                : Guid.Empty;
+            var storedTakeNumber = root.TryGetProperty("takeNumber", out var takeNumberValue)
+                && takeNumberValue.TryGetInt32(out var parsedTakeNumber)
+                ? parsedTakeNumber
+                : 0;
+            var storedTakeCount = root.TryGetProperty("takeCount", out var takeCountValue)
+                && takeCountValue.TryGetInt32(out var parsedTakeCount)
+                ? parsedTakeCount
+                : 0;
+            var storedKey = root.TryGetProperty("idempotencyKey", out var keyValue)
+                && keyValue.ValueKind == JsonValueKind.String
+                ? keyValue.GetString()
+                : null;
+            var storedInputFingerprint = root.TryGetProperty("queuedInputFingerprint", out var fingerprintValue)
+                && fingerprintValue.ValueKind == JsonValueKind.String
+                ? fingerprintValue.GetString()
+                : null;
+
+            return string.Equals(execution, MovieShotExecutionOperations.ImageToVideo, StringComparison.Ordinal)
+                && sourceId == sourceProductionVersionId
+                && storedTakeNumber == takeNumber
+                && storedTakeCount == takeCount
+                && string.Equals(storedKey, job.IdempotencyKey, StringComparison.Ordinal)
+                && string.Equals(storedInputFingerprint, MovieShotExecutionIntentFingerprint.Compute(job.InputJson), StringComparison.Ordinal)
+                && input.TakeNumber == takeNumber
+                && input.TakeCount == takeCount;
+        }
+        catch (JsonException)
+        {
+            return false;
         }
     }
 

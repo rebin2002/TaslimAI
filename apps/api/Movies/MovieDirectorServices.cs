@@ -1078,25 +1078,26 @@ public sealed class MovieDirectorService(
     }
 }
 
-public sealed class MovieDirectorActionExecutor(TaslimDbContext db, IMovieStudioService movies, IMovieVideoProvider provider, IGenerationCostEstimator costEstimator) : IDirectorActionExecutor
+public sealed class MovieDirectorActionExecutor(IMovieVideoProvider provider) : IDirectorActionExecutor
 {
     public string ActionType => DirectorActionTypes.GenerateShot;
-    public async Task<DirectorActionExecution> ExecuteAsync(DirectorAction action, Guid executingUserId, CancellationToken cancellationToken = default)
+    public Task<DirectorActionExecution> ExecuteAsync(DirectorAction action, Guid executingUserId, CancellationToken cancellationToken = default)
     {
-        if (!provider.IsAvailable) return new(false, GenerationJobErrorCodes.MovieProviderUnavailable, "The movie generation capability is not available.", null);
-        DirectorGenerateShotPayload? payload;
-        try { payload = JsonSerializer.Deserialize<DirectorGenerateShotPayload>(action.PayloadJson, DirectorJson.Options); }
-        catch (JsonException) { payload = null; }
-        if (payload is null) return new(false, "DIRECTOR_ACTION_INVALID", "The Director action payload is invalid.", null);
-        var shot = await db.MovieShots.AsNoTracking().Include(item => item.Scene).ThenInclude(item => item.MovieProject)
-            .FirstOrDefaultAsync(item => item.Id == payload.ShotId && item.Scene.MovieProjectId == action.MovieProjectId && item.Scene.MovieProject.WorkspaceId == action.WorkspaceId, cancellationToken);
-        if (shot is null) return new(false, "DIRECTOR_ACTION_TARGET_INVALID", "The Director shot target is invalid.", null);
-        var duration = Math.Clamp(shot.DurationSeconds ?? shot.Scene.DurationSeconds ?? Math.Min(shot.Scene.MovieProject.DurationSeconds, 60), 1, 3600);
-        var estimate = costEstimator.Estimate(new GenerationCostEstimationRequest(provider.Key, VideoDurationSeconds: duration * QualityMultiplier(payload.QualityLevel)));
-        var result = await movies.GenerateShotAsync(executingUserId, shot.Id, new MovieStudioGenerationRequest($"Director: {payload.QualityLevel}", estimate.AmountUsd, estimate), cancellationToken, action.IdempotencyKey ?? $"director:{action.Id:N}");
-        return result is null
-            ? new(false, "DIRECTOR_SHOT_NOT_FOUND", "The Director shot could not be found.", null)
-            : new(true, null, "The Director queued the shot for generation.", JsonSerializer.Serialize(new { result.Job.Id, result.ClipId }));
+        if (!provider.IsAvailable)
+            return Task.FromResult<DirectorActionExecution>(new(
+                false,
+                GenerationJobErrorCodes.MovieProviderUnavailable,
+                "The movie generation capability is not available.",
+                null));
+
+        // Director proposal approval does not show or bind the exact selected
+        // adapter model and maximum USD for this shot. Hold execution until a
+        // shot-duration quote and explicit price-confirmation flow exists.
+        return Task.FromResult<DirectorActionExecution>(new(
+            false,
+            "MOVIE_SCENE_QUOTE_REQUIRED",
+            "Director shot generation is held until an exact shot-duration provider/model quote and maximum USD confirmation are available.",
+            null));
     }
 
     private static decimal QualityMultiplier(string quality) => quality switch
