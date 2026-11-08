@@ -403,7 +403,7 @@ public sealed class AutopilotAcceptedV2GoldenVectorFixtureTests
     """;
 
     [Fact]
-    public void Owner_supplied_v2_vector_pins_exact_body_canonical_bytes_hmac_and_metadata_mutation()
+    public void Owner_supplied_v2_vector_pins_exact_body_canonical_bytes_and_hmac()
     {
         using var document = JsonDocument.Parse(OwnerGoldenVectorJson);
         var root = document.RootElement;
@@ -451,16 +451,115 @@ public sealed class AutopilotAcceptedV2GoldenVectorFixtureTests
         Assert.Equal(expectedHmac, actualHmac);
         Assert.Equal($"v2={expectedHmac}", ReadString(root, "signature_header_value"));
         Assert.Equal(ReadString(root, "signature_header_value"), ReadString(headers, "X-Autopilot-Signature"));
+    }
 
-        // Mutating only the signed source metadata while retaining the body and
-        // original signature must invalidate this pure fixture verification.
-        var sourceMarker = $"\n{ReadString(values, "source")}\n";
-        var sourceMarkerIndex = canonicalText.IndexOf(sourceMarker, StringComparison.Ordinal);
-        Assert.True(sourceMarkerIndex >= 0);
-        Assert.Equal(sourceMarkerIndex, canonicalText.LastIndexOf(sourceMarker, StringComparison.Ordinal));
-        var mutatedCanonical = canonicalText.Replace(sourceMarker, "\nalternate-source\n", StringComparison.Ordinal);
-        var mutatedHmac = Convert.ToHexString(HMACSHA256.HashData(key, Encoding.ASCII.GetBytes(mutatedCanonical))).ToLowerInvariant();
-        Assert.NotEqual(expectedHmac, mutatedHmac);
+    // Expected canonical Base64 and HMAC values were independently recomputed
+    // from the owner-supplied fixture with its synthetic key.
+    public static object[][] AcceptedVectorMutationCases =>
+        new object[][]
+        {
+            new object[]
+            {
+                "source", "alternate-source",
+                "QVVUT1BJTE9ULUVWRU5ULVYyClBPU1QKL2FwaS9hdXRvcGlsb3QvZXZlbnRzCjE3NjAwMDAwMDAKYWx0ZXJuYXRlLXNvdXJjZQpldnQ6djItMDAxCndhdmUudGFzay5jb21wbGV0ZWQKY2QwNmI2OTUzMWQxNDMwZjg5MjU2MDIzOGRiN2JkZGYyZGNjOWI2NWIwYTE0ZDZjOGNjMGI3MDI5OGEzMTI3OQo=",
+                "63a6fa6845b442d04c7cc69aa892cb962b4a2d673fac04ef00766a4eccef5eff",
+                369, "cd06b69531d1430f892560238db7bddf2dcc9b65b0a14d6c8cc0b70298a31279"
+            },
+            new object[]
+            {
+                "event-type", "wave.task.completedX",
+                "QVVUT1BJTE9ULUVWRU5ULVYyClBPU1QKL2FwaS9hdXRvcGlsb3QvZXZlbnRzCjE3NjAwMDAwMDAKbWFudXMtYnJpZGdlCmV2dDp2Mi0wMDEKd2F2ZS50YXNrLmNvbXBsZXRlZFgKY2QwNmI2OTUzMWQxNDMwZjg5MjU2MDIzOGRiN2JkZGYyZGNjOWI2NWIwYTE0ZDZjOGNjMGI3MDI5OGEzMTI3OQo=",
+                "70109dcc4df4880963c33cdaaa07727409681b928e5e29b8f7a48e123a12257d",
+                369, "cd06b69531d1430f892560238db7bddf2dcc9b65b0a14d6c8cc0b70298a31279"
+            },
+            new object[]
+            {
+                "external-event-id", "evt:v2-002",
+                "QVVUT1BJTE9ULUVWRU5ULVYyClBPU1QKL2FwaS9hdXRvcGlsb3QvZXZlbnRzCjE3NjAwMDAwMDAKbWFudXMtYnJpZGdlCmV2dDp2Mi0wMDIKd2F2ZS50YXNrLmNvbXBsZXRlZApjZDA2YjY5NTMxZDE0MzBmODkyNTYwMjM4ZGI3YmRkZjJkY2M5YjY1YjBhMTRkNmM4Y2MwYjcwMjk4YTMxMjc5Cg==",
+                "295b2678643f4ea0e4a5c138bfecb37517f5eff9411adba03c266732aec09864",
+                369, "cd06b69531d1430f892560238db7bddf2dcc9b65b0a14d6c8cc0b70298a31279"
+            },
+            new object[]
+            {
+                "timestamp", "1760000001",
+                "QVVUT1BJTE9ULUVWRU5ULVYyClBPU1QKL2FwaS9hdXRvcGlsb3QvZXZlbnRzCjE3NjAwMDAwMDEKbWFudXMtYnJpZGdlCmV2dDp2Mi0wMDEKd2F2ZS50YXNrLmNvbXBsZXRlZApjZDA2YjY5NTMxZDE0MzBmODkyNTYwMjM4ZGI3YmRkZjJkY2M5YjY1YjBhMTRkNmM4Y2MwYjcwMjk4YTMxMjc5Cg==",
+                "c299937a138b9becdd8199be7b9c248a879e76fc0a664e456b945d965024a57a",
+                369, "cd06b69531d1430f892560238db7bddf2dcc9b65b0a14d6c8cc0b70298a31279"
+            },
+            new object[]
+            {
+                "raw-body", "append-ascii-space",
+                "QVVUT1BJTE9ULUVWRU5ULVYyClBPU1QKL2FwaS9hdXRvcGlsb3QvZXZlbnRzCjE3NjAwMDAwMDAKbWFudXMtYnJpZGdlCmV2dDp2Mi0wMDEKd2F2ZS50YXNrLmNvbXBsZXRlZAozYWQ2NDIzYWY1M2MxMDY3OTAyNDM0MjMxZTJjZGMxOGQ1MGM0YzdmNWFlNmM3ZDY1MmNkNWRhNGVjYWYxZWNjCg==",
+                "f7651424819c0784c361e29aac6c6dd2ece2438218eb0c985108cd0f6e93e34b",
+                370, "3ad6423af53c1067902434231e2cdc18d50c4c7f5ae6c7d652cd5da4ecaf1ecc"
+            }
+        };
+
+    [Theory]
+    [MemberData(nameof(AcceptedVectorMutationCases))]
+    public void Each_accepted_v2_mutation_changes_pinned_canonical_bytes_and_rejects_original_hmac(
+        string field,
+        string mutatedValue,
+        string expectedCanonicalBase64,
+        string expectedHmac,
+        int expectedRawBodyLength,
+        string expectedRawBodySha256)
+    {
+        using var document = JsonDocument.Parse(OwnerGoldenVectorJson);
+        var root = document.RootElement;
+        var values = root.GetProperty("values");
+        var rawBody = Convert.FromBase64String(ReadString(root.GetProperty("raw_body"), "base64"));
+        var canonicalText = ReadString(root.GetProperty("canonical"), "text");
+        var originalCanonical = Convert.FromBase64String(ReadString(root.GetProperty("canonical"), "base64"));
+        var key = Convert.FromBase64String(ReadString(root.GetProperty("test_only_key"), "base64"));
+        var originalHmacHex = ReadString(root, "hmac_sha256_hex_lowercase");
+        var originalHmac = Convert.FromHexString(originalHmacHex);
+
+        var mutatedRawBody = rawBody;
+        var mutatedCanonicalText = field switch
+        {
+            "timestamp" => ReplaceCanonicalLine(canonicalText, 3, mutatedValue),
+            "source" => ReplaceCanonicalLine(canonicalText, 4, mutatedValue),
+            "external-event-id" => ReplaceCanonicalLine(canonicalText, 5, mutatedValue),
+            "event-type" => ReplaceCanonicalLine(canonicalText, 6, mutatedValue),
+            "raw-body" => MutateBodyAndCanonicalHash(),
+            _ => throw new ArgumentOutOfRangeException(nameof(field), field, "Unknown vector mutation.")
+        };
+
+        int rawBodyLength = mutatedRawBody.Length;
+        var rawBodySha256 = Convert.ToHexString(SHA256.HashData(mutatedRawBody)).ToLowerInvariant();
+        Assert.Equal(expectedRawBodyLength, rawBodyLength);
+        Assert.Equal(expectedRawBodySha256, rawBodySha256);
+
+        var mutatedCanonical = Encoding.ASCII.GetBytes(mutatedCanonicalText);
+        var mutatedCanonicalBase64 = Convert.ToBase64String(mutatedCanonical);
+        Assert.Equal(expectedCanonicalBase64, mutatedCanonicalBase64);
+        Assert.NotEqual(Convert.ToBase64String(originalCanonical), mutatedCanonicalBase64);
+
+        var mutatedHmac = HMACSHA256.HashData(key, mutatedCanonical);
+        var mutatedHmacHex = Convert.ToHexString(mutatedHmac).ToLowerInvariant();
+        Assert.Equal(expectedHmac, mutatedHmacHex);
+        Assert.NotEqual(originalHmacHex, mutatedHmacHex);
+        Assert.False(CryptographicOperations.FixedTimeEquals(originalHmac, mutatedHmac));
+
+        string MutateBodyAndCanonicalHash()
+        {
+            Assert.Equal("append-ascii-space", mutatedValue);
+            mutatedRawBody = new byte[rawBody.Length + 1];
+            Buffer.BlockCopy(rawBody, 0, mutatedRawBody, 0, rawBody.Length);
+            mutatedRawBody[^1] = (byte)' ';
+            var changedDigest = Convert.ToHexString(SHA256.HashData(mutatedRawBody)).ToLowerInvariant();
+            return ReplaceCanonicalLine(canonicalText, 7, changedDigest);
+        }
+    }
+
+    private static string ReplaceCanonicalLine(string canonicalText, int lineIndex, string replacement)
+    {
+        var lines = canonicalText.Split('\n');
+        Assert.Equal(9, lines.Length);
+        Assert.Equal(string.Empty, lines[^1]);
+        lines[lineIndex] = replacement;
+        return string.Join("\n", lines);
     }
 
     private static string ReadString(JsonElement element, string propertyName) =>
