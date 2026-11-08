@@ -217,7 +217,7 @@ public sealed class AutopilotExternalEventAcknowledgementTests : IClassFixture<A
                     responseBody.RootElement.GetProperty("error").GetProperty("code").GetString());
             }
 
-            Assert.Equal(0, isolatedFactory.ProviderProbe.LaunchCalls);
+            Assert.Equal(0, isolatedFactory.ProviderProbe.ProviderCalls);
             using var afterScope = isolatedFactory.Services.CreateScope();
             var afterDb = afterScope.ServiceProvider.GetRequiredService<TaslimDbContext>();
             var events = await afterDb.AutopilotEvents.AsNoTracking().ToListAsync();
@@ -385,21 +385,25 @@ public sealed class AutopilotAcknowledgementFactory : WebApplicationFactory<Prog
 
 public sealed class AcknowledgementProviderProbe : IWaveLaunchProvider
 {
-    private int launchCalls;
+    private int providerCalls;
 
     public string ProviderKey => "acknowledgement-test-probe";
     public bool IsConfigured => true;
-    public int LaunchCalls => Volatile.Read(ref launchCalls);
+    public int ProviderCalls => Volatile.Read(ref providerCalls);
 
     public Task<WaveLaunchProviderResult> LaunchTaskAsync(
         WaveLaunchProviderRequest request,
         CancellationToken cancellationToken = default)
     {
-        Interlocked.Increment(ref launchCalls);
+        Interlocked.Increment(ref providerCalls);
         return Task.FromResult(WaveLaunchProviderResult.Unavailable("unexpected_acknowledgement_test_provider_call"));
     }
 
     public Task<WaveLaunchTaskState?> GetTaskStateAsync(
         string externalTaskId,
-        CancellationToken cancellationToken = default) => Task.FromResult<WaveLaunchTaskState?>(null);
+        CancellationToken cancellationToken = default)
+    {
+        Interlocked.Increment(ref providerCalls);
+        return Task.FromResult<WaveLaunchTaskState?>(null);
+    }
 }
