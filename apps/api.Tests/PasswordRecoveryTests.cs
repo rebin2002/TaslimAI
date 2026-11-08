@@ -299,6 +299,83 @@ public sealed class PasswordRecoveryTests(PasswordRecoveryApiFactory factory) : 
     }
 
     [Fact]
+    public async Task Reset_token_is_bound_to_issuing_account_and_cross_account_error_is_generic()
+    {
+        using var isolationFactory = new PasswordRecoveryApiFactory();
+        var issuerEmail = $"reset-issuer-{Guid.NewGuid():N}@example.test";
+        var otherEmail = $"reset-other-{Guid.NewGuid():N}@example.test";
+        const string issuerOldPassword = "StrongPassword!123";
+        const string issuerNewPassword = "IssuerNewPassword!456";
+        const string otherOldPassword = "StrongPassword!123";
+        const string otherNewPassword = "OtherNewPassword!456";
+
+        using var issuerRegistration = isolationFactory.CreateClient();
+        Assert.Equal(HttpStatusCode.OK, (await Register(issuerRegistration, issuerEmail)).StatusCode);
+        using var otherRegistration = isolationFactory.CreateClient();
+        Assert.Equal(HttpStatusCode.OK, (await Register(otherRegistration, otherEmail)).StatusCode);
+        using var requestClient = isolationFactory.CreateClient();
+        Assert.Equal(HttpStatusCode.Accepted, (await Forgot(requestClient, issuerEmail)).StatusCode);
+
+        var captured = await WaitForEmailAsync(isolationFactory.EmailSender, issuerEmail);
+        var fragment = new Uri(ExtractResetUrl(captured.Body)).Fragment.TrimStart('#');
+        var values = fragment.Split('&', StringSplitOptions.RemoveEmptyEntries)
+            .Select(part => part.Split('=', 2))
+            .ToDictionary(pair => Uri.UnescapeDataString(pair[0]), pair => Uri.UnescapeDataString(pair[1]), StringComparer.Ordinal);
+        var token = values["token"];
+
+        using var otherResetClient = isolationFactory.CreateClient();
+        var crossAccount = await Reset(otherResetClient, otherEmail, token, otherNewPassword);
+        Assert.Equal(HttpStatusCode.BadRequest, crossAccount.StatusCode);
+        Assert.False(crossAccount.Headers.Contains("Set-Cookie"));
+        var crossAccountBody = await crossAccount.Content.ReadAsStringAsync();
+        Assert.Equal("PASSWORD_RESET_INVALID", JsonDocument.Parse(crossAccountBody).RootElement.GetProperty("error").GetProperty("code").GetString());
+
+        using var invalidTokenClient = isolationFactory.CreateClient();
+        var invalidToken = await Reset(invalidTokenClient, otherEmail, "not-a-valid-reset-token", otherNewPassword);
+        Assert.Equal(HttpStatusCode.BadRequest, invalidToken.StatusCode);
+        Assert.Equal(crossAccountBody, await invalidToken.Content.ReadAsStringAsync());
+
+        using (var scope = isolationFactory.Services.CreateScope())
+        {
+            var userManager = scope.ServiceProvider.GetRequiredService<UserManager<ApplicationUser>>();
+            var issuer = await userManager.FindByEmailAsync(issuerEmail);
+            var other = await userManager.FindByEmailAsync(otherEmail);
+            Assert.NotNull(issuer);
+            Assert.NotNull(other);
+            Assert.True(await userManager.CheckPasswordAsync(issuer!, issuerOldPassword));
+            Assert.True(await userManager.CheckPasswordAsync(other!, otherOldPassword));
+            Assert.False(await userManager.CheckPasswordAsync(other!, otherNewPassword));
+            Assert.True(await userManager.VerifyUserTokenAsync(
+                issuer!,
+                userManager.Options.Tokens.PasswordResetTokenProvider,
+                UserManager<ApplicationUser>.ResetPasswordTokenPurpose,
+                token));
+            Assert.False(await userManager.VerifyUserTokenAsync(
+                other!,
+                userManager.Options.Tokens.PasswordResetTokenProvider,
+                UserManager<ApplicationUser>.ResetPasswordTokenPurpose,
+                token));
+        }
+
+        using var issuerResetClient = isolationFactory.CreateClient();
+        var issuerReset = await Reset(issuerResetClient, issuerEmail, token, issuerNewPassword);
+        Assert.Equal(HttpStatusCode.OK, issuerReset.StatusCode);
+        Assert.Equal(HttpStatusCode.Unauthorized, (await issuerResetClient.GetAsync("/api/auth/me")).StatusCode);
+        using (var scope = isolationFactory.Services.CreateScope())
+        {
+            var userManager = scope.ServiceProvider.GetRequiredService<UserManager<ApplicationUser>>();
+            var issuer = await userManager.FindByEmailAsync(issuerEmail);
+            var other = await userManager.FindByEmailAsync(otherEmail);
+            Assert.NotNull(issuer);
+            Assert.NotNull(other);
+            Assert.False(await userManager.CheckPasswordAsync(issuer!, issuerOldPassword));
+            Assert.True(await userManager.CheckPasswordAsync(issuer!, issuerNewPassword));
+            Assert.True(await userManager.CheckPasswordAsync(other!, otherOldPassword));
+            Assert.False(await userManager.CheckPasswordAsync(other!, otherNewPassword));
+        }
+    }
+
+    [Fact]
     public async Task Reset_with_valid_identity_token_and_wrong_csrf_preserves_token_and_account_state()
     {
         using var csrfFactory = new PasswordRecoveryApiFactory();
