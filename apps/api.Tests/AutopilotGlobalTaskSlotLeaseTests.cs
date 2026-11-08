@@ -137,6 +137,268 @@ public sealed class AutopilotGlobalTaskSlotLeaseTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task PostgreSql_barrier_contention_and_ambiguous_refresh_heartbeat_preserve_user_wide_cap_when_ci_database_is_available()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("ConnectionStrings__Postgres");
+        if (string.IsNullOrWhiteSpace(baseConnectionString)) return;
+
+        var schemaName = $"slot_heartbeat_{Guid.NewGuid():N}";
+        var adminConnectionString = new Npgsql.NpgsqlConnectionStringBuilder(baseConnectionString)
+        {
+            Pooling = false,
+        }.ConnectionString;
+        await using (var connection = new Npgsql.NpgsqlConnection(adminConnectionString))
+        {
+            await connection.OpenAsync();
+            await using var command = connection.CreateCommand();
+            command.CommandText = $"CREATE SCHEMA \"{schemaName}\"";
+            await command.ExecuteNonQueryAsync();
+        }
+
+        try
+        {
+            var applicationName = $"slot_heartbeat_{Guid.NewGuid():N}";
+            var scopedConnectionString = new Npgsql.NpgsqlConnectionStringBuilder(baseConnectionString)
+            {
+                SearchPath = schemaName,
+                Pooling = false,
+                ApplicationName = applicationName,
+            }.ConnectionString;
+            var pgOptions = new DbContextOptionsBuilder<TaslimDbContext>()
+                .UseNpgsql(scopedConnectionString)
+                .Options;
+            await using (var db = new TaslimDbContext(pgOptions))
+                await db.Database.EnsureCreatedAsync();
+
+            var taskIds = await SeedLaunchTasksAsync(total: 3, initiallyActive: 0, tasksPerWave: 1, contextOptions: pgOptions);
+            var inventoryScope = AutopilotGlobalTaskInventoryScopeIds.ManusBridgeAuthenticatedUserWide;
+            var inventoryPayload = BuildBridgeInventoryPayload(taskCount: 19);
+            var inventoryRequestCount = 0;
+            string? inventoryRequestUri = null;
+            string? inventoryAuthorization = null;
+            var inventoryHandler = new FakeHttpHandler((request, _) =>
+            {
+                inventoryRequestCount++;
+                inventoryRequestUri = request.RequestUri?.AbsoluteUri;
+                inventoryAuthorization = request.Headers.Authorization?.ToString();
+                return Task.FromResult(JsonResponse(inventoryPayload));
+            });
+            using var inventorySource = new ManusBridgeUserWideTaskInventoryPageSource(
+                () => "synthetic-bridge-token",
+                new Uri("https://bridge.example/v1/tasks"),
+                ExpectedBridgeManusUserId,
+                testHandler: inventoryHandler);
+            var inventory = await new AutopilotGlobalTaskInventoryReader(inventorySource, inventoryScope).ReadAuthoritativeSnapshotAsync();
+            Assert.True(inventory.IsAuthoritative);
+            Assert.Equal(inventoryScope, inventory.ScopeId);
+            Assert.Equal(1, inventory.PagesRead);
+            Assert.False(inventory.HasMorePages);
+            Assert.Equal(19, inventory.ActiveTasks.Count);
+            Assert.All(inventory.ActiveTasks, item => Assert.Equal(inventoryScope, item.ScopeId));
+            Assert.Contains("\"api-key-0\"", inventoryPayload);
+            Assert.Contains("\"api-key-1\"", inventoryPayload);
+            Assert.Contains("\"created_by_api_key\":null", inventoryPayload);
+            Assert.Equal(1, inventoryRequestCount);
+            Assert.Equal("https://bridge.example/v1/tasks", inventoryRequestUri);
+            Assert.Equal("Bearer synthetic-bridge-token", inventoryAuthorization);
+
+            var clock = new ManualTimeProvider(new DateTimeOffset(2026, 11, 8, 0, 0, 0, TimeSpan.Zero));
+            using var testDeadline = new CancellationTokenSource(TimeSpan.FromSeconds(120));
+            var bothReady = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var releaseContenders = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var readyCount = 0;
+
+            async Task<(Guid RowId, string Key, AutopilotGlobalTaskSlotResult Result)> ReserveAtBarrierAsync(Guid rowId)
+            {
+                await using var db = new TaslimDbContext(pgOptions);
+                var row = await db.AutopilotWaveLaunchTasks.SingleAsync(item => item.Id == rowId, testDeadline.Token);
+                var key = AutopilotGlobalTaskSlotIdentity.CreateIdempotencyKey(row.WaveKey, row.TaskKey);
+                var allocator = new AutopilotGlobalTaskSlotAllocator(
+                    db,
+                    inventoryScope,
+                    clock,
+                    AutopilotGlobalTaskSlotAllocator.HardMaximum);
+
+                if (Interlocked.Increment(ref readyCount) == 2)
+                    bothReady.TrySetResult(true);
+                await releaseContenders.Task.WaitAsync(testDeadline.Token);
+
+                var result = await allocator.ReserveOrRecoverLaunchAsync(
+                    rowId,
+                    key,
+                    inventory,
+                    TimeSpan.FromMinutes(1),
+                    providerGuaranteesIdempotency: false,
+                    cancellationToken: testDeadline.Token);
+                return (rowId, key, result);
+            }
+
+            async Task<int> CountBlockedAllocatorSessionsAsync()
+            {
+                await using var monitorConnection = new Npgsql.NpgsqlConnection(adminConnectionString);
+                await monitorConnection.OpenAsync(testDeadline.Token);
+                await using var monitorCommand = monitorConnection.CreateCommand();
+                monitorCommand.CommandText = "SELECT COUNT(*) FROM pg_stat_activity WHERE application_name = @application_name AND state = 'active' AND wait_event_type = 'Lock'";
+                var applicationParameter = monitorCommand.CreateParameter();
+                applicationParameter.ParameterName = "application_name";
+                applicationParameter.Value = applicationName;
+                monitorCommand.Parameters.Add(applicationParameter);
+                var count = await monitorCommand.ExecuteScalarAsync(testDeadline.Token);
+                return Convert.ToInt32(count, System.Globalization.CultureInfo.InvariantCulture);
+            }
+
+            Task<(Guid RowId, string Key, AutopilotGlobalTaskSlotResult Result)>[] contenders;
+            int lockWaitersObserved;
+            await using (var blockerConnection = new Npgsql.NpgsqlConnection(scopedConnectionString))
+            {
+                await blockerConnection.OpenAsync(testDeadline.Token);
+                await using var blockerTransaction = await blockerConnection.BeginTransactionAsync(testDeadline.Token);
+                await using (var blockerCommand = blockerConnection.CreateCommand())
+                {
+                    blockerCommand.Transaction = blockerTransaction;
+                    // This is the allocator's fixed cross-process transaction advisory fence.
+                    blockerCommand.CommandText = "SELECT pg_advisory_xact_lock(1413560652, 20)";
+                    await blockerCommand.ExecuteNonQueryAsync(testDeadline.Token);
+                }
+
+                contenders = taskIds.Take(2).Select(ReserveAtBarrierAsync).ToArray();
+                await bothReady.Task.WaitAsync(testDeadline.Token);
+                releaseContenders.TrySetResult(true);
+
+                lockWaitersObserved = 0;
+                var waitDeadline = System.Diagnostics.Stopwatch.StartNew();
+                while (lockWaitersObserved < 2 && waitDeadline.Elapsed < TimeSpan.FromSeconds(10))
+                {
+                    lockWaitersObserved = await CountBlockedAllocatorSessionsAsync();
+                    if (lockWaitersObserved < 2)
+                        await Task.Delay(TimeSpan.FromMilliseconds(10), testDeadline.Token);
+                }
+
+                await blockerTransaction.CommitAsync(testDeadline.Token);
+            }
+
+            var racedClaims = await Task.WhenAll(contenders).WaitAsync(testDeadline.Token);
+            Assert.Equal(2, lockWaitersObserved);
+
+            Assert.Single(racedClaims, item => item.Result.Outcome == AutopilotGlobalTaskSlotOutcomes.Reserved);
+            Assert.Single(racedClaims, item => item.Result.Outcome == AutopilotGlobalTaskSlotOutcomes.CapacityReached);
+            Assert.All(racedClaims, item => Assert.True(item.Result.ActiveSlotsObserved <= AutopilotGlobalTaskSlotAllocator.HardMaximum));
+            var winner = racedClaims.Single(item => item.Result.Outcome == AutopilotGlobalTaskSlotOutcomes.Reserved);
+            var denied = racedClaims.Single(item => item.Result.Outcome == AutopilotGlobalTaskSlotOutcomes.CapacityReached);
+            Assert.True(winner.Result.SlotHeld);
+            Assert.True(winner.Result.MayCallProvider);
+            Assert.False(denied.Result.MayCallProvider);
+            // Count authorization decisions only; this test never calls a provider.
+            var providerAuthorizations = racedClaims.Count(item => item.Result.MayCallProvider);
+            Assert.Equal(1, providerAuthorizations);
+
+            // RecordAmbiguousAsync refreshes UpdatedAt while retaining the slot;
+            // this verifies the durable lease-refresh heartbeat under contention.
+            clock.Advance(TimeSpan.FromSeconds(50));
+            await using (var heartbeatDb = new TaslimDbContext(pgOptions))
+            {
+                var heartbeat = await new AutopilotGlobalTaskSlotAllocator(
+                    heartbeatDb,
+                    inventoryScope,
+                    clock,
+                    AutopilotGlobalTaskSlotAllocator.HardMaximum)
+                    .RecordAmbiguousAsync(winner.RowId, winner.Key, "provider_timeout", testDeadline.Token);
+                Assert.Equal(AutopilotGlobalTaskSlotOutcomes.AmbiguousLaunch, heartbeat.Outcome);
+                Assert.True(heartbeat.SlotHeld);
+                Assert.False(heartbeat.MayCallProvider);
+            }
+
+            await using (var verifyHeartbeat = new TaslimDbContext(pgOptions))
+            {
+                var held = await verifyHeartbeat.AutopilotWaveLaunchTasks.SingleAsync(item => item.Id == winner.RowId, testDeadline.Token);
+                Assert.Equal(AutopilotWaveLaunchStatuses.Launching, held.Status);
+                Assert.Equal("global_slot_reserved", held.ReasonCode);
+                Assert.StartsWith("slot_retained_until_authoritative_reconciliation:", held.LastStatusDetail);
+                Assert.Equal(clock.GetUtcNow().UtcDateTime, held.UpdatedAt);
+            }
+
+            // The original lease has elapsed, but the refreshed lease has not;
+            // no second fake provider call may be authorized.
+            clock.Advance(TimeSpan.FromSeconds(30));
+            await using (var retryDb = new TaslimDbContext(pgOptions))
+            {
+                var beforeRefreshedExpiry = await new AutopilotGlobalTaskSlotAllocator(
+                    retryDb,
+                    inventoryScope,
+                    clock,
+                    AutopilotGlobalTaskSlotAllocator.HardMaximum)
+                    .ReserveOrRecoverLaunchAsync(
+                        winner.RowId,
+                        winner.Key,
+                        inventory,
+                        TimeSpan.FromMinutes(1),
+                        providerGuaranteesIdempotency: true,
+                        cancellationToken: testDeadline.Token);
+                Assert.Equal(AutopilotGlobalTaskSlotOutcomes.LaunchInProgress, beforeRefreshedExpiry.Outcome);
+                Assert.True(beforeRefreshedExpiry.SlotHeld);
+                Assert.False(beforeRefreshedExpiry.MayCallProvider);
+            }
+
+            clock.Advance(TimeSpan.FromSeconds(31));
+            await using (var expiredDb = new TaslimDbContext(pgOptions))
+            {
+                var afterExpiryWithoutIdempotency = await new AutopilotGlobalTaskSlotAllocator(
+                    expiredDb,
+                    inventoryScope,
+                    clock,
+                    AutopilotGlobalTaskSlotAllocator.HardMaximum)
+                    .ReserveOrRecoverLaunchAsync(
+                        winner.RowId,
+                        winner.Key,
+                        inventory,
+                        TimeSpan.FromMinutes(1),
+                        providerGuaranteesIdempotency: false,
+                        cancellationToken: testDeadline.Token);
+                Assert.Equal(AutopilotGlobalTaskSlotOutcomes.AmbiguousLaunch, afterExpiryWithoutIdempotency.Outcome);
+                Assert.True(afterExpiryWithoutIdempotency.SlotHeld);
+                Assert.False(afterExpiryWithoutIdempotency.MayCallProvider);
+            }
+
+            await using (var overflowDb = new TaslimDbContext(pgOptions))
+            {
+                var overflowRow = await overflowDb.AutopilotWaveLaunchTasks.SingleAsync(item => item.Id == taskIds[2], testDeadline.Token);
+                var overflowKey = AutopilotGlobalTaskSlotIdentity.CreateIdempotencyKey(overflowRow.WaveKey, overflowRow.TaskKey);
+                var twentyFirst = await new AutopilotGlobalTaskSlotAllocator(
+                    overflowDb,
+                    inventoryScope,
+                    clock,
+                    AutopilotGlobalTaskSlotAllocator.HardMaximum)
+                    .ReserveOrRecoverLaunchAsync(
+                        taskIds[2],
+                        overflowKey,
+                        inventory,
+                        TimeSpan.FromMinutes(1),
+                        providerGuaranteesIdempotency: false,
+                        cancellationToken: testDeadline.Token);
+                Assert.Equal(AutopilotGlobalTaskSlotOutcomes.CapacityReached, twentyFirst.Outcome);
+                Assert.Equal(AutopilotGlobalTaskSlotAllocator.HardMaximum, twentyFirst.ActiveSlotsObserved);
+                Assert.False(twentyFirst.MayCallProvider);
+            }
+
+            Assert.Equal(1, providerAuthorizations);
+            await using var finalVerify = new TaslimDbContext(pgOptions);
+            var localOccupied = await finalVerify.AutopilotWaveLaunchTasks.CountAsync(
+                item => item.Status == AutopilotWaveLaunchStatuses.Launching || item.Status == AutopilotWaveLaunchStatuses.Launched,
+                testDeadline.Token);
+            Assert.Equal(1, localOccupied);
+            Assert.Equal(AutopilotGlobalTaskSlotAllocator.HardMaximum, inventory.ActiveTasks.Count + localOccupied);
+        }
+        finally
+        {
+            await using var connection = new Npgsql.NpgsqlConnection(adminConnectionString);
+            await connection.OpenAsync();
+            await using var command = connection.CreateCommand();
+            command.CommandText = $"DROP SCHEMA IF EXISTS \"{schemaName}\" CASCADE";
+            await command.ExecuteNonQueryAsync();
+        }
+    }
+
+    [Fact]
     public async Task Exact_task_detail_terminal_receipt_releases_one_slot_and_replay_does_not_free_another()
     {
         var taskIds = await SeedLaunchTasksAsync(total: 22, initiallyActive: 20, tasksPerWave: 22);
@@ -1770,6 +2032,17 @@ public sealed class AutopilotGlobalTaskSlotLeaseTests : IAsyncLifetime
 
     private static AutopilotGlobalTaskInventorySnapshot CompleteInventory() =>
         new(ScopeId, true, 1, false, null, Array.Empty<AutopilotGlobalTaskInventoryItem>());
+
+    private sealed class ManualTimeProvider : TimeProvider
+    {
+        private DateTimeOffset current;
+
+        public ManualTimeProvider(DateTimeOffset initial) => current = initial;
+
+        public override DateTimeOffset GetUtcNow() => current;
+
+        public void Advance(TimeSpan elapsed) => current = current.Add(elapsed);
+    }
 
     private async Task<Guid> SeedCompletionEventAsync(
         Guid taskRowId,
