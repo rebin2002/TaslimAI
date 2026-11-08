@@ -365,3 +365,163 @@ public sealed record PublicFreeTierSettlementResult(
     bool IsIdempotentReplay,
     bool ReconciliationRequired,
     string Code);
+
+/// <summary>Outcome returned by one physical provider invocation to the dispatch gate.</summary>
+public sealed record PublicFreeTierProviderCallResult<T>(
+    T Value,
+    PublicFreeTierProviderOutcome Outcome,
+    bool ActualCostKnown,
+    decimal? ActualProviderCostUsd);
+
+/// <summary>Provider-free observable result of the reserve-authorize-dispatch-settle sequence.</summary>
+public sealed record PublicFreeTierGuardedDispatchResult<T>(
+    bool ProviderInvoked,
+    bool OutcomeRecorded,
+    bool ReconciliationRequired,
+    T? Value,
+    string Code);
+
+/// <summary>
+/// Safe composition for a future route/worker integration. A policy Allow decision or a held
+/// reservation alone never reaches the provider: this gate requires a fresh non-replay hold and
+/// a fresh one-shot Reserved-to-Dispatched authorization. Each physical retry/fallback must call
+/// this method with its own stable attempt keys. This type is deliberately not registered or
+/// wired to production routes in this owner-safe change.
+/// </summary>
+public sealed class PublicFreeTierProviderDispatchGate(IPublicFreeTierSpendLedger ledger)
+{
+    public async Task<PublicFreeTierGuardedDispatchResult<T>> ExecuteAsync<T>(
+        PublicFreeTierAdmissionRequest request,
+        string dispatchIdempotencyKey,
+        string completionIdempotencyKey,
+        Func<CancellationToken, Task<PublicFreeTierProviderCallResult<T>>> providerCall,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(ledger);
+        ArgumentNullException.ThrowIfNull(request);
+        ArgumentNullException.ThrowIfNull(providerCall);
+        if (string.IsNullOrWhiteSpace(dispatchIdempotencyKey) || dispatchIdempotencyKey.Length > 200
+            || string.IsNullOrWhiteSpace(completionIdempotencyKey) || completionIdempotencyKey.Length > 200)
+            return Blocked<T>("PUBLIC_FREE_TIER_IDEMPOTENCY_KEY_REQUIRED");
+
+        PublicFreeTierReservationResult? reservation;
+        try
+        {
+            reservation = await ledger.TryReserveBeforeProviderCallAsync(request, cancellationToken);
+        }
+        catch (Exception)
+        {
+            return Blocked<T>("PUBLIC_FREE_TIER_LEDGER_UNAVAILABLE");
+        }
+
+        if (reservation is null || !reservation.Reserved || reservation.IsIdempotentReplay
+            || reservation.ReservationId is not { } reservationId
+            || reservation.State != PublicFreeTierReservationState.Reserved
+            || reservation.Decision is not { Allowed: true })
+        {
+            var code = reservation?.Decision is { Allowed: false } decision
+                ? decision.Code
+                : reservation?.IsIdempotentReplay == true
+                    ? "PUBLIC_FREE_TIER_RESERVATION_REPLAY"
+                    : "PUBLIC_FREE_TIER_RESERVATION_REQUIRED";
+            return Blocked<T>(code);
+        }
+
+        PublicFreeTierDispatchAuthorizationResult? authorization;
+        try
+        {
+            authorization = await ledger.TryAuthorizeProviderDispatchAsync(
+                reservationId,
+                dispatchIdempotencyKey,
+                cancellationToken);
+        }
+        catch (Exception)
+        {
+            return Blocked<T>("PUBLIC_FREE_TIER_DISPATCH_AUTHORIZATION_UNAVAILABLE");
+        }
+
+        if (authorization is null || !authorization.DispatchAuthorized || authorization.IsIdempotentReplay
+            || authorization.State != PublicFreeTierReservationState.Dispatched)
+            return Blocked<T>(authorization?.Code ?? "PUBLIC_FREE_TIER_DISPATCH_NOT_AUTHORIZED");
+
+        PublicFreeTierProviderCallResult<T>? providerResult;
+        try
+        {
+            providerResult = await providerCall(cancellationToken);
+        }
+        catch (Exception exception)
+        {
+            await TryRecordUnknownOutcomeAsync(
+                reservationId,
+                completionIdempotencyKey,
+                exception is OperationCanceledException
+                    ? PublicFreeTierProviderOutcome.CancelledAfterDispatch
+                    : PublicFreeTierProviderOutcome.Failed);
+            return new(true, false, true, default, "PUBLIC_FREE_TIER_PROVIDER_OUTCOME_UNKNOWN");
+        }
+
+        if (providerResult is null || !Enum.IsDefined(providerResult.Outcome)
+            || (providerResult.ActualCostKnown
+                ? !providerResult.ActualProviderCostUsd.HasValue || providerResult.ActualProviderCostUsd.Value < 0m
+                : providerResult.ActualProviderCostUsd.HasValue))
+        {
+            await TryRecordUnknownOutcomeAsync(
+                reservationId,
+                completionIdempotencyKey,
+                PublicFreeTierProviderOutcome.Failed);
+            return new(true, false, true, default, "PUBLIC_FREE_TIER_PROVIDER_COST_INVALID");
+        }
+
+        PublicFreeTierSettlementResult? settlement;
+        try
+        {
+            // Persist outcome even if the client disconnected after the provider may have run.
+            settlement = await ledger.RecordProviderOutcomeAsync(
+                reservationId,
+                completionIdempotencyKey,
+                providerResult.Outcome,
+                providerResult.ActualCostKnown,
+                providerResult.ActualProviderCostUsd,
+                CancellationToken.None);
+        }
+        catch (Exception)
+        {
+            // The durable Dispatched hold remains conservative if reconciliation storage fails.
+            return new(true, false, true, default, "PUBLIC_FREE_TIER_OUTCOME_RECORD_FAILED");
+        }
+
+        if (settlement is null || !settlement.Applied || settlement.IsIdempotentReplay)
+            return new(true, false, true, default, settlement?.Code ?? "PUBLIC_FREE_TIER_SETTLEMENT_REJECTED");
+
+        return new(
+            true,
+            true,
+            settlement.ReconciliationRequired,
+            providerResult.Value,
+            settlement.ReconciliationRequired ? "PUBLIC_FREE_TIER_RECONCILIATION_REQUIRED" : "PUBLIC_FREE_TIER_SETTLED");
+    }
+
+    private async Task TryRecordUnknownOutcomeAsync(
+        Guid reservationId,
+        string completionIdempotencyKey,
+        PublicFreeTierProviderOutcome outcome)
+    {
+        try
+        {
+            await ledger.RecordProviderOutcomeAsync(
+                reservationId,
+                completionIdempotencyKey,
+                outcome,
+                actualCostKnown: false,
+                actualProviderCostUsd: null,
+                cancellationToken: CancellationToken.None);
+        }
+        catch (Exception)
+        {
+            // Never release a possibly dispatched hold when outcome persistence is unavailable.
+        }
+    }
+
+    private static PublicFreeTierGuardedDispatchResult<T> Blocked<T>(string code) =>
+        new(false, false, false, default, code);
+}

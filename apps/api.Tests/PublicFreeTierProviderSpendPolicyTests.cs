@@ -750,6 +750,121 @@ public sealed class PublicFreeTierProviderSpendPolicyTests
         }
     }
 
+    [Fact]
+    public async Task Dispatch_gate_keeps_provider_disabled_when_policy_budget_is_disabled()
+    {
+        var ledger = new AtomicTestLedger(new PublicFreeTierPolicyOptions(), NowUtc);
+        var gate = new PublicFreeTierProviderDispatchGate(ledger);
+        var providerCalls = 0;
+
+        var result = await gate.ExecuteAsync(
+            ValidRequest(),
+            "disabled-dispatch",
+            "disabled-completion",
+            _ =>
+            {
+                providerCalls++;
+                return Task.FromResult(new PublicFreeTierProviderCallResult<string>("unexpected", PublicFreeTierProviderOutcome.Succeeded, true, 0.001m));
+            });
+
+        Assert.False(result.ProviderInvoked);
+        Assert.Equal("PUBLIC_FREE_TIER_FIREWALL_DISABLED", result.Code);
+        Assert.Equal(0, providerCalls);
+        Assert.Equal(0, ledger.ReservationCount);
+        Assert.Equal(0, ledger.DispatchAuthorizationCalls);
+    }
+
+    [Fact]
+    public async Task Dispatch_gate_never_treats_an_allowed_policy_decision_as_a_reservation()
+    {
+        var ledger = new AtomicTestLedger(EnabledOptions(), NowUtc) { ReturnAllowedWithoutReservation = true };
+        var gate = new PublicFreeTierProviderDispatchGate(ledger);
+        var providerCalls = 0;
+
+        var result = await gate.ExecuteAsync(
+            ValidRequest(),
+            "no-hold-dispatch",
+            "no-hold-completion",
+            _ =>
+            {
+                providerCalls++;
+                return Task.FromResult(new PublicFreeTierProviderCallResult<string>("unexpected", PublicFreeTierProviderOutcome.Succeeded, true, 0.001m));
+            });
+
+        Assert.False(result.ProviderInvoked);
+        Assert.Equal("PUBLIC_FREE_TIER_RESERVATION_REQUIRED", result.Code);
+        Assert.Equal(0, providerCalls);
+        Assert.Equal(0, ledger.DispatchAuthorizationCalls);
+    }
+
+    [Fact]
+    public async Task Dispatch_gate_never_calls_provider_when_one_shot_authorization_is_denied()
+    {
+        var ledger = new AtomicTestLedger(EnabledOptions(), NowUtc) { RejectDispatchAuthorization = true };
+        var gate = new PublicFreeTierProviderDispatchGate(ledger);
+        var providerCalls = 0;
+
+        var result = await gate.ExecuteAsync(
+            ValidRequest(),
+            "rejected-permit-dispatch",
+            "rejected-permit-completion",
+            _ =>
+            {
+                providerCalls++;
+                return Task.FromResult(new PublicFreeTierProviderCallResult<string>("unexpected", PublicFreeTierProviderOutcome.Succeeded, true, 0.001m));
+            });
+
+        Assert.False(result.ProviderInvoked);
+        Assert.Equal("SYNTHETIC_DISPATCH_DENIED", result.Code);
+        Assert.Equal(0, providerCalls);
+        Assert.Equal(1, ledger.ReservationCount);
+        Assert.Equal(1, ledger.DispatchAuthorizationCalls);
+        Assert.Equal(0.001m, ledger.GlobalExposureUsd);
+    }
+
+    [Fact]
+    public async Task Dispatch_gate_calls_provider_once_and_keeps_unknown_cost_held_on_replay()
+    {
+        var ledger = new AtomicTestLedger(EnabledOptions(), NowUtc);
+        var gate = new PublicFreeTierProviderDispatchGate(ledger);
+        var request = ValidRequest(idempotencyKey: "unknown-cost-gated-attempt");
+        var providerCalls = 0;
+
+        var result = await gate.ExecuteAsync(
+            request,
+            "unknown-cost-dispatch",
+            "unknown-cost-completion",
+            _ =>
+            {
+                providerCalls++;
+                return Task.FromResult(new PublicFreeTierProviderCallResult<string>(
+                    "synthetic-result",
+                    PublicFreeTierProviderOutcome.Succeeded,
+                    ActualCostKnown: false,
+                    ActualProviderCostUsd: null));
+            });
+        var replay = await gate.ExecuteAsync(
+            request,
+            "unknown-cost-dispatch-retry",
+            "unknown-cost-completion-retry",
+            _ =>
+            {
+                providerCalls++;
+                return Task.FromResult(new PublicFreeTierProviderCallResult<string>("unexpected", PublicFreeTierProviderOutcome.Succeeded, true, 0m));
+            });
+
+        Assert.True(result.ProviderInvoked);
+        Assert.True(result.OutcomeRecorded);
+        Assert.True(result.ReconciliationRequired);
+        Assert.Equal("PUBLIC_FREE_TIER_RECONCILIATION_REQUIRED", result.Code);
+        Assert.Equal("synthetic-result", result.Value);
+        Assert.False(replay.ProviderInvoked);
+        Assert.Equal("PUBLIC_FREE_TIER_RECONCILIATION_REQUIRED", replay.Code);
+        Assert.Equal(1, providerCalls);
+        Assert.Equal(1, ledger.UnknownExposureCount);
+        Assert.Equal(0.001m, ledger.GlobalExposureUsd);
+    }
+
     private static PublicFreeTierPolicyOptions EnabledOptions() => new() { Enabled = true };
 
     private static PublicFreeTierAdmissionDecision Evaluate(
@@ -834,6 +949,10 @@ public sealed class PublicFreeTierProviderSpendPolicyTests
             get { lock (gate) return byId.Values.Count(item => item.UnknownExposure); }
         }
 
+        public bool ReturnAllowedWithoutReservation { get; set; }
+        public bool RejectDispatchAuthorization { get; set; }
+        public int DispatchAuthorizationCalls { get; private set; }
+
         public int UserMessagesForUtcDay
         {
             get { lock (gate) return byId.Values.Count(item => item.Request.UserId == UserId); }
@@ -845,6 +964,14 @@ public sealed class PublicFreeTierProviderSpendPolicyTests
         {
             lock (gate)
             {
+                if (ReturnAllowedWithoutReservation)
+                    return Task.FromResult(new PublicFreeTierReservationResult(
+                        false,
+                        null,
+                        false,
+                        PublicFreeTierAdmissionDecision.Allow(),
+                        PublicFreeTierReservationState.None));
+
                 var key = (request.UserId, request.WorkspaceId, request.IdempotencyKey);
                 if (byKey.TryGetValue(key, out var existing))
                 {
@@ -877,9 +1004,13 @@ public sealed class PublicFreeTierProviderSpendPolicyTests
         {
             lock (gate)
             {
+                DispatchAuthorizationCalls++;
                 if (!byId.TryGetValue(reservationId, out var stored))
                     return Task.FromResult(new PublicFreeTierDispatchAuthorizationResult(
                         false, false, PublicFreeTierReservationState.None, "RESERVATION_NOT_FOUND"));
+                if (RejectDispatchAuthorization)
+                    return Task.FromResult(new PublicFreeTierDispatchAuthorizationResult(
+                        false, false, stored.State, "SYNTHETIC_DISPATCH_DENIED"));
                 if (string.IsNullOrWhiteSpace(dispatchIdempotencyKey) || dispatchIdempotencyKey.Length > 200)
                     return Task.FromResult(new PublicFreeTierDispatchAuthorizationResult(
                         false, false, stored.State, "DISPATCH_IDEMPOTENCY_KEY_INVALID"));
