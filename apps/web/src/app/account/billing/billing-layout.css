@@ -607,7 +607,7 @@
     flex-basis: 100%;
   }
 
-  .billing-definition-list > div {
+  .billing-page .billing-definition-list > div {
     align-items: flex-start;
   }
 }
