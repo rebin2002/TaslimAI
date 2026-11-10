@@ -5,11 +5,24 @@ import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AlertCircle, AudioLines, CheckCircle2, Clock3, Download, FolderOpen, Headphones, LoaderCircle, Music2, Pause, Play, RefreshCw, Sparkles, WandSparkles, XCircle } from "lucide-react";
+import { Info } from "lucide-react";
 import { useAuth } from "@/components/AuthProvider";
 import { AccessibleProgressBar } from "@/components/AccessibleProgressBar";
 import { useLocale } from "@/components/LocaleProvider";
 import { api, type Asset, type GenerationJob, type MusicGenerationInput, type Project } from "@/lib/api";
 import { canCancelMusicJob, isMusicProviderUnavailable, parseMusicJobResult } from "@/lib/musicStudioState";
+import {
+  REFERENCE_AUDIO_ACCEPT,
+  clearReferenceAudioSelection,
+  formatReferenceAudioSize,
+  localCandidateFromFile,
+  referenceAudioPreviewUrl,
+  revokeReferenceAudioObjectUrl,
+  selectReferenceAudio,
+  selectUnclaimedReferenceAudioCandidates,
+  type ReferenceAudioCandidate,
+  type ReferenceAudioState,
+} from "@/lib/musicReferenceAudioState";
 
 const genres = ["auto", "ambient", "cinematic", "classical", "electronic", "folk", "hip_hop", "jazz", "lofi", "pop", "rock", "world", "other"] as const;
 const moods = ["calm", "energetic", "uplifting", "melancholic", "inspiring", "dramatic", "playful", "romantic", "focused", "other"] as const;
@@ -104,6 +117,51 @@ function formatAssetDate(value: string, locale: string) {
   }
 }
 
+// Browser-only helper kept separate from the pure state module so its tests
+// stay deterministic without DOM globals.
+function referenceAudioObjectUrlFrom(file: Blob): string | null {
+  if (typeof URL === "undefined" || typeof URL.createObjectURL !== "function") return null;
+  return URL.createObjectURL(file);
+}
+
+type ReferenceAudioPanelProps = {
+  state: ReferenceAudioState;
+  candidates: ReferenceAudioCandidate[];
+  loading: boolean;
+  t: (key: string, values?: Record<string, string>) => string;
+  onFileSelected: (event: React.ChangeEvent<HTMLInputElement>) => void;
+  onStoredPicked: (candidate: ReferenceAudioCandidate) => void;
+  onClear: () => void;
+};
+
+// Selection and preview only: no upload, no job, and no provider call leaves
+// the browser from this panel.
+export function ReferenceAudioPanel({ state, candidates, loading, t, onFileSelected, onStoredPicked, onClear }: ReferenceAudioPanelProps) {
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const selected = state.candidate;
+  const previewUrl = selected ? (selected.sourceKind === "local" ? state.previewObjectUrl : referenceAudioPreviewUrl(selected, api.assetFileUrl)) : null;
+  const storedId = selected?.sourceKind === "stored_asset" ? selected.assetId ?? "" : "";
+  return <section className="music-reference-panel" aria-labelledby="music-reference-title">
+    <div className="music-reference-heading"><div><p className="music-overline">{t("music.reference.eyebrow")}</p><h3 id="music-reference-title">{t("music.reference.title")}</h3></div><Info size={18} aria-hidden="true" /></div>
+    <p className="music-reference-description">{t("music.reference.description")}</p>
+    <div className="music-reference-picker">
+      <input ref={fileInputRef} className="music-reference-input" type="file" accept={REFERENCE_AUDIO_ACCEPT} onChange={onFileSelected} aria-label={t("music.reference.uploadLabel")} />
+      <button type="button" className="music-action-button" onClick={() => fileInputRef.current?.click()}>{t("music.reference.chooseFile")}</button>
+      <span>{t("music.reference.fileHint")}</span>
+    </div>
+    {loading ? <p className="music-reference-muted">{t("music.reference.loading")}</p> : candidates.length > 0 ? <label className="music-choice-field music-reference-select"><span>{t("music.reference.savedLabel")}</span><select value={storedId} onChange={(event) => {
+      const picked = event.target.value ? candidates.find((candidate) => candidate.assetId === event.target.value) : null;
+      if (picked) onStoredPicked(picked);
+    }}><option value="">{t("music.reference.savedPlaceholder")}</option>{candidates.map((candidate) => <option key={candidate.id} value={candidate.assetId ?? ""}>{candidate.displayName}</option>)}</select></label> : <p className="music-reference-muted">{t("music.reference.empty")}</p>}
+    {state.rejectedReasonKey ? <p className="music-reference-error" role="alert">{t(state.rejectedReasonKey)}</p> : null}
+    {selected ? <div className="music-reference-selected" aria-live="polite">
+      <div className="music-reference-file"><MusicArtwork /><div><strong>{selected.displayName}</strong><span>{formatReferenceAudioSize(selected.sizeBytes) ?? t("music.reference.metadataUnavailable")}</span></div><button type="button" className="music-reference-clear" onClick={onClear}>{t("music.reference.clear")}</button></div>
+      {previewUrl ? <audio className="music-reference-audio" controls preload="metadata" src={previewUrl} aria-label={`${t("music.reference.previewLabel")}: ${selected.displayName}`} /> : <p className="music-reference-muted">{t("music.reference.previewUnavailable")}</p>}
+      <p className="music-reference-note">{t("music.reference.note")}</p>
+    </div> : null}
+  </section>;
+}
+
 function RecentMusicLibrary({ assets, loading, error, locale, t }: { assets: Asset[]; loading: boolean; error: string; locale: string; t: (key: string, values?: Record<string, string>) => string }) {
   return <section className="music-library-panel" aria-labelledby="music-library-title">
     <div className="music-section-heading">
@@ -147,6 +205,16 @@ export function MusicStudioView() {
   const [loadingLibrary, setLoadingLibrary] = useState(true);
   const [libraryError, setLibraryError] = useState("");
   const [error, setError] = useState("");
+  const [referenceAudio, setReferenceAudio] = useState<ReferenceAudioState>({ candidate: null, previewObjectUrl: null, rejectedReasonKey: null });
+  const [referenceAudioAssets, setReferenceAudioAssets] = useState<Asset[]>([]);
+  const [loadingReferenceLibrary, setLoadingReferenceLibrary] = useState(true);
+  // The File object behind a local candidate: object URLs need the real Blob,
+  // while the pure state module stays testable without browser globals.
+  const applyReferenceAudioResult = useCallback((result: { state: ReferenceAudioState }) => {
+    // The preview URL effect revokes the prior URL exactly once when this
+    // dependency changes (and also on unmount).
+    setReferenceAudio(result.state);
+  }, []);
 
   const loadProjects = useCallback(async () => {
     if (!workspace) return;
@@ -176,9 +244,25 @@ export function MusicStudioView() {
     }
   }, [t, workspace]);
 
+  // Unclaimed reference candidates are the caller's own private, project-free
+  // audio assets. The asset query is workspace-membership scoped server-side;
+  // no provider call is involved in listing or previewing them.
+  const loadReferenceAudioCandidates = useCallback(async () => {
+    if (!workspace) return;
+    setLoadingReferenceLibrary(true);
+    try {
+      const result = await api.listAssets(workspace.id, { status: "Active", page: 1, pageSize: 100 });
+      setReferenceAudioAssets(result.items);
+    } catch {
+      setReferenceAudioAssets([]);
+    } finally {
+      setLoadingReferenceLibrary(false);
+    }
+  }, [workspace]);
+
   // Loading remote workspace data is an external synchronization.
   // eslint-disable-next-line react-hooks/set-state-in-effect
-  useEffect(() => { void loadProjects(); void loadRecentMusic(); }, [loadProjects, loadRecentMusic]);
+  useEffect(() => { void loadProjects(); void loadRecentMusic(); void loadReferenceAudioCandidates(); }, [loadProjects, loadRecentMusic, loadReferenceAudioCandidates]);
 
   useEffect(() => {
     if (!current || current.status === "Succeeded" || current.status === "Failed" || current.status === "Cancelled") return;
@@ -200,10 +284,40 @@ export function MusicStudioView() {
     return () => window.clearTimeout(timer);
   }, [current?.status, loadRecentMusic]);
 
+  // Release any local preview object URL when the studio unmounts.
+  useEffect(() => () => { revokeReferenceAudioObjectUrl(referenceAudio.previewObjectUrl); }, [referenceAudio.previewObjectUrl]);
+
+  function handleReferenceFilePicked(event: React.ChangeEvent<HTMLInputElement>) {
+    const files = event.target.files;
+    const picked = files && files.length > 0 ? files[0] : null;
+    // Allow re-picking the same file later.
+    event.target.value = "";
+    if (!picked) return;
+    const handle = { name: picked.name, size: picked.size, mimeType: picked.type ?? "" };
+    applyReferenceAudioResult(selectReferenceAudio(referenceAudio, localCandidateFromFile(handle), (candidate) => (
+      candidate.sourceKind === "local" ? referenceAudioObjectUrlFrom(picked) : null
+    )));
+  }
+
+  function handleReferenceStoredPicked(candidate: ReferenceAudioCandidate) {
+    applyReferenceAudioResult(selectReferenceAudio(referenceAudio, candidate, () => null));
+  }
+
+  function handleReferenceAudioClear() {
+    applyReferenceAudioResult(clearReferenceAudioSelection(referenceAudio));
+  }
+
   async function generate(event: React.FormEvent) {
     event.preventDefault();
     if (!workspace || description.trim().length < 3 || purpose.trim().length < 3) {
       setError(t("music.required"));
+      return;
+    }
+    // The reference audio path is selection and preview only for now: the job
+    // contract has no reference field yet, so never let a selection imply that
+    // it will reach a (possibly paid) provider call.
+    if (referenceAudio.candidate) {
+      setError(t("music.reference.note"));
       return;
     }
     setWorking(true);
@@ -252,6 +366,7 @@ export function MusicStudioView() {
   const result = useMemo(() => parseMusicJobResult(current), [current]);
   const isSuccess = current?.status === "Succeeded" && !!result?.assetId;
   const isFailure = current?.status === "Failed" || current?.status === "Cancelled";
+  const referenceCandidates = useMemo(() => selectUnclaimedReferenceAudioCandidates(referenceAudioAssets), [referenceAudioAssets]);
   const failureCopy = current?.status === "Cancelled" ? { title: t("music.cancelledTitle"), text: t("music.cancelledText") } : isMusicProviderUnavailable(current) ? { title: t("music.providerUnavailableTitle"), text: t("music.providerUnavailableText") } : { title: t("music.failureTitle"), text: t("music.failureText") };
 
   return <div className="music-studio-page">
@@ -274,8 +389,9 @@ export function MusicStudioView() {
           <label className="music-choice-field"><span>{t("music.vocalPreference")}</span><select value={vocalPreference} onChange={(event) => setVocalPreference(event.target.value)}>{vocalPreferences.map((value) => <option key={value} value={value}>{t(`music.vocal.${value}`)}</option>)}</select></label>
         </div>
         <details className="music-optional-controls"><summary>{t("music.moreOptions")}</summary><div className="music-optional-grid"><label className="music-choice-field"><span>{t("music.language")}</span><select value={language} onChange={(event) => setLanguage(event.target.value)}>{languages.map((value) => <option key={value} value={value}>{t(`music.language.${value}`)}</option>)}</select></label><label className="music-choice-field"><span>{t("music.project")}</span><select value={projectId} onChange={(event) => setProjectId(event.target.value)} disabled={loadingProjects}><option value="">{t("music.noProject")}</option>{projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}</select></label><label className="music-choice-field"><span>{t("music.titleLabel")}</span><input value={title} onChange={(event) => setTitle(event.target.value)} maxLength={160} placeholder={t("music.titlePlaceholder")} /></label><label className="music-primary-field music-field-wide"><span>{t("music.additionalInstructions")}</span><textarea className="is-short" value={additionalInstructions} onChange={(event) => setAdditionalInstructions(event.target.value)} maxLength={2000} placeholder={t("music.additionalInstructionsPlaceholder")} /></label></div></details>
+        <ReferenceAudioPanel state={referenceAudio} candidates={referenceCandidates} loading={loadingReferenceLibrary} t={t} onFileSelected={handleReferenceFilePicked} onStoredPicked={handleReferenceStoredPicked} onClear={handleReferenceAudioClear} />
         {error && <div className="music-inline-error"><XCircle size={15} /> {error}</div>}
-        <button className="music-generate-button" type="submit" disabled={working || description.trim().length < 3 || purpose.trim().length < 3}><Sparkles size={17} /> {working ? t("music.working") : t("music.generate")} <span aria-hidden="true">↗</span></button>
+        <button className="music-generate-button" type="submit" disabled={working || referenceAudio.candidate !== null || description.trim().length < 3 || purpose.trim().length < 3}><Sparkles size={17} /> {working ? t("music.working") : t("music.generate")} <span aria-hidden="true">↗</span></button>
       </section>
       <aside className="music-side-panel"><div className="music-side-icon"><Headphones size={20} /></div><p className="music-overline">{t("music.guidanceTitle")}</p><h2>{t("music.guidanceText")}</h2><ol><li>{t("music.guidanceOne")}</li><li>{t("music.guidanceTwo")}</li><li>{t("music.guidanceThree")}</li></ol><div className="music-side-footer"><Clock3 size={14} /> {t("music.safetyNote")}</div></aside>
     </form> : isSuccess && result?.assetId ? <section className="music-result-panel" aria-live="polite">
