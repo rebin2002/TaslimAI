@@ -25,9 +25,14 @@ public sealed class ManusBridgeResponseBoundaryContractTests
         try
         {
             var payload = "{\"ok\":true,\"task_id\":\"" + FakeTaskId + "\"}" + new string(' ', 160_000);
+            var bytes = Encoding.UTF8.GetBytes(payload);
+            using var body = new ReadObservingStream(bytes);
+            using var content = new StreamContent(body);
+            content.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("application/json");
+            content.Headers.ContentLength = bytes.Length;
             using var handler = new StubHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
             {
-                Content = new StringContent(payload, Encoding.UTF8, "application/json")
+                Content = content
             });
             using var http = new HttpClient(handler);
             var provider = NewProvider(http);
@@ -46,6 +51,46 @@ public sealed class ManusBridgeResponseBoundaryContractTests
             Assert.Equal(WaveLaunchProviderOutcomes.Unavailable, result.Outcome);
             Assert.False(result.IsLaunched);
             Assert.Null(result.ExternalTaskId);
+            // Header-known oversize must not be read into memory before rejection.
+            // HttpClient's default response buffering is part of this contract.
+            Assert.True(body.BytesRead <= ReadBudget + 1,
+                $"Provider consumed {body.BytesRead} declared-length bytes; expected at most {ReadBudget + 1}");
+            Assert.Equal(1, handler.RequestCount);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(TestTokenEnvironment, previous);
+        }
+    }
+
+    [Fact]
+    public async Task Small_declared_length_create_response_remains_a_launch_ack()
+    {
+        var previous = Environment.GetEnvironmentVariable(TestTokenEnvironment);
+        Environment.SetEnvironmentVariable(TestTokenEnvironment, "provider-free-test-token");
+        try
+        {
+            var payload = "{\"ok\":true,\"task_id\":\"" + FakeTaskId + "\"}";
+            using var handler = new StubHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent(payload, Encoding.UTF8, "application/json")
+            });
+            using var http = new HttpClient(handler);
+            var provider = NewProvider(http);
+            var request = new WaveLaunchProviderRequest(
+                "wave-response-boundary", "task-response-boundary", "Offline test",
+                "Do not call external providers", new string('a', 40),
+                "feature/offline", "offline-response-boundary-positive")
+            {
+                FencingToken = 1
+            };
+
+            var result = await provider.LaunchTaskAsync(request);
+
+            // The response-size fix must not disable otherwise valid small
+            // creation ACKs. Only the fake HTTP handler receives this request.
+            Assert.True(result.IsLaunched);
+            Assert.Equal(FakeTaskId, result.ExternalTaskId);
             Assert.Equal(1, handler.RequestCount);
         }
         finally
