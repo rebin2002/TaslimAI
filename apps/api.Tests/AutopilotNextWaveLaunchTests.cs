@@ -2778,7 +2778,15 @@ public sealed class AutopilotNextWaveLaunchTests
             const string nativeTaskId = "ABCDEFGHIJKLMNOPQRSTUV";
             handler.Respond = _ => new HttpResponseMessage(HttpStatusCode.OK)
             {
-                Content = new StringContent(JsonSerializer.Serialize(new { ok = true, task_id = nativeTaskId })),
+                // Acceptance now requires the bridge to echo the exact fencing
+                // epoch this request carried; a task identity alone is not
+                // admission. See AutopilotFencedAdmissionOnLeaseTakeoverTests.
+                Content = new StringContent(JsonSerializer.Serialize(new
+                {
+                    ok = true,
+                    task_id = nativeTaskId,
+                    fencing_high_water_token = request.FencingToken,
+                })),
             };
             var launched = await provider.LaunchTaskAsync(request);
             Assert.True(launched.IsLaunched);
