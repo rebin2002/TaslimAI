@@ -22,6 +22,7 @@ public sealed class PresentationRenderer : IPresentationRenderer
     private const string C = "http://schemas.openxmlformats.org/drawingml/2006/chart";
     private const int SlideWidth = 12_192_000;
     private const int SlideHeight = 6_858_000;
+    private const int MinColumnTextHeight = 120_000;
     private int shapeId;
 
     public RenderedPresentation Render(PresentationDraft draft, PresentationGenerationInput input, PresentationGenerationOptions options)
@@ -118,12 +119,27 @@ public sealed class PresentationRenderer : IPresentationRenderer
         var columns = block.Columns.ToArray();
         if (columns.Length == 0) return;
         var width = 10_200_000 / columns.Length;
+        // The card keeps the designed 130_000 gap below the block, then the remaining space is
+        // split between the heading and the body. The inset constants below only fit a full-height
+        // block: a title, section or closing slide shares its 2_250_000 content area with up to four
+        // blocks, leaving as little as 562_500, where the fixed 160_000 + 420_000 + 100_000 insets
+        // made the body height negative. A non-positive <a:ext cy> violates the DrawingML positive
+        // coordinate type and puts the text outside its card, so the insets scale down with the card
+        // and both text heights are clamped to stay inside it.
+        var cardHeight = Math.Max(MinColumnTextHeight * 3, height - 130_000);
+        var topInset = Math.Min(160_000, cardHeight / 6);
+        var headingGap = Math.Min(100_000, cardHeight / 12);
+        var bottomInset = Math.Min(40_000, cardHeight / 12);
+        var textHeight = cardHeight - topInset - headingGap - bottomInset;
+        var headingHeight = Math.Min(420_000, Math.Clamp(textHeight * 2 / 5, MinColumnTextHeight, textHeight - MinColumnTextHeight));
+        var bodyTop = topInset + headingHeight + headingGap;
+        var bodyHeight = cardHeight - bodyTop - bottomInset;
         for (var index = 0; index < columns.Length; index++)
         {
             var x = 820_000 + index * width;
-            body.Append(Card(NextId(), x, y, width - 180_000, height - 130_000, "FFFFFF", "DCE6ED"));
-            body.Append(TextBox(NextId(), x + 140_000, y + 160_000, width - 460_000, 420_000, columns[index].Heading, "087E8B", 15, rtl, language, true, null));
-            body.Append(TextBox(NextId(), x + 140_000, y + 680_000, width - 460_000, height - 850_000, string.Join("\n", columns[index].Items.Select(item => $"• {item}")), "253B53", 13, rtl, language, false, null));
+            body.Append(Card(NextId(), x, y, width - 180_000, cardHeight, "FFFFFF", "DCE6ED"));
+            body.Append(TextBox(NextId(), x + 140_000, y + topInset, width - 460_000, headingHeight, columns[index].Heading, "087E8B", 15, rtl, language, true, null));
+            body.Append(TextBox(NextId(), x + 140_000, y + bodyTop, width - 460_000, bodyHeight, string.Join("\n", columns[index].Items.Select(item => $"• {item}")), "253B53", 13, rtl, language, false, null));
         }
     }
 
