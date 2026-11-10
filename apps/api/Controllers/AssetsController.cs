@@ -29,9 +29,10 @@ public sealed class AssetsController(
         [FromQuery] int pageSize = 24,
         CancellationToken cancellationToken = default)
     {
+        if (!TryGetUserId(out var userId)) return Unauthorized();
         try
         {
-            var result = await assets.ListAsync(GetUserId(), new AssetFilter(workspaceId, projectId, assetType, status, search, sort, page, pageSize), cancellationToken);
+            var result = await assets.ListAsync(userId, new AssetFilter(workspaceId, projectId, assetType, status, search, sort, page, pageSize), cancellationToken);
             return result is null ? Forbid() : Ok(result);
         }
         catch (AssetValidationException exception)
@@ -43,7 +44,8 @@ public sealed class AssetsController(
     [HttpGet("{id:guid}")]
     public async Task<IActionResult> Get(Guid id, CancellationToken cancellationToken)
     {
-        var asset = await assets.GetAsync(GetUserId(), id, cancellationToken);
+        if (!TryGetUserId(out var userId)) return Unauthorized();
+        var asset = await assets.GetAsync(userId, id, cancellationToken);
         return asset is null
             ? ApiResults.Error(this, StatusCodes.Status404NotFound, "ASSET_NOT_FOUND", "Asset not found.")
             : Ok(AssetContractMapper.ToDto(asset));
@@ -53,9 +55,10 @@ public sealed class AssetsController(
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> Update(Guid id, [FromBody] UpdateAssetRequest request, CancellationToken cancellationToken)
     {
+        if (!TryGetUserId(out var userId)) return Unauthorized();
         try
         {
-            var asset = await assets.UpdateAsync(GetUserId(), id, request, cancellationToken);
+            var asset = await assets.UpdateAsync(userId, id, request, cancellationToken);
             return asset is null
                 ? ApiResults.Error(this, StatusCodes.Status404NotFound, "ASSET_NOT_FOUND", "Asset not found.")
                 : Ok(AssetContractMapper.ToDto(asset));
@@ -77,10 +80,11 @@ public sealed class AssetsController(
     [HttpGet("{id:guid}/download")]
     public async Task<IActionResult> Download(Guid id, [FromQuery] bool inline = false, CancellationToken cancellationToken = default)
     {
+        if (!TryGetUserId(out var userId)) return Unauthorized();
         AssetDownload? download;
         try
         {
-            download = await assets.GetDownloadAsync(GetUserId(), id, cancellationToken: cancellationToken);
+            download = await assets.GetDownloadAsync(userId, id, cancellationToken: cancellationToken);
         }
         catch (AssetValidationException exception)
         {
@@ -94,10 +98,11 @@ public sealed class AssetsController(
     [HttpGet("{id:guid}/representations/{representationId:guid}/download")]
     public async Task<IActionResult> DownloadRepresentation(Guid id, Guid representationId, CancellationToken cancellationToken)
     {
+        if (!TryGetUserId(out var userId)) return Unauthorized();
         AssetDownload? download;
         try
         {
-            download = await assets.GetDownloadAsync(GetUserId(), id, representationId, cancellationToken);
+            download = await assets.GetDownloadAsync(userId, id, representationId, cancellationToken);
         }
         catch (AssetValidationException exception)
         {
@@ -133,13 +138,16 @@ public sealed class AssetsController(
 
     private async Task<IActionResult> SetStatus(Guid id, bool archive, CancellationToken cancellationToken)
     {
+        if (!TryGetUserId(out var userId)) return Unauthorized();
         var asset = archive
-            ? await assets.ArchiveAsync(GetUserId(), id, cancellationToken)
-            : await assets.RestoreAsync(GetUserId(), id, cancellationToken);
+            ? await assets.ArchiveAsync(userId, id, cancellationToken)
+            : await assets.RestoreAsync(userId, id, cancellationToken);
         return asset is null
             ? ApiResults.Error(this, StatusCodes.Status404NotFound, "ASSET_NOT_FOUND", "Asset not found.")
             : Ok(AssetContractMapper.ToDto(asset));
     }
 
-    private Guid GetUserId() => Guid.Parse(User.FindFirst(ClaimTypes.NameIdentifier)?.Value ?? throw new InvalidOperationException("Authenticated user identifier is missing."));
+    private bool TryGetUserId(out Guid userId) =>
+        Guid.TryParse(User.FindFirst(ClaimTypes.NameIdentifier)?.Value, out userId)
+        && userId != Guid.Empty;
 }
