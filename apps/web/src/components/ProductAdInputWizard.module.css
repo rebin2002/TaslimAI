@@ -40,7 +40,7 @@
   line-height: 1.5;
 }
 .field textarea { min-height: 82px; resize: vertical; }
-.field input::placeholder, .field textarea::placeholder { color: #8998a7; }
+.field input::placeholder, .field textarea::placeholder { color: #5f7083; }
 .field input:focus-visible, .field textarea:focus-visible, .field select:focus-visible, .fileInput:focus-visible, .submitButton:focus-visible {
   border-color: #4275d6;
   outline: 3px solid rgba(66, 117, 214, .28);
@@ -48,7 +48,7 @@
 }
 .fileInput { box-sizing: border-box; width: 100%; min-height: 46px; padding: 7px; color: #536579; border: 1px dashed #bac9d8; border-radius: 9px; background: #f9fbfd; font: inherit; font-size: 12px; }
 .fileInput::file-selector-button { margin-inline-end: 10px; padding: 7px 10px; color: #294d83; border: 1px solid #c9d9ee; border-radius: 7px; background: #edf4ff; font: inherit; font-weight: 700; cursor: pointer; }
-.helpText, .fileName { color: #6a7a8b; font-size: 11px; line-height: 1.55; }
+.helpText, .fileName { color: #5f7083; font-size: 11px; line-height: 1.55; }
 .fileName { overflow-wrap: anywhere; }
 .errorText { color: #a8333b; font-size: 12px; line-height: 1.45; }
 .outputFields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
@@ -59,13 +59,13 @@
 .previewHeading { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
 .previewHeading h2 { margin: 0; color: #172639; font-size: 21px; line-height: 1.3; letter-spacing: -.035em; }
 .previewMark { display: grid; flex: 0 0 auto; width: 38px; height: 38px; place-items: center; color: #285fc2; border: 1px solid #d6e4fa; border-radius: 11px; background: #edf4ff; font-size: 13px; font-weight: 800; }
-.emptyPreview { display: grid; flex: 1; min-height: 185px; place-items: center; margin: 22px 0 0; padding: 20px; color: #748496; border: 1px dashed #cbd8e4; border-radius: 13px; background: rgba(255, 255, 255, .7); font-size: 13px; line-height: 1.65; text-align: center; }
+.emptyPreview { display: grid; flex: 1; min-height: 185px; place-items: center; margin: 22px 0 0; padding: 20px; color: #617184; border: 1px dashed #cbd8e4; border-radius: 13px; background: rgba(255, 255, 255, .7); font-size: 13px; line-height: 1.65; text-align: center; }
 .previewCard { margin-top: 24px; padding: 18px; border: 1px solid #dfe7ef; border-radius: 14px; background: #fff; box-shadow: 0 12px 26px rgba(23, 38, 57, .06); }
 .previewMeta { display: flex; flex-wrap: wrap; gap: 7px; }
 .previewMeta span { padding: 5px 8px; color: #3e5b7a; border-radius: 999px; background: #edf4ff; font-size: 10px; font-weight: 750; }
 .previewCard h3 { margin: 19px 0 7px; color: #172639; font-size: 22px; line-height: 1.25; overflow-wrap: anywhere; }
 .previewCard p { margin: 0; color: #526579; font-size: 13px; line-height: 1.7; overflow-wrap: anywhere; }
-.previewAsset { display: block; margin-top: 12px; color: #6a7a8b; font-size: 10px; line-height: 1.5; overflow-wrap: anywhere; }
+.previewAsset { display: block; margin-top: 12px; color: #5f7083; font-size: 10px; line-height: 1.5; overflow-wrap: anywhere; }
 .localNotice { margin: auto 0 0; padding: 12px 13px; color: #42685f; border: 1px solid #cfe8dd; border-radius: 10px; background: #f0faf5; font-size: 11px; line-height: 1.6; }
 
 @media (max-width: 760px) {
