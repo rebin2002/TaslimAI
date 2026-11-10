@@ -18,6 +18,14 @@ namespace Taslim.Api.Autopilot;
 /// <item>a malformed, ambiguous, or non-2xx response is reported as
 /// <see cref="WaveLaunchProviderOutcomes.Unavailable"/> or
 /// <see cref="WaveLaunchProviderOutcomes.Rejected"/> — never as a successful launch;</item>
+/// <item>a successful create response is admitted only when the bridge echoes
+/// <c>fencing_high_water_token</c> exactly equal to the epoch sent in the
+/// <c>X-Taslim-Fencing-Token</c> header. A task identity on its own is never
+/// admission, because it proves only that <em>some</em> task exists — not that
+/// the bridge served this request under the caller's still-current lease epoch.
+/// A missing, malformed, or unequal acknowledgment is reported as
+/// <see cref="WaveLaunchProviderOutcomes.Rejected"/> so the durable reservation
+/// stays held and ambiguous instead of being released for another create;</item>
 /// <item>status polling only ever reports a normalized execution state; it never
 /// produces gate evidence.</item>
 /// </list>
@@ -90,6 +98,25 @@ public sealed class ManusBridgeWaveLaunchProvider : IWaveLaunchProvider
             var externalTaskId = ExtractExternalTaskId(body);
             if (string.IsNullOrWhiteSpace(externalTaskId))
                 return WaveLaunchProviderResult.Unavailable("bridge_task_identity_missing", "The bridge response did not contain a task identity.");
+
+            // Fail closed on the fencing epoch. The identity check above only
+            // proves the bridge named a task; it does not prove that the bridge
+            // observed this request's epoch as its high-water mark. Without an
+            // exact acknowledgment, a delayed holder whose lease was already
+            // taken over could otherwise be admitted and launch duplicate work.
+            // This is a contract mismatch, not a transient fault: it is reported
+            // as Rejected so the caller never treats the response as an accepted
+            // launch, while an identity that may really exist keeps the durable
+            // reservation held for authoritative reconciliation.
+            if (!TryExtractFencingHighWaterToken(body, out var acknowledgedFencingToken))
+                return WaveLaunchProviderResult.Rejected(
+                    "bridge_fencing_high_water_missing",
+                    "The bridge returned a task identity without a fencing high-water acknowledgment.");
+
+            if (acknowledgedFencingToken != request.FencingToken)
+                return WaveLaunchProviderResult.Rejected(
+                    "bridge_fencing_high_water_mismatch",
+                    "The bridge fencing high-water acknowledgment does not equal the epoch this request carried.");
 
             return WaveLaunchProviderResult.Launched(externalTaskId, "task_accepted");
         }
@@ -205,6 +232,75 @@ public sealed class ManusBridgeWaveLaunchProvider : IWaveLaunchProvider
         if (string.IsNullOrWhiteSpace(candidate)) return null;
         var trimmed = candidate.Trim();
         return trimmed.Length <= 200 ? trimmed : trimmed[..200];
+    }
+
+    /// <summary>
+    /// Reads the fencing high-water acknowledgment from a create response. Only
+    /// a bare integer (or an integer written as a string) counts as an
+    /// acknowledgment: a present-but-malformed value is reported as missing so
+    /// the caller fails closed rather than guessing an epoch. Comparison
+    /// against the request epoch is deliberately exact and is left to the
+    /// caller.
+    /// </summary>
+    public static bool TryExtractFencingHighWaterToken(string? body, out long fencingHighWaterToken)
+    {
+        fencingHighWaterToken = 0;
+        if (string.IsNullOrWhiteSpace(body)) return false;
+
+        using var document = JsonDocument.Parse(body);
+        var root = document.RootElement;
+        if (TryReadFencingHighWaterToken(root, out fencingHighWaterToken)) return true;
+
+        // Tolerate the same wrapped response shapes that task-identity
+        // resolution already accepts, so a small bridge response evolution
+        // cannot silently turn an acknowledged epoch into an unverified one.
+        foreach (var container in FencingTokenContainers)
+        {
+            if (root.ValueKind == JsonValueKind.Object
+                && root.TryGetProperty(container, out var child)
+                && child.ValueKind == JsonValueKind.Object
+                && TryReadFencingHighWaterToken(child, out fencingHighWaterToken))
+                return true;
+        }
+
+        fencingHighWaterToken = 0;
+        return false;
+    }
+
+    private static readonly string[] FencingHighWaterTokenNames =
+    [
+        "fencing_high_water_token",
+        "fencingHighWaterToken",
+    ];
+
+    private static readonly string[] FencingTokenContainers = ["data", "task", "result"];
+
+    private static bool TryReadFencingHighWaterToken(JsonElement element, out long value)
+    {
+        value = 0;
+        if (element.ValueKind != JsonValueKind.Object) return false;
+
+        foreach (var name in FencingHighWaterTokenNames)
+        {
+            if (!element.TryGetProperty(name, out var candidate)) continue;
+            var parsed = candidate.ValueKind switch
+            {
+                JsonValueKind.Number => candidate.TryGetInt64(out var number) ? (long?)number : null,
+                JsonValueKind.String => long.TryParse(
+                    (candidate.GetString() ?? string.Empty).Trim(),
+                    NumberStyles.None,
+                    CultureInfo.InvariantCulture,
+                    out var text) ? (long?)text : null,
+                _ => null,
+            };
+            if (parsed is { } resolved)
+            {
+                value = resolved;
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private static string? ExtractStatusToken(string? body)
