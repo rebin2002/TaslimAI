@@ -87,6 +87,39 @@ public sealed class ManusBridgeResponseBoundaryContractTests
         }
     }
 
+    [Fact]
+    public async Task Small_unknown_length_task_state_remains_readable_and_normalized()
+    {
+        var previous = Environment.GetEnvironmentVariable(TestTokenEnvironment);
+        Environment.SetEnvironmentVariable(TestTokenEnvironment, "provider-free-test-token");
+        try
+        {
+            var payload = Encoding.UTF8.GetBytes("{\"status\":\"stopped\"}");
+            using var body = new ReadObservingStream(payload);
+            using var handler = new StubHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StreamContent(body)
+            });
+            using var http = new HttpClient(handler);
+            var provider = NewProvider(http);
+
+            // A future bounded-reader fix must not pass the two negative
+            // contracts by rejecting every otherwise valid small response.
+            var state = await provider.GetTaskStateAsync(FakeTaskId);
+
+            Assert.NotNull(state);
+            Assert.Equal(WaveLaunchTaskStates.Cancelled, state!.Status);
+            Assert.True(state.IsTerminal);
+            Assert.False(state.IsSuccess);
+            Assert.Equal(payload.Length, body.BytesRead);
+            Assert.Equal(1, handler.RequestCount);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(TestTokenEnvironment, previous);
+        }
+    }
+
     private static ManusBridgeWaveLaunchProvider NewProvider(HttpClient http)
     {
         var options = new AutopilotOptions
