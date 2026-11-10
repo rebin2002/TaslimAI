@@ -64,6 +64,46 @@ public sealed class ManusBridgeResponseBoundaryContractTests
     }
 
     [Fact]
+    public async Task Oversized_declared_content_length_must_reject_before_body_read()
+    {
+        // Separate from the outcome assertion in the sibling negative test:
+        // if the outcome fails first, xUnit never reaches its bytes-read check.
+        // A trustworthy oversized Content-Length must be rejected at headers.
+        var previous = Environment.GetEnvironmentVariable(TestTokenEnvironment);
+        Environment.SetEnvironmentVariable(TestTokenEnvironment, "provider-free-test-token");
+        try
+        {
+            var bytes = Encoding.UTF8.GetBytes("{\"ok\":true,\"task_id\":\"" + FakeTaskId + "\"}" + new string(' ', 160_000));
+            using var body = new ReadObservingStream(bytes);
+            using var content = new StreamContent(body);
+            content.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("application/json");
+            content.Headers.ContentLength = bytes.Length;
+            using var handler = new StubHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = content
+            });
+            using var http = new HttpClient(handler);
+            var provider = NewProvider(http);
+            var request = new WaveLaunchProviderRequest(
+                "wave-response-boundary", "task-header-preflight", "Offline test",
+                "No external provider calls", new string('b', 40),
+                "feature/offline", "offline-declared-header-preflight")
+            {
+                FencingToken = 1
+            };
+
+            await provider.LaunchTaskAsync(request);
+
+            Assert.Equal(0, body.BytesRead);
+            Assert.Equal(1, handler.RequestCount);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(TestTokenEnvironment, previous);
+        }
+    }
+
+    [Fact]
     public async Task Small_declared_length_create_response_remains_a_launch_ack()
     {
         var previous = Environment.GetEnvironmentVariable(TestTokenEnvironment);
