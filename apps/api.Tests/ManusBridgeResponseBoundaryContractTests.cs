@@ -62,7 +62,7 @@ public sealed class ManusBridgeResponseBoundaryContractTests
         try
         {
             var payload = Encoding.UTF8.GetBytes("{\"status\":\"stopped\"}" + new string(' ', 200_000));
-            using var body = new ReadBudgetStream(payload, ReadBudget);
+            using var body = new ReadObservingStream(payload);
             using var handler = new StubHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
             {
                 Content = new StreamContent(body)
@@ -74,8 +74,11 @@ public sealed class ManusBridgeResponseBoundaryContractTests
             // never be accepted based on its valid/truncated JSON prefix.
             var state = await provider.GetTaskStateAsync(FakeTaskId);
 
+            // The fake never enforces the cap. This assertion must fail if
+            // production still buffers the entire unknown-length response.
+            Assert.True(body.BytesRead <= ReadBudget + 1,
+                $"Provider consumed {body.BytesRead} bytes; expected at most {ReadBudget + 1}");
             Assert.Null(state);
-            Assert.True(body.BytesRead <= ReadBudget, "Bridge response was fully buffered beyond the safety budget");
             Assert.Equal(1, handler.RequestCount);
         }
         finally
@@ -108,11 +111,10 @@ public sealed class ManusBridgeResponseBoundaryContractTests
         }
     }
 
-    // Non-seekable, unknown-Content-Length fake. If the HTTP client buffers the
-    // whole 200 KB body, the fake fails rather than silently exercising the
-    // test machine's memory. An owner fix should use ResponseHeadersRead and
-    // bounded incremental reads, returning unavailable/null on overflow.
-    private sealed class ReadBudgetStream(byte[] data, int budget) : Stream
+    // Non-seekable, unknown-Content-Length fake that intentionally does NOT
+    // enforce any read limit. The assertion above must detect buffering by
+    // the actual provider, not by the fake's own IOException or clamping.
+    private sealed class ReadObservingStream(byte[] data) : Stream
     {
         private readonly MemoryStream inner = new(data, writable: false);
 
@@ -127,23 +129,16 @@ public sealed class ManusBridgeResponseBoundaryContractTests
             set => throw new NotSupportedException();
         }
 
-        private int Permit(int requested)
-        {
-            var remaining = budget - BytesRead;
-            if (remaining <= 0) throw new IOException("unbounded_bridge_response_read");
-            return Math.Min(requested, remaining);
-        }
-
         public override int Read(byte[] buffer, int offset, int count)
         {
-            var read = inner.Read(buffer, offset, Permit(count));
+            var read = inner.Read(buffer, offset, count);
             BytesRead += read;
             return read;
         }
 
         public override int Read(Span<byte> buffer)
         {
-            var read = inner.Read(buffer[..Permit(buffer.Length)]);
+            var read = inner.Read(buffer);
             BytesRead += read;
             return read;
         }
@@ -151,7 +146,7 @@ public sealed class ManusBridgeResponseBoundaryContractTests
         public override async ValueTask<int> ReadAsync(
             Memory<byte> buffer, CancellationToken cancellationToken = default)
         {
-            var read = await inner.ReadAsync(buffer[..Permit(buffer.Length)], cancellationToken);
+            var read = await inner.ReadAsync(buffer, cancellationToken);
             BytesRead += read;
             return read;
         }
