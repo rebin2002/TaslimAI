@@ -28,6 +28,16 @@ export type ProductAdMockPreview = {
   format: string;
 };
 
+/**
+ * Draft preview lifecycle. Reported through a live region that stays mounted
+ * for the whole session so assistive technology can announce status changes.
+ * `idle` announces nothing because the wizard has no status to report on mount.
+ */
+export type ProductAdPreviewStatus = "idle" | "ready" | "cleared";
+
+/** `edited` is any change that discards the preview shown so far. */
+export type ProductAdPreviewAction = "edited" | "generated";
+
 type ProductAdCopy = {
   eyebrow: string;
   title: string;
@@ -47,6 +57,8 @@ type ProductAdCopy = {
   createPreview: string;
   fileError: string;
   previewTitle: string;
+  previewReady: (channel: string, format: string) => string;
+  previewCleared: string;
   previewEmptyTitle: string;
   previewEmpty: string;
   mockBadge: string;
@@ -75,6 +87,8 @@ const copyByLocale: Record<Locale, ProductAdCopy> = {
     createPreview: "Create mock preview",
     fileError: "Choose an image file no larger than 10 MB.",
     previewTitle: "Draft preview",
+    previewReady: (channel, format) => `Draft preview ready for ${channel} in ${format}.`,
+    previewCleared: "Draft preview cleared. Create it again when you are done editing.",
     previewEmptyTitle: "Your draft preview will appear here",
     previewEmpty: "Add a product name and photo to make a sample ad.",
     mockBadge: "Mock preview",
@@ -101,6 +115,8 @@ const copyByLocale: Record<Locale, ProductAdCopy> = {
     createPreview: "إنشاء معاينة تجريبية",
     fileError: "اختر ملف صورة لا يتجاوز حجمه 10 MB.",
     previewTitle: "معاينة المسودة",
+    previewReady: (channel, format) => `معاينة المسودة جاهزة لـ${channel} بصيغة ${format}.`,
+    previewCleared: "تم مسح معاينة المسودة. أنشئها مرة أخرى بعد الانتهاء من التعديل.",
     previewEmptyTitle: "ستظهر معاينة المسودة هنا",
     previewEmpty: "أضف اسم المنتج وصورته لإنشاء إعلان تجريبي.",
     mockBadge: "معاينة تجريبية",
@@ -127,6 +143,8 @@ const copyByLocale: Record<Locale, ProductAdCopy> = {
     createPreview: "پێشبینینی نموونەیی دروست بکە",
     fileError: "فایلی وێنەیەک هەڵبژێرە کە قەبارەکەی لە 10 MB زیاتر نەبێت.",
     previewTitle: "پێشبینینی ڕەشنووس",
+    previewReady: (channel, format) => `پێشبینینی ڕەشنووس ئامادەیە بۆ ${channel} بە ${format}.`,
+    previewCleared: "پێشبینینی ڕەشنووس سڕایەوە. کاتێک دەستکاریت تەواو کرد دووبارە دروستی بکە.",
     previewEmptyTitle: "پێشبینینی ڕەشنووسەکەت لێرە دەردەکەوێت",
     previewEmpty: "ناوی بەرهەم و وێنەکەی زیاد بکە بۆ دروستکردنی ڕیکلامێکی نموونەیی.",
     mockBadge: "پێشبینینی نموونەیی",
@@ -153,6 +171,29 @@ export function buildProductAdMockPreview(input: ProductAdDraftInput, locale: Lo
   };
 }
 
+/**
+ * Keeps `idle` silent so the first keystroke cannot announce a preview that was
+ * never created, and keeps `cleared` stable so repeated edits do not re-announce.
+ */
+export function nextProductAdPreviewStatus(
+  current: ProductAdPreviewStatus,
+  action: ProductAdPreviewAction,
+): ProductAdPreviewStatus {
+  if (action === "generated") return "ready";
+  return current === "ready" ? "cleared" : current;
+}
+
+export function buildProductAdPreviewAnnouncement(
+  status: ProductAdPreviewStatus,
+  locale: Locale,
+  output: Readonly<{ channel: ProductAdChannel; format: ProductAdFormat }> = defaultProductAdOutput,
+): string {
+  const copy = copyByLocale[locale];
+  if (status === "ready") return copy.previewReady(copy.channels[output.channel], copy.formats[output.format]);
+  if (status === "cleared") return copy.previewCleared;
+  return "";
+}
+
 export function ProductAdInputWizard({ locale = "en" }: Readonly<{ locale?: Locale }>) {
   const id = useId();
   const copy = copyByLocale[locale];
@@ -165,10 +206,16 @@ export function ProductAdInputWizard({ locale = "en" }: Readonly<{ locale?: Loca
   const [photoError, setPhotoError] = useState("");
   const [logoError, setLogoError] = useState("");
   const [preview, setPreview] = useState<ProductAdMockPreview | null>(null);
+  const [previewStatus, setPreviewStatus] = useState<ProductAdPreviewStatus>("idle");
+
+  function invalidatePreview() {
+    setPreviewStatus((current) => nextProductAdPreviewStatus(current, "edited"));
+    setPreview(null);
+  }
 
   function updateProductPhoto(event: ChangeEvent<HTMLInputElement>) {
     const file = event.currentTarget.files?.[0] ?? null;
-    setPreview(null);
+    invalidatePreview();
     if (file && !isSupportedProductAdImage(file)) {
       setProductPhoto(null);
       setPhotoError(copy.fileError);
@@ -181,7 +228,7 @@ export function ProductAdInputWizard({ locale = "en" }: Readonly<{ locale?: Loca
 
   function updateBrandLogo(event: ChangeEvent<HTMLInputElement>) {
     const file = event.currentTarget.files?.[0] ?? null;
-    setPreview(null);
+    invalidatePreview();
     if (file && !isSupportedProductAdImage(file)) {
       setBrandLogo(null);
       setLogoError(copy.fileError);
@@ -195,6 +242,7 @@ export function ProductAdInputWizard({ locale = "en" }: Readonly<{ locale?: Loca
   function createPreview(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setPreview(buildProductAdMockPreview({ productName, benefit, channel, format }, locale));
+    setPreviewStatus(nextProductAdPreviewStatus(previewStatus, "generated"));
   }
 
   return (
@@ -213,7 +261,7 @@ export function ProductAdInputWizard({ locale = "en" }: Readonly<{ locale?: Loca
               id={`${id}-product-name`}
               type="text"
               value={productName}
-              onChange={(event) => { setProductName(event.target.value); setPreview(null); }}
+              onChange={(event) => { setProductName(event.target.value); invalidatePreview(); }}
               placeholder={copy.productNamePlaceholder}
               autoComplete="off"
               maxLength={120}
@@ -227,7 +275,7 @@ export function ProductAdInputWizard({ locale = "en" }: Readonly<{ locale?: Loca
             <textarea
               id={`${id}-benefit`}
               value={benefit}
-              onChange={(event) => { setBenefit(event.target.value); setPreview(null); }}
+              onChange={(event) => { setBenefit(event.target.value); invalidatePreview(); }}
               placeholder={copy.benefitPlaceholder}
               rows={3}
               maxLength={280}
@@ -273,7 +321,7 @@ export function ProductAdInputWizard({ locale = "en" }: Readonly<{ locale?: Loca
           <div className={styles.outputFields}>
             <label className={styles.field} htmlFor={`${id}-channel`}>
               <span className={styles.labelText}>{copy.channel}</span>
-              <select id={`${id}-channel`} value={channel} onChange={(event) => { setChannel(event.target.value as ProductAdChannel); setPreview(null); }}>
+              <select id={`${id}-channel`} value={channel} onChange={(event) => { setChannel(event.target.value as ProductAdChannel); invalidatePreview(); }}>
                 <option value="instagram">{copy.channels.instagram}</option>
                 <option value="facebook">{copy.channels.facebook}</option>
                 <option value="tiktok">{copy.channels.tiktok}</option>
@@ -281,7 +329,7 @@ export function ProductAdInputWizard({ locale = "en" }: Readonly<{ locale?: Loca
             </label>
             <label className={styles.field} htmlFor={`${id}-format`}>
               <span className={styles.labelText}>{copy.format}</span>
-              <select id={`${id}-format`} value={format} onChange={(event) => { setFormat(event.target.value as ProductAdFormat); setPreview(null); }}>
+              <select id={`${id}-format`} value={format} onChange={(event) => { setFormat(event.target.value as ProductAdFormat); invalidatePreview(); }}>
                 <option value="square">{copy.formats.square}</option>
                 <option value="story">{copy.formats.story}</option>
                 <option value="landscape">{copy.formats.landscape}</option>
@@ -294,6 +342,9 @@ export function ProductAdInputWizard({ locale = "en" }: Readonly<{ locale?: Loca
       </div>
 
       <aside className={styles.previewPanel} aria-labelledby={`${id}-preview-title`}>
+        <p className="sr-only" role="status" aria-live="polite" aria-atomic="true">
+          {buildProductAdPreviewAnnouncement(previewStatus, locale, { channel, format })}
+        </p>
         <div className={styles.previewHeading}>
           <div>
             <p className={styles.eyebrow}>{copy.mockBadge}</p>
@@ -302,7 +353,7 @@ export function ProductAdInputWizard({ locale = "en" }: Readonly<{ locale?: Loca
           <span className={styles.previewMark} aria-hidden="true">Aa</span>
         </div>
         {preview ? (
-          <div className={styles.previewCard} aria-live="polite">
+          <div className={styles.previewCard}>
             <div className={styles.previewMeta}>
               <span>{preview.channel}</span>
               <span>{preview.format}</span>
