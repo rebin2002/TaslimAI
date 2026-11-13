@@ -193,6 +193,11 @@ else
   ensure_db "$ladder_conn"
   assert_major "$ladder_conn" "target" "$expected_major"
 
+  step "dotnet-ef availability"
+  if ! dotnet ef --version >/dev/null 2>&1; then
+    fail "the dotnet-ef tool is unavailable; run 'dotnet tool restore' from the repository root first"
+  fi
+
   step "EF model consistency"
   dotnet ef migrations has-pending-model-changes --project apps/api --startup-project apps/api
 
