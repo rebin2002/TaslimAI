@@ -87,6 +87,57 @@ Refused (red) cases, each verified to stop before opening a connection:
 * ladder database == test database -> refused.
 * empty target connection string -> refused (no silent default).
 
+## Hosted execution (GitHub Actions, free runners, disposable databases)
+
+The lane executes from its own `ci/postgres18-` branch namespace, so it does not
+wait on a `.github/workflows/ci.yml` owner merge. `workflow_dispatch` is still
+accepted, but GitHub only lists a dispatchable workflow once the file exists on
+the default branch, which is why the prefix trigger is the primary path.
+
+Safe-default proof, run 43349372716 on `a51898b346c40e80b8d7ea34f2e5075231e6db76`
+and re-proved on the docs-only push run for `c306aa13b77907b704582450ff0a71c2a5631579`:
+
+| Job | Result |
+| --- | --- |
+| Resolve opt-in legs | success -> `legs=guards-only` |
+| Parity harness guard contracts | success (36/36) |
+| Autopilot / Billing / schema-parity legs | **skipped**, as designed without a marker |
+
+Full lane on `main` + this lane, run 43350243764 on `cd5806621091270391a75c7f44548f7e8a1dfefe`,
+and full lane on the **composed #718 + #720 candidate**, run 43350275586 on
+`726aabc24ece737e8232491d6dfa7443642d1669` (merge of `#718` head `6f34095f`,
+`#720` head `fc880d85`, and this lane):
+
+| Leg | Composed-candidate result | Job |
+| --- | --- | --- |
+| Guard contracts | 36/36 pass | [job](https://github.com/rebin2002/TaslimAI/actions/runs/43350275586/job/131639415163) |
+| Autopilot on PG18 | pass, 224/224, `target server major = 18` | [job](https://github.com/rebin2002/TaslimAI/actions/runs/43350275586/job/131639466601) |
+| Billing on PG18 | pass, 72/72, `target server major = 18` | [job](https://github.com/rebin2002/TaslimAI/actions/runs/43350275586/job/131639466590) |
+| PG15 control vs PG18 schema | pass, `PG15 control server major = 15`, 1931 columns identical | [job](https://github.com/rebin2002/TaslimAI/actions/runs/43350275586/job/131639466611) |
+| Extension assumption audit | 82 migration classes, no `CREATE EXTENSION` dependency | (all legs) |
+
+`726aabc2` is a disposable evidence branch under the lane prefix, not a PR and
+not a release candidate; it can be deleted once reviewed. The hosted PG18 Autopilot
+leg executes the same bounded suite that #720's exact-head run left **skipped**,
+which is the specific qualification gap #734 records.
+
+## Red-to-green history of this slice
+
+1. First local Autopilot leg reported 4 failures. Root cause was the harness, not
+   PostgreSQL: the ladder and the test run shared one database, so
+   `EnsureCreated()` became a no-op and `AutopilotLocks` / `AutopilotRuns` were
+   missing (`42P01`). Fixed by separating the databases and adding a refusal when
+   they collide.
+2. The harness then passed 224/224 on PG18 while still reporting `EXIT=1`, because
+   the summary check string-matched `Failed: 0` while `dotnet test` pads the
+   counter (`Failed:     0`). Fixed by parsing the counters and asserting
+   `failed == 0 and passed > 0`.
+3. First hosted billing leg failed with `Run "dotnet tool restore" to make the
+   "dotnet-ef" command available` - the job was missing the step the other jobs
+   had. Fixed, plus a harness preflight that now fails with an actionable message.
+4. Final hosted state: all legs green on `main` + lane and on the composed
+   #718 + #720 candidate.
+
 ## What this lane does not do
 
 It does not enable a runtime, change any production configuration, perform
