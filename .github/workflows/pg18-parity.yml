@@ -1,0 +1,195 @@
+name: PostgreSQL 18 parity (opt-in, disposable)
+# Issue #734: production runs PostgreSQL 18 (ghcr.io/railwayapp-templates/
+# postgres-ssl:18) while .github/workflows/ci.yml pins PostgreSQL 15. That CI
+# file is owned elsewhere (#109 owns the autopilot-gate.if hunk, #66 the
+# Browser E2E hunk), so this lane lives in its own file and never edits it.
+#
+# Safe defaults:
+#   * workflow_dispatch only - no push, pull_request or schedule trigger, so
+#     this lane cannot consume CI minutes or run against anything a human has
+#     not explicitly selected.
+#   * The PG15 control in ci.yml is unchanged and stays the required check.
+#   * candidate_ref lets an owner run the lane against an exact composed
+#     candidate (for example #718 + #720) without merging anything.
+#   * Database names are disposable-prefixed and the harness refuses any other
+#     target, so a mis-set secret cannot route migrations at production.
+on:
+  workflow_dispatch:
+    inputs:
+      legs:
+        description: Which parity legs to execute
+        required: true
+        type: choice
+        options: [guards-only, billing, autopilot, schema-diff, all]
+        default: guards-only
+      candidate_ref:
+        description: Exact ref/SHA of the candidate to qualify (blank = this branch)
+        required: false
+        default: ""
+      reason:
+        description: Why this lane is being run (recorded in the run summary)
+        required: false
+        default: release-qualification
+permissions:
+  contents: read
+
+env:
+  NODE_VERSION: "22"
+  DOTNET_VERSION: "8.0.x"
+  # Pinned linux/amd64 manifest digest of postgres:18 (resolved from the
+  # registry index sha256:b9f6b8ff03b62f3cfd9d9ba3fe56226a9991c79d3fb46fd46536263bf02be553).
+  # Same pinning style as the PG15 pin in ci.yml; rotate deliberately, never silently.
+  PG18_IMAGE: postgres:18@sha256:c7fedce47eff6a78cb35dad6b627f0d684107f75ab15c0870e40c093766ba452
+
+jobs:
+  guards:
+    name: Parity harness guard contracts
+    if: ${{ github.event_name == 'workflow_dispatch' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Offline guard contracts (no database, no providers, no network)
+        run: |
+          bash -n scripts/lib/pg18-parity-refs.sh scripts/pg18-parity-gate.sh scripts/pg18-parity-gate.test.sh
+          bash scripts/pg18-parity-gate.test.sh
+
+  pg18-autopilot:
+    name: Autopilot regression on PostgreSQL 18
+    needs: guards
+    if: ${{ github.event_name == 'workflow_dispatch' && (inputs.legs == 'autopilot' || inputs.legs == 'all') }}
+    runs-on: ubuntu-latest
+    services:
+      postgres18:
+        # Literal pin: the env context is not available for service images.
+        image: postgres:18@sha256:c7fedce47eff6a78cb35dad6b627f0d684107f75ab15c0870e40c093766ba452 # postgres:18 linux/amd64
+        env:
+          POSTGRES_USER: taslim
+          POSTGRES_PASSWORD: change-me
+          POSTGRES_DB: taslim_pg18_autopilot
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U taslim -d taslim_pg18_autopilot"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.event.inputs.candidate_ref || github.sha }}
+      - uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+      - run: dotnet tool restore
+      - name: Record the exact tested head and server identity
+        run: |
+          echo "tested head SHA: $(git rev-parse HEAD)"
+          echo "requested candidate: ${{ github.event.inputs.candidate_ref || '(this branch)' }}"
+          echo "dispatch reason: ${{ github.event.inputs.reason }}"
+      - name: Bounded Autopilot regression on the disposable PG18 database
+        env:
+          FRESH_DATABASE_URL: Host=localhost;Port=5432;Database=taslim_pg18_autopilot;Username=taslim;Password=change-me
+          PG18_LADDER_URL: Host=localhost;Port=5432;Database=taslim_pg18_autopilot_ladder;Username=taslim;Password=change-me
+          ConnectionStrings__Postgres: Host=localhost;Port=5432;Database=taslim_pg18_autopilot;Username=taslim;Password=change-me
+          Database__ApplyMigrations: "false"
+        run: bash scripts/pg18-parity-gate.sh autopilot
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: pg18-autopilot-log
+          path: /tmp/pg18-autopilot.log
+          if-no-files-found: warn
+
+  pg18-billing:
+    name: Billing regression on PostgreSQL 18
+    needs: guards
+    if: ${{ github.event_name == 'workflow_dispatch' && (inputs.legs == 'billing' || inputs.legs == 'all') }}
+    runs-on: ubuntu-latest
+    services:
+      postgres18:
+        image: postgres:18@sha256:c7fedce47eff6a78cb35dad6b627f0d684107f75ab15c0870e40c093766ba452 # postgres:18 linux/amd64
+        env:
+          POSTGRES_USER: taslim
+          POSTGRES_PASSWORD: change-me
+          POSTGRES_DB: taslim_pg18_billing
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U taslim -d taslim_pg18_billing"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.event.inputs.candidate_ref || github.sha }}
+      - uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+      - name: Billing ledger regression on the disposable PG18 database
+        env:
+          ConnectionStrings__Postgres: Host=localhost;Port=5432;Database=taslim_pg18_billing;Username=taslim;Password=change-me
+          PG18_LADDER_URL: Host=localhost;Port=5432;Database=taslim_pg18_billing_ladder;Username=taslim;Password=change-me
+          Database__ApplyMigrations: "false"
+          Ai__OpenAI__Enabled: "false"
+        run: bash scripts/pg18-parity-gate.sh billing
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: pg18-billing-log
+          path: /tmp/pg18-billing.log
+          if-no-files-found: warn
+
+  pg15-pg18-schema:
+    name: PG15 control vs PG18 schema parity
+    needs: guards
+    if: ${{ github.event_name == 'workflow_dispatch' && (inputs.legs == 'schema-diff' || inputs.legs == 'all') }}
+    runs-on: ubuntu-latest
+    services:
+      pg15:
+        # Byte-for-byte the PG15 pin used by ci.yml, so the control leg stays
+        # identical to the existing required check.
+        image: postgres:15@sha256:e27d24a29acce1b554771ba68c43afa55446069d228310451bb8c96c1531d2cb # postgres:15 linux/amd64
+        env:
+          POSTGRES_USER: taslim
+          POSTGRES_PASSWORD: change-me
+          POSTGRES_DB: taslim_pg18_parity15
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U taslim -d taslim_pg18_parity15"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+      pg18:
+        image: postgres:18@sha256:c7fedce47eff6a78cb35dad6b627f0d684107f75ab15c0870e40c093766ba452 # postgres:18 linux/amd64
+        env:
+          POSTGRES_USER: taslim
+          POSTGRES_PASSWORD: change-me
+          POSTGRES_DB: taslim_pg18_parity18
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd "pg_isready -U taslim -d taslim_pg18_parity18"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.event.inputs.candidate_ref || github.sha }}
+      - uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+      - run: dotnet tool restore
+      - name: Migration ladder on both majors and column-level diff
+        env:
+          PG15_URL: Host=localhost;Port=5432;Database=taslim_pg18_parity15;Username=taslim;Password=change-me
+          PG18_URL: Host=localhost;Port=5433;Database=taslim_pg18_parity18;Username=taslim;Password=change-me
+        run: bash scripts/pg18-parity-gate.sh schema-diff
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: failure()
+        with:
+          name: pg18-schema-diff
+          path: /tmp/pg18-schema.diff
+          if-no-files-found: warn
