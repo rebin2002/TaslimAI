@@ -155,6 +155,51 @@ else
   printf '  ok   empty target refused (no silent default)\n'; pass=$((pass + 1))
 fi
 
+echo "== workflow safe-default contracts =="
+WF="$ROOT_DIR/.github/workflows/pg18-parity.yml"
+CIT="$ROOT_DIR/.github/workflows/ci.yml"
+if [[ -f "$WF" ]]; then
+  # The lane must never auto-run on shared branches or ordinary PRs.
+  for forbidden in "pull_request:" "schedule:" "cron:"; do
+    if grep -qE "^[[:space:]]*[-]?[[:space:]]*${forbidden}" "$WF"; then
+      printf '  FAIL workflow contains %s\n' "$forbidden"; fail_count=$((fail_count + 1))
+    else
+      printf '  ok   workflow has no %s trigger\n' "$forbidden"; pass=$((pass + 1))
+    fi
+  done
+  if grep -A3 "^  push:" "$WF" | grep -q '"ci/postgres18-\*\*"'; then
+    printf '  ok   push trigger is limited to the lane prefix\n'; pass=$((pass + 1))
+  else
+    printf '  FAIL push trigger is not limited to the lane prefix\n'; fail_count=$((fail_count + 1))
+  fi
+  if grep -q "default: guards-only" "$WF"; then
+    printf '  ok   default leg selection is guards-only\n'; pass=$((pass + 1))
+  else
+    printf '  FAIL default leg selection is not guards-only\n'; fail_count=$((fail_count + 1))
+  fi
+  # The PG15 control leg must reuse the exact pin from ci.yml.
+  if [[ -f "$CIT" ]]; then
+    cit_pin="$(grep -m1 -o 'postgres:15@sha256:[0-9a-f]\{64\}' "$CIT")"
+    if [[ -n "$cit_pin" ]] && grep -qF "$cit_pin" "$WF"; then
+      printf '  ok   PG15 control leg reuses the ci.yml pin\n'; pass=$((pass + 1))
+    else
+      printf '  FAIL PG15 control leg does not reuse the ci.yml pin\n'; fail_count=$((fail_count + 1))
+    fi
+    if grep -q "postgres:18@sha256:[0-9a-f]\{64\}" "$WF"; then
+      printf '  ok   PG18 image is digest-pinned\n'; pass=$((pass + 1))
+    else
+      printf '  FAIL PG18 image is not digest-pinned\n'; fail_count=$((fail_count + 1))
+    fi
+  fi
+  if grep -qE "^[[:space:]]*contents: read" "$WF"; then
+    printf '  ok   workflow permissions are read-only\n'; pass=$((pass + 1))
+  else
+    printf '  FAIL workflow permissions are not read-only\n'; fail_count=$((fail_count + 1))
+  fi
+else
+  printf '  FAIL workflow file missing\n'; fail_count=$((fail_count + 1))
+fi
+
 echo
 printf '%s\n' "pg18-parity-gate.test.sh: $pass passed, $fail_count failed"
 [[ "$fail_count" -eq 0 ]] || exit 1
