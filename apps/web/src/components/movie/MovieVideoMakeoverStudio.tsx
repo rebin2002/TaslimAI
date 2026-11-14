@@ -95,6 +95,20 @@ export function reduceMovieVideoMakeoverStudioSource(
   return applyMovieVideoMakeoverSourceSelection(selection, entry);
 }
 
+/**
+ * Catalogue changes can revoke access to a previously selected clip. Mask stale
+ * source facts in the rendered draft immediately, without mutating the caller's
+ * controlled state during render. The owner may then persist the cleared draft.
+ */
+export function reconcileMovieVideoMakeoverStudioSelection(
+  selection: MovieVideoMakeoverSelection,
+  entries: ReturnType<typeof describeMovieVideoMakeoverProjectSources>,
+): MovieVideoMakeoverSelection {
+  if (selection.sourceAssetId === null) return selection;
+  const current = entries.find((entry) => entry.assetId === selection.sourceAssetId);
+  return current?.selectable ? selection : clearMovieVideoMakeoverSourceSelection(selection);
+}
+
 export function MovieVideoMakeoverStudio({
   project,
   assets,
@@ -106,8 +120,9 @@ export function MovieVideoMakeoverStudio({
 }: MovieVideoMakeoverStudioProps) {
   const context = { principalId, workspaceId };
   const entries = describeMovieVideoMakeoverProjectSources(project, assets, context);
-  const attached = entries.find((entry) => entry.assetId !== "" && entry.assetId === selection.sourceAssetId) ?? null;
-  const copy = movieVideoMakeoverSourcePendingCopy(attached, selection.mode);
+  const visibleSelection = reconcileMovieVideoMakeoverStudioSelection(selection, entries);
+  const attached = entries.find((entry) => entry.selectable && entry.assetId === visibleSelection.sourceAssetId) ?? null;
+  const copy = movieVideoMakeoverSourcePendingCopy(attached, visibleSelection.mode);
   const tally = tallyMovieVideoMakeoverSourceGaps(attached === null ? [] : [attached]);
   const pendingCount = Object.values(tally).reduce((total, count) => total + count, 0);
 
@@ -115,15 +130,15 @@ export function MovieVideoMakeoverStudio({
     <div className="movie-makeover-studio" data-pending-source-facts={String(pendingCount)}>
       <MovieVideoMakeoverSourcePanel
         entries={entries}
-        selectedAssetId={selection.sourceAssetId}
-        mode={selection.mode}
-        onAttach={(assetId) => onChange(reduceMovieVideoMakeoverStudioSource(selection, assetId, entries))}
-        onDetach={() => onChange(reduceMovieVideoMakeoverStudioSource(selection, null, entries))}
+        selectedAssetId={visibleSelection.sourceAssetId}
+        mode={visibleSelection.mode}
+        onAttach={(assetId) => onChange(reduceMovieVideoMakeoverStudioSource(visibleSelection, assetId, entries))}
+        onDetach={() => onChange(reduceMovieVideoMakeoverStudioSource(visibleSelection, null, entries))}
       />
       <p className="movie-makeover-studio-summary" role="note">
         {copy.headline}
       </p>
-      <MovieVideoMakeoverInputPanel selection={selection} onChange={onChange} showPlaceholderSourceControl={false} />
+      <MovieVideoMakeoverInputPanel selection={visibleSelection} onChange={onChange} showPlaceholderSourceControl={false} />
       {/* No source is inferred from the draft. A missing makeover result must
           remain unavailable, never be replaced with the original clip. */}
       {comparison ? <MovieMakeoverComparisonPanel {...comparison} /> : null}
