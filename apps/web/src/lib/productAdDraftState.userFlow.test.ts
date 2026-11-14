@@ -253,6 +253,8 @@ describe("product ad draft user flow: save with photo + optional logo, restore o
     store.setItem(
       key,
       JSON.stringify({
+        savedByUser: encodeURIComponent(principal.userId),
+        savedByWorkspace: encodeURIComponent(principal.workspaceId),
         version: -3,
         savedAt: Number.MAX_SAFE_INTEGER,
         productName: "x".repeat(500),
@@ -292,6 +294,32 @@ describe("product ad draft user flow: save with photo + optional logo, restore o
     store.setItem(key, JSON.stringify({ ...payload, savedByUser: encodeURIComponent("user-2") }));
     expect(readProductAdDraft(store, principal, { purgeOnOwnerMismatch: false })).toBeNull();
     expect(store.entries.has(key)).toBe(true);
+  });
+
+  it("refuses missing or partial provenance even under the correct scoped key", () => {
+    const key = productAdDraftStorageKey(principal)!;
+    const store = makeStore();
+    const complete = {
+      ...applyProductAdDraftEdit(blankProductAdDraft(1), edit(), 1),
+      savedByUser: encodeURIComponent(principal.userId),
+      savedByWorkspace: encodeURIComponent(principal.workspaceId),
+    };
+    for (const invalid of [
+      { ...complete, savedByUser: undefined, savedByWorkspace: undefined },
+      { ...complete, savedByUser: undefined },
+      { ...complete, savedByWorkspace: undefined },
+      { ...complete, savedByUser: "" },
+      { ...complete, savedByWorkspace: "" },
+    ]) {
+      store.setItem(key, JSON.stringify(invalid));
+      expect(readProductAdDraft(store, principal)).toBeNull();
+      expect(store.entries.has(key)).toBe(false);
+    }
+    store.setItem(key, JSON.stringify({ ...complete, savedByWorkspace: undefined }));
+    expect(readProductAdDraft(store, principal, { purgeOnOwnerMismatch: false })).toBeNull();
+    expect(store.entries.has(key)).toBe(true);
+    store.setItem(key, JSON.stringify(complete));
+    expect(readProductAdDraft(store, principal)?.productName).toBe(complete.productName);
   });
 
   it("retires an unattributed legacy draft without exposing its content", () => {
