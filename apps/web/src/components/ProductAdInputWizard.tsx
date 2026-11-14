@@ -138,7 +138,10 @@ const copyByLocale: Record<Locale, ProductAdCopy> = {
 };
 
 export function isSupportedProductAdImage(file: Pick<File, "type" | "size">): boolean {
-  return file.type.startsWith("image/") && file.size <= MAX_PRODUCT_AD_IMAGE_BYTES;
+  // Match the formats promised in the UI; image/* also admits SVG and GIF.
+  // Keep validation local and refuse empty or oversized files.
+  return ["image/jpeg", "image/png", "image/webp"].includes(file.type)
+    && Number.isFinite(file.size) && file.size > 0 && file.size <= MAX_PRODUCT_AD_IMAGE_BYTES;
 }
 
 export function buildProductAdMockPreview(input: ProductAdDraftInput, locale: Locale): ProductAdMockPreview {
