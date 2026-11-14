@@ -12,7 +12,7 @@ namespace Taslim.Api.Controllers;
 [ApiController]
 [Authorize]
 [Route("api/movie-studio")]
-public sealed class MovieStudioController(IMovieStudioService movies, IMovieProductionComplexityService complexity, IMovieDurationBudgetService durationBudgets, IMovieGuideService guides, IMovieStoryService stories, IMovieStoryCastService storyCast, IMovieCharacterContinuityService continuity, IMovieWorldContinuityService worldContinuity, IMovieProductionContinuityService productionContinuity, IMovieProductionReferencePackageService productionReferences, IMovieProductionPreflightService productionPreflight, IMovieTimelineService timeline, IMovieTimelineTransitionService transitionEdits, IMovieTakeSelectService takeSelects, IMovieShotExecutionService shotExecution, MovieAuthorizationService authorization, MovieShotImportanceService shotImportance, IMovieCinematographyPlanningService cinematographyPlanning, IMovieCharacterProductionSheetService productionSheets, IMovieLocationGeographySheetService geographySheets, IMoviePropBibleService propBible, IMovieReferenceReadinessService referenceReadiness, IMovieMissingInsertPlannerService insertPlanner) : ControllerBase
+public sealed class MovieStudioController(IMovieStudioService movies, IMovieProductionComplexityService complexity, IMovieDurationBudgetService durationBudgets, IMovieGuideService guides, IMovieStoryService stories, IMovieStoryCastService storyCast, IMovieCharacterContinuityService continuity, IMovieWorldContinuityService worldContinuity, IMovieProductionContinuityService productionContinuity, IMovieProductionReferencePackageService productionReferences, IMovieProductionPreflightService productionPreflight, IMovieTimelineService timeline, IMovieTimelineTransitionService transitionEdits, IMovieTakeSelectService takeSelects, IMovieShotExecutionService shotExecution, MovieAuthorizationService authorization, MovieShotImportanceService shotImportance, IMovieCinematographyPlanningService cinematographyPlanning, IMovieCharacterProductionSheetService productionSheets, IMovieLocationGeographySheetService geographySheets, IMoviePropBibleService propBible, IMovieReferenceReadinessService referenceReadiness, IMovieMissingInsertPlannerService insertPlanner, IMovieMissingInsertDecisionService insertDecisions) : ControllerBase
 {
     [HttpGet("cinematography/presets")]
     public IActionResult CinematographyPresets() => Ok(CinematographyPresetCatalog.All);
@@ -118,6 +118,51 @@ public sealed class MovieStudioController(IMovieStudioService movies, IMovieProd
             return result is null ? ApiResults.Error(this, 404, "MOVIE_PROJECT_NOT_FOUND", "Movie project not found.") : Ok(result);
         }
         catch (MovieMissingInsertPlannerException exception) { return ApiResults.Error(this, 400, exception.Code, exception.Message); }
+    }
+
+    [HttpGet("projects/{id:guid}/insert-planner/decisions")]
+    public async Task<IActionResult> GetMissingInsertDecisions(Guid id, CancellationToken cancellationToken)
+    {
+        var result = await insertDecisions.ListAsync(GetUserId(), id, cancellationToken);
+        return result is null ? ApiResults.Error(this, 404, "MOVIE_PROJECT_NOT_FOUND", "Movie project not found.") : Ok(result);
+    }
+
+    [HttpPost("projects/{id:guid}/insert-planner/decisions")]
+    [ValidateAntiForgeryToken]
+    public async Task<IActionResult> MaterializeMissingInsertDecisions(Guid id, MovieMissingInsertMaterializeRequest request, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var result = await insertDecisions.MaterializeAsync(GetUserId(), id, request, cancellationToken);
+            return result is null ? ApiResults.Error(this, 404, "MOVIE_PROJECT_NOT_FOUND", "Movie project not found.") : Ok(result);
+        }
+        catch (MovieMissingInsertPlannerException exception) { return ApiResults.Error(this, 400, exception.Code, exception.Message); }
+        catch (MovieMissingInsertDecisionException exception) { return ApiResults.Error(this, exception.IsConflict ? 409 : 400, exception.Code, exception.Message); }
+    }
+
+    [HttpPost("insert-planner/decisions/{decisionId:guid}/review")]
+    [ValidateAntiForgeryToken]
+    public async Task<IActionResult> ReviewMissingInsertDecision(Guid decisionId, MovieMissingInsertReviewRequest request, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var result = await insertDecisions.ReviewAsync(GetUserId(), decisionId, request, cancellationToken);
+            return result is null ? ApiResults.Error(this, 404, "MOVIE_INSERT_DECISION_NOT_FOUND", "Missing-insert decision not found.") : Ok(result);
+        }
+        catch (MovieMissingInsertDecisionException exception) { return ApiResults.Error(this, exception.IsConflict ? 409 : 400, exception.Code, exception.Message); }
+    }
+
+    [HttpPost("insert-planner/decisions/{decisionId:guid}/apply")]
+    [ValidateAntiForgeryToken]
+    public async Task<IActionResult> ApplyMissingInsertDecision(Guid decisionId, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var result = await insertDecisions.ApplyAsync(GetUserId(), decisionId, cancellationToken);
+            return result is null ? ApiResults.Error(this, 404, "MOVIE_INSERT_DECISION_NOT_FOUND", "Missing-insert decision not found.") : Ok(result);
+        }
+        catch (MovieMissingInsertDecisionException exception) { return ApiResults.Error(this, exception.IsConflict ? 409 : 400, exception.Code, exception.Message); }
+        catch (MovieTimelineValidationException exception) { return ApiResults.Error(this, 409, exception.Code, exception.Message); }
     }
 
     [HttpPost("projects/{id:guid}/timeline/revisions")]

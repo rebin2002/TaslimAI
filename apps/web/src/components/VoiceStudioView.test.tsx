@@ -6,6 +6,7 @@ import { VoiceAudioPlayer, nextVoiceChoiceIndex, voiceLanguageTag, voiceTextDire
 import { translate } from "../lib/i18n";
 
 const voiceSource = readFileSync(new URL("./VoiceStudioView.tsx", import.meta.url), "utf8");
+const globalStyles = readFileSync(new URL("../app/globals.css", import.meta.url), "utf8");
 
 describe("Voice Studio accessibility", () => {
   it("gives the custom audio controls localized names and a readable progress value", () => {
@@ -48,5 +49,10 @@ describe("Voice Studio accessibility", () => {
     expect(nextVoiceChoiceIndex(1, "Enter", 3)).toBeNull();
     expect(voiceSource).toContain('tabIndex={language === value ? 0 : -1}');
     expect(voiceSource).toContain('onKeyDown={(event) => handleVoiceChoiceKeyDown(event, languages, value, setLanguage)}');
+  });
+
+  it("keeps the final dark-hero title rule on the light foreground", () => {
+    const parallelVoiceStudioBaseStyles = globalStyles.slice(globalStyles.indexOf("/* Parallel Voice Studio */")).split("@media")[0];
+    expect(parallelVoiceStudioBaseStyles).toMatch(/\.voice-studio-header h1\s*\{[^}]*color: var\(--white\);/);
   });
 });
