@@ -159,4 +159,26 @@ describe("Chat stream state", () => {
     expect(completed).toMatchObject({ content: settled.content, status: "Completed" });
     expect(terminalState.terminal).toBe("completed");
   });
+
+  it("preserves identical consecutive incremental chunks while assistant is pending", () => {
+    // Valid live streams can repeat text (e.g. "ha" followed by "ha").
+    // Content equality is not a replay signal unless message.started carries
+    // an already-Completed assistant snapshot.
+    let state = reduceChatStream(createChatStreamState(), event("message.started", {
+      userMessage: user,
+      assistantMessage: assistant,
+    }));
+    state = reduceChatStream(state, event("message.delta", { messageId: "assistant-1", delta: "ha" }));
+    state = reduceChatStream(state, event("message.delta", { messageId: "assistant-1", delta: "ha" }));
+    expect(state.messages.find(item => item.id === "assistant-1")).toMatchObject({
+      content: "haha",
+      status: "Pending",
+    });
+    state = reduceChatStream(state, event("message.completed", {
+      userMessage: user,
+      assistantMessage: message("assistant-1", "Assistant", "haha", "Completed"),
+    }));
+    expect(state.messages.find(item => item.id === "assistant-1")?.content).toBe("haha");
+    expect(state.terminal).toBe("completed");
+  });
 });
