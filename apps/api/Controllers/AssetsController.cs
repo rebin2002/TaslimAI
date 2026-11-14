@@ -129,6 +129,11 @@ public sealed class AssetsController(
             logger.LogWarning("Asset download failed because the configured private storage provider rejected the operation. AssetId={AssetId}; WorkspaceId={WorkspaceId}", download.Asset.Id, download.Asset.WorkspaceId);
             return ApiResults.Error(this, StatusCodes.Status503ServiceUnavailable, "FILE_STORAGE_OPERATION_FAILED", "We couldn't open this asset. Please try again.");
         }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidOperationException)
+        {
+            logger.LogWarning("Asset download failed because the local private storage operation could not open the file. AssetId={AssetId}; WorkspaceId={WorkspaceId}", download.Asset.Id, download.Asset.WorkspaceId);
+            return ApiResults.Error(this, StatusCodes.Status503ServiceUnavailable, "FILE_STORAGE_OPERATION_FAILED", "We couldn't open this asset. Please try again.");
+        }
     }
 
     private async Task<IActionResult> SetStatus(Guid id, bool archive, CancellationToken cancellationToken)
