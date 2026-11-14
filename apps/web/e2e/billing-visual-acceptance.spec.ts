@@ -264,6 +264,7 @@ test.describe(`Billing route visual acceptance${BASELINE ? " (baseline control: 
       await expect(page.getByText(billingFixture.actions.disabledReason, { exact: true })).toBeVisible();
 
       const metrics = await measureBillingPage(page);
+      const bodyScrollWidth = await page.evaluate(() => document.body.scrollWidth);
       detectedCollisionsByCase.set(`${locale}@${width}`, metrics.collisions.length);
 
       expect(metrics.lang, "document lang").toBe(strings.tag);
@@ -275,6 +276,7 @@ test.describe(`Billing route visual acceptance${BASELINE ? " (baseline control: 
       } else {
         expect(metrics.collisions, `text-box collisions: ${JSON.stringify(metrics.collisions.slice(0, 8))}`).toHaveLength(0);
         expect(metrics.pageOverflow, "page-level horizontal overflow").toBe(false);
+        expect(bodyScrollWidth, "body scrollWidth must fit viewport").toBeLessThanOrEqual(width + 1);
         expect(metrics.cardsOutsideViewport, "plan/summary cards inside viewport").toBe(0);
         expect(metrics.enabledButtons, "all plan change / checkout controls stay disabled").toBe(0);
         expect(metrics.totalButtons).toBe(plans.length + 3);
@@ -295,7 +297,11 @@ test.describe(`Billing route visual acceptance${BASELINE ? " (baseline control: 
 
       const screenshotName = `billing-${locale}-${width}px${BASELINE ? "-baseline" : ""}`;
       const shotPath = testInfo.outputPath(`${screenshotName}.png`);
-      await page.screenshot({ path: shotPath, fullPage: true });
+      const screenshot = await page.screenshot({ path: shotPath, fullPage: true });
+      if (!BASELINE) {
+        // html.scrollWidth missed #816 tablet overflow; verify the actual bitmap.
+        expect(screenshot.readUInt32BE(16), "fullPage screenshot width").toBeLessThanOrEqual(width + 1);
+      }
       await testInfo.attach(screenshotName, { path: shotPath, contentType: "image/png" });
       if (process.env.BILLING_SHOTS_DIR) {
         mkdirSync(process.env.BILLING_SHOTS_DIR, { recursive: true });
