@@ -179,28 +179,16 @@ export function ProductAdInputWizard({ locale = "en", principal = null }: Readon
   const workspaceId = principal?.workspaceId ?? null;
   const key = productAdDraftStorageKey({ userId, workspaceId });
 
-  // Object URLs never leave this tab, are never persisted, and are revoked when
-  // the file changes or the authenticated wizard unmounts. A restored filename
-  // is not a file: users must reattach bytes before previewing the image.
-  useEffect(() => {
-    if (!productPhoto) {
-      setProductPhotoUrl(null);
-      return;
-    }
-    const url = URL.createObjectURL(productPhoto);
-    setProductPhotoUrl(url);
-    return () => URL.revokeObjectURL(url);
-  }, [productPhoto]);
+  // URLs are allocated only in user file-picker events; these effects solely
+  // revoke abandoned URLs. No synchronous setState inside an effect, and no
+  // object URL is ever serialized into workspace-scoped draft storage.
+  useEffect(() => () => {
+    if (productPhotoUrl) URL.revokeObjectURL(productPhotoUrl);
+  }, [productPhotoUrl]);
 
-  useEffect(() => {
-    if (!brandLogo) {
-      setBrandLogoUrl(null);
-      return;
-    }
-    const url = URL.createObjectURL(brandLogo);
-    setBrandLogoUrl(url);
-    return () => URL.revokeObjectURL(url);
-  }, [brandLogo]);
+  useEffect(() => () => {
+    if (brandLogoUrl) URL.revokeObjectURL(brandLogoUrl);
+  }, [brandLogoUrl]);
 
   // A draft is keyed to both the authenticated user and workspace. Never read it
   // during SSR and never display the previous account's form while rehydrating.
@@ -223,6 +211,8 @@ export function ProductAdInputWizard({ locale = "en", principal = null }: Readon
       setFormat(restored?.format ?? defaultProductAdOutput.format);
       setProductPhoto(null);
       setBrandLogo(null);
+      setProductPhotoUrl(null);
+      setBrandLogoUrl(null);
       setRestoredProductPhoto(restored?.productPhoto ?? null);
       setRestoredBrandLogo(restored?.brandLogo ?? null);
       setRestoredDraft(restored);
@@ -263,12 +253,14 @@ export function ProductAdInputWizard({ locale = "en", principal = null }: Readon
     setRestoredProductPhoto(null);
     if (file && !isSupportedProductAdImage(file)) {
       setProductPhoto(null);
+      setProductPhotoUrl(null);
       setPhotoError(copy.fileError);
       event.currentTarget.value = "";
       return;
     }
     setPhotoError("");
     setProductPhoto(file);
+    setProductPhotoUrl(file ? URL.createObjectURL(file) : null);
   }
 
   function updateBrandLogo(event: ChangeEvent<HTMLInputElement>) {
@@ -277,12 +269,14 @@ export function ProductAdInputWizard({ locale = "en", principal = null }: Readon
     setRestoredBrandLogo(null);
     if (file && !isSupportedProductAdImage(file)) {
       setBrandLogo(null);
+      setBrandLogoUrl(null);
       setLogoError(copy.fileError);
       event.currentTarget.value = "";
       return;
     }
     setLogoError("");
     setBrandLogo(file);
+    setBrandLogoUrl(file ? URL.createObjectURL(file) : null);
   }
 
   function createPreview(event: FormEvent<HTMLFormElement>) {
