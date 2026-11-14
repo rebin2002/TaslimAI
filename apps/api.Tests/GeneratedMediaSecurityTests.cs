@@ -60,6 +60,49 @@ public sealed class GeneratedMediaSecurityTests
     }
 
     [Fact]
+    public async Task Exact_length_verification_finalizes_hash_when_s3_stops_at_content_length()
+    {
+        var bytes = Encoding.UTF8.GetBytes("generated video payload");
+        using var source = new MemoryStream(bytes);
+        using var bounded = new CountingReadStream(source, maxBytes: 128, expectedContentLength: bytes.Length);
+        var requestBytes = new byte[bytes.Length];
+
+        // Simulate an S3 adapter that reads exactly Content-Length, never EOF.
+        Assert.Equal(bytes.Length, await bounded.ReadAsync(requestBytes.AsMemory()));
+        Assert.Equal(bytes, requestBytes);
+        Assert.Null(bounded.Sha256Hex);
+
+        await bounded.VerifyExactLengthAsync(bytes.Length);
+
+        Assert.Equal(bytes.Length, bounded.BytesRead);
+        Assert.Equal(Convert.ToHexString(SHA256.HashData(bytes)), bounded.Sha256Hex);
+    }
+
+    [Fact]
+    public async Task Exact_length_verification_rejects_trailing_bytes_hidden_by_content_length()
+    {
+        using var source = new MemoryStream([1, 2, 3, 4]);
+        using var bounded = new CountingReadStream(source, maxBytes: 10, expectedContentLength: 3);
+        var requestBytes = new byte[3];
+
+        Assert.Equal(3, await bounded.ReadAsync(requestBytes.AsMemory()));
+        await Assert.ThrowsAsync<FileUploadValidationException>(
+            () => bounded.VerifyExactLengthAsync(3));
+    }
+
+    [Fact]
+    public async Task Exact_length_verification_rejects_short_generated_stream()
+    {
+        using var source = new MemoryStream([1, 2]);
+        using var bounded = new CountingReadStream(source, maxBytes: 10, expectedContentLength: 3);
+        using var destination = new MemoryStream();
+
+        await bounded.CopyToAsync(destination);
+        await Assert.ThrowsAsync<FileUploadValidationException>(
+            () => bounded.VerifyExactLengthAsync(3));
+    }
+
+    [Fact]
     public void Image_inspection_derives_container_and_dimensions_from_the_header()
     {
         var descriptor = GeneratedMediaSecurity.ValidateDescriptor("frame.png", "image/png");
