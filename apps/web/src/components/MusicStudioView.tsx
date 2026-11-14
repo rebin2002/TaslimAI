@@ -197,8 +197,15 @@ function RecentMusicLibrary({ assets, loading, error, locale, t }: { assets: Ass
   </section>;
 }
 
+// A workspace change must unmount the previous private library/preview state.
+// Keying the whole studio also prevents in-flight results from the prior
+// workspace from appearing in the next workspace and releases local Blob URLs.
 export function MusicStudioView() {
   const { workspace } = useAuth();
+  return <WorkspaceMusicStudio key={workspace?.id ?? "no-workspace"} workspace={workspace} />;
+}
+
+function WorkspaceMusicStudio({ workspace }: { workspace: ReturnType<typeof useAuth>["workspace"] }) {
   const { t, locale } = useLocale();
   const searchParams = useSearchParams();
   const [projects, setProjects] = useState<Project[]>([]);
