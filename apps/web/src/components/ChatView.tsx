@@ -222,6 +222,11 @@ export function ChatView({ conversationId }: Readonly<ChatViewProps>) {
   }
 
   async function clearAttachments() {
+    // Clearing the composer is an explicit abandonment of the staged batch, so it
+    // has to fence an upload that is still in flight. Without the fence a parked
+    // request commits its stored file back into the composer the user just emptied.
+    invalidateChatAttachmentUploads(attachmentUploadGenerationRef);
+    setUploadProgress(null);
     const pending = attachments;
     setAttachments([]);
     await Promise.all(pending.map(async (file) => {
