@@ -166,6 +166,8 @@ export function ProductAdInputWizard({ locale = "en", principal = null }: Readon
   const [format, setFormat] = useState<ProductAdFormat>(defaultProductAdOutput.format);
   const [productPhoto, setProductPhoto] = useState<File | null>(null);
   const [brandLogo, setBrandLogo] = useState<File | null>(null);
+  const [productPhotoUrl, setProductPhotoUrl] = useState<string | null>(null);
+  const [brandLogoUrl, setBrandLogoUrl] = useState<string | null>(null);
   const [photoError, setPhotoError] = useState("");
   const [logoError, setLogoError] = useState("");
   const [preview, setPreview] = useState<ProductAdMockPreview | null>(null);
@@ -176,6 +178,29 @@ export function ProductAdInputWizard({ locale = "en", principal = null }: Readon
   const userId = principal?.userId ?? null;
   const workspaceId = principal?.workspaceId ?? null;
   const key = productAdDraftStorageKey({ userId, workspaceId });
+
+  // Object URLs never leave this tab, are never persisted, and are revoked when
+  // the file changes or the authenticated wizard unmounts. A restored filename
+  // is not a file: users must reattach bytes before previewing the image.
+  useEffect(() => {
+    if (!productPhoto) {
+      setProductPhotoUrl(null);
+      return;
+    }
+    const url = URL.createObjectURL(productPhoto);
+    setProductPhotoUrl(url);
+    return () => URL.revokeObjectURL(url);
+  }, [productPhoto]);
+
+  useEffect(() => {
+    if (!brandLogo) {
+      setBrandLogoUrl(null);
+      return;
+    }
+    const url = URL.createObjectURL(brandLogo);
+    setBrandLogoUrl(url);
+    return () => URL.revokeObjectURL(url);
+  }, [brandLogo]);
 
   // A draft is keyed to both the authenticated user and workspace. Never read it
   // during SSR and never display the previous account's form while rehydrating.
@@ -378,6 +403,30 @@ export function ProductAdInputWizard({ locale = "en", principal = null }: Readon
               <span>{preview.channel}</span>
               <span>{preview.format}</span>
             </div>
+            {productPhoto && productPhotoUrl && (
+              <div
+                className={`${styles.previewArtwork} ${format === "story" ? styles.previewStory : format === "landscape" ? styles.previewLandscape : styles.previewSquare}`}
+                aria-label="Local product-photo preview"
+              >
+                {/* File data is only read via revocable browser object URLs. */}
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img
+                  data-preview-asset="product"
+                  className={styles.previewProductImage}
+                  src={productPhotoUrl}
+                  alt={productName.trim()}
+                />
+                {brandLogo && brandLogoUrl && (
+                  /* eslint-disable-next-line @next/next/no-img-element */
+                  <img
+                    data-preview-asset="brand-logo"
+                    className={styles.previewBrandLogo}
+                    src={brandLogoUrl}
+                    alt={copy.brandLogo}
+                  />
+                )}
+              </div>
+            )}
             <h3 dir="auto">{preview.headline}</h3>
             <p dir="auto">{preview.caption}</p>
             {productPhoto && <small className={styles.previewAsset} dir="auto">{copy.productPhoto}: {productPhoto.name}</small>}

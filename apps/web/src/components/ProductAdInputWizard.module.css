@@ -63,6 +63,12 @@
 .previewCard { margin-top: 24px; padding: 18px; border: 1px solid #dfe7ef; border-radius: 14px; background: #fff; box-shadow: 0 12px 26px rgba(23, 38, 57, .06); }
 .previewMeta { display: flex; flex-wrap: wrap; gap: 7px; }
 .previewMeta span { padding: 5px 8px; color: #3e5b7a; border-radius: 999px; background: #edf4ff; font-size: 10px; font-weight: 750; }
+.previewArtwork { position: relative; width: 100%; margin: 16px 0; overflow: hidden; border: 1px solid #dfe7ef; border-radius: 12px; background: #f2f5f9; }
+.previewSquare { aspect-ratio: 1 / 1; }
+.previewStory { aspect-ratio: 9 / 16; max-height: 540px; }
+.previewLandscape { aspect-ratio: 16 / 9; }
+.previewProductImage { display: block; width: 100%; height: 100%; object-fit: contain; }
+.previewBrandLogo { position: absolute; inset-inline-start: 12px; top: 12px; display: block; max-width: 28%; max-height: 24%; padding: 6px; border-radius: 8px; background: rgba(255,255,255,.95); object-fit: contain; box-shadow: 0 3px 12px rgba(23,38,57,.12); }
 .previewCard h3 { margin: 19px 0 7px; color: #172639; font-size: 22px; line-height: 1.25; overflow-wrap: anywhere; }
 .previewCard p { margin: 0; color: #526579; font-size: 13px; line-height: 1.7; overflow-wrap: anywhere; }
 .previewAsset { display: block; margin-top: 12px; color: #6a7a8b; font-size: 10px; line-height: 1.5; overflow-wrap: anywhere; }

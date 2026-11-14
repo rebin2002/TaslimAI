@@ -44,8 +44,11 @@ test.describe("Product Ad preview — real authenticated session, local-only dra
       await logo.setInputFiles({ name: "brand-logo.png", mimeType: "image/png", buffer: onePixelPng });
       await submit.click();
       await expect(page.locator("aside h3")).toHaveText("Cedar & Silk");
+      await expect(page.locator('aside img[data-preview-asset="product"]')).toHaveAttribute("src", /^blob:/);
+      await expect(page.locator('aside img[data-preview-asset="brand-logo"]')).toHaveAttribute("src", /^blob:/);
 
       await page.reload();
+      await expect(page.locator('aside img[data-preview-asset]')).toHaveCount(0);
       await expect(name).toHaveValue("Cedar & Silk");
       await expect(benefit).toHaveValue("Keeps your skin soft");
       await expect(channel).toHaveValue("tiktok");
@@ -57,6 +60,8 @@ test.describe("Product Ad preview — real authenticated session, local-only dra
       await logo.setInputFiles({ name: "brand-logo.png", mimeType: "image/png", buffer: onePixelPng });
       await submit.click();
       await expect(page.locator("aside h3")).toHaveText("Cedar & Silk");
+      await expect(page.locator('aside img[data-preview-asset="product"]')).toHaveAttribute("src", /^blob:/);
+      await expect(page.locator('aside img[data-preview-asset="brand-logo"]')).toHaveAttribute("src", /^blob:/);
 
       const overflow = await page.evaluate(() =>
         document.documentElement.scrollWidth - document.documentElement.clientWidth
