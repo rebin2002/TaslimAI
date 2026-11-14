@@ -1,6 +1,7 @@
 "use client";
 
-import { useId, useState, type ChangeEvent, type FormEvent } from "react";
+import { useEffect, useId, useState, type ChangeEvent, type FormEvent } from "react";
+import { applyProductAdDraftEdit, blankProductAdDraft, buildProductAdDraftRestoredNotice, clearProductAdDraft, hasProductAdDraftContent, persistProductAdDraft, productAdDraftStorageKey, restoreProductAdDraft, type ProductAdDraftAsset, type ProductAdDraftPrincipal, type ProductAdDraftState } from "@/lib/productAdDraftState";
 import { localeDirection, localeTag, type Locale } from "@/lib/i18n";
 import styles from "./ProductAdInputWizard.module.css";
 
@@ -153,7 +154,7 @@ export function buildProductAdMockPreview(input: ProductAdDraftInput, locale: Lo
   };
 }
 
-export function ProductAdInputWizard({ locale = "en" }: Readonly<{ locale?: Locale }>) {
+export function ProductAdInputWizard({ locale = "en", principal = null }: Readonly<{ locale?: Locale; principal?: ProductAdDraftPrincipal | null }>) {
   const id = useId();
   const copy = copyByLocale[locale];
   const [productName, setProductName] = useState("");
@@ -165,10 +166,65 @@ export function ProductAdInputWizard({ locale = "en" }: Readonly<{ locale?: Loca
   const [photoError, setPhotoError] = useState("");
   const [logoError, setLogoError] = useState("");
   const [preview, setPreview] = useState<ProductAdMockPreview | null>(null);
+  const [restoredDraft, setRestoredDraft] = useState<ProductAdDraftState | null>(null);
+  const [restoredProductPhoto, setRestoredProductPhoto] = useState<ProductAdDraftAsset | null>(null);
+  const [restoredBrandLogo, setRestoredBrandLogo] = useState<ProductAdDraftAsset | null>(null);
+  const [hydratedKey, setHydratedKey] = useState<string | null>(null);
+  const userId = principal?.userId ?? null;
+  const workspaceId = principal?.workspaceId ?? null;
+  const key = productAdDraftStorageKey({ userId, workspaceId });
+
+  // A draft is keyed to both the authenticated user and workspace. Never read it
+  // during SSR and never display the previous account's form while rehydrating.
+  useEffect(() => {
+    let restored: ProductAdDraftState | null = null;
+    if (key) {
+      try { restored = restoreProductAdDraft(window.sessionStorage, { userId, workspaceId }); }
+      catch { /* Storage can be blocked; the wizard still works in memory. */ }
+    }
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setProductName(restored?.productName ?? "");
+    setBenefit(restored?.benefit ?? "");
+    setChannel(restored?.channel ?? defaultProductAdOutput.channel);
+    setFormat(restored?.format ?? defaultProductAdOutput.format);
+    setProductPhoto(null);
+    setBrandLogo(null);
+    setRestoredProductPhoto(restored?.productPhoto ?? null);
+    setRestoredBrandLogo(restored?.brandLogo ?? null);
+    setRestoredDraft(restored);
+    setPreview(null);
+    setPhotoError("");
+    setLogoError("");
+    setHydratedKey(key);
+  }, [key, userId, workspaceId]);
+
+  // Store descriptors and form settings, never image bytes. On reload, filenames
+  // are remembered but actual file inputs remain empty and must be reattached.
+  useEffect(() => {
+    if (!key || hydratedKey !== key) return;
+    try {
+      const draft = applyProductAdDraftEdit(blankProductAdDraft(), {
+        productName, benefit, channel, format,
+        productPhoto: productPhoto ?? (restoredProductPhoto
+          ? { name: restoredProductPhoto.name, type: restoredProductPhoto.mime, size: restoredProductPhoto.bytes }
+          : null),
+        brandLogo: brandLogo ?? (restoredBrandLogo
+          ? { name: restoredBrandLogo.name, type: restoredBrandLogo.mime, size: restoredBrandLogo.bytes }
+          : null),
+      }, Date.now());
+      if (hasProductAdDraftContent(draft)) {
+        persistProductAdDraft(window.sessionStorage, { userId, workspaceId }, draft);
+      } else {
+        clearProductAdDraft(window.sessionStorage, { userId, workspaceId });
+      }
+    } catch { /* Session storage failure cannot affect the in-memory preview. */ }
+  }, [key, hydratedKey, userId, workspaceId, productName, benefit, channel, format,
+      productPhoto, brandLogo, restoredProductPhoto, restoredBrandLogo]);
 
   function updateProductPhoto(event: ChangeEvent<HTMLInputElement>) {
     const file = event.currentTarget.files?.[0] ?? null;
     setPreview(null);
+    setRestoredProductPhoto(null);
     if (file && !isSupportedProductAdImage(file)) {
       setProductPhoto(null);
       setPhotoError(copy.fileError);
@@ -182,6 +238,7 @@ export function ProductAdInputWizard({ locale = "en" }: Readonly<{ locale?: Loca
   function updateBrandLogo(event: ChangeEvent<HTMLInputElement>) {
     const file = event.currentTarget.files?.[0] ?? null;
     setPreview(null);
+    setRestoredBrandLogo(null);
     if (file && !isSupportedProductAdImage(file)) {
       setBrandLogo(null);
       setLogoError(copy.fileError);
@@ -197,6 +254,8 @@ export function ProductAdInputWizard({ locale = "en" }: Readonly<{ locale?: Loca
     setPreview(buildProductAdMockPreview({ productName, benefit, channel, format }, locale));
   }
 
+  if (key && hydratedKey !== key) return <p role="status">Restoring saved product-ad draft…</p>;
+
   return (
     <section className={styles.shell} lang={localeTag(locale)} dir={localeDirection(locale)} aria-labelledby={`${id}-title`}>
       <div className={styles.formPanel}>
@@ -204,6 +263,7 @@ export function ProductAdInputWizard({ locale = "en" }: Readonly<{ locale?: Loca
           <p className={styles.eyebrow}>{copy.eyebrow}</p>
           <h1 id={`${id}-title`}>{copy.title}</h1>
           <p className={styles.intro}>{copy.intro}</p>
+          {restoredDraft && <p role="status" aria-live="polite">{buildProductAdDraftRestoredNotice(restoredDraft, locale)}</p>}
         </header>
 
         <form className={styles.form} onSubmit={createPreview}>
