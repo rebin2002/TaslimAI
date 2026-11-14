@@ -23,6 +23,11 @@ describe("globalSearchResultDestination", () => {
     expect(assetDestination("asset/with spaces", "Archived")).toBe("/assets?assetId=asset%2Fwith%20spaces&status=Archived");
   });
 
+  it("does not allow untrusted status values to inject a second query parameter", () => {
+    expect(assetDestination("asset-1", "Archived&assetId=asset-2")).toBe("/assets?assetId=asset-1&status=Active");
+    expect(assetDestination("asset-1", "Archived")).toBe("/assets?assetId=asset-1&status=Archived");
+  });
+
   it("opens the exact asset instead of searching by a potentially duplicated title", () => {
     expect(globalSearchResultDestination(result({ id: "asset/with spaces", title: "Shared name" }))).toBe(
       "/assets?assetId=asset%2Fwith%20spaces&status=Active",
