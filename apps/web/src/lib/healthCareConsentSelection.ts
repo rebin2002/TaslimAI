@@ -271,7 +271,10 @@ export function describeConsentSelectionUi(state: ConsentSelectionState): Consen
           documentId: doc.id,
           selected: state.selection[doc.id] === true,
           toggleEnabled: true,
-          previewEnabled: isPreviewAvailable(state, doc.id),
+          // The preview action is the second step after selection. Requiring
+          // an already-granted preview here would disable the only button
+          // that can request it, making the journey unreachable.
+          previewEnabled: isDocumentSelected(state, doc.id),
         }))
       : [],
   };
