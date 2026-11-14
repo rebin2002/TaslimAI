@@ -116,7 +116,7 @@ export function MovieVideoMakeoverStudio({
       <p className="movie-makeover-studio-summary" role="note">
         {copy.headline}
       </p>
-      <MovieVideoMakeoverInputPanel selection={selection} onChange={onChange} />
+      <MovieVideoMakeoverInputPanel selection={selection} onChange={onChange} showPlaceholderSourceControl={false} />
     </div>
   );
 }
