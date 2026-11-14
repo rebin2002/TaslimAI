@@ -44,6 +44,10 @@
  */
 
 import {
+  MovieMakeoverComparisonPanel,
+  type MovieMakeoverComparisonPanelProps,
+} from "@/components/movie/MovieMakeoverComparisonPanel";
+import {
   MovieVideoMakeoverInputPanel,
 } from "@/components/movie/MovieVideoMakeoverInputPanel";
 import type { MovieVideoMakeoverSelection } from "@/components/movie/movieVideoMakeoverInputState";
@@ -67,6 +71,8 @@ export type MovieVideoMakeoverStudioProps = {
   readonly workspaceId: string | null;
   readonly selection: MovieVideoMakeoverSelection;
   readonly onChange: (nextSelection: MovieVideoMakeoverSelection) => void;
+  /** Already-authorized preview sources supplied by the route owner, never fetched here. */
+  readonly comparison?: MovieMakeoverComparisonPanelProps | null;
 };
 
 /**
@@ -96,6 +102,7 @@ export function MovieVideoMakeoverStudio({
   workspaceId,
   selection,
   onChange,
+  comparison = null,
 }: MovieVideoMakeoverStudioProps) {
   const context = { principalId, workspaceId };
   const entries = describeMovieVideoMakeoverProjectSources(project, assets, context);
@@ -117,6 +124,9 @@ export function MovieVideoMakeoverStudio({
         {copy.headline}
       </p>
       <MovieVideoMakeoverInputPanel selection={selection} onChange={onChange} showPlaceholderSourceControl={false} />
+      {/* No source is inferred from the draft. A missing makeover result must
+          remain unavailable, never be replaced with the original clip. */}
+      {comparison ? <MovieMakeoverComparisonPanel {...comparison} /> : null}
     </div>
   );
 }
