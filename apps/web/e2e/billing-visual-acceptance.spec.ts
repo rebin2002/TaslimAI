@@ -258,7 +258,7 @@ test.describe(`Billing route visual acceptance${BASELINE ? " (baseline control: 
       await expect(page.locator(".billing-plan-option").nth(1).locator("button")).toHaveText(strings.upgrade);
       await expect(page.locator(".billing-credit-card").locator("strong")).toHaveText(await formatInPage(billingFixture.credits.totalRemaining));
       await expect(page.locator(".billing-credit-card")).toContainText(
-        strings.includedRemaining.replace("{count}", await formatInPage(billingFixture.credits.includedRemaining)),
+        strings.includedCredits.replace("{count}", await formatInPage(billingFixture.credits.includedRemaining)),
       );
       await expect(page.getByText(billingFixture.actions.disabledReason, { exact: true })).toBeVisible();
 
