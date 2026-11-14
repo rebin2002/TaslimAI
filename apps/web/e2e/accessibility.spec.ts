@@ -67,6 +67,9 @@ async function interceptOnboardingApi(page: Page, options: { initialLocale?: Loc
     body: { displayName?: string; preferredLanguage?: Locale; defaultGenerationLanguage?: Locale; intent?: string };
   }> = [];
   const authMeResponses: OnboardingMockState[] = [];
+  // Onboarding is app-wide. Exercise it on the client-gated Projects route:
+  // Billing becomes server-auth-gated under #652, which cannot be passed by
+  // mocking /api/auth/me in page.route and would invalidate this test setup.
   const appOrigin = new URL(process.env.E2E_WEB_URL ?? "http://localhost:3000").origin;
   const apiOrigin = new URL(process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:5000").origin;
   const mockOrigins = new Set([appOrigin, apiOrigin]);
@@ -165,7 +168,7 @@ test.describe("basic accessibility smoke", () => {
 
     for (const profile of profiles) {
       await page.setViewportSize({ width: profile.width, height: profile.height });
-      await page.goto("/account/billing");
+      await page.goto("/projects");
       const dialog = page.getByRole("dialog");
       await expect(dialog).toBeVisible();
       await expect(dialog.locator("[data-dialog-autofocus]")).toBeFocused();
@@ -258,7 +261,7 @@ test.describe("basic accessibility smoke", () => {
         test.setTimeout(90_000);
         const traffic = await interceptOnboardingApi(page, { initialLocale: profile.locale, allowCompletion: true });
         await page.setViewportSize({ width: 375, height: 812 });
-        await page.goto("/account/billing");
+        await page.goto("/projects");
         const dialog = page.getByRole("dialog");
         await expect(dialog).toBeVisible();
         await expect(page.locator("html")).toHaveAttribute("lang", profile.lang);
