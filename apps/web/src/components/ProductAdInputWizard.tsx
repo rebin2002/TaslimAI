@@ -137,6 +137,11 @@ const copyByLocale: Record<Locale, ProductAdCopy> = {
   },
 };
 
+/** Scope transitions must mask stale content, including a transition to sign-out. */
+export function shouldMaskProductAdDraft(key: string | null, hydratedKey: string | null): boolean {
+  return hydratedKey !== key;
+}
+
 export function isSupportedProductAdImage(file: Pick<File, "type" | "size">): boolean {
   // Match the formats promised in the UI; image/* also admits SVG and GIF.
   // Keep validation local and refuse empty or oversized files.
@@ -286,7 +291,7 @@ export function ProductAdInputWizard({ locale = "en", principal = null }: Readon
 
   // Guard transitions *to* anonymous as well as between authenticated scopes.
   // Until the post-commit reset completes, never render the prior account draft.
-  if (hydratedKey !== key) return <p role="status">Restoring saved product-ad draft…</p>;
+  if (shouldMaskProductAdDraft(key, hydratedKey)) return <p role="status">Restoring saved product-ad draft…</p>;
 
   return (
     <section className={styles.shell} lang={localeTag(locale)} dir={localeDirection(locale)} aria-labelledby={`${id}-title`}>
