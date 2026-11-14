@@ -412,7 +412,9 @@ export function ShotDesigner({
               <div className="movie-shot-list-item" key={shot.id}>
                 <span>{formatShotDesignerSequence(locale, shot.sequence)}</span>
                 <div>
-                  <strong>{shot.description}</strong>
+                  <strong>
+                    <bdi dir="auto">{shot.description}</bdi>
+                  </strong>
                   <small>
                     {selection
                       ? `${shotDesignerIntentLabel(locale, selection.intent)} ${text("override")}${selection.presetId ? ` · ${presets.find((preset) => preset.id === selection.presetId)?.name ?? text("customDirection")}` : ""}`
