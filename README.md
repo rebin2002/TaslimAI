@@ -116,6 +116,8 @@ ASP.NET Core Identity issues an HttpOnly `taslim.auth` cookie. In Production it 
 
 The API allows only configured origins and uses `AllowCredentials()`; wildcard CORS is not used. Private resources are authorized through Workspace membership. Projects are never directly owned by the browser user, and no authentication token is stored in localStorage.
 
+The login page links to a complete Identity password-recovery flow. Recovery is disabled until the API service has a TLS SMTP sender configured; deployment settings and security details are in [docs/PASSWORD_RECOVERY.md](docs/PASSWORD_RECOVERY.md).
+
 ### Railway HTTPS forwarding
 
 Railway terminates TLS at its ingress proxy, so the API uses ASP.NET Core Forwarded Headers Middleware to consume one `X-Forwarded-Proto` hop before exception handling, CORS, authentication, authorization, or antiforgery. Production processes only the forwarded scheme, with `ForwardLimit=1`, and preserves `CookieSecurePolicy.Always` for both auth and CSRF cookies. Local development remains direct HTTP with the existing `SameAsRequest` development policy.

@@ -35,7 +35,6 @@ export type PasswordPolicy = {
   requireNonAlphanumeric: boolean;
   requiredUniqueChars: number;
 };
-
 export type Project = {
   id: string;
   workspaceId: string;
@@ -60,6 +59,8 @@ export type ProjectOverview = {
 
 export type RegisterInput = { displayName: string; email: string; password: string; preferredLanguage?: string };
 export type LoginInput = { email: string; password: string };
+export type PasswordResetRequestInput = { email: string };
+export type PasswordResetInput = { email: string; token: string; newPassword: string };
 export type OnboardingIntent = "project" | "chat" | "image" | "document" | "presentation" | "research";
 export type OnboardingInput = {
   displayName?: string;
@@ -1160,6 +1161,8 @@ export type MovieCollaboration = { movieProjectId: string; team: MovieTeamMember
 export const api = {
   me: () => request<AuthResponse>("/api/auth/me"),
   passwordPolicy: () => request<PasswordPolicy>("/api/auth/password-policy"),
+  requestPasswordReset: (input: PasswordResetRequestInput) => request<{ message: string }>("/api/auth/password/forgot", { method: "POST", body: JSON.stringify(input) }, true),
+  resetPassword: (input: PasswordResetInput) => request<{ success: boolean }>("/api/auth/password/reset", { method: "POST", body: JSON.stringify(input) }, true),
   register: async (input: RegisterInput) => { const result = await request<AuthResponse>("/api/auth/register", { method: "POST", body: JSON.stringify(input) }, true); csrfToken = null; clearMovieWorkspaceRequests(); await csrf(true); return result; },
   login: async (input: LoginInput) => { const result = await request<AuthResponse>("/api/auth/login", { method: "POST", body: JSON.stringify(input) }, true); csrfToken = null; await csrf(true); return result; },
   logout: async () => { const result = await request<{ success: boolean }>("/api/auth/logout", { method: "POST" }, true); csrfToken = null; await csrf(true); return result; },

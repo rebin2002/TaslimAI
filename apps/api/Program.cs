@@ -18,6 +18,7 @@ using Taslim.Api.Authorization;
 using Taslim.Api.Billing;
 using Taslim.Api.Benchmarking;
 using Taslim.Api.Domain;
+using Taslim.Api.Email;
 using Taslim.Api.Documents;
 using Taslim.Api.Presentations;
 using Taslim.Api.Research;
@@ -124,6 +125,12 @@ builder.Services.AddAuthorization(options =>
 });
 builder.Services.AddScoped<IAuthorizationHandler, AdminUsageAuthorizationHandler>();
 builder.Services.AddRateLimiter(RateLimiting.Configure);
+builder.Services.Configure<DataProtectionTokenProviderOptions>(options => options.TokenLifespan = TimeSpan.FromMinutes(PasswordRecoveryOptions.PasswordResetTokenLifetimeMinutes));
+builder.Services.Configure<PasswordRecoveryOptions>(builder.Configuration.GetSection("PasswordRecovery"));
+builder.Services.Configure<SmtpEmailOptions>(builder.Configuration.GetSection("Email"));
+builder.Services.AddSingleton<IEmailSender, SmtpEmailSender>();
+builder.Services.AddScoped<PasswordResetOutboxService>();
+builder.Services.AddHostedService<PasswordResetEmailWorker>();
 
 builder.Services.ConfigureApplicationCookie(options =>
 {
