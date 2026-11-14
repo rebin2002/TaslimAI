@@ -534,7 +534,7 @@ export function toMusicLyricsDraftInput(
   const issues: MusicGuidedIssue[] = [];
   if (draft.sections.length === 0) issues.push({ code: "section_text_invalid", field: "sections" });
   if (!draft.language) issues.push({ code: "language_unsupported", field: "language" });
-  else if (resolveMusicGuidedDraftDialect(draft) === null) issues.push({ code: "dialect_required", field: "dialect" });
+  else if (draft.language === "ar" && resolveMusicGuidedDraftDialect(draft) === null) issues.push({ code: "dialect_required", field: "dialect" });
   if (draft.references.length > 0 && !draft.referenceRights.granted) {
     issues.push({ code: "consent_token_required", field: "referenceRights" });
   }
