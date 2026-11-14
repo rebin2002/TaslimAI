@@ -1,7 +1,16 @@
 import { describe, expect, it } from "vitest";
-import { attachmentOnlyCreationPrompt, canSubmitHomeCreation, createHomeCreationSubmissionGate, resolveHomeCreationPrompt } from "./homeCreation";
+import { attachmentOnlyCreationPrompt, canSubmitHomeCreation, createHomeCreationSubmissionGate, isHomeCreationSubmitKey, resolveHomeCreationPrompt } from "./homeCreation";
 
 describe("home creation prompt", () => {
+  it("does not submit while Enter confirms an IME candidate or while Shift is held", () => {
+    const key = { key: "Enter", shiftKey: false, isComposing: false, keyCode: 13 };
+    expect(isHomeCreationSubmitKey(key)).toBe(true);
+    expect(isHomeCreationSubmitKey({ ...key, isComposing: true })).toBe(false);
+    expect(isHomeCreationSubmitKey({ ...key, keyCode: 229 })).toBe(false);
+    expect(isHomeCreationSubmitKey({ ...key, shiftKey: true })).toBe(false);
+    expect(isHomeCreationSubmitKey({ ...key, key: "Escape" })).toBe(false);
+  });
+
   it("requires either instructions or an attachment", () => {
     expect(resolveHomeCreationPrompt("   ", 0)).toBeNull();
     expect(canSubmitHomeCreation("   ", 0)).toBe(false);
