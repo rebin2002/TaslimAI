@@ -102,6 +102,7 @@ export type MovieVideoMakeoverSourceBlockCode =
   | "source_clip_not_ready"
   | "source_file_missing"
   | "source_cross_workspace"
+  | "source_cross_principal"
   | "source_preview_unavailable";
 
 export type MovieVideoMakeoverSourceBlocker = {
@@ -342,6 +343,13 @@ export function describeMovieVideoMakeoverSource(
   if (assetId !== null && contextWorkspaceId !== null && descriptorWorkspaceId !== null
     && contextWorkspaceId !== descriptorWorkspaceId) {
     blockers.push(blocker("source_cross_workspace", "This clip belongs to a different workspace and cannot be attached here."));
+  }
+
+  const contextPrincipalId = cleanText(context.principalId, MOVIE_VIDEO_MAKEOVER_INPUT_LIMITS.maxPrincipalIdLength);
+  const descriptorPrincipalId = cleanText(descriptor.ownerPrincipalId, MOVIE_VIDEO_MAKEOVER_INPUT_LIMITS.maxPrincipalIdLength);
+  if (assetId !== null && contextPrincipalId !== null && descriptorPrincipalId !== null
+    && contextPrincipalId !== descriptorPrincipalId) {
+    blockers.push(blocker("source_cross_principal", "This clip belongs to another creator and cannot be attached without verified ownership."));
   }
 
   const label = cleanText(descriptor.name, 160)
