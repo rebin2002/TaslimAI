@@ -44,9 +44,11 @@ import {
 export type MovieVideoMakeoverInputPanelProps = {
   readonly selection: MovieVideoMakeoverSelection;
   readonly onChange: (nextSelection: MovieVideoMakeoverSelection) => void;
+  /** Suppress the demo-only source selector when a verified source panel is mounted. */
+  readonly showPlaceholderSourceControl?: boolean;
 };
 
-export function MovieVideoMakeoverInputPanel({ selection, onChange }: MovieVideoMakeoverInputPanelProps) {
+export function MovieVideoMakeoverInputPanel({ selection, onChange, showPlaceholderSourceControl = true }: MovieVideoMakeoverInputPanelProps) {
   const admission: MovieVideoMakeoverAdmission = admitMovieVideoMakeoverDraft(
     createMovieVideoMakeoverDraft(buildMovieVideoMakeoverDraftInput(selection)),
   );
@@ -107,6 +109,7 @@ export function MovieVideoMakeoverInputPanel({ selection, onChange }: MovieVideo
         )}
       </fieldset>
 
+      {showPlaceholderSourceControl ? (
       <div className="movie-makeover-source" aria-label="Source video">
         <span className="movie-makeover-source-label">Source video</span>
         {selection.sourceAssetId === null ? (
@@ -130,6 +133,7 @@ export function MovieVideoMakeoverInputPanel({ selection, onChange }: MovieVideo
           </p>
         )}
       </div>
+      ) : null}
 
       <fieldset className="movie-makeover-presets" aria-label="Preset">
         <legend>Preset</legend>
