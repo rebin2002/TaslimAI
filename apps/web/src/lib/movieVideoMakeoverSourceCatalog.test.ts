@@ -212,6 +212,21 @@ describe("source catalogue: blocked clips are named, not silently dropped", () =
     expect(entry.blockers.map((blocker) => blocker.code)).toContain("source_cross_workspace");
   });
 
+  it("rejects cross-principal clip ownership even inside the same workspace", () => {
+    const entry = describeMovieVideoMakeoverSource(
+      verifiedSource({ ownerPrincipalId: "other-creator" }),
+      { principalId: PRINCIPAL, workspaceId: WORKSPACE },
+    );
+    expect(entry.selectable).toBe(false);
+    expect(entry.blockers.map((blocker) => blocker.code)).toContain("source_cross_principal");
+
+    const sameOwner = describeMovieVideoMakeoverSource(
+      verifiedSource({ ownerPrincipalId: PRINCIPAL }),
+      { principalId: PRINCIPAL, workspaceId: WORKSPACE },
+    );
+    expect(sameOwner.blockers.map((blocker) => blocker.code)).not.toContain("source_cross_principal");
+  });
+
   it("leaves workspace comparison alone when the caller does not state a workspace", () => {
     const entry = describeMovieVideoMakeoverSource(verifiedSource({ workspaceId: "workspace_other" }), {});
     expect(entry.blockers.map((blocker) => blocker.code)).not.toContain("source_cross_workspace");
