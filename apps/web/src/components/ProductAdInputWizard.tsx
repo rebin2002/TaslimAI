@@ -314,7 +314,7 @@ export function ProductAdInputWizard({ locale = "en", principal = null }: Readon
               id={`${id}-product-photo`}
               className={styles.fileInput}
               type="file"
-              accept="image/*"
+              accept="image/jpeg,image/png,image/webp"
               aria-describedby={`${id}-photo-help`}
               aria-invalid={photoError ? true : undefined}
               required
@@ -331,7 +331,7 @@ export function ProductAdInputWizard({ locale = "en", principal = null }: Readon
               id={`${id}-brand-logo`}
               className={styles.fileInput}
               type="file"
-              accept="image/*"
+              accept="image/jpeg,image/png,image/webp"
               aria-describedby={`${id}-logo-help`}
               aria-invalid={logoError ? true : undefined}
               onChange={updateBrandLogo}
