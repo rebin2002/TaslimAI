@@ -84,7 +84,7 @@ public sealed class SocialGenerationJobHandler(
         if (generated.Draft.Posts.SelectMany(post => post.AssetRefs).Any(reference => !selectedAssetNames.Contains(reference)))
             throw new SocialGenerationStageException(SocialGenerationStages.DraftValidation, GenerationJobErrorCodes.SocialOutputInvalid, "The social result referenced an unselected Asset.", generated.Usage);
 
-        var language = NormalizeOutputLanguage(generated.Draft.Language, input.Language);
+        var language = SocialOutputLanguagePolicy.Normalize(generated.Draft.Language, input.Language);
         generated.Draft.Language = language;
         var metadata = JsonSerializer.Serialize(new
         {
@@ -149,7 +149,6 @@ public sealed class SocialGenerationJobHandler(
         return input.AssetIds.Select(id => assets.First(asset => asset.Id == id)).ToArray();
     }
 
-    private static string NormalizeOutputLanguage(string draftLanguage, string requested) => draftLanguage is "en" or "ar" or "ku" ? draftLanguage : requested is "en" or "ar" or "ku" ? requested : "en";
     private static string? Trim(string? value, int max) => string.IsNullOrWhiteSpace(value) ? null : value.Length <= max ? value : value[..Math.Max(1, max - 3)].TrimEnd() + "...";
 
     private static string BuildFileName(string title)
