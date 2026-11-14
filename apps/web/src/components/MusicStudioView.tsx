@@ -1,5 +1,5 @@
 "use client";
-import { localeTag } from "@/lib/i18n";
+import { localeDirection, localeTag, type Locale } from "@/lib/i18n";
 
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
@@ -94,6 +94,20 @@ function MusicArtwork({ large = false }: { large?: boolean }) {
     <AudioLines size={large ? 30 : 20} />
     <div className="music-wave-bars"><i /><i /><i /><i /><i /><i /><i /></div>
   </div>;
+}
+
+export function musicLyricsLanguageTag(language: string, locale: Locale): string {
+  // "auto" leaves the sung language to the provider, so the lyrics field follows
+  // the interface locale, and Sorani resolves to its canonical ckb tag.
+  return localeTag(language === "auto" ? locale : language);
+}
+
+export function musicLyricsTextDirection(language: string, locale: Locale): "ltr" | "rtl" {
+  // Kurdish Sorani and Arabic lyrics are written in the Arabic script, so their
+  // caret, bidi reordering and trailing punctuation must not inherit an English
+  // shell's left-to-right base direction.
+  const effective = language === "auto" ? locale : language;
+  return localeDirection(effective as Locale);
 }
 
 function formatAssetDate(value: string, locale: string) {
@@ -265,8 +279,8 @@ export function MusicStudioView() {
     {!current ? <form className="music-studio-workspace" onSubmit={(event) => void generate(event)}>
       <section className="music-create-panel">
         <div className="music-panel-heading"><span className="music-step-number">01</span><div><p className="music-overline">{t("music.createTitle")}</p><h2>{t("music.createSubtitle")}</h2></div></div>
-        <label className="music-primary-field"><span>{t("music.descriptionLabel")}</span><textarea value={description} onChange={(event) => setDescription(event.target.value)} maxLength={4000} placeholder={t("music.descriptionPlaceholder")} aria-label={t("music.descriptionLabel")} required /><small>{description.length}/4000</small></label>
-        <label className="music-primary-field"><span>{t("music.purpose")}</span><textarea className="is-short" value={purpose} onChange={(event) => setPurpose(event.target.value)} maxLength={1000} placeholder={t("music.purposePlaceholder")} aria-label={t("music.purpose")} required /><small>{purpose.length}/1000</small></label>
+        <label className="music-primary-field"><span>{t("music.descriptionLabel")}</span><textarea dir={musicLyricsTextDirection(language, locale)} lang={musicLyricsLanguageTag(language, locale)} value={description} onChange={(event) => setDescription(event.target.value)} maxLength={4000} placeholder={t("music.descriptionPlaceholder")} aria-label={t("music.descriptionLabel")} required /><small>{description.length}/4000</small></label>
+        <label className="music-primary-field"><span>{t("music.purpose")}</span><textarea className="is-short" dir={musicLyricsTextDirection(language, locale)} lang={musicLyricsLanguageTag(language, locale)} value={purpose} onChange={(event) => setPurpose(event.target.value)} maxLength={1000} placeholder={t("music.purposePlaceholder")} aria-label={t("music.purpose")} required /><small>{purpose.length}/1000</small></label>
         <div className="music-choice-grid">
           <label className="music-choice-field"><span>{t("music.genre")}</span><select value={genre} onChange={(event) => setGenre(event.target.value)}>{genres.map((value) => <option key={value} value={value}>{t(`music.genre.${value}`)}</option>)}</select></label>
           <label className="music-choice-field"><span>{t("music.mood")}</span><select value={mood} onChange={(event) => setMood(event.target.value)}>{moods.map((value) => <option key={value} value={value}>{t(`music.mood.${value}`)}</option>)}</select></label>

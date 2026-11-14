@@ -247,4 +247,63 @@ test.describe("chat journeys", () => {
     await expect(page.getByText("late old SSE response")).toHaveCount(0);
     await expect(page.getByRole("heading", { name: "E2E New Conversation" })).toBeVisible();
   });
+
+  test("does not stage an attachment that was cleared while its upload was running", async ({ authenticatedPage: page }) => {
+    test.setTimeout(30_000);
+    const abandonedFileName = "e2e-abandoned-upload.txt";
+    let abandonedUploadStarted = false;
+    let releaseAbandonedUpload: () => void = () => {};
+    const abandonedUploadReleased = new Promise<void>((resolve) => { releaseAbandonedUpload = resolve; });
+    const uploadUrl = /\/api\/workspaces\/[^/]+\/files$/;
+
+    // Chat uploads its queue one file at a time, so the first chip is on screen
+    // while the second request is parked. That window is what a clear has to cover.
+    await page.route(uploadUrl, async (route) => {
+      if (route.request().method() !== "POST" || !route.request().postData()?.includes(abandonedFileName)) {
+        await route.continue();
+        return;
+      }
+      abandonedUploadStarted = true;
+      await abandonedUploadReleased;
+      try {
+        await route.fulfill({
+          status: 201,
+          contentType: "application/json",
+          body: JSON.stringify({
+            id: "00000000-0000-0000-0000-000000000201",
+            workspaceId: "00000000-0000-0000-0000-000000000001",
+            projectId: null,
+            conversationId: null,
+            originalFileName: abandonedFileName,
+            contentType: "text/plain",
+            extension: "txt",
+            sizeBytes: 40,
+            storageProvider: "Local",
+            status: "Ready",
+            textExtractionStatus: "NotStarted",
+            extractedTextLength: null,
+          }),
+        });
+      } catch {
+        // A fenced upload can be torn down before the parked response is delivered.
+      }
+    });
+
+    await page.goto("/chat");
+    await page.locator('input[type="file"]').setInputFiles([
+      { name: "e2e-cleared-upload.txt", mimeType: "text/plain", buffer: Buffer.from("Cleared before the upload batch finished.") },
+      { name: abandonedFileName, mimeType: "text/plain", buffer: Buffer.from("Abandoned while this upload was still in flight.") },
+    ]);
+    await expect(page.getByText("e2e-cleared-upload.txt")).toBeVisible();
+    await expect.poll(() => abandonedUploadStarted, { timeout: 10_000 }).toBe(true);
+
+    await page.getByRole("button", { name: /clear all/i }).click();
+    await expect(page.getByText("e2e-cleared-upload.txt")).toHaveCount(0);
+    // The cleared composer must stop waiting on the batch the user abandoned.
+    await expect(page.locator(".chat-upload-progress")).toHaveCount(0);
+
+    releaseAbandonedUpload();
+    await page.waitForTimeout(1_500);
+    await expect(page.getByText(abandonedFileName)).toHaveCount(0);
+  });
 });
