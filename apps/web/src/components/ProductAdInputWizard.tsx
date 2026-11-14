@@ -176,13 +176,13 @@ export function ProductAdInputWizard({ locale = "en", principal = null }: Readon
 
   // A draft is keyed to both the authenticated user and workspace. Never read it
   // during SSR and never display the previous account's form while rehydrating.
+  // eslint-disable-next-line react-hooks/set-state-in-effect -- rehydrate after the verified identity is available.
   useEffect(() => {
     let restored: ProductAdDraftState | null = null;
     if (key) {
       try { restored = restoreProductAdDraft(window.sessionStorage, { userId, workspaceId }); }
       catch { /* Storage can be blocked; the wizard still works in memory. */ }
     }
-    // eslint-disable-next-line react-hooks/set-state-in-effect
     setProductName(restored?.productName ?? "");
     setBenefit(restored?.benefit ?? "");
     setChannel(restored?.channel ?? defaultProductAdOutput.channel);

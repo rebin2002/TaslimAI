@@ -370,7 +370,10 @@ describe("product ad draft user flow: save with photo + optional logo, restore o
     expect(wizardSource).toContain('id={`${id}-brand-logo`}');
     expect(wizardSource).not.toMatch(/-product-photo`[\s\S]{0,320}defaultValue/);
     expect(wizardSource).not.toMatch(/-brand-logo`[\s\S]{0,320}defaultValue/);
-    expect(wizardSource).not.toMatch(/initialDraft|restoredDraft/);
+    expect(wizardSource).toContain("restoreProductAdDraft(window.sessionStorage");
+    expect(wizardSource).toContain("setProductPhoto(null)");
+    expect(wizardSource).toContain("setBrandLogo(null)");
+    expect(wizardSource).toContain("if (key && hydratedKey !== key) return");
   });
 
   it("keeps a text-only draft restorable but not submittable", () => {

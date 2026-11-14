@@ -18,7 +18,9 @@ describe("product ad preview route", () => {
 
   it("passes the saved English, Arabic, or Sorani locale to the existing wizard", () => {
     expect(localeAdapterSource).toContain('import { useLocale } from "@/components/LocaleProvider";');
-    expect(localeAdapterSource).toContain("<ProductAdInputWizard locale={locale} />");
+    expect(localeAdapterSource).toContain("locale={locale} principal={{ userId: user.id, workspaceId: workspace.id }}");
+    expect(localeAdapterSource).toContain('import { useAuth } from "@/components/AuthProvider";');
+    expect(localeAdapterSource).toContain("if (loading || !user || !workspace) return null;");
     expect(localeAdapterSource).not.toContain("fetch(");
     expect(localeAdapterSource).not.toContain("/api/");
   });
