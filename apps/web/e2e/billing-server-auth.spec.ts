@@ -15,6 +15,14 @@ test.describe("Billing page server authorization", () => {
     expect(await response.text()).not.toContain("billing-credit-card");
   });
 
+  test("a valid authenticated session reaches the protected Billing route", async ({ authenticatedPage: page }) => {
+    const response = await page.request.get("/account/billing", { maxRedirects: 0 });
+    expect(response.status()).toBe(200);
+    await page.goto("/account/billing");
+    await expect(page).toHaveURL(/\/account\/billing$/);
+    await expect(page.locator(".billing-page")).toBeVisible();
+  });
+
   test("a forged session cookie does not authorize Billing", async ({ request }) => {
     const response = await request.get("/account/billing", {
       maxRedirects: 0,
