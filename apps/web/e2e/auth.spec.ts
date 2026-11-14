@@ -9,7 +9,9 @@ test.describe("authentication and onboarding", () => {
     await onboarding.getByRole("button", { name: /continue/i }).click();
     await expect(onboarding.locator("#onboarding-title")).toBeVisible();
     await onboarding.getByRole("button", { name: /choose .*action/i }).click();
-    await onboarding.getByRole("button").filter({ hasText: /project/i }).click();
+    // Project is not a launch choice in the revised five-action onboarding.
+    // The Skip control still completes onboarding and returns to Projects.
+    await onboarding.getByRole("button", { name: /skip/i }).click();
     await expect(onboarding).toBeHidden();
     await expect(page).toHaveURL(/\/projects/);
     await expect(page.getByRole("heading", { name: /projects/i })).toBeVisible();
