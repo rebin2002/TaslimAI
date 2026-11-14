@@ -186,6 +186,27 @@ describe("HealthCareConsentJourney wiring (#715 route x #804 panel, synthetic, #
     expect(html).toContain(healthCareConsentJourneyCopy(locale).optInTitle);
   });
 
+  it("subscribes parent consent/preview notices to the same snapshot as the panel", () => {
+    // Without a subscription the child panel updates, while the journey's
+    // parent notices can remain stale after selection or revocation.
+    const source = readFileSync(new URL("./HealthCareConsentJourney.tsx", import.meta.url), "utf8");
+    expect(source).toContain("useSyncExternalStore(baseStore.subscribe, baseStore.getSnapshot, baseStore.getSnapshot)");
+
+    const store = journeyStore("en");
+    const observed: ConsentSelectionState[] = [];
+    const unsubscribe = store.subscribe(() => observed.push(store.getSnapshot()));
+    store.grantConsent([]);
+    store.toggleDocumentSelection("synth-journey-01");
+    store.requestPreview("synth-journey-01");
+    store.revokeConsent();
+    unsubscribe();
+
+    expect(observed.map((state) => state.consent)).toEqual(["granted", "granted", "granted", "revoked"]);
+    expect(observed[2].preview.status).toBe("granted");
+    expect(observed[3].selection).toEqual({});
+    expect(observed[3].preview.status).toBe("unavailable");
+  });
+
   it("audits the wiring sources for provider, upload and persistence surfaces", () => {
     const sources = [
       ["HealthCareConsentJourney.tsx", new URL("./HealthCareConsentJourney.tsx", import.meta.url)],
