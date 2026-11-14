@@ -150,6 +150,19 @@ describe("source catalogue: blocked clips are named, not silently dropped", () =
     expect(entry.blockers.map((blocker) => blocker.code)).toContain("source_asset_not_video");
   });
 
+  it("rejects contradictory media claims instead of accepting image assets as video", () => {
+    for (const evidence of [
+      { assetType: "video", mimeType: "image/svg+xml" },
+      { assetType: "video", mimeType: "image/png" },
+      { assetType: "video", mimeType: "application/pdf" },
+      { assetType: "image", mimeType: "video/mp4" },
+    ]) {
+      const entry = describeMovieVideoMakeoverSource(verifiedSource(evidence));
+      expect(entry.selectable).toBe(false);
+      expect(entry.blockers.map((blocker) => blocker.code)).toContain("source_asset_not_video");
+    }
+  });
+
   it("falls back to the mime type when the asset type is absent, and blocks when neither is known", () => {
     expect(describeMovieVideoMakeoverSource(verifiedSource({ assetType: null, mimeType: "video/mp4" })).selectable).toBe(true);
     const unknown = describeMovieVideoMakeoverSource(verifiedSource({ assetType: null, mimeType: null }));
