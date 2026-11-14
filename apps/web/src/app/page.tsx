@@ -2,7 +2,7 @@
 import { localeTag, type Locale } from "@/lib/i18n";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ArrowRight, ArrowUpRight, FolderKanban, LibraryBig, LoaderCircle, MessageSquare, Sparkles } from "lucide-react";
 import { ProtectedPage } from "@/components/ProtectedPage";
 import { HomeComposer } from "@/components/HomeComposer";
@@ -11,7 +11,7 @@ import { useLocale } from "@/components/LocaleProvider";
 import { StudioChooser } from "@/components/StudioChooser";
 import { api, type ActivityItem, type Asset, type Conversation, type Project } from "@/lib/api";
 import { buildHomeRecentItems, hasInFlightActivity, type HomeRecentItem } from "@/lib/homeDashboardState";
-import { resolveHomeCreationPrompt } from "@/lib/homeCreation";
+import { createHomeCreationSubmissionGate, resolveHomeCreationPrompt } from "@/lib/homeCreation";
 
 const promptChips = [
   { labelKey: "home.promptCampaign" },
@@ -37,6 +37,7 @@ function HomeDashboard() {
   const [projectId, setProjectId] = useState("");
   const [files, setFiles] = useState<File[]>([]);
   const [asking, setAsking] = useState(false);
+  const submissionGate = useRef(createHomeCreationSubmissionGate());
   const [dashboard, setDashboard] = useState<DashboardData | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState("");
@@ -75,7 +76,7 @@ function HomeDashboard() {
       setAskError(t("chat.sendError"));
       return;
     }
-    if (!workspace) return;
+    if (!workspace || !submissionGate.current.tryStart()) return;
     setAsking(true);
     setAskError("");
     try {
@@ -86,6 +87,7 @@ function HomeDashboard() {
     } catch {
       setAskError(t("home.askError"));
     } finally {
+      submissionGate.current.finish();
       setAsking(false);
     }
   }
