@@ -22,3 +22,19 @@ export function createHomeCreationSubmissionGate() {
     finish(): void { busy = false; },
   };
 }
+
+/**
+ * IME-aware Enter admission for the Home creation composer. Enter is used to
+ * confirm candidate characters in Chinese/Japanese/Korean input; only a
+ * completed plain Enter may submit. The caller still enforces the same
+ * busy/content guard as the Create button.
+ */
+export function isHomeCreationSubmitKey(event: Readonly<{
+  key: string;
+  shiftKey: boolean;
+  isComposing: boolean;
+  keyCode: number;
+}>): boolean {
+  return event.key === "Enter" && !event.shiftKey
+    && !event.isComposing && event.keyCode !== 229;
+}
