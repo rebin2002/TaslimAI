@@ -6,10 +6,21 @@ import {
   isSupportedProductAdImage,
   MAX_PRODUCT_AD_IMAGE_BYTES,
   ProductAdInputWizard,
+  shouldMaskProductAdDraft,
 } from "./ProductAdInputWizard";
 import { localeDirection, localeTag, locales } from "@/lib/i18n";
 
 describe("ProductAdInputWizard", () => {
+  it("masks prior-account input during sign-out and workspace switches", () => {
+    const accountA = "taslim:draft:product-ad:user-a:workspace-1";
+    const accountB = "taslim:draft:product-ad:user-b:workspace-1";
+    expect(shouldMaskProductAdDraft(accountA, accountA)).toBe(false);
+    expect(shouldMaskProductAdDraft(accountB, accountA)).toBe(true);
+    expect(shouldMaskProductAdDraft(null, accountA)).toBe(true);
+    expect(shouldMaskProductAdDraft(null, null)).toBe(false);
+    expect(shouldMaskProductAdDraft(accountA, null)).toBe(true);
+  });
+
   it("defaults to an Instagram square post and requires a local product photo but not a logo", () => {
     const html = renderToStaticMarkup(<ProductAdInputWizard />);
 
