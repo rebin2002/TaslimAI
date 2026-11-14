@@ -1,4 +1,5 @@
-import { test, expect } from "./fixtures";
+import { randomUUID } from "node:crypto";
+import { E2E_PASSWORD, loginInUi, logoutInUi, registerInUi, test, expect } from "./fixtures";
 
 const onePixelPng = Buffer.from(
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/aGQAAAAASUVORK5CYII=",
@@ -76,4 +77,45 @@ test.describe("Product Ad preview — real authenticated session, local-only dra
       });
     });
   }
+});
+
+
+test("product-ad draft stays in its original account after an authenticated switch in the same tab", async ({ authenticatedPage: page }) => {
+  await page.goto("/create/product-ad");
+  const name = page.locator('input[id$="-product-name"]');
+  const oldAccountDraft = "Account A private ad draft";
+  await expect(name).toBeVisible();
+  await name.fill(oldAccountDraft);
+  // Assert the actual storage write completed before navigating away; this also
+  // makes the test independent of React's effect scheduling.
+  await page.waitForFunction((expected) => {
+    for (let index = 0; index < window.sessionStorage.length; index++) {
+      const key = window.sessionStorage.key(index);
+      if (key?.startsWith("taslim:draft:product-ad:")
+        && window.sessionStorage.getItem(key)?.includes(expected)) return true;
+    }
+    return false;
+  }, oldAccountDraft);
+
+  const originalUser = page.testUser;
+  await logoutInUi(page);
+  const secondUser = {
+    displayName: "E2E Alternate Account",
+    email: `e2e+ad-switch-${randomUUID()}@example.test`,
+    password: E2E_PASSWORD,
+  };
+  await registerInUi(page, secondUser);
+  await page.goto("/create/product-ad");
+  await expect(name).toBeVisible();
+  await expect(name).toHaveValue("");
+  await expect(page.locator("main")).not.toContainText(oldAccountDraft);
+
+  await name.fill("Account B distinct ad draft");
+  await logoutInUi(page);
+  await loginInUi(page, originalUser);
+  await page.goto("/create/product-ad");
+  await expect(name).toHaveValue(oldAccountDraft);
+  await expect(page.locator("main")).not.toContainText("Account B distinct ad draft");
+  // The first account's text settings survive; browser file-input bytes never do.
+  expect(await page.locator('input[id$="-product-photo"]').evaluate((el) => (el as HTMLInputElement).files?.length ?? 0)).toBe(0);
 });
