@@ -444,6 +444,67 @@ public sealed class AssetTests : IClassFixture<GenerationJobsApiFactory>
         Assert.DoesNotContain("system.test", await download.Content.ReadAsStringAsync());
     }
 
+    [Fact]
+    public async Task Document_representation_download_rejects_stale_file_metadata()
+    {
+        using var client = factory.CreateClient();
+        var auth = await Register(client, "Document Representation Owner");
+        var now = DateTime.UtcNow;
+        var assetId = Guid.NewGuid();
+        var representationId = Guid.NewGuid();
+        var storedFileId = Guid.NewGuid();
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            db.StoredFiles.Add(new StoredFile
+            {
+                Id = storedFileId,
+                WorkspaceId = auth.PersonalWorkspace.Id,
+                UserId = auth.User.Id,
+                OriginalFileName = "report.pdf",
+                StoredFileName = "report.pdf",
+                ContentType = "application/pdf",
+                Extension = ".pdf",
+                SizeBytes = 4,
+                StorageProvider = FileStorageProviders.Local,
+                StorageKey = $"document-integrity/{Guid.NewGuid():N}.pdf",
+                Status = StoredFileStatus.Ready,
+                CreatedAt = now,
+            });
+            db.Assets.Add(new Asset
+            {
+                Id = assetId,
+                WorkspaceId = auth.PersonalWorkspace.Id,
+                CreatedByUserId = auth.User.Id,
+                StoredFileId = storedFileId,
+                Name = "Document integrity fixture",
+                AssetType = AssetTypes.Document,
+                MimeType = "application/pdf",
+                Status = AssetStatus.Active,
+                CreatedAt = now,
+                UpdatedAt = now,
+            });
+            db.AssetRepresentations.Add(new AssetRepresentation
+            {
+                Id = representationId,
+                AssetId = assetId,
+                StoredFileId = storedFileId,
+                RepresentationType = AssetRepresentationTypes.Pdf,
+                FileName = "report.docx",
+                ContentType = "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                SizeBytes = 5,
+                CreatedAt = now,
+            });
+            await db.SaveChangesAsync();
+        }
+
+        var download = await client.GetAsync($"/api/assets/{assetId}/representations/{representationId}/download");
+        Assert.Equal(HttpStatusCode.Conflict, download.StatusCode);
+        var body = await download.Content.ReadAsStringAsync();
+        Assert.Contains("ASSET_FILE_UNAVAILABLE", body, StringComparison.Ordinal);
+        Assert.DoesNotContain("report.docx", body, StringComparison.Ordinal);
+    }
+
     private static async Task<AuthResponse> Register(HttpClient client, string displayName)
     {
         var response = await SendWithCsrf(client, HttpMethod.Post, "/api/auth/register", new { displayName, email = $"asset-{Guid.NewGuid():N}@example.com", password = "StrongPassword!123", preferredLanguage = "en" });
