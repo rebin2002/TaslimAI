@@ -64,7 +64,7 @@ describe("HealthCareConsentSelectionPanel (synthetic, #714)", () => {
     expect(html).toContain(STRINGS.revokeLabel);
   });
 
-  it("requires an explicit open: selection alone never enables a preview", () => {
+  it("enables the selected sample's preview button, but grants preview only after explicit open", () => {
     const store = createConsentSelectionStore();
     store.grantConsent(SYNTH_DOCS);
     store.toggleDocumentSelection("synth-doc-02");
@@ -72,8 +72,10 @@ describe("HealthCareConsentSelectionPanel (synthetic, #714)", () => {
       <ConsentSelectionView state={store.getSnapshot()} strings={STRINGS} store={store} />,
     );
     expect(afterSelect).toContain('aria-pressed="true"');
-    // Both preview affordances stay disabled until the user opens one.
-    expect(afterSelect.match(/disabled=""[^>]*>Open preview</g)).toHaveLength(SYNTH_DOCS.length);
+    // Only the selected sample becomes actionable. Selection alone does not
+    // grant preview access until the user explicitly activates Open preview.
+    expect(afterSelect.match(/disabled=""[^>]*>Open preview</g)).toHaveLength(1);
+    expect(store.getSnapshot().preview.status).not.toBe("granted");
 
     store.requestPreview("synth-doc-02");
     const afterOpen = renderToStaticMarkup(
