@@ -15,5 +15,5 @@ export const metadata: Metadata = {
 
 export default async function HealthCarePage() {
   await requireAuthenticatedPage("/create/health");
-  return <ProtectedPage><HealthPlaceholderPage /></ProtectedPage>;
+  return <ProtectedPage><HealthPlaceholderPage entry="create" /></ProtectedPage>;
 }

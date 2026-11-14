@@ -1,17 +1,25 @@
 "use client";
 
 import Link from "next/link";
-import { ArrowLeft, ArrowRight, HeartPulse } from "lucide-react";
+import { ArrowLeft, ArrowRight, Compass, HeartPulse } from "lucide-react";
 import { useLocale } from "@/components/LocaleProvider";
 import { healthCareCopy, healthCareDirection, healthCareLanguageTag } from "@/lib/healthCareI18n";
 import styles from "./HealthCarePage.module.css";
 
 /**
+ * Which surface rendered the informational Health Care view. The Create surface
+ * returns to the Create chooser, while the existing Personal surface keeps its
+ * original Home and departments navigation so `/personal/health` behaviour is
+ * unchanged by the Health Care launch.
+ */
+export type HealthPlaceholderEntry = "create" | "personal";
+
+/**
  * Informational only: no health-data input, upload, storage, analysis, or provider
  * integration is available from this page.
  */
-export function HealthPlaceholderPage() {
-  const { locale } = useLocale();
+export function HealthPlaceholderPage({ entry = "personal" }: Readonly<{ entry?: HealthPlaceholderEntry }>) {
+  const { t, locale } = useLocale();
   const copy = healthCareCopy(locale);
   const BackIcon = locale === "en" ? ArrowLeft : ArrowRight;
 
@@ -48,10 +56,23 @@ export function HealthPlaceholderPage() {
         </section>
 
         <div className={styles.actions}>
-          <Link className={styles.backLink} href="/create">
-            <BackIcon size={16} aria-hidden="true" />
-            <span>{copy.backToCreate}</span>
-          </Link>
+          {entry === "create" ? (
+            <Link className={styles.backLink} href="/create" data-health-entry="create">
+              <BackIcon size={16} aria-hidden="true" />
+              <span>{copy.backToCreate}</span>
+            </Link>
+          ) : (
+            <>
+              <Link className={styles.backLink} href="/" data-health-entry="personal">
+                <BackIcon size={16} aria-hidden="true" />
+                <span>{t("placeholder.backHome")}</span>
+              </Link>
+              <Link className={styles.backLink} href="/#departments">
+                <Compass size={16} aria-hidden="true" />
+                <span>{t("placeholder.explore")}</span>
+              </Link>
+            </>
+          )}
         </div>
       </section>
     </div>
