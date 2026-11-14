@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   MovieVideoMakeoverStudio,
   reduceMovieVideoMakeoverStudioSource,
+  reconcileMovieVideoMakeoverStudioSelection,
   type MovieVideoMakeoverStudioProps,
 } from "./MovieVideoMakeoverStudio";
 import {
@@ -240,6 +241,36 @@ describe("studio: attaching a source is a draft edit and nothing more", () => {
     expect(result.uiEnabled).toBe(false);
     expect(result.providerJobCreated).toBe(false);
     expect(result.previewPermitted).toBe(true);
+  });
+
+  it("immediately masks a missing or revoked source without mutating the caller's selection", () => {
+    const selected = reduceMovieVideoMakeoverStudioSource(settledDraftParts(), "asset_take_01", catalogue());
+    const missing = reconcileMovieVideoMakeoverStudioSelection(selected, []);
+    expect(missing.sourceAssetId).toBeNull();
+    expect(missing.sourceSizeBytes).toBeNull();
+    expect(missing.sourceDurationSeconds).toBeNull();
+    expect(admission(missing).blockedReasons.map((reason) => reason.code)).toContain("source_missing");
+    expect(selected.sourceAssetId).toBe("asset_take_01");
+
+    const revoked = catalogue().map((entry) => entry.assetId === "asset_take_01"
+      ? { ...entry, selectable: false }
+      : entry);
+    expect(reconcileMovieVideoMakeoverStudioSelection(selected, revoked).sourceAssetId).toBeNull();
+    expect(reconcileMovieVideoMakeoverStudioSelection(selected, catalogue())).toBe(selected);
+  });
+
+  it("shows no attached source if the active project loses or revokes its clip", () => {
+    const selected = reduceMovieVideoMakeoverStudioSource(settledDraftParts(), "asset_take_01", catalogue());
+    const markup = render({
+      project: project({ clips: [] }),
+      assets: assets(),
+      principalId: PRINCIPAL,
+      workspaceId: WORKSPACE,
+      selection: selected,
+    });
+    expect(markup).toContain("No source attached");
+    expect(markup).not.toContain("Attached, but");
+    expect(markup).toContain("source_missing");
   });
 
   it("detaching removes the source and returns the draft to its blocking state", () => {
