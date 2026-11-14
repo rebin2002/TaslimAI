@@ -284,7 +284,9 @@ export function ProductAdInputWizard({ locale = "en", principal = null }: Readon
     setPreview(buildProductAdMockPreview({ productName, benefit, channel, format }, locale));
   }
 
-  if (key && hydratedKey !== key) return <p role="status">Restoring saved product-ad draft…</p>;
+  // Guard transitions *to* anonymous as well as between authenticated scopes.
+  // Until the post-commit reset completes, never render the prior account draft.
+  if (hydratedKey !== key) return <p role="status">Restoring saved product-ad draft…</p>;
 
   return (
     <section className={styles.shell} lang={localeTag(locale)} dir={localeDirection(locale)} aria-labelledby={`${id}-title`}>
