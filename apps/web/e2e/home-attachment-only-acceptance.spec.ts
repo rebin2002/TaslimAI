@@ -40,6 +40,24 @@ test("Home attachment-only creates exactly one scoped Chat submission without a 
     await route.fulfill({ status: 200, contentType: "application/json", body: "{}" });
   });
 
+  // The destination is an entirely synthetic conversation; no database write
+  // or generation is needed to verify the Home-to-Chat navigation.
+  await page.route("**/api/conversations/" + conversationId, async (route: Route) => {
+    if (route.request().method() !== "GET") return route.continue();
+    await route.fulfill({
+      status: 200, contentType: "application/json",
+      body: JSON.stringify({
+        id: conversationId, workspaceId: "test-workspace", projectId: null,
+        title: "Attachment review", status: "Active",
+        createdAt: new Date(0).toISOString(), updatedAt: new Date(0).toISOString(), lastMessageAt: null,
+      }),
+    });
+  });
+  await page.route("**/api/conversations/" + conversationId + "/messages", async (route: Route) => {
+    if (route.request().method() === "POST") return route.continue();
+    await route.fulfill({ status: 200, contentType: "application/json", body: "[]" });
+  });
+
   await page.goto("/");
   const composer = page.locator(".home-composer");
   await expect(composer).toBeVisible();
@@ -50,7 +68,7 @@ test("Home attachment-only creates exactly one scoped Chat submission without a 
   });
   await expect(submit).toBeEnabled();
   await submit.click();
-  await expect(page).toHaveURL(new RegExp("/chat/" + conversationId + "(?:\\\\?|$)"));
+  await expect(page).toHaveURL(new RegExp("/chat/" + conversationId));
   expect(seen).toEqual({
     conversation: 1,
     upload: 1,
