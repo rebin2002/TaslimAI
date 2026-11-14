@@ -3,6 +3,7 @@ import { useRef } from "react";
 import { ChevronDown, Paperclip, Send, X } from "lucide-react";
 import { useLocale } from "@/components/LocaleProvider";
 import type { Project } from "@/lib/api";
+import { canSubmitHomeCreation } from "@/lib/homeCreation";
 
 type HomeComposerProps = {
   value: string;
@@ -60,7 +61,7 @@ export function HomeComposer({ value, onChange, onSubmit, busy, projects, projec
             <ChevronDown size={14} aria-hidden="true" />
           </label>
         </div>
-        <button type="button" className="home-composer-submit" onClick={onSubmit} disabled={busy || !value.trim()} aria-label={t("home.createAction")}>
+        <button type="button" className="home-composer-submit" onClick={onSubmit} disabled={busy || !canSubmitHomeCreation(value, files.length)} aria-label={t("home.createAction")}>
           <span>{t("home.createAction")}</span><Send size={16} />
         </button>
       </div>
