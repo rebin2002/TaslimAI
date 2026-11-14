@@ -31,8 +31,15 @@ public sealed class BillingAccountService(TaslimDbContext db, IBillingProvisioni
             .Where(item => item.WorkspaceId == workspaceId && (!item.ExpiresAt.HasValue || item.ExpiresAt > DateTime.UtcNow))
             .ToListAsync(cancellationToken);
         var entitlementIds = entitlements.Select(item => item.Id).ToArray();
+        // Visible history is the workspace's own durable ledger, so it answers a
+        // different question from the balance queries below: which movements
+        // were recorded, not which credits are still spendable. Filtering it by
+        // entitlement expiry reused the balance rule for a display query and
+        // made an aged-out allowance look like an account with no activity at
+        // all, so Account > Billing showed "0 credits remaining" beside
+        // "No transactions yet" even though the grant row was never deleted.
         var entries = await db.CreditLedgerEntries.AsNoTracking()
-            .Where(item => item.WorkspaceId == workspaceId && (!item.CreditEntitlementId.HasValue || entitlementIds.Contains(item.CreditEntitlementId.Value)))
+            .Where(item => item.WorkspaceId == workspaceId)
             .OrderByDescending(item => item.CreatedAt)
             .ThenByDescending(item => item.Id)
             .Take(100)
@@ -40,6 +47,8 @@ public sealed class BillingAccountService(TaslimDbContext db, IBillingProvisioni
         // The UI history is intentionally capped, but balances are not. Using
         // the capped history for accounting silently made an active entitlement
         // look empty after its ledger grew past 100 entries.
+        // Balances do honour expiry: credits whose entitlement has aged out are
+        // no longer spendable, whether or not they remain visible in history.
         var balanceByEntitlement = await db.CreditLedgerEntries.AsNoTracking()
             .Where(item => item.WorkspaceId == workspaceId && (!item.CreditEntitlementId.HasValue || entitlementIds.Contains(item.CreditEntitlementId.Value)))
             .GroupBy(item => item.CreditEntitlementId)
