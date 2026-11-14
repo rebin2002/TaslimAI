@@ -722,15 +722,19 @@ test.describe("issue #700 onboarding and billing layout", () => {
         })
         .map((element) => (element as HTMLAnchorElement).pathname)
         .sort());
-      expect.soft(visibleStudioHrefs, `visible a.studio-card[href^='/create/'] links at ${width}px must be only Image, Document, Presentation, and short-form Movie`).toEqual([
+      expect.soft(visibleStudioHrefs, `visible a.studio-card[href^='/create/'] links at ${width}px must include approved Health Care navigation`).toEqual([
         "/create/document",
+        "/create/health",
         "/create/image",
         "/create/movie",
         "/create/presentation",
       ].sort());
-      for (const excludedPath of ["/create/research", "/create/social", "/create/music", "/create/voice", "/create/health", "/personal/health", "/health"]) {
+      for (const excludedPath of ["/create/research", "/create/social", "/create/music", "/create/voice", "/personal/health", "/health"]) {
         expect.soft(await page.locator(`a.studio-card[href='${excludedPath}']`).isVisible(), `a.studio-card[href='${excludedPath}'] must not be visible in the beta chooser at ${width}px`).toBe(false);
       }
+      // #793 on main deliberately exposes a localized, noindex, coming-soon
+      // Health Care entry. #701's older beta CSS must not hide it again.
+      await expect(page.locator('a.studio-card[href="/create/health"]')).toBeVisible();
       expect.soft(await page.evaluate(() => document.documentElement.scrollWidth), `Create chooser must not overflow horizontally at ${width}px`).toBeLessThanOrEqual(width);
     }
     await expect(page.locator(".studio-category:has(a.studio-card[href='/create/social'])")).toBeHidden();

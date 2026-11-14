@@ -958,7 +958,6 @@
 .app-shell .studio-chooser a.studio-card[href="/create/social"],
 .app-shell .studio-chooser a.studio-card[href="/create/music"],
 .app-shell .studio-chooser a.studio-card[href="/create/voice"],
-.app-shell .studio-chooser a.studio-card[href="/create/health"],
 .app-shell .studio-chooser a.studio-card[href="/personal/health"],
 .app-shell .studio-chooser a.studio-card[href="/health"] {
   display: none;
