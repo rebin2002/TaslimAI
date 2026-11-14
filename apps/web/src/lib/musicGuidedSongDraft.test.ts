@@ -338,6 +338,16 @@ describe("guided song draft references and consent", () => {
 });
 
 describe("guided song draft handoff to the PR #802 mapper", () => {
+  it("accepts English lyrics without an artificial dialect requirement", () => {
+    const english = apply(songDraft(), { type: "set_language", language: "en" });
+    expect(resolveMusicGuidedDraftDialect(english)).toBeNull();
+    expect(summarizeMusicGuidedDraft(english, openCapabilities).canSubmit).toBe(true);
+    const handoff = toMusicLyricsDraftInput(english, { stage: "preflight" });
+    expect(handoff.ok).toBe(true);
+    expect(handoff.issues).toEqual([]);
+    expect(handoff.input).toMatchObject({ vocalLanguage: "en", dialect: null, lyricsRightsConfirmed: true });
+  });
+
   it("produces the mapper input shape only for a fully resolved song draft", () => {
     const handoff = toMusicLyricsDraftInput(songDraft(), { stage: "preflight" });
     expect(handoff.ok).toBe(true);
