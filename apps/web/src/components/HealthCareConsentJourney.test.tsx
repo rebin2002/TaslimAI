@@ -87,8 +87,10 @@ describe("HealthCareConsentJourney wiring (#715 route x #804 panel, synthetic, #
     expect(state.selection["synth-journey-01"]).toBe(true);
     let html = view(locale, state, store);
     expect(html).toContain('aria-pressed="true"');
-    // Two-step preview: selection alone keeps both affordances disabled.
-    expect(html.match(/disabled=""[^>]*>Open preview</g)).toHaveLength(2);
+    // The selected sample now enables precisely its own preview request.
+    // The other sample remains disabled until independently selected.
+    expect(html.match(/disabled=""[^>]*>Open preview</g)).toHaveLength(1);
+    expect(html.match(/>Open preview</g)).toHaveLength(2);
 
     store.requestPreview("synth-journey-01");
     state = store.getSnapshot();
