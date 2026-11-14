@@ -9,3 +9,16 @@ export function resolveHomeCreationPrompt(value: string, attachmentCount: number
 export function canSubmitHomeCreation(value: string, attachmentCount: number): boolean {
   return resolveHomeCreationPrompt(value, attachmentCount) !== null;
 }
+
+/** Synchronous single-flight admission for Home create, independent of React renders. */
+export function createHomeCreationSubmissionGate() {
+  let busy = false;
+  return {
+    tryStart(): boolean {
+      if (busy) return false;
+      busy = true;
+      return true;
+    },
+    finish(): void { busy = false; },
+  };
+}
