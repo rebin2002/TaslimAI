@@ -35,14 +35,15 @@ export function reduceChatStream(state: ChatStreamState, event: ChatStreamEvent)
     if (!targetId) return state;
     return {
       ...state,
-      // A delta that equals the target's whole current content is a replayed
-      // completion snapshot, not an incremental chunk: ChatController replays
+      // Only a completed assistant snapshot can be an idempotent replay. A
+      // pending stream may legitimately emit two identical incremental chunks,
+      // so content equality alone must not discard either one. ChatController replays
       // message.started with the settled content and then a single
       // message.delta carrying that same content when a retry reuses the
       // requestId of an already-settled stream. Appending that frame onto the
       // snapshot delivered by message.started would render the settled answer
       // twice, and a later message.completed replaces the content anyway.
-      messages: state.messages.map(message => message.id === targetId && message.content !== event.data.delta
+      messages: state.messages.map(message => message.id === targetId && !(message.status === "Completed" && message.content === event.data.delta)
         ? { ...message, status: "Pending", content: message.content + event.data.delta }
         : message),
     };
