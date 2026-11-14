@@ -65,6 +65,19 @@ describe("MovieMakeoverComparisonPanel url admission (fail-closed, provider-free
     expect(isAllowedMakeoverPreviewUrl("http://localhost:3000/preview.mp4")).toBe(true);
     expect(isAllowedMakeoverPreviewUrl("/previews/asset-77.mp4")).toBe(true);
   });
+  it("rejects disguised credential URLs and non-video data while keeping authorized video previews", () => {
+    expect(isAllowedMakeoverPreviewUrl("https://user:secret@cdn.taslim.test/preview.mp4")).toBe(false);
+    expect(isAllowedMakeoverPreviewUrl("http://user@localhost:3000/preview.mp4")).toBe(false);
+    expect(isAllowedMakeoverPreviewUrl("data:text/html,<script>1</script>")).toBe(false);
+    expect(isAllowedMakeoverPreviewUrl("data:image/svg+xml,<svg/>")).toBe(false);
+    expect(isAllowedMakeoverPreviewUrl("https://cdn.taslim.test/\npreview.mp4")).toBe(false);
+    expect(isAllowedMakeoverPreviewUrl("/previews/\nasset.mp4")).toBe(false);
+    expect(isAllowedMakeoverPreviewUrl("data:video/mp4;base64,AAAA")).toBe(true);
+    expect(isAllowedMakeoverPreviewUrl("https://cdn.taslim.test/preview.mp4")).toBe(true);
+    const html = render({ afterSource: { url: "https://user:secret@cdn.taslim.test/preview.mp4" } });
+    expect(html).not.toContain("user:secret");
+    expect(html).toContain(MOVIE_MAKEOVER_COMPARISON_DEFAULT_LABELS.blocked);
+  });
   it("rejects scripting, file and unverifiable sources", () => {
     expect(isAllowedMakeoverPreviewUrl("javascript:alert(1)")).toBe(false);
     expect(isAllowedMakeoverPreviewUrl("file:///home/user/secret.mp4")).toBe(false);
