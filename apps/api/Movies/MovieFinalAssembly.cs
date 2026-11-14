@@ -257,7 +257,13 @@ public sealed class MovieFinalAssemblyService(
         {
             if (!string.Equals(existing.RequestFingerprint, fingerprint, StringComparison.Ordinal))
                 throw new MovieFinalAssemblyValidationException("IDEMPOTENCY_KEY_REUSED", "This idempotency key was already used for a different assembly request.");
-            await ReconcileTerminalJobAsync(existing, cancellationToken);
+            // Issue #696: a transient pre-publication queue/link fault must never be
+            // replayed forever. Reconcile the stranded pairing first; only an assembly
+            // that stays terminal falls through to the canonical job projection.
+            if (!await RecoverQueueLinkAsync(existing, normalizedIdempotencyKey, fingerprint, cancellationToken))
+            {
+                await ReconcileTerminalJobAsync(existing, cancellationToken);
+            }
             return ToDto(existing);
         }
 
@@ -315,7 +321,13 @@ public sealed class MovieFinalAssemblyService(
             if (winner is null) throw;
             if (!string.Equals(winner.RequestFingerprint, fingerprint, StringComparison.Ordinal))
                 throw new MovieFinalAssemblyValidationException("IDEMPOTENCY_KEY_REUSED", "This idempotency key was already used for a different assembly request.");
-            await ReconcileTerminalJobAsync(winner, cancellationToken);
+            // The loser of the unique-index race replays the winner, whose link write
+            // may itself have been the lost one (issue #696), so it gets the same
+            // bounded reconciliation as the direct idempotent replay.
+            if (!await RecoverQueueLinkAsync(winner, normalizedIdempotencyKey, fingerprint, cancellationToken))
+            {
+                await ReconcileTerminalJobAsync(winner, cancellationToken);
+            }
             return ToDto(winner);
         }
 
@@ -332,6 +344,10 @@ public sealed class MovieFinalAssemblyService(
             normalizedIdempotencyKey,
             expectedDuration,
             persistedTransitions);
+        // Set only after the shared seam committed a durable canonical job row. It is
+        // the evidence that a failure below is a lost link write rather than a missing
+        // job, and it is what makes the compensation branch provably safe.
+        GenerationJob? committedJob = null;
         try
         {
             var job = await jobs.CreateAsync(userId, new CreateGenerationJobRequest
@@ -350,6 +366,7 @@ public sealed class MovieFinalAssemblyService(
                 InternalCostEstimate = new GenerationCostEstimate(true, 0m, UsageCurrencies.Usd, null, null, null, []),
             }, cancellationToken, normalizedIdempotencyKey);
             db.Entry(job).State = EntityState.Detached;
+            committedJob = job;
             assembly.GenerationJobId = job.Id;
             assembly.Status = MovieAssemblyStatuses.Queued;
             assembly.UpdatedAt = DateTime.UtcNow;
@@ -358,6 +375,23 @@ public sealed class MovieFinalAssemblyService(
         }
         catch
         {
+            // Issue #696 scenario (b): the canonical job row is durable and still
+            // executable, so reporting this assembly terminal right now would publish
+            // exactly the contradictory pairing the issue forbids - a Failed master
+            // export whose committed job a worker can still run and settle usage for.
+            // Re-issue the link+status write once, so durability wins over the fault.
+            if (committedJob is not null && await TryRepairQueueLinkAsync(assembly, committedJob))
+            {
+                // The published pair is consistent, but the caller still saw a real
+                // transient fault: keep failing closed instead of pretending success.
+                // A repeated identical request now replays the in-flight assembly.
+                throw;
+            }
+
+            // Either the seam produced no durable job at all, or the repair write
+            // failed too. Keep the terminal queue-failure compensation; a repeated
+            // identical request then converges through RecoverQueueLinkAsync rather
+            // than replaying this transient failure forever.
             assembly.Status = MovieAssemblyStatuses.Failed;
             assembly.LastErrorCode = GenerationJobErrorCodes.MovieAssemblyQueueFailed;
             assembly.UpdatedAt = DateTime.UtcNow;
@@ -468,6 +502,158 @@ public sealed class MovieFinalAssemblyService(
             assembly.UpdatedAt = now;
             assembly.CheckpointJson = checkpoint;
         }
+    }
+
+    /// <summary>
+    /// Re-issues the assembly-to-job link and in-flight status write after a transient fault
+    /// lost it while the canonical job row had already committed, so the published pair can
+    /// never be (terminal assembly, executable job). It never throws: a false result leaves
+    /// the caller in the terminal queue-failure path, whose same-key retry is reconciled by
+    /// <see cref="RecoverQueueLinkAsync"/>.
+    /// </summary>
+    private async Task<bool> TryRepairQueueLinkAsync(MovieAssembly assembly, GenerationJob job)
+    {
+        try
+        {
+            // A fenced UPDATE of the exact pre-image the faulting write was aiming at. It is
+            // used instead of re-issuing SaveChanges because the change tracker can still be
+            // holding other entities from the failed save, and because the compare-and-swap
+            // keeps a concurrent claimant from being overwritten. Cancellation must not
+            // abandon this durability write, since the fault itself may have been one.
+            var now = DateTime.UtcNow;
+            var checkpoint = JsonSerializer.Serialize(new { phase = "queued", progressPercent = 0 }, JsonOptions);
+            var linked = await db.MovieAssemblies
+                .Where(item => item.Id == assembly.Id
+                    && item.Status == MovieAssemblyStatuses.Planned
+                    && item.GenerationJobId == null)
+                .ExecuteUpdateAsync(setters => setters
+                    .SetProperty(item => item.GenerationJobId, job.Id)
+                    .SetProperty(item => item.Status, MovieAssemblyStatuses.Queued)
+                    .SetProperty(item => item.LastErrorCode, (string?)null)
+                    .SetProperty(item => item.CheckpointJson, checkpoint)
+                    .SetProperty(item => item.UpdatedAt, now), CancellationToken.None);
+            if (linked == 0) return false;
+
+            assembly.GenerationJobId = job.Id;
+            assembly.Status = MovieAssemblyStatuses.Queued;
+            assembly.LastErrorCode = null;
+            assembly.CheckpointJson = checkpoint;
+            assembly.UpdatedAt = now;
+            return true;
+        }
+        catch (Exception)
+        {
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Issue #696: converges an assembly that a transient pre-publication queue/link fault
+    /// stranded, onto exactly one canonical assembly and one canonical job. Recovery is
+    /// deliberately narrow and fail-closed:
+    /// <list type="bullet">
+    /// <item>only the <c>MOVIE_ASSEMBLY_QUEUE_FAILED</c> marker, or an assembly still in
+    /// <c>Planned</c> whose link write was lost after the seam committed its job, is eligible,
+    /// so a master export that genuinely failed while executing is never silently re-driven;</item>
+    /// <item>the committed job row is reused, never recreated, and is adopted only when it is
+    /// unambiguous and carries this exact canonical request fingerprint;</item>
+    /// <item>a job that already started executing or reached a terminal state is left alone,
+    /// because re-driving it requires the explicit job retry seam;</item>
+    /// <item>the write is a fenced compare-and-swap on the stranded pairing, so simultaneous
+    /// identical retries have exactly one owner.</item>
+    /// </list>
+    /// Returns false when no safe recovery applies, leaving the existing projection intact.
+    /// </summary>
+    private async Task<bool> RecoverQueueLinkAsync(MovieAssembly assembly, string idempotencyKey, string fingerprint, CancellationToken cancellationToken)
+    {
+        // Only the pre-publication queue marker, or an assembly that never got linked
+        // after the seam committed its job, is eligible. Anything else - Ready, Cancelled,
+        // or a terminal execution failure - stays exactly as reported.
+        var strandedByQueueMarker = assembly.Status == MovieAssemblyStatuses.Failed
+            && string.Equals(assembly.LastErrorCode, GenerationJobErrorCodes.MovieAssemblyQueueFailed, StringComparison.Ordinal);
+        var committedButNeverLinked = assembly.Status == MovieAssemblyStatuses.Planned
+            && assembly.GenerationJobId is null;
+        if (!strandedByQueueMarker && !committedButNeverLinked)
+        {
+            return false;
+        }
+
+        var canonical = assembly.GenerationJob;
+        if (canonical is null)
+        {
+            // The link write is the part that was lost, so look for the single durable job
+            // the seam committed for this requester and idempotency key.
+            if (assembly.RequestedByUserId is not Guid requesterId) return false;
+            var candidates = await db.GenerationJobs.AsNoTracking()
+                .Where(item => item.CreatedByUserId == requesterId
+                    && item.IdempotencyKey == idempotencyKey
+                    && item.JobType == GenerationJobTypes.MovieAssembly)
+                .ToListAsync(cancellationToken);
+            // Ambiguous durable state is never adopted automatically.
+            if (candidates.Count != 1) return false;
+            canonical = candidates[0];
+        }
+
+        // The payload must describe this exact canonical request. The worker reads the same
+        // payload with default System.Text.Json options, so recovery has to match that
+        // contract and refuse anything unreadable instead of publishing a foreign master.
+        if (!string.Equals(ReadAssemblyInputFingerprint(canonical.InputJson), fingerprint, StringComparison.Ordinal)) return false;
+
+        // Concurrency ownership: Pending/Queued means nothing has claimed the job yet.
+        // Running, Succeeded, Failed and Cancelled belong to execution, not to queueing.
+        if (canonical.Status is not (GenerationJobStatus.Pending or GenerationJobStatus.Queued)) return false;
+
+        // Fenced compare-and-swap on the exact stranded pairing, so two simultaneous
+        // identical retries have exactly one owner.
+        IQueryable<MovieAssembly> stranded = db.MovieAssemblies
+            .Where(item => item.Id == assembly.Id && item.RequestFingerprint == fingerprint);
+        if (strandedByQueueMarker)
+        {
+            var expectedLink = assembly.GenerationJobId;
+            stranded = stranded.Where(item => item.Status == MovieAssemblyStatuses.Failed
+                && item.LastErrorCode == GenerationJobErrorCodes.MovieAssemblyQueueFailed);
+            stranded = expectedLink is null
+                ? stranded.Where(item => item.GenerationJobId == null)
+                : stranded.Where(item => item.GenerationJobId == expectedLink);
+        }
+        else
+        {
+            stranded = stranded.Where(item => item.Status == MovieAssemblyStatuses.Planned
+                && item.GenerationJobId == null);
+        }
+
+        var now = DateTime.UtcNow;
+        var checkpoint = JsonSerializer.Serialize(new { phase = "queue_link_recovered", progressPercent = 0 }, JsonOptions);
+        var repaired = await stranded.ExecuteUpdateAsync(setters => setters
+            .SetProperty(item => item.GenerationJobId, canonical.Id)
+            .SetProperty(item => item.Status, MovieAssemblyStatuses.Queued)
+            .SetProperty(item => item.LastErrorCode, (string?)null)
+            .SetProperty(item => item.CheckpointJson, checkpoint)
+            .SetProperty(item => item.UpdatedAt, now), cancellationToken);
+        if (repaired == 0)
+        {
+            // Another retry already owned this repair: publish the durable winner rather
+            // than the stale in-memory copy, and let the normal projection continue.
+            await db.Entry(assembly).ReloadAsync(cancellationToken);
+            return false;
+        }
+
+        assembly.GenerationJobId = canonical.Id;
+        assembly.Status = MovieAssemblyStatuses.Queued;
+        assembly.LastErrorCode = null;
+        assembly.CheckpointJson = checkpoint;
+        assembly.UpdatedAt = now;
+        return true;
+    }
+
+    private static string? ReadAssemblyInputFingerprint(string? inputJson)
+    {
+        if (string.IsNullOrWhiteSpace(inputJson)) return null;
+        // Any unreadable or unexpected payload is treated as foreign work: recovery reads
+        // the worker's contract, and a payload the worker could not trust must not be
+        // adopted into an in-flight state either.
+        try { return JsonSerializer.Deserialize<MovieFinalAssemblyInput>(inputJson)?.RequestFingerprint; }
+        catch (Exception) { return null; }
     }
 
     private static bool IsTerminalAssemblyStatus(string status) =>
