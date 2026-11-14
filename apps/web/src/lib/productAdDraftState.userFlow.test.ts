@@ -360,7 +360,12 @@ describe("product ad draft user flow: save with photo + optional logo, restore o
   it("agrees with the wizard's own file rule and its non-autofilling inputs", () => {
     // The stored-descriptor ceiling is the wizard's selection ceiling.
     expect(isStorableProductAdDraftAsset({ type: "image/png", size: MAX_PRODUCT_AD_DRAFT_NAME_BYTES })).toBe(true);
+    expect(isStorableProductAdDraftAsset({ type: "image/jpeg", size: 256 })).toBe(true);
+    expect(isStorableProductAdDraftAsset({ type: "image/webp", size: 256 })).toBe(true);
     expect(isStorableProductAdDraftAsset({ type: "image/png", size: MAX_PRODUCT_AD_DRAFT_NAME_BYTES + 1 })).toBe(false);
+    expect(isStorableProductAdDraftAsset({ type: "image/png", size: 0 })).toBe(false);
+    expect(isStorableProductAdDraftAsset({ type: "image/svg+xml", size: 128 })).toBe(false);
+    expect(isStorableProductAdDraftAsset({ type: "image/gif", size: 128 })).toBe(false);
     expect(isStorableProductAdDraftAsset({ type: "text/plain", size: 128 })).toBe(false);
     expect(isStorableProductAdDraftAsset(null)).toBe(false);
 
