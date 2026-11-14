@@ -3,7 +3,7 @@ import { useRef } from "react";
 import { ChevronDown, Paperclip, Send, X } from "lucide-react";
 import { useLocale } from "@/components/LocaleProvider";
 import type { Project } from "@/lib/api";
-import { canSubmitHomeCreation } from "@/lib/homeCreation";
+import { canSubmitHomeCreation, isHomeCreationSubmitKey } from "@/lib/homeCreation";
 
 type HomeComposerProps = {
   value: string;
@@ -36,7 +36,16 @@ export function HomeComposer({ value, onChange, onSubmit, busy, projects, projec
         className="home-composer-input"
         value={value}
         onChange={(event) => onChange(event.target.value)}
-        onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); onSubmit(); } }}
+        onKeyDown={(event) => {
+          if (isHomeCreationSubmitKey({
+            key: event.key, shiftKey: event.shiftKey,
+            isComposing: event.nativeEvent.isComposing,
+            keyCode: event.nativeEvent.keyCode,
+          }) && !busy && canSubmitHomeCreation(value, files.length)) {
+            event.preventDefault();
+            onSubmit();
+          }
+        }}
         placeholder={t("home.creationPlaceholder")}
         aria-label={t("home.creationPlaceholder")}
         maxLength={20000}
