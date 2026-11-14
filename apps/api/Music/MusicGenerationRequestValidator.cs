@@ -1,3 +1,4 @@
+using System.Globalization;
 using Taslim.Api.Contracts;
 using Taslim.Api.Domain;
 
@@ -6,6 +7,8 @@ namespace Taslim.Api.Music;
 public static class MusicGenerationRequestValidator
 {
     private const int MaxReferenceAssets = 10;
+    private const int MinimumVisiblePromptCharacters = 3;
+    private const int MinimumVisibleLyricsLineCharacters = 1;
     private const int MaxLyricsSections = 24;
     private const int MaxLyricsLinesPerSection = 30;
     private const int MaxLyricsLineCharacters = 200;
@@ -13,9 +16,13 @@ public static class MusicGenerationRequestValidator
 
     public static void Validate(MusicGenerationInput request, MusicGenerationOptions options)
     {
-        if (string.IsNullOrWhiteSpace(request.Description) || request.Description.Trim().Length < 3 || request.Description.Length > options.MaxPromptCharacters)
+        // Issue #708 / PR #773: String.Trim() only removes white_space-classed code points, so a
+        // minimum-length gate measured with Trim lets visually empty bidi format controls (Cc/Cf such
+        // as RLM, ALM, LRE/RLE/PDF, ZWSP and ZWNJ) satisfy the gate and reach the billable
+        // cost-preflight path. Admission requires a minimum number of visible-glyph characters.
+        if (!HasMinimumVisibleCharacters(request.Description, MinimumVisiblePromptCharacters) || request.Description.Length > options.MaxPromptCharacters)
             throw new MusicRequestValidationException(GenerationJobErrorCodes.MusicRequestInvalid, "Describe the music in 3 to 4,000 characters.");
-        if (string.IsNullOrWhiteSpace(request.Purpose) || request.Purpose.Trim().Length < 3 || request.Purpose.Length > options.MaxPurposeCharacters)
+        if (!HasMinimumVisibleCharacters(request.Purpose, MinimumVisiblePromptCharacters) || request.Purpose.Length > options.MaxPurposeCharacters)
             throw new MusicRequestValidationException(GenerationJobErrorCodes.MusicRequestInvalid, "Describe the purpose in 3 to 1,000 characters.");
         if (string.IsNullOrWhiteSpace(request.Genre) || request.Genre.Length > 40 || !MusicGenerationValues.Genres.Contains(request.Genre.Trim()))
             throw new MusicRequestValidationException(GenerationJobErrorCodes.MusicGenreUnsupported, "The selected genre is not supported.");
@@ -149,7 +156,7 @@ public static class MusicGenerationRequestValidator
 
             foreach (var line in section.Lines)
             {
-                if (string.IsNullOrWhiteSpace(line) || line.Length > MaxLyricsLineCharacters || line.Length > MaxTotalLyricsCharacters - totalCharacters)
+                if (line is null || !HasMinimumVisibleCharacters(line, MinimumVisibleLyricsLineCharacters) || line.Length > MaxLyricsLineCharacters || line.Length > MaxTotalLyricsCharacters - totalCharacters)
                     throw new MusicRequestValidationException(GenerationJobErrorCodes.MusicRequestInvalid, "Lyrics contain an empty or over-limit line.");
                 totalCharacters += line.Length;
             }
@@ -161,4 +168,51 @@ public static class MusicGenerationRequestValidator
         if (string.IsNullOrWhiteSpace(value) || !supported.Contains(value.Trim()))
             throw new MusicRequestValidationException(code, $"The selected {field} is not supported.");
     }
+
+    // Counts only characters that render a visible glyph. Bidi format controls and other
+    // Unicode Cf/Cc characters (the zero-width space family, separators, private-use and
+    // unassigned code points) never count toward the minimum because char.IsWhiteSpace
+    // returns false and String.Trim leaves them untouched. Letters, digits, punctuation,
+    // symbols and combining marks always count, so valid Arabic/Sorani text such as
+    // "ئەم گۆرانییە بۆ منداڵانی کوردستان" keeps passing admission unchanged, including
+    // when bidi controls wrap genuine visible content.
+    private static bool HasMinimumVisibleCharacters(string? value, int minimumVisibleCharacters)
+    {
+        if (string.IsNullOrEmpty(value))
+        {
+            return false;
+        }
+
+        var visibleCharacters = 0;
+        foreach (var character in value)
+        {
+            if (IsInvisibleTextCharacter(character))
+            {
+                continue;
+            }
+
+            visibleCharacters++;
+            if (visibleCharacters >= minimumVisibleCharacters)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    // Classification is per-BMP-code-point and normalization-stable: NFC/NFD neither
+    // compose nor decompose Cc/Cf/Zs control and separator code points. Surrogate halves
+    // count as visible so astral characters (emoji included) are never rejected here.
+    private static bool IsInvisibleTextCharacter(char value) =>
+        value is '\u200B' or '\uFEFF'
+        || char.IsWhiteSpace(value)
+        || CharUnicodeInfo.GetUnicodeCategory(value)
+            is UnicodeCategory.Control
+            or UnicodeCategory.Format
+            or UnicodeCategory.PrivateUse
+            or UnicodeCategory.OtherNotAssigned
+            or UnicodeCategory.LineSeparator
+            or UnicodeCategory.ParagraphSeparator
+            or UnicodeCategory.SpaceSeparator;
 }
