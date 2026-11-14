@@ -16,5 +16,5 @@ export const metadata: Metadata = {
 
 export default async function HealthCarePage() {
   await requireAuthenticatedPage("/create/health");
-  return <ProtectedPage>{/* #714 wiring: #804 opt-in consent journey over synthetic samples only. */}<HealthPlaceholderPage /><HealthCareConsentJourney /></ProtectedPage>;
+  return <ProtectedPage><HealthPlaceholderPage entry="create" /><HealthCareConsentJourney /></ProtectedPage>;
 }
