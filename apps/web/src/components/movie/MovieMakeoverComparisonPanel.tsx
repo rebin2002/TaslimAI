@@ -91,9 +91,23 @@ export function isAllowedMakeoverPreviewUrl(url: string): boolean {
   const value = url.trim();
   if (value.length === 0) return false;
   if (value.startsWith("/") && !value.startsWith("//")) return true; // same-origin absolute path
+  // Do not allow invisible separators or encoded-URL ambiguity to turn a
+  // claimed preview into a credential-bearing or non-media request.
+  if (/[\\u0000-\\u001f\\u007f]/.test(value)) return false;
   const schemeMatch = /^([a-z][a-z0-9+.-]*:)/i.exec(value);
   if (!schemeMatch) return false;
-  return (ALLOWED_PREVIEW_SCHEMES as readonly string[]).includes(schemeMatch[1].toLowerCase());
+  const scheme = schemeMatch[1].toLowerCase();
+  if (!(ALLOWED_PREVIEW_SCHEMES as readonly string[]).includes(scheme)) return false;
+  if (scheme === "data:") return /^data:video\\/[a-z0-9.+-]+(?:;[a-z0-9=+-]+)*,/i.test(value);
+  if (scheme === "http:" || scheme === "https:") {
+    try {
+      const parsed = new URL(value);
+      return !parsed.username && !parsed.password && !!parsed.hostname;
+    } catch {
+      return false;
+    }
+  }
+  return true;
 }
 
 export function movieMakeoverPaneState(
