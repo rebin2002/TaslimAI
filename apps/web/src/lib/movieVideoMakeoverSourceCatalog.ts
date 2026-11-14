@@ -189,12 +189,16 @@ function carryNumber(value: number | null | undefined): number | null {
 function isVideoAsset(descriptor: MovieVideoMakeoverSourceDescriptor): boolean {
   const assetType = cleanText(descriptor.assetType, 40);
   const mimeType = cleanText(descriptor.mimeType, 100);
-  if (assetType !== null) {
-    return assetType.toLowerCase() === MOVIE_VIDEO_MAKEOVER_SOURCE_ASSET_TYPE;
+  // Treat contradictory type evidence as unsafe: a claimed "video" asset
+  // accompanied by image/* (or other non-video media) is not a verified
+  // video source and must never become selectable.
+  if (assetType !== null && assetType.toLowerCase() !== MOVIE_VIDEO_MAKEOVER_SOURCE_ASSET_TYPE) {
+    return false;
   }
-  if (mimeType !== null) {
-    return mimeType.toLowerCase().startsWith(MOVIE_VIDEO_MAKEOVER_SOURCE_ASSET_TYPE + "/");
+  if (mimeType !== null && !mimeType.toLowerCase().startsWith(MOVIE_VIDEO_MAKEOVER_SOURCE_ASSET_TYPE + "/")) {
+    return false;
   }
+  if (assetType !== null || mimeType !== null) return true;
   // Neither field present: the read model does not say, so the clip is not a
   // confirmed makeover source and must not be advertised as one.
   return false;
