@@ -34,6 +34,9 @@ test("Home attachment-only creates exactly one scoped Chat submission without a 
     });
   });
   await page.route("**/api/conversations/*/messages", async (route: Route) => {
+    if (route.request().method() === "GET") {
+      return route.fulfill({ status: 200, contentType: "application/json", body: "[]" });
+    }
     if (route.request().method() !== "POST") return route.continue();
     const body = route.request().postDataJSON() as { content: string; attachmentIds: string[] };
     seen.messages.push({ content: body.content, attachmentIds: body.attachmentIds });
@@ -53,11 +56,6 @@ test("Home attachment-only creates exactly one scoped Chat submission without a 
       }),
     });
   });
-  await page.route("**/api/conversations/" + conversationId + "/messages", async (route: Route) => {
-    if (route.request().method() === "POST") return route.continue();
-    await route.fulfill({ status: 200, contentType: "application/json", body: "[]" });
-  });
-
   await page.goto("/");
   const composer = page.locator(".home-composer");
   await expect(composer).toBeVisible();
