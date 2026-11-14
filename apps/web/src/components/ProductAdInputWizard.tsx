@@ -177,25 +177,33 @@ export function ProductAdInputWizard({ locale = "en", principal = null }: Readon
   // A draft is keyed to both the authenticated user and workspace. Never read it
   // during SSR and never display the previous account's form while rehydrating.
   useEffect(() => {
-    let restored: ProductAdDraftState | null = null;
-    if (key) {
-      try { restored = restoreProductAdDraft(window.sessionStorage, { userId, workspaceId }); }
-      catch { /* Storage can be blocked; the wizard still works in memory. */ }
-    }
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- identity-scoped session storage hydration.
-    setProductName(restored?.productName ?? "");
-    setBenefit(restored?.benefit ?? "");
-    setChannel(restored?.channel ?? defaultProductAdOutput.channel);
-    setFormat(restored?.format ?? defaultProductAdOutput.format);
-    setProductPhoto(null);
-    setBrandLogo(null);
-    setRestoredProductPhoto(restored?.productPhoto ?? null);
-    setRestoredBrandLogo(restored?.brandLogo ?? null);
-    setRestoredDraft(restored);
-    setPreview(null);
-    setPhotoError("");
-    setLogoError("");
-    setHydratedKey(key);
+    // Browser-only session restore runs after the committed render, never
+    // synchronously inside the effect. Cancel any queued restore when the
+    // authenticated principal/workspace changes or the wizard unmounts.
+    let cancelled = false;
+    queueMicrotask(() => {
+      if (cancelled) return;
+      let restored: ProductAdDraftState | null = null;
+      if (key) {
+        try { restored = restoreProductAdDraft(window.sessionStorage, { userId, workspaceId }); }
+        catch { /* Storage can be blocked; the wizard still works in memory. */ }
+      }
+      if (cancelled) return;
+      setProductName(restored?.productName ?? "");
+      setBenefit(restored?.benefit ?? "");
+      setChannel(restored?.channel ?? defaultProductAdOutput.channel);
+      setFormat(restored?.format ?? defaultProductAdOutput.format);
+      setProductPhoto(null);
+      setBrandLogo(null);
+      setRestoredProductPhoto(restored?.productPhoto ?? null);
+      setRestoredBrandLogo(restored?.brandLogo ?? null);
+      setRestoredDraft(restored);
+      setPreview(null);
+      setPhotoError("");
+      setLogoError("");
+      setHydratedKey(key);
+    });
+    return () => { cancelled = true; };
   }, [key, userId, workspaceId]);
 
   // Store descriptors and form settings, never image bytes. On reload, filenames
