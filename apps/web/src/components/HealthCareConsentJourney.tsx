@@ -22,7 +22,7 @@
  *    nothing here re-implements or overwrites owner logic.
  */
 
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useMemo, useState, useSyncExternalStore } from "react";
 import { useLocale } from "@/components/LocaleProvider";
 import { HealthCareConsentSelectionPanel } from "@/components/HealthCareConsentSelectionPanel";
 import {
@@ -68,7 +68,9 @@ export function HealthCareConsentJourney({ locale: localeOverride }: HealthCareC
 
   // Notices derived from the same synchronous snapshot the panel renders, so
   // a revocation clears them in the very same pass the rows disappear.
-  const state = baseStore.getSnapshot();
+  // Subscribe the host notices to the same atomic consent snapshot as the
+  // selection panel. Reading getSnapshot alone does not cause host re-renders.
+  const state = useSyncExternalStore(baseStore.subscribe, baseStore.getSnapshot, baseStore.getSnapshot);
   const grantedRows = state.documents.filter((doc) => state.selection[doc.id] === true);
   const showGrantedNotice = state.consent === "granted" && grantedRows.length > 0;
   const previewedDocumentId = state.preview.status === "granted" ? state.preview.documentId : null;
