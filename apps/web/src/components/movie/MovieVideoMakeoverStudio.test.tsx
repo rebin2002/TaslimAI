@@ -119,7 +119,7 @@ const inertHandlers: Pick<MovieVideoMakeoverStudioProps, "onChange"> = {
   },
 };
 
-function render(props: Pick<MovieVideoMakeoverStudioProps, "project" | "assets" | "principalId" | "workspaceId" | "selection">): string {
+function render(props: Pick<MovieVideoMakeoverStudioProps, "project" | "assets" | "principalId" | "workspaceId" | "selection"> & Pick<MovieVideoMakeoverStudioProps, "comparison">): string {
   return renderToStaticMarkup(<MovieVideoMakeoverStudio {...props} {...inertHandlers} />);
 }
 
@@ -315,6 +315,42 @@ describe("studio: markup composes the source step with the #784 panel", () => {
       .filter((fragment) => !fragment.slice(0, fragment.indexOf(">")).includes("disabled"));
     expect(enabled.length).toBe(1);
     expect(markup).not.toContain("Choose an uploaded clip");
+  });
+
+  it("renders an authorized before preview without inventing an after result", () => {
+    const markup = render({
+      project: project(),
+      assets: assets(),
+      principalId: PRINCIPAL,
+      workspaceId: WORKSPACE,
+      selection: settledDraftParts(),
+      comparison: {
+        beforeSource: { url: "blob:https://studio.taslim.test/00000000-0000-4000-8000-0000000000b4" },
+        afterSource: null,
+        viewMode: "split",
+        splitPercent: 50,
+        dir: "rtl",
+        onSplitPercentChange: () => { throw new Error("static render must not emit split updates"); },
+        onViewModeChange: () => { throw new Error("static render must not emit mode updates"); },
+      },
+    });
+    expect(markup).toContain("movie-makeover-comparison-panel");
+    expect(markup).toContain("Makeover result preview is not available yet");
+    expect(markup).toContain("blob:https://studio.taslim.test/");
+    expect(markup).toContain('dir="rtl"');
+    expect(markup).toContain("launchPermitted: false");
+    expect(markup).not.toContain('aria-label="Makeover result"');
+  });
+
+  it("does not expose comparison controls before a route supplies authorized sources", () => {
+    const markup = render({
+      project: project(),
+      assets: assets(),
+      principalId: PRINCIPAL,
+      workspaceId: WORKSPACE,
+      selection: settledDraftParts(),
+    });
+    expect(markup).not.toContain("movie-makeover-comparison-panel");
   });
 
   it("says there is nothing to pick when the project has no clips", () => {
