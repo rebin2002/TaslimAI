@@ -300,10 +300,9 @@ describe("studio: markup composes the source step with the #784 panel", () => {
       selection: settledDraftParts(),
     });
     const labels = buttonLabels(markup);
-    // Exactly two enabled controls exist in this composition, and both are draft
-    // edits: this slice's "Attach as source" and #784's pre-existing placeholder
-    // source button. Every action control stays disabled, and a draft with no
-    // source attached keeps #784's blocked wording rather than an estimate wording.
+    // Only the real catalogue's "Attach as source" is enabled. The demo-only
+    // placeholder selector is suppressed, and estimate/start stay disabled.
+    // A draft without a source still shows the existing blocked wording.
     expect(labels.filter((label) => label === "Attach as source")).toHaveLength(1);
     expect(markup).toContain('disabled=""');
     expect(markup).toContain('title="Not wired yet"');
@@ -314,7 +313,8 @@ describe("studio: markup composes the source step with the #784 panel", () => {
       .split("<button")
       .slice(1)
       .filter((fragment) => !fragment.slice(0, fragment.indexOf(">")).includes("disabled"));
-    expect(enabled.length).toBe(2);
+    expect(enabled.length).toBe(1);
+    expect(markup).not.toContain("Choose an uploaded clip");
   });
 
   it("says there is nothing to pick when the project has no clips", () => {
