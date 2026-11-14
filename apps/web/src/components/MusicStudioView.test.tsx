@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 import type { Asset } from "@/lib/api";
@@ -70,6 +71,14 @@ function storedCandidate(asset: Asset) {
 const emptyState = { candidate: null, previewObjectUrl: null, rejectedReasonKey: null };
 
 describe("Music Studio reference audio panel", () => {
+  it("discards private previews and in-flight library results when the active workspace changes", () => {
+    const source = readFileSync(new URL("./MusicStudioView.tsx", import.meta.url), "utf8");
+    // React key changes unmount the old studio, including the object URL cleanup
+    // and any pending responses. A workspace switch must never reuse old clips.
+    expect(source).toContain('<WorkspaceMusicStudio key={workspace?.id ?? "no-workspace"} workspace={workspace} />');
+    expect(source).toContain("revokeReferenceAudioObjectUrl(referenceAudio.previewObjectUrl)");
+  });
+
   it("renders a labelled, provider-free picker with an accessible file input", () => {
     const html = renderToStaticMarkup(
       <ReferenceAudioPanel state={emptyState} candidates={[]} loading={false} t={translate}
