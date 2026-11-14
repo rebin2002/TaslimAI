@@ -64,7 +64,12 @@ describe("ProductAdInputWizard", () => {
 
     expect(buildProductAdMockPreview(input, "ar").caption).toContain("اكتشف صابون اليوم");
     expect(isSupportedProductAdImage(validImage)).toBe(true);
+    expect(isSupportedProductAdImage({ type: "image/jpeg", size: 512 })).toBe(true);
+    expect(isSupportedProductAdImage({ type: "image/webp", size: 512 })).toBe(true);
     expect(isSupportedProductAdImage({ type: "image/png", size: MAX_PRODUCT_AD_IMAGE_BYTES + 1 })).toBe(false);
+    expect(isSupportedProductAdImage({ type: "image/png", size: 0 })).toBe(false);
+    expect(isSupportedProductAdImage({ type: "image/svg+xml", size: 128 })).toBe(false);
+    expect(isSupportedProductAdImage({ type: "image/gif", size: 128 })).toBe(false);
     expect(isSupportedProductAdImage({ type: "text/plain", size: 128 })).toBe(false);
   });
 
