@@ -174,7 +174,11 @@ export function isStorableProductAdDraftAsset(
   file: Pick<File, "type" | "size"> | null | undefined,
 ): file is Pick<File, "type" | "size"> {
   if (!file) return false;
-  return typeof file.type === "string" && file.type.startsWith("image/") && file.size <= MAX_PRODUCT_AD_DRAFT_NAME_BYTES;
+  // Match the actual wizard whitelist on both save and untrusted restore.
+  // image/* would retain SVG/GIF descriptors that the file picker rejects.
+  return typeof file.type === "string"
+    && ["image/jpeg", "image/png", "image/webp"].includes(file.type)
+    && Number.isFinite(file.size) && file.size > 0 && file.size <= MAX_PRODUCT_AD_DRAFT_NAME_BYTES;
 }
 
 function toDraftAsset(file: ProductAdDraftEdit["productPhoto"]): ProductAdDraftAsset | null {
