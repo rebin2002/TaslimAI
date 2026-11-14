@@ -406,7 +406,9 @@ describe("product ad draft user flow: save with photo + optional logo, restore o
     expect(wizardSource).toContain("restoreProductAdDraft(window.sessionStorage");
     expect(wizardSource).toContain("setProductPhoto(null)");
     expect(wizardSource).toContain("setBrandLogo(null)");
-    expect(wizardSource).toContain("if (key && hydratedKey !== key) return");
+    // Render masking must include authenticated -> anonymous transitions; a null key is not exempt.
+    expect(wizardSource).toContain("if (shouldMaskProductAdDraft(key, hydratedKey)) return");
+    expect(wizardSource).not.toContain("if (key && hydratedKey !== key) return");
   });
 
   it("keeps a text-only draft restorable but not submittable", () => {
