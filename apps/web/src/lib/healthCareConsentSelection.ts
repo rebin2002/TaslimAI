@@ -157,6 +157,9 @@ export function reduceConsentSelection(
       return {
         ...state,
         consent: "revoked",
+        // Discard offered document descriptors as well as selections; future
+        // private-document adapters must never retain labels after withdrawal.
+        documents: [],
         selection: {},
         preview: unavailablePreview("consent-revoked"),
         revision: state.revision + 1,
