@@ -15,6 +15,12 @@ describe("chat attachment scope", () => {
     });
   });
 
+  it("does not inherit a stale selected conversation on the new-chat route", () => {
+    expect(resolveChatAttachmentScope(undefined, { id: "conversation-1", projectId: "private-project" }, "project-2")).toEqual({
+      projectId: "project-2",
+    });
+  });
+
   it("keeps a new conversation draft scoped to its selected project", () => {
     expect(resolveChatAttachmentScope(undefined, null, "project-2")).toEqual({ projectId: "project-2" });
   });

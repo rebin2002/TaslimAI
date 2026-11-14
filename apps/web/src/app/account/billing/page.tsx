@@ -1,3 +1,4 @@
+import "./billing-layout.css";
 import { BillingView } from "@/components/BillingView";
 import { ProtectedPage } from "@/components/ProtectedPage";
 import { requireAuthenticatedPage } from "@/lib/serverAuth";
