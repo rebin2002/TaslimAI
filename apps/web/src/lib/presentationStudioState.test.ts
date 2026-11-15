@@ -31,12 +31,24 @@ describe("presentationStudioState", () => {
     expect(shouldResetPresentationWorkspaceState(null, "workspace-2")).toBe(false);
     const values = new Map<string, string>();
     vi.stubGlobal("window", { sessionStorage: { getItem: (key: string) => values.get(key) ?? null, setItem: (key: string, value: string) => values.set(key, value), removeItem: (key: string) => values.delete(key) } });
-    persistPresentationActiveJobId("workspace-1", "presentation-job-1");
-    expect(values.get(presentationActiveJobStorageKey("workspace-1"))).toBe("presentation-job-1");
-    expect(readPresentationActiveJobId("workspace-1")).toBe("presentation-job-1");
-    expect(readPresentationActiveJobId("workspace-2")).toBeNull();
-    clearPresentationActiveJobId("workspace-1");
-    expect(readPresentationActiveJobId("workspace-1")).toBeNull();
+    // A previous account's same-workspace job must never trigger a protected
+    // GET during a new user's restore, even if an older workspace-only key exists.
+    values.set("taslim:presentation-generation:workspace-1", "legacy-user-job");
+    persistPresentationActiveJobId("user-a", "workspace-1", "presentation-job-1");
+    expect(values.get(presentationActiveJobStorageKey("user-a", "workspace-1"))).toBe("presentation-job-1");
+    expect(readPresentationActiveJobId("user-a", "workspace-1")).toBe("presentation-job-1");
+    expect(readPresentationActiveJobId("user-a", "workspace-2")).toBeNull();
+    expect(readPresentationActiveJobId("user-b", "workspace-1")).toBeNull();
+    expect(readPresentationActiveJobId("", "workspace-1")).toBeNull();
+    expect(readPresentationActiveJobId("user-a", "")).toBeNull();
+    persistPresentationActiveJobId("user-b", "workspace-1", "user-b-job");
+    expect(readPresentationActiveJobId("user-b", "workspace-1")).toBe("user-b-job");
+    clearPresentationActiveJobId("user-a", "workspace-1");
+    expect(readPresentationActiveJobId("user-a", "workspace-1")).toBeNull();
+    expect(readPresentationActiveJobId("user-b", "workspace-1")).toBe("user-b-job");
+    expect(values.get("taslim:presentation-generation:workspace-1")).toBe("legacy-user-job");
+    persistPresentationActiveJobId("", "workspace-1", "ignored");
+    expect(readPresentationActiveJobId("", "workspace-1")).toBeNull();
   });
   it("recovers a bounded draft and rejects malformed or unsupported browser data", () => {
     const state = parsePresentationDraftState(JSON.stringify({
