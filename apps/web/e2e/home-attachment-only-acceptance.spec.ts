@@ -65,6 +65,16 @@ test("Home attachment-only creates exactly one scoped Chat submission without a 
     name: "report.txt", mimeType: "text/plain", buffer: Buffer.from("A local, non-sensitive test report."),
   });
   await expect(submit).toBeEnabled();
+  // Chinese/Japanese/Korean IME Enter confirms a character candidate; it must
+  // not create the conversation or dispatch a paid generation request.
+  await composer.locator(".home-composer-input").evaluate((input) => {
+    input.dispatchEvent(new KeyboardEvent("keydown", {
+      key: "Enter", isComposing: true, bubbles: true, cancelable: true,
+    }));
+  });
+  expect(seen.conversation).toBe(0);
+  expect(seen.upload).toBe(0);
+  expect(seen.messages).toEqual([]);
   await submit.click();
   await expect(page).toHaveURL(new RegExp("/chat/" + conversationId));
   expect(seen).toEqual({
