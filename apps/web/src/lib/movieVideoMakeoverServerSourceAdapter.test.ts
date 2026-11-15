@@ -67,6 +67,23 @@ describe("authenticated source metadata adapter for provider-free Movie Makeover
     expect(entry.blockers.map((item) => item.code)).toContain("source_asset_unavailable");
   });
 
+  it("fails closed when the server returns a blocker together with attachPermitted=true", () => {
+    const conflicting = expectOne(map({
+      ...response,
+      sources: [{ ...row, attachPermitted: true, blockers: ["source_storage_unavailable"] }],
+    }));
+    expect(conflicting.selectable).toBe(false);
+    expect(conflicting.blockers.map((item) => item.code)).toContain("source_asset_unavailable");
+
+    // The runtime boundary must also refuse a malformed response missing the
+    // server's blocker array, rather than assuming its absence means approval.
+    const malformed = expectOne(map({
+      ...response,
+      sources: [{ ...row, blockers: undefined as unknown as string[] }],
+    }));
+    expect(malformed.selectable).toBe(false);
+  });
+
   it("refuses mismatched or unverified source ownership even when the server exposes a row", () => {
     for (const override of [
       { ownerIsRequester: false },
