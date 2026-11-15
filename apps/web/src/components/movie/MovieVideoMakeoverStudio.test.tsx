@@ -120,8 +120,11 @@ const inertHandlers: Pick<MovieVideoMakeoverStudioProps, "onChange"> = {
   },
 };
 
-function render(props: Pick<MovieVideoMakeoverStudioProps, "project" | "assets" | "principalId" | "workspaceId" | "selection"> & Pick<MovieVideoMakeoverStudioProps, "comparison" | "comparisonBinding">): string {
-  return renderToStaticMarkup(<MovieVideoMakeoverStudio {...props} {...inertHandlers} />);
+function render(props: Pick<MovieVideoMakeoverStudioProps, "project" | "assets" | "principalId" | "workspaceId" | "selection"> & Pick<MovieVideoMakeoverStudioProps, "comparison" | "comparisonBinding"> & Partial<Pick<MovieVideoMakeoverStudioProps, "sourceReadBinding">>): string {
+  const { sourceReadBinding = { principalId: PRINCIPAL, workspaceId: WORKSPACE }, ...rest } = props;
+  return renderToStaticMarkup(
+    <MovieVideoMakeoverStudio {...rest} sourceReadBinding={sourceReadBinding} {...inertHandlers} />,
+  );
 }
 
 describe("studio: what the real Movie read models can and cannot say", () => {
@@ -198,6 +201,38 @@ describe("studio: what the real Movie read models can and cannot say", () => {
       expect(markup).toContain("No source attached");
       expect(markup).not.toContain('data-attached="true"');
     }
+  });
+
+  it("fails closed when cached clip/asset snapshots belong to another principal in the same workspace", () => {
+    const selected = reduceMovieVideoMakeoverStudioSource(
+      settledDraftParts(), "asset_take_01", catalogue(),
+    );
+    const previousRead = { principalId: PRINCIPAL, workspaceId: WORKSPACE };
+    // Account B joins the same workspace. A's old in-memory project and Assets
+    // cannot be repurposed as B's authoritative read merely because workspace matches.
+    for (const readBinding of [previousRead, null, { ...previousRead, workspaceId: "old_workspace" }]) {
+      const markup = render({
+        project: project(),
+        assets: assets(),
+        principalId: "principal_creator_B",
+        workspaceId: WORKSPACE,
+        sourceReadBinding: readBinding,
+        selection: selected,
+      });
+      expect(markup).not.toContain("Interview room take 01");
+      expect(markup).not.toContain("Reel take 02");
+      expect(markup).toContain("No source attached");
+      expect(markup).not.toContain('data-attached="true"');
+      expect(markup).toContain('data-pending-source-facts="0"');
+    }
+    // Correctly-bound fresh synthetic source snapshots remain renderable.
+    const freshMarkup = render({
+      project: project(), assets: assets(),
+      principalId: "principal_creator_B", workspaceId: WORKSPACE,
+      sourceReadBinding: { principalId: "principal_creator_B", workspaceId: WORKSPACE },
+      selection: createEmptyMovieVideoMakeoverSelection(),
+    });
+    expect(freshMarkup).toContain("Interview room take 01");
   });
 
   it("does not display an old project's private clips after an authenticated workspace switch", () => {
