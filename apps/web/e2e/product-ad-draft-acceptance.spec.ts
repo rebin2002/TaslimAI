@@ -119,3 +119,45 @@ test("product-ad draft stays in its original account after an authenticated swit
   // The first account's text settings survive; browser file-input bytes never do.
   expect(await page.locator('input[id$="-product-photo"]').evaluate((el) => (el as HTMLInputElement).files?.length ?? 0)).toBe(0);
 });
+
+
+// Integration acceptance: the preview is discoverable from both customer entry
+// points, with the correct locale/RTL and no provider, checkout or publish call.
+for (const entry of ["/create", "/"] as const) {
+  for (const profile of [
+    { locale: "en", heading: "Start with your product.", title: "Product Ad", dir: "ltr", width: 375 },
+    { locale: "ar", heading: "ابدأ بمنتجك.", title: "إعلان منتج", dir: "rtl", width: 375 },
+    { locale: "ku", heading: "لە بەرهەمەکەتەوە دەست پێ بکە.", title: "ڕیکلامی بەرهەم", dir: "rtl", width: 768 },
+  ] as const) {
+    test(`Product Ad appears once on ${entry} and opens its local-only preview (${profile.locale})`, async ({ authenticatedPage: page }) => {
+      const unexpectedWrites: string[] = [];
+      page.on("request", (request) => {
+        if (/\/api\/(generation|payments|checkout|provider|assets\/upload)|sunoapi|runway/i.test(request.url())) {
+          unexpectedWrites.push(request.url());
+        }
+      });
+      await page.setViewportSize({ width: profile.width, height: 850 });
+      await page.addInitScript((locale) => window.localStorage.setItem("taslim-locale", locale), profile.locale);
+      await page.goto(entry);
+      const tile = page.locator('a[data-product-ad-tile="true"]');
+      await expect(tile).toHaveCount(1);
+      await expect(tile).toBeVisible();
+      await expect(tile.locator("strong")).toHaveText(profile.title);
+      await expect(tile).toHaveAttribute("href", "/create/product-ad");
+      await tile.click();
+      await expect(page).toHaveURL(/\/create\/product-ad$/);
+      const wizard = page.locator('section[aria-labelledby][lang]');
+      await expect(wizard).toHaveAttribute("dir", profile.dir);
+      await expect(wizard.locator("h1")).toHaveText(profile.heading);
+      await expect(wizard.locator('input[id$="-product-name"]')).toBeVisible();
+      await expect(page.getByText(/local-only preview|معاينة محلية فقط|تەنها پێشبینینی ناوخۆییە/)).toBeVisible();
+      const geometry = await page.evaluate(() => ({
+        html: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+        body: document.body.scrollWidth - document.documentElement.clientWidth,
+      }));
+      expect(geometry.html).toBeLessThanOrEqual(1);
+      expect(geometry.body).toBeLessThanOrEqual(1);
+      expect(unexpectedWrites).toEqual([]);
+    });
+  }
+}
