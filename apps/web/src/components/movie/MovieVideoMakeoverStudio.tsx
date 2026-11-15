@@ -106,7 +106,22 @@ export function reconcileMovieVideoMakeoverStudioSelection(
 ): MovieVideoMakeoverSelection {
   if (selection.sourceAssetId === null) return selection;
   const current = entries.find((entry) => entry.assetId === selection.sourceAssetId);
-  return current?.selectable ? selection : clearMovieVideoMakeoverSourceSelection(selection);
+  if (!current?.selectable) return clearMovieVideoMakeoverSourceSelection(selection);
+
+  // An asset can retain its ID while its authoritative catalogue facts change
+  // (replacement file, updated duration, revoked ownership or retention). Never
+  // render previously selected metadata as if it were still current. Reapplying
+  // the live descriptor also clears claims the current catalogue cannot verify.
+  const refreshed = applyMovieVideoMakeoverSourceSelection(selection, current);
+  const sourceFields: readonly (keyof MovieVideoMakeoverSelection)[] = [
+    "sourceAssetId", "sourceOwnerPrincipalId", "sourceWorkspaceId",
+    "sourceVisibilityPrivate", "sourceRetentionVerified", "sourceAudioPresent",
+    "sourceDurationSeconds", "sourceWidth", "sourceHeight", "sourceFrameRate",
+    "sourceSizeBytes", "preserveOriginalAudio",
+  ];
+  return sourceFields.every((field) => Object.is(selection[field], refreshed[field]))
+    ? selection
+    : refreshed;
 }
 
 export function MovieVideoMakeoverStudio({
