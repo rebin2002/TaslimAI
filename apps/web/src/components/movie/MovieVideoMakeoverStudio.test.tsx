@@ -120,7 +120,7 @@ const inertHandlers: Pick<MovieVideoMakeoverStudioProps, "onChange"> = {
   },
 };
 
-function render(props: Pick<MovieVideoMakeoverStudioProps, "project" | "assets" | "principalId" | "workspaceId" | "selection"> & Pick<MovieVideoMakeoverStudioProps, "comparison">): string {
+function render(props: Pick<MovieVideoMakeoverStudioProps, "project" | "assets" | "principalId" | "workspaceId" | "selection"> & Pick<MovieVideoMakeoverStudioProps, "comparison" | "comparisonBinding">): string {
   return renderToStaticMarkup(<MovieVideoMakeoverStudio {...props} {...inertHandlers} />);
 }
 
@@ -392,7 +392,8 @@ describe("studio: markup composes the source step with the #784 panel", () => {
       assets: assets(),
       principalId: PRINCIPAL,
       workspaceId: WORKSPACE,
-      selection: settledDraftParts(),
+      selection: reduceMovieVideoMakeoverStudioSource(settledDraftParts(), "asset_take_01", catalogue()),
+      comparisonBinding: { principalId: PRINCIPAL, workspaceId: WORKSPACE, sourceAssetId: "asset_take_01" },
       comparison: {
         beforeSource: { url: "blob:https://studio.taslim.test/00000000-0000-4000-8000-0000000000b4" },
         afterSource: null,
@@ -409,6 +410,35 @@ describe("studio: markup composes the source step with the #784 panel", () => {
     expect(markup).toContain('dir="rtl"');
     expect(markup).toContain("launchPermitted: false");
     expect(markup).not.toContain('aria-label="Makeover result"');
+  });
+
+  it("never renders a previously authorized preview after an identity, workspace or clip switch", () => {
+    const authorizedSource = reduceMovieVideoMakeoverStudioSource(settledDraftParts(), "asset_take_01", catalogue());
+    const privateUrl = "blob:https://studio.taslim.test/00000000-0000-4000-8000-0000000000b4";
+    const comparison = {
+      beforeSource: { url: privateUrl }, afterSource: null, viewMode: "split" as const,
+      splitPercent: 50, onSplitPercentChange: () => {}, onViewModeChange: () => {},
+    };
+    const safe = {
+      project: project(), assets: assets(), principalId: PRINCIPAL,
+      workspaceId: WORKSPACE, selection: authorizedSource, comparison,
+    };
+    const binding = { principalId: PRINCIPAL, workspaceId: WORKSPACE, sourceAssetId: "asset_take_01" };
+    expect(render({ ...safe, comparisonBinding: binding })).toContain(privateUrl);
+    for (const changed of [
+      { comparisonBinding: undefined },
+      { comparisonBinding: { ...binding, principalId: "different_creator" } },
+      { comparisonBinding: { ...binding, workspaceId: "different_workspace" } },
+      { comparisonBinding: { ...binding, sourceAssetId: "asset_take_02" } },
+      { principalId: "different_creator", comparisonBinding: binding },
+      { workspaceId: "different_workspace", comparisonBinding: binding },
+      { project: project({ clips: [] }), comparisonBinding: binding },
+      { selection: createEmptyMovieVideoMakeoverSelection(), comparisonBinding: binding },
+    ]) {
+      const html = render({ ...safe, ...changed });
+      expect(html).not.toContain("movie-makeover-comparison-panel");
+      expect(html).not.toContain(privateUrl);
+    }
   });
 
   it("does not expose comparison controls before a route supplies authorized sources", () => {
