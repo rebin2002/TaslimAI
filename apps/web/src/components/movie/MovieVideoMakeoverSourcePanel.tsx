@@ -25,10 +25,9 @@
  *    #775, #778, #784 or #801, and nothing imports it from MovieStudioView.
  */
 
-import { movieMakeoverCopy, movieMakeoverDirection, type MovieMakeoverLocale } from "./movieVideoMakeoverLocale";
+import { movieMakeoverCopy, movieMakeoverDirection, localizedMovieMakeoverBlocker, localizedMovieMakeoverGap, localizedMovieMakeoverSourcePendingCopy, type MovieMakeoverLocale } from "./movieVideoMakeoverLocale";
 import {
   countSelectableMovieVideoMakeoverSources,
-  movieVideoMakeoverSourcePendingCopy,
   type MovieVideoMakeoverSourceEntry,
 } from "@/lib/movieVideoMakeoverSourceCatalog";
 
@@ -77,8 +76,8 @@ export function movieVideoMakeoverSourcePanelModel(
       label: entry.label,
       attached,
       attachable: entry.selectable,
-      reasons: entry.blockers.map((blocker) => blocker.message),
-      pendingFacts: entry.gaps.map((gap) => gap.message),
+      reasons: entry.blockers.map((blocker) => localizedMovieMakeoverBlocker(blocker.code, blocker.message, locale)),
+      pendingFacts: entry.gaps.map((gap) => localizedMovieMakeoverGap(gap.code, gap.message, locale)),
     };
   });
 
@@ -94,7 +93,7 @@ export function movieVideoMakeoverSourcePanelModel(
     notice = c.sourceCount(selectableCount, entries.length);
   }
 
-  const copy = movieVideoMakeoverSourcePendingCopy(attachedEntry, mode);
+  const copy = localizedMovieMakeoverSourcePendingCopy(attachedEntry, mode, locale);
   return { rows, notice, headline: copy.headline, details: copy.details, attachedEntry };
 }
 
