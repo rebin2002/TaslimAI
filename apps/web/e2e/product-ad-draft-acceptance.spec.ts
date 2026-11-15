@@ -33,6 +33,9 @@ test.describe("Product Ad preview — real authenticated session, local-only dra
       const channel = page.locator('select[id$="-channel"]');
       const format = page.locator('select[id$="-format"]');
       const submit = page.locator('form button[type="submit"]');
+      const previewStatus = page.locator('aside p[role="status"][aria-live="polite"]');
+      await expect(previewStatus).toBeAttached();
+      await expect(previewStatus).toBeEmpty();
 
       await expect(name).toBeVisible();
       await expect(photo).toHaveAttribute("required", "");
@@ -47,9 +50,11 @@ test.describe("Product Ad preview — real authenticated session, local-only dra
       await expect(page.locator("aside h3")).toHaveText("Cedar & Silk");
       await expect(page.locator('aside img[data-preview-asset="product"]')).toHaveAttribute("src", /^blob:/);
       await expect(page.locator('aside img[data-preview-asset="brand-logo"]')).toHaveAttribute("src", /^blob:/);
+      await expect(previewStatus).toContainText("TikTok");
 
       await page.reload();
       await expect(page.locator('aside img[data-preview-asset]')).toHaveCount(0);
+      await expect(previewStatus).toBeEmpty();
       await expect(name).toHaveValue("Cedar & Silk");
       await expect(benefit).toHaveValue("Keeps your skin soft");
       await expect(channel).toHaveValue("tiktok");
@@ -75,6 +80,10 @@ test.describe("Product Ad preview — real authenticated session, local-only dra
       await testInfo.attach(`product-ad-${profile.locale}-${profile.width}`, {
         path: screenshot, contentType: "image/png",
       });
+      await benefit.fill("Updated after draft preview");
+      await expect(page.locator("aside h3")).toHaveCount(0);
+      await expect(previewStatus).not.toBeEmpty();
+      await expect(previewStatus).not.toContainText("TikTok");
     });
   }
 });
