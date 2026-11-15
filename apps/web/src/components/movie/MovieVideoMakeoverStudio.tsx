@@ -75,11 +75,23 @@ export type MovieVideoMakeoverComparisonBinding = Readonly<{
   sourceAssetId: string;
 }>;
 
+/** The identity under which the route fetched its project and asset snapshots.
+ * Bind at fetch completion; do not derive this from the currently rendering user.
+ * Otherwise a same-workspace sign-out/sign-in can briefly show the prior user's
+ * private clip titles before the next response arrives.
+ */
+export type MovieVideoMakeoverSourceReadBinding = Readonly<{
+  principalId: string;
+  workspaceId: string;
+}>;
+
 export type MovieVideoMakeoverStudioProps = {
   readonly project: MovieVideoMakeoverProjectSource | null;
   readonly assets: readonly MovieVideoMakeoverAssetSource[];
   readonly principalId: string | null;
   readonly workspaceId: string | null;
+  /** Required: without provenance, cached source lists are never rendered. */
+  readonly sourceReadBinding: MovieVideoMakeoverSourceReadBinding | null;
   readonly selection: MovieVideoMakeoverSelection;
   readonly onChange: (nextSelection: MovieVideoMakeoverSelection) => void;
   /** Already-authorized preview sources supplied by the route owner, never fetched here. */
@@ -142,6 +154,7 @@ export function MovieVideoMakeoverStudio({
   assets,
   principalId,
   workspaceId,
+  sourceReadBinding,
   selection,
   onChange,
   comparison = null,
@@ -151,7 +164,14 @@ export function MovieVideoMakeoverStudio({
   // Route authentication can briefly be unresolved after logout or an account
   // switch. Fail closed before rendering even clip titles; no caller-supplied
   // project/asset cache may stand in for the current authenticated identity.
-  const hasAuthenticatedScope = Boolean(principalId?.trim() && workspaceId?.trim());
+  // A workspace ID alone is insufficient: two different authenticated creators
+  // can belong to the same workspace. Refuse stale snapshots from either identity.
+  // Missing fetch provenance fails closed until the route loads fresh data.
+  const hasAuthenticatedScope = Boolean(
+    principalId?.trim() && workspaceId?.trim() && sourceReadBinding &&
+    sourceReadBinding.principalId === principalId &&
+    sourceReadBinding.workspaceId === workspaceId,
+  );
   const entries = hasAuthenticatedScope
     ? describeMovieVideoMakeoverProjectSources(project, assets, context)
     : [];
