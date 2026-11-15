@@ -35,6 +35,7 @@ describe("Movie Team review workflow", () => {
     // from both the UI and the API payload, even before the server reauthorizes it.
     expect(workspaceSource).toContain("isFinal: reviewIsFinal && canRequestFinalReview");
     expect(workspaceSource).toContain("checked={reviewIsFinal && canRequestFinalReview}");
+    expect(workspaceSource).toContain("if (!canRequestFinalReview) setReviewIsFinal(false);");
   });
 
   it("exposes decisions only to the assigned authenticated reviewer", () => {
