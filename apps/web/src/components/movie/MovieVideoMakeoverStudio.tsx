@@ -261,6 +261,9 @@ export function MovieVideoMakeoverStudio({
           {...comparison}
           dir={locale === "en" ? comparison.dir : movieMakeoverDirection(locale)}
           labels={locale === "en" ? comparison.labels : {
+            // Caller-provided defaults may still be English. Resolved locale
+            // copy must win for every visible and accessible comparison label.
+            ...comparison.labels,
             region: c.region,
             modeGroup: c.view,
             modeSplit: c.split,
@@ -272,7 +275,6 @@ export function MovieVideoMakeoverStudio({
             beforeUnavailable: c.beforeUnavailable,
             afterUnavailable: c.afterUnavailable,
             blocked: c.blocked,
-            ...comparison.labels,
           }}
         />
       ) : null}
