@@ -253,6 +253,8 @@ describe("product ad draft user flow: save with photo + optional logo, restore o
     store.setItem(
       key,
       JSON.stringify({
+        savedByUser: encodeURIComponent(principal.userId),
+        savedByWorkspace: encodeURIComponent(principal.workspaceId),
         version: -3,
         savedAt: Number.MAX_SAFE_INTEGER,
         productName: "x".repeat(500),
@@ -292,6 +294,22 @@ describe("product ad draft user flow: save with photo + optional logo, restore o
     store.setItem(key, JSON.stringify({ ...payload, savedByUser: encodeURIComponent("user-2") }));
     expect(readProductAdDraft(store, principal, { purgeOnOwnerMismatch: false })).toBeNull();
     expect(store.entries.has(key)).toBe(true);
+  });
+
+  it("never adopts a well-formed draft missing one or both owner fields", () => {
+    const store = makeStore();
+    fillWizardThenSaveDraft(store, (step) => 100 + step);
+    const key = productAdDraftStorageKey(principal)!;
+    const payload = JSON.parse(store.entries.get(key)!);
+    for (const missing of [
+      { ...payload, savedByUser: undefined, savedByWorkspace: undefined },
+      { ...payload, savedByUser: undefined },
+      { ...payload, savedByWorkspace: undefined },
+    ]) {
+      store.setItem(key, JSON.stringify(missing));
+      expect(readProductAdDraft(store, principal)).toBeNull();
+      expect(store.entries.has(key)).toBe(false);
+    }
   });
 
   it("retires an unattributed legacy draft without exposing its content", () => {
@@ -362,6 +380,13 @@ describe("product ad draft user flow: save with photo + optional logo, restore o
     expect(isStorableProductAdDraftAsset({ type: "image/png", size: MAX_PRODUCT_AD_DRAFT_NAME_BYTES })).toBe(true);
     expect(isStorableProductAdDraftAsset({ type: "image/png", size: MAX_PRODUCT_AD_DRAFT_NAME_BYTES + 1 })).toBe(false);
     expect(isStorableProductAdDraftAsset({ type: "text/plain", size: 128 })).toBe(false);
+    expect(isStorableProductAdDraftAsset({ type: "image/jpeg", size: 1 })).toBe(true);
+    expect(isStorableProductAdDraftAsset({ type: "image/webp", size: 250 })).toBe(true);
+    expect(isStorableProductAdDraftAsset({ type: "image/png", size: 0 })).toBe(false);
+    expect(isStorableProductAdDraftAsset({ type: "image/gif", size: 100 })).toBe(false);
+    expect(isStorableProductAdDraftAsset({ type: "image/svg+xml", size: 100 })).toBe(false);
+    expect(isStorableProductAdDraftAsset({ type: "image/png", size: Number.NaN })).toBe(false);
+    expect(isStorableProductAdDraftAsset({ type: "image/png", size: Number.POSITIVE_INFINITY })).toBe(false);
     expect(isStorableProductAdDraftAsset(null)).toBe(false);
 
     // The real UI behaviour the notice depends on: neither file input pre-fills a
