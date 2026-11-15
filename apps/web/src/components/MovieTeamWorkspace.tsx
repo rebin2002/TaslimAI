@@ -161,6 +161,10 @@ function IdentityScopedMovieTeamWorkspace({ project }: { project: MovieProject }
   const canComment = (collaboration?.currentUserPermissions ?? []).includes("Comment");
   const canRequestReviews = Boolean(user && canComment);
   const canRequestFinalReview = (collaboration?.currentUserPermissions ?? []).includes("FinalApproval");
+  // Discard any previously checked final gate when the server revokes its capability.
+  useEffect(() => {
+    if (!canRequestFinalReview) setReviewIsFinal(false);
+  }, [canRequestFinalReview]);
   const reviewerOptions = user ? team.filter((member) => member.userId !== user.id) : [];
   const canDecide = (review: MovieCollaboration["reviews"][number]) => Boolean(
     user
