@@ -4,6 +4,13 @@ import { describe, expect, it } from "vitest";
 const workspaceSource = readFileSync(new URL("./MovieTeamWorkspace.tsx", import.meta.url), "utf8");
 
 describe("Movie Team review workflow", () => {
+  it("fails closed and remounts review permissions across identity/project changes", () => {
+    expect(workspaceSource).toContain("project.workspaceId !== workspace.id");
+    expect(workspaceSource).toContain("if (loading || !user?.id || !workspace?.id");
+    expect(workspaceSource).toContain("key={movieTeamIdentityKey(user.id, workspace.id, project.id)}");
+    expect(workspaceSource).toContain("function IdentityScopedMovieTeamWorkspace");
+  });
+
   it("requests project sign-off from a different current team member", () => {
     expect(workspaceSource).toContain("api.requestMovieReview(project.id");
     expect(workspaceSource).toContain('targetType: "project"');
