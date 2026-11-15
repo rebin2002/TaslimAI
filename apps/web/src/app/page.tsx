@@ -26,7 +26,20 @@ function formatDate(value: string, locale: Locale) {
 }
 
 export default function HomePage() {
-  return <ProtectedPage><HomeDashboard /></ProtectedPage>;
+  return <ProtectedPage><IdentityScopedHomeDashboard /></ProtectedPage>;
+}
+
+/**
+ * A Home composer holds unsent text, local File objects, selected project and
+ * private dashboard results. A same-tab account/workspace switch must remount
+ * all of it before the new principal can see or submit stale old-scope data.
+ * A key on the child handles this synchronously during render, unlike an
+ * effect that clears the previous account after one visible frame.
+ */
+function IdentityScopedHomeDashboard() {
+  const { user, workspace, loading } = useAuth();
+  if (loading || !user || !workspace) return null;
+  return <HomeDashboard key={`${user.id}:${workspace.id}`} />;
 }
 
 function HomeDashboard() {
