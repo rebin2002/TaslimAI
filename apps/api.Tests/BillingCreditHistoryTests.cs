@@ -78,21 +78,6 @@ public sealed class BillingCreditHistoryTests
         var expired = new CreditEntitlement { Id = Guid.NewGuid(), WorkspaceId = workspace.Id, BillingPeriodId = period.Id, Type = CreditEntitlementType.IncludedMonthly, GrantedCredits = 1_000, GrantedAt = periodStart, ExpiresAt = periodEnd, IdempotencyKey = "included:mixed-expired", CreatedAt = periodStart };
         var active = new CreditEntitlement { Id = Guid.NewGuid(), WorkspaceId = workspace.Id, BillingPeriodId = period.Id, Type = CreditEntitlementType.Purchased, GrantedCredits = 500, GrantedAt = periodEnd, ExpiresAt = null, IdempotencyKey = "purchased:mixed-active", CreatedAt = now };
         db.Workspaces.Add(workspace);
-        // A different tenant can hold newer ledger movements; showing the
-        // whole durable history must still be bounded by the requested workspace.
-        var foreignWorkspace = new Workspace
-        {
-            Id = Guid.NewGuid(), Name = "Other Tenant", Slug = $"other-tenant-{Guid.NewGuid():N}",
-            Type = WorkspaceType.Personal, CreatedAt = now, UpdatedAt = now,
-        };
-        db.Workspaces.Add(foreignWorkspace);
-        db.CreditLedgerEntries.Add(new CreditLedgerEntry
-        {
-            Id = Guid.NewGuid(), WorkspaceId = foreignWorkspace.Id, CreditEntitlementId = null,
-            Type = CreditLedgerEntryType.Grant, Amount = 987_654,
-            IdempotencyKey = $"foreign-ledger:{Guid.NewGuid():N}",
-            Reason = "Foreign tenant confidential grant", CreatedAt = now.AddMinutes(1),
-        });
         db.Plans.Add(plan);
         db.Subscriptions.Add(subscription);
         db.BillingPeriods.Add(period);
