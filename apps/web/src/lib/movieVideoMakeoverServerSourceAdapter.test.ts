@@ -38,7 +38,10 @@ const response: MovieMakeoverServerSourceResponse = {
   workspaceId: context.workspaceId,
   sources: [row],
 };
-const map = (value: MovieMakeoverServerSourceResponse | null = response, scope = context) =>
+const map = (
+  value: MovieMakeoverServerSourceResponse | null = response,
+  scope: { principalId: string | null; workspaceId: string | null } = context,
+) =>
   describeVerifiedMovieMakeoverServerSources(value, projectId, scope);
 
 describe("authenticated source metadata adapter for provider-free Movie Makeover", () => {
