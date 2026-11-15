@@ -6,6 +6,9 @@ const protectedEntryPoints = [
   { path: "/create/document", label: "Document Studio" },
   { path: "/search", label: "Global Search" },
   { path: "/account/admin/operations", label: "Admin Operations" },
+  { path: "/create", label: "Create" },
+  { path: "/create/social", label: "Social Studio" },
+  { path: "/chat/e2e-anonymous-boundary", label: "Chat conversation" },
 ] as const;
 
 test.describe("anonymous protected-route boundary", () => {
