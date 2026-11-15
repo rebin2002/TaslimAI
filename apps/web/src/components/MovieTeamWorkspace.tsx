@@ -37,6 +37,7 @@ function IdentityScopedMovieTeamWorkspace({ project }: { project: MovieProject }
   const [commentBody, setCommentBody] = useState("");
   const [reviewerUserId, setReviewerUserId] = useState("");
   const [reviewNote, setReviewNote] = useState("");
+  const [decisionNotes, setDecisionNotes] = useState<Record<string, string>>({});
   const [reviewIsFinal, setReviewIsFinal] = useState(false);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
@@ -120,8 +121,9 @@ function IdentityScopedMovieTeamWorkspace({ project }: { project: MovieProject }
     setError("");
     setMessage("");
     try {
-      await api.decideMovieReview(project.id, reviewId, { status });
+      await api.decideMovieReview(project.id, reviewId, { status, decisionNote: decisionNotes[reviewId]?.trim() || null });
       await load();
+      setDecisionNotes((notes) => { const next = { ...notes }; delete next[reviewId]; return next; });
       setMessage(status === "Approved" ? "Review approved." : status === "ChangesRequested" ? "Changes requested." : "Review rejected.");
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "The review decision could not be saved.");
@@ -353,10 +355,22 @@ function IdentityScopedMovieTeamWorkspace({ project }: { project: MovieProject }
                 <div className="movie-team-compose-actions">
                   <span className={`movie-team-review-status is-${review.status.toLowerCase()}`}>{review.status}</span>
                   {canDecide(review) && review.status !== "Approved" && review.status !== "Rejected" && (
-                    <div className="movie-team-compose-actions">
-                      <button type="button" className="movie-text-action" onClick={() => void decideReview(review.id, "Approved")} disabled={busy}><CheckCircle2 size={12} /> Approve</button>
-                      <button type="button" className="movie-text-action" onClick={() => void decideReview(review.id, "ChangesRequested")} disabled={busy}>Request changes</button>
-                      <button type="button" className="movie-text-action is-danger" onClick={() => void decideReview(review.id, "Rejected")} disabled={busy}><X size={12} /> Reject</button>
+                    <div className="movie-team-compose">
+                      <label htmlFor={`movie-team-decision-note-${review.id}`}>Decision note (optional)</label>
+                      <textarea
+                        id={`movie-team-decision-note-${review.id}`}
+                        rows={2}
+                        maxLength={4000}
+                        value={decisionNotes[review.id] ?? ""}
+                        placeholder="Explain your approval, requested changes or rejection."
+                        onChange={(event) => setDecisionNotes((notes) => ({ ...notes, [review.id]: event.target.value }))}
+                        disabled={busy}
+                      />
+                      <div className="movie-team-compose-actions">
+                        <button type="button" className="movie-text-action" onClick={() => void decideReview(review.id, "Approved")} disabled={busy}><CheckCircle2 size={12} /> Approve</button>
+                        <button type="button" className="movie-text-action" onClick={() => void decideReview(review.id, "ChangesRequested")} disabled={busy}>Request changes</button>
+                        <button type="button" className="movie-text-action is-danger" onClick={() => void decideReview(review.id, "Rejected")} disabled={busy}><X size={12} /> Reject</button>
+                      </div>
                     </div>
                   )}
                 </div>
