@@ -120,7 +120,7 @@ const inertHandlers: Pick<MovieVideoMakeoverStudioProps, "onChange"> = {
   },
 };
 
-function render(props: Pick<MovieVideoMakeoverStudioProps, "project" | "assets" | "principalId" | "workspaceId" | "selection"> & Pick<MovieVideoMakeoverStudioProps, "comparison" | "comparisonBinding"> & Partial<Pick<MovieVideoMakeoverStudioProps, "sourceReadBinding" | "draftReadBinding">>): string {
+function render(props: Pick<MovieVideoMakeoverStudioProps, "project" | "assets" | "principalId" | "workspaceId" | "selection"> & Pick<MovieVideoMakeoverStudioProps, "comparison" | "comparisonBinding"> & Partial<Pick<MovieVideoMakeoverStudioProps, "sourceReadBinding" | "draftReadBinding" | "locale">>): string {
   const {
     sourceReadBinding = { principalId: PRINCIPAL, workspaceId: WORKSPACE },
     draftReadBinding = { principalId: PRINCIPAL, workspaceId: WORKSPACE },
@@ -135,6 +135,54 @@ function render(props: Pick<MovieVideoMakeoverStudioProps, "project" | "assets" 
     />,
   );
 }
+
+describe("Movie Makeover locale-safe provider-free composition", () => {
+  for (const locale of ["ar", "ku"] as const) {
+    it(`renders ${locale} RTL controls without enabling a provider or exposing cross-account drafts`, () => {
+      const markup = render({
+        project: project(),
+        assets: assets(),
+        principalId: PRINCIPAL,
+        workspaceId: WORKSPACE,
+        selection: settledDraftParts(),
+        comparison: null,
+        comparisonBinding: null,
+        locale,
+      });
+      expect(markup).toContain('dir="rtl"');
+      expect(markup).toContain(locale === "ar" ? "تحسين الفيديو بالذكاء الاصطناعي" : "جوانکردنی ڤیدیۆ بە زیرەکی دەستکرد");
+      expect(markup).toContain(locale === "ar" ? "إرفاق كمصدر" : "زیادکردن وەک سەرچاوە");
+      expect(markup).toContain(locale === "ar" ? "لم يتم ربط مزود الخدمة" : "هیچ دابینکەرێک پەیوەست نەکراوە");
+      expect(markup).toContain("launchPermitted: false");
+      expect(markup).toContain("billable: false");
+      expect(markup).not.toContain('title="Not wired yet"');
+    });
+  }
+
+  it("translates the honest unavailable result without replacing it with the source clip", () => {
+    const markup = render({
+      project: project(),
+      assets: assets(),
+      principalId: PRINCIPAL,
+      workspaceId: WORKSPACE,
+      selection: reduceMovieVideoMakeoverStudioSource(settledDraftParts(), "asset_take_01", catalogue()),
+      comparisonBinding: { principalId: PRINCIPAL, workspaceId: WORKSPACE, sourceAssetId: "asset_take_01" },
+      comparison: {
+        beforeSource: { url: "/api/test-asset/video" },
+        afterSource: null,
+        viewMode: "split",
+        splitPercent: 50,
+        onSplitPercentChange: () => { throw new Error("render cannot move splitter"); },
+        onViewModeChange: () => { throw new Error("render cannot change view"); },
+      },
+      locale: "ku",
+    });
+    expect(markup).toContain("پێشبینینی ئەنجام هێشتا بەردەست نییە");
+    expect(markup).toContain('dir="rtl"');
+    expect(markup).toContain("/api/test-asset/video");
+    expect(markup).not.toContain('aria-label="ئەنجامی جوانکردن"');
+  });
+});
 
 describe("studio: what the real Movie read models can and cannot say", () => {
   it("builds one row per clip in project order", () => {
