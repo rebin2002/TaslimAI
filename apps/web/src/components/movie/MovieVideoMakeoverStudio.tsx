@@ -43,6 +43,7 @@
  * this composer is mounted, which its owner can do without touching any file here.
  */
 
+import { movieMakeoverCopy, movieMakeoverDirection, type MovieMakeoverLocale } from "./movieVideoMakeoverLocale";
 import {
   MovieMakeoverComparisonPanel,
   type MovieMakeoverComparisonPanelProps,
@@ -101,6 +102,8 @@ export type MovieVideoMakeoverStudioProps = {
   readonly comparison?: MovieMakeoverComparisonPanelProps | null;
   /** Must match the current authenticated principal, workspace and attached clip. */
   readonly comparisonBinding?: MovieVideoMakeoverComparisonBinding | null;
+  /** Route-resolved UI locale; default English retains standalone behavior. */
+  readonly locale?: MovieMakeoverLocale;
 };
 
 /**
@@ -163,7 +166,9 @@ export function MovieVideoMakeoverStudio({
   onChange,
   comparison = null,
   comparisonBinding = null,
+  locale = "en",
 }: MovieVideoMakeoverStudioProps) {
+  const c = movieMakeoverCopy(locale);
   const context = { principalId, workspaceId };
   // Route authentication can briefly be unresolved after logout or an account
   // switch. Fail closed before rendering even clip titles; no caller-supplied
@@ -188,8 +193,8 @@ export function MovieVideoMakeoverStudio({
   );
   if (!hasDraftScope) {
     return (
-      <div className="movie-makeover-studio" data-pending-source-facts="0">
-        <p role="status">No source attached. Movie Makeover draft unavailable until account and workspace data are refreshed.</p>
+      <div className="movie-makeover-studio" dir={movieMakeoverDirection(locale)} data-pending-source-facts="0">
+        <p role="status">{c.waitingForScope}</p>
       </div>
     );
   }
@@ -211,8 +216,9 @@ export function MovieVideoMakeoverStudio({
   );
 
   return (
-    <div className="movie-makeover-studio" data-pending-source-facts={String(pendingCount)}>
+    <div className="movie-makeover-studio" dir={movieMakeoverDirection(locale)} data-pending-source-facts={String(pendingCount)}>
       <MovieVideoMakeoverSourcePanel
+        locale={locale}
         entries={entries}
         selectedAssetId={visibleSelection.sourceAssetId}
         mode={visibleSelection.mode}
@@ -222,10 +228,29 @@ export function MovieVideoMakeoverStudio({
       <p className="movie-makeover-studio-summary" role="note">
         {copy.headline}
       </p>
-      <MovieVideoMakeoverInputPanel selection={visibleSelection} onChange={onChange} showPlaceholderSourceControl={false} />
+      <MovieVideoMakeoverInputPanel locale={locale} selection={visibleSelection} onChange={onChange} showPlaceholderSourceControl={false} />
       {/* No source is inferred from the draft. A missing makeover result must
           remain unavailable, never be replaced with the original clip. */}
-      {comparisonMatchesSource && comparison ? <MovieMakeoverComparisonPanel {...comparison} /> : null}
+      {comparisonMatchesSource && comparison ? (
+        <MovieMakeoverComparisonPanel
+          {...comparison}
+          dir={locale === "en" ? comparison.dir : movieMakeoverDirection(locale)}
+          labels={locale === "en" ? comparison.labels : {
+            region: c.region,
+            modeGroup: c.view,
+            modeSplit: c.split,
+            modeBefore: c.before,
+            modeAfter: c.after,
+            beforePane: c.original,
+            afterPane: c.result,
+            splitter: c.splitter,
+            beforeUnavailable: c.beforeUnavailable,
+            afterUnavailable: c.afterUnavailable,
+            blocked: c.blocked,
+            ...comparison.labels,
+          }}
+        />
+      ) : null}
     </div>
   );
 }
