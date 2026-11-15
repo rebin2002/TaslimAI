@@ -59,7 +59,11 @@ test.describe("Product Ad preview — real authenticated session, local-only dra
       await expect(benefit).toHaveValue("Keeps your skin soft");
       await expect(channel).toHaveValue("tiktok");
       await expect(format).toHaveValue("story");
-      await expect(page.locator('section[aria-labelledby] p[role="status"]')).toBeVisible();
+      // The draft-restored notice is visible; the second, sr-only status belongs
+      // to the preview announcer and must not make this locator ambiguous.
+      const restoredDraftNotice = page.locator('section[aria-labelledby] p[role="status"]:not(.sr-only)');
+      await expect(restoredDraftNotice).toBeVisible();
+      await expect(restoredDraftNotice).toContainText("Cedar & Silk");
       expect(await photo.evaluate((input) => (input as HTMLInputElement).files?.length ?? 0)).toBe(0);
       expect(await logo.evaluate((input) => (input as HTMLInputElement).files?.length ?? 0)).toBe(0);
       await photo.setInputFiles({ name: "product.png", mimeType: "image/png", buffer: onePixelPng });
