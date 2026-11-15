@@ -25,6 +25,7 @@ public static class MovieVideoMakeoverSourceCodes
     public const string AssetMissing = "source_asset_missing";
     public const string AssetNotFound = "source_reference_invalid";
     public const string FileMissing = "source_file_missing";
+    public const string FileLinkMismatch = "source_file_link_mismatch";
     public const string AssetUnavailable = "source_asset_unavailable";
     public const string NotVideo = "source_asset_not_video";
     public const string ClipNotReady = "source_clip_not_ready";
@@ -164,7 +165,24 @@ public static class MovieVideoMakeoverSourceEvaluator
         if (storedFile is not null && storedFile.Status != StoredFileStatus.Ready)
             blockers.Add(MovieVideoMakeoverSourceCodes.AssetUnavailable);
 
+        // A clip may supply a direct file ID in addition to the asset's own
+        // file link. Conflicting persisted links are not evidence of one video;
+        // never allow the direct link to silently override the asset link.
+        if (asset?.StoredFileId is { } assetFileId
+            && clip.StoredFileId is { } clipFileId
+            && assetFileId != clipFileId)
+            blockers.Add(MovieVideoMakeoverSourceCodes.FileLinkMismatch);
+
+        // The asset's type label is not proof of the actual stored media type.
+        // Reject contradictory MIME evidence (including missing file MIME)
+        // before exposing a source as attachable to the Movie Makeover UI.
         if (asset is not null && !string.Equals(asset.AssetType, AssetTypes.Video, StringComparison.OrdinalIgnoreCase))
+            blockers.Add(MovieVideoMakeoverSourceCodes.NotVideo);
+        if (asset is not null && !string.IsNullOrWhiteSpace(asset.MimeType)
+            && !asset.MimeType.Trim().StartsWith("video/", StringComparison.OrdinalIgnoreCase))
+            blockers.Add(MovieVideoMakeoverSourceCodes.NotVideo);
+        if (storedFile is not null && (string.IsNullOrWhiteSpace(storedFile.ContentType)
+            || !storedFile.ContentType.Trim().StartsWith("video/", StringComparison.OrdinalIgnoreCase)))
             blockers.Add(MovieVideoMakeoverSourceCodes.NotVideo);
 
         if (!string.Equals(clip.Status, MovieClipStatuses.Ready, StringComparison.OrdinalIgnoreCase))
