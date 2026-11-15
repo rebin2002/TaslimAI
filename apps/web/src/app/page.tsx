@@ -51,6 +51,12 @@ function HomeDashboard() {
   const [files, setFiles] = useState<File[]>([]);
   const [asking, setAsking] = useState(false);
   const submissionGate = useRef(createHomeCreationSubmissionGate());
+  // Remounts cancel in-flight continuation; recreate after a StrictMode effect replay.
+  useEffect(() => {
+    const gate = createHomeCreationSubmissionGate();
+    submissionGate.current = gate;
+    return () => gate.cancel();
+  }, []);
   const [dashboard, setDashboard] = useState<DashboardData | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState("");
@@ -89,19 +95,25 @@ function HomeDashboard() {
       setAskError(t("chat.sendError"));
       return;
     }
-    if (!workspace || !submissionGate.current.tryStart()) return;
+    if (!workspace) return;
+    const gate = submissionGate.current;
+    if (!gate.tryStart()) return;
     setAsking(true);
     setAskError("");
     try {
       const conversation = await api.createConversation(workspace.id, projectId ? { projectId } : {});
+      if (!gate.isActive()) return;
       const uploaded = await Promise.all(files.map((file) => api.uploadFile(workspace.id, file, { conversationId: conversation.id, projectId: projectId || undefined })));
+      if (!gate.isActive()) return;
       await api.sendMessage(conversation.id, prompt, undefined, uploaded.map((file) => file.id));
+      if (!gate.isActive()) return;
       router.push(`/chat/${conversation.id}`);
     } catch {
-      setAskError(t("home.askError"));
+      if (gate.isActive()) setAskError(t("home.askError"));
     } finally {
-      submissionGate.current.finish();
-      setAsking(false);
+      const shouldUpdateUi = gate.isActive();
+      gate.finish();
+      if (shouldUpdateUi) setAsking(false);
     }
   }
 
