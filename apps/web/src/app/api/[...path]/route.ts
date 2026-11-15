@@ -8,7 +8,8 @@ const UPSTREAM_TIMEOUT_MS = 30_000;
 // commonly recognized names (e.g. X-Forwarded-Client-Cert and future variants).
 // The upstream HTTPS/cookie trust boundary must never depend on client metadata.
 function stripUntrustedForwardingHeaders(headers: Headers): void {
-  for (const name of headers.keys()) {
+  // Snapshot names: deleting during a live Headers iterator can skip the next key.
+  for (const name of [...headers.keys()]) {
     if (name === "forwarded" || name === "via" || name === "x-real-ip" || name.startsWith("x-forwarded-")) {
       headers.delete(name);
     }
