@@ -321,10 +321,12 @@ function IdentityScopedMovieTeamWorkspace({ project }: { project: MovieProject }
                     <span className="movie-team-resolved">
                       <CheckCircle2 size={12} /> Resolved
                     </span>
-                  ) : (
+                  ) : canComment ? (
                     <button type="button" className="movie-text-action" onClick={() => void resolve(comment.id)} disabled={busy}>
                       <CheckCircle2 size={12} /> Resolve
                     </button>
+                  ) : (
+                    <span className="movie-team-permissions">Read only · resolve requires Comment permission</span>
                   )}
                 </footer>
               </li>
