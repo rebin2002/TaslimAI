@@ -92,6 +92,9 @@ export type MovieVideoMakeoverStudioProps = {
   readonly workspaceId: string | null;
   /** Required: without provenance, cached source lists are never rendered. */
   readonly sourceReadBinding: MovieVideoMakeoverSourceReadBinding | null;
+  /** Draft provenance is independent of source-list fetch provenance. A fresh clip
+   * fetch cannot authorize showing a previous account's private prompt or consent. */
+  readonly draftReadBinding?: MovieVideoMakeoverSourceReadBinding | null;
   readonly selection: MovieVideoMakeoverSelection;
   readonly onChange: (nextSelection: MovieVideoMakeoverSelection) => void;
   /** Already-authorized preview sources supplied by the route owner, never fetched here. */
@@ -155,6 +158,7 @@ export function MovieVideoMakeoverStudio({
   principalId,
   workspaceId,
   sourceReadBinding,
+  draftReadBinding = null,
   selection,
   onChange,
   comparison = null,
@@ -172,6 +176,23 @@ export function MovieVideoMakeoverStudio({
     sourceReadBinding.principalId === principalId &&
     sourceReadBinding.workspaceId === workspaceId,
   );
+  // Private drafts are a separate read model from the source catalogue. The
+  // correct source fetch alone does not prove that the controlled selection was
+  // loaded for this account. Fail closed before rendering any draft prompt,
+  // consent reference, capabilities or stale source names, and expose no controls
+  // that could mutate a previous account's selection during the transition.
+  const hasDraftScope = Boolean(
+    hasAuthenticatedScope && draftReadBinding &&
+    draftReadBinding.principalId === principalId &&
+    draftReadBinding.workspaceId === workspaceId,
+  );
+  if (!hasDraftScope) {
+    return (
+      <div className="movie-makeover-studio" data-pending-source-facts="0">
+        <p role="status">No source attached. Movie Makeover draft unavailable until account and workspace data are refreshed.</p>
+      </div>
+    );
+  }
   const entries = hasAuthenticatedScope
     ? describeMovieVideoMakeoverProjectSources(project, assets, context)
     : [];
