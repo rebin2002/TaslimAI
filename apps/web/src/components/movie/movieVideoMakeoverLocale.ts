@@ -103,3 +103,108 @@ const copy = {
 export const movieMakeoverCopy = (locale: MovieMakeoverLocale) => copy[locale];
 export const movieMakeoverDirection = (locale: MovieMakeoverLocale): "ltr" | "rtl" =>
   locale === "en" ? "ltr" : "rtl";
+
+
+import { isMovieVideoMakeoverUnsupportedFutureMode } from "@/lib/movieVideoMakeoverDraftState";
+import {
+  movieVideoMakeoverSourcePendingCopy,
+  type MovieVideoMakeoverSourceBlockCode,
+  type MovieVideoMakeoverSourceGapCode,
+  type MovieVideoMakeoverSourceEntry,
+} from "@/lib/movieVideoMakeoverSourceCatalog";
+
+/** Source eligibility codes are authoritative; never translate arbitrary server text. */
+type IssueLocale = Exclude<MovieMakeoverLocale, "en">;
+const sourceIssueCopy: Record<IssueLocale, {
+  blockers: Record<MovieVideoMakeoverSourceBlockCode, string>;
+  gaps: Record<MovieVideoMakeoverSourceGapCode, string>;
+  futureHeadline: string; futureDetail: string;
+  noneHeadline: string; noneDetail: string;
+  blockedHeadline: string;
+  completeHeadline: string; completeDetail: string;
+  pendingHeadline: (count: number) => string;
+}> = {
+  ar: {
+    blockers: {
+    source_asset_missing: "لا يوجد معرّف ملف لإرفاق هذا المقطع.",
+    source_asset_not_video: "يتطلب التحسين ملف فيديو مكتملًا؛ هذا العنصر ليس فيديو مؤهلًا.",
+    source_asset_unavailable: "الملف غير متاح أو لم يسمح الخادم بإرفاقه.",
+    source_clip_not_ready: "لم يكتمل إنتاج هذا المقطع بعد.",
+    source_file_missing: "لا يوجد ملف محفوظ مرتبط بهذا العنصر.",
+    source_cross_workspace: "ينتمي المقطع إلى مساحة عمل أخرى ولا يمكن إرفاقه هنا.",
+    source_cross_principal: "لم يتم إثبات ملكية منشئ المحتوى لهذا المقطع.",
+    source_preview_unavailable: "معاينة الملف غير متاحة؛ لا يمكن التحقق من مقارنة قبل وبعد.",
+    },
+    gaps: {
+    ownership_unverified: "خاوەنی هذا المقطع غير متحقق منه.",
+    visibility_unverified: "خصوصية هذا المقطع غير متحقق منها.",
+    retention_unverified: "سياسة الاحتفاظ بالملف غير متحقق منها.",
+    duration_unknown: "مدة الفيديو غير معروفة.",
+    dimensions_unknown: "أبعاد الفيديو غير معروفة.",
+    frame_rate_unknown: "معدل الإطارات غير معروف.",
+    audio_state_unknown: "وجود الصوت غير معروف.",
+    size_unknown: "حجم الملف غير معروف.",
+    },
+    futureHeadline: "تغيير الملابس ميزة مستقبلية؛ إرفاق مقطع لا يجعلها متاحة.",
+    futureDetail: "لم يُثبت دعم تعديل الملابس داخل الفيديو؛ يبقى الطلب غير متاح.",
+    noneHeadline: "لم يُرفق فيديو مصدر. اختر مقطعًا مكتملًا من مساحة العمل هذه.",
+    noneDetail: "رفع فيديو جديد غير متاح في هذه اللوحة؛ يمكن فقط إرفاق المقاطع الموجودة.",
+    blockedHeadline: "لا يمكن إرفاق هذا المقطع.",
+    completeHeadline: "معلومات المصدر مكتملة، لكن تقدير التكلفة والبدء غير متاحين بعد.",
+    completeDetail: "إرفاق المصدر لا يبدأ مهمة ولا يحجز رصيدًا ولا يتيح التنفيذ.",
+    pendingHeadline: (count: number) => "تم إرفاق المصدر، لكن معلومات تحتاج إلى تحقق: " + String(count),
+  },
+  ku: {
+    blockers: {
+    source_asset_missing: "ناسێنەری فایل بۆ زیادکردنی ئەم کلیپە نییە.",
+    source_asset_not_video: "جوانکردن پێویستی بە ڤیدیۆیەکی تەواوکراو هەیە؛ ئەم دانەیە ڤیدیۆی گونجاو نییە.",
+    source_asset_unavailable: "فایلەکە بەردەست نییە یان ڕاژە ڕێگەی زیادکردنی نەداوە.",
+    source_clip_not_ready: "بەرهەمهێنانی ئەم کلیپە هێشتا تەواو نەبووە.",
+    source_file_missing: "هیچ فایلێکی پاشەکەوتکراو بۆ ئەم دانەیە نییە.",
+    source_cross_workspace: "ئەم کلیپە هی بۆشایی کارێکی ترە و ناتوانرێت لێرە زیاد بکرێت.",
+    source_cross_principal: "خاوەندارێتی دروستکەری ئەم کلیپە پشتڕاست نەکراوەتەوە.",
+    source_preview_unavailable: "پێشبینینی فایلەکە بەردەست نییە؛ بەراوردی پێش و دوا ناتوانرێت پشتڕاست بکرێتەوە.",
+    },
+    gaps: {
+    ownership_unverified: "خاوەنی ئەم کلیپە پشتڕاست نەکراوەتەوە.",
+    visibility_unverified: "تایبەتمەندی ئەم کلیپە پشتڕاست نەکراوەتەوە.",
+    retention_unverified: "سیاسەتی پاراستنی فایلەکە پشتڕاست نەکراوەتەوە.",
+    duration_unknown: "ماوەی ڤیدیۆکە نادیارە.",
+    dimensions_unknown: "قەبارەی وێنەی ڤیدیۆکە نادیارە.",
+    frame_rate_unknown: "ژمارەی چوارچێوەکان لە چرکەیەکدا نادیارە.",
+    audio_state_unknown: "بوونی دەنگ نادیارە.",
+    size_unknown: "قەبارەی فایلەکە نادیارە.",
+    },
+    futureHeadline: "گۆڕینی جل تایبەتمەندی داهاتووە؛ زیادکردنی کلیپ چالاکی ناکات.",
+    futureDetail: "پشتگیری گۆڕینی جل لە ڤیدیۆدا پشتڕاست نەکراوەتەوە؛ داواکارییەکە ناچالاکە.",
+    noneHeadline: "هیچ ڤیدیۆیەکی سەرچاوە زیاد نەکراوە. کلیپێکی تەواوکراو هەڵبژێرە.",
+    noneDetail: "بارکردنی ڤیدیۆی نوێ لەم پەنێڵەدا بەردەست نییە؛ تەنها کلیپە هەبووەکان زیاد دەکرێن.",
+    blockedHeadline: "ئەم کلیپە ناتوانرێت زیاد بکرێت.",
+    completeHeadline: "زانیارییەکانی سەرچاوە تەواون، بەڵام خەملاندن و دەستپێکردن بەردەست نین.",
+    completeDetail: "زیادکردنی سەرچاوە هیچ کارێک دەست پێ ناکات و کرێدت ناگیرێت.",
+    pendingHeadline: (count: number) => "سەرچاوە زیادکراوە، بەڵام ئەم ژمارە زانیارییانە پێویستیان بە پشتڕاستکردنەوە هەیە: " + String(count),
+  },
+};
+export function localizedMovieMakeoverBlocker(code: MovieVideoMakeoverSourceBlockCode, original: string, locale: MovieMakeoverLocale): string {
+  return locale === "en" ? original : sourceIssueCopy[locale].blockers[code];
+}
+export function localizedMovieMakeoverGap(code: MovieVideoMakeoverSourceGapCode, original: string, locale: MovieMakeoverLocale): string {
+  return locale === "en" ? original : sourceIssueCopy[locale].gaps[code];
+}
+export function localizedMovieMakeoverSourcePendingCopy(
+  entry: MovieVideoMakeoverSourceEntry | null, mode: string | null, locale: MovieMakeoverLocale,
+): { readonly headline: string; readonly details: readonly string[] } {
+  if (locale === "en") return movieVideoMakeoverSourcePendingCopy(entry, mode);
+  const c = sourceIssueCopy[locale];
+  if (isMovieVideoMakeoverUnsupportedFutureMode(mode)) return { headline: c.futureHeadline, details: [c.futureDetail] };
+  if (entry === null) return { headline: c.noneHeadline, details: [c.noneDetail] };
+  if (!entry.selectable) return {
+    headline: c.blockedHeadline,
+    details: entry.blockers.map((item) => localizedMovieMakeoverBlocker(item.code, item.message, locale)),
+  };
+  if (entry.gaps.length === 0) return { headline: c.completeHeadline, details: [c.completeDetail] };
+  return {
+    headline: c.pendingHeadline(entry.gaps.length),
+    details: entry.gaps.map((item) => localizedMovieMakeoverGap(item.code, item.message, locale)),
+  };
+}
