@@ -5,10 +5,12 @@ const workspaceSource = readFileSync(new URL("./MovieTeamWorkspace.tsx", import.
 
 describe("Movie Team review workflow", () => {
   it("fails closed and remounts review permissions across identity/project changes", () => {
-    expect(workspaceSource).toContain("project.workspaceId !== workspace.id");
-    expect(workspaceSource).toContain("if (loading || !user?.id || !workspace?.id");
-    expect(workspaceSource).toContain("key={movieTeamIdentityKey(user.id, workspace.id, project.id)}");
+    expect(workspaceSource).toContain("project.workspaceId || !project.id");
+    expect(workspaceSource).toContain("if (loading || !user?.id || !project.workspaceId");
+    expect(workspaceSource).toContain("key={movieTeamIdentityKey(user.id, project.workspaceId, project.id)}");
     expect(workspaceSource).toContain("function IdentityScopedMovieTeamWorkspace");
+    // Invited collaborators may review projects outside their personal workspace.
+    expect(workspaceSource).not.toContain("project.workspaceId !== workspace.id");
   });
 
   it("requests project sign-off from a different current team member", () => {
