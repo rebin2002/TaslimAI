@@ -40,26 +40,39 @@ public sealed class MovieVideoMakeoverSourceController(
         var (requesterUserId, workspaceId) = access.Value;
         var visibleToRequester = StoredFileVisibility.ForWorkspaceMember(requesterUserId).Compile();
 
-        var clips = await db.MovieClips.AsNoTracking()
-            .Where(clip => clip.MovieProjectId == projectId)
-            .OrderBy(clip => clip.CreatedAt)
-            .Take(MaxRows + 1)
-            .ToListAsync(cancellationToken);
-        var truncated = clips.Count > MaxRows;
-        if (truncated) clips.RemoveAt(MaxRows);
-
-        var (assetsByClip, filesByClip) = await LoadEvidenceAsync(clips, cancellationToken);
-
-        var sources = new List<MovieVideoMakeoverSourceDto>(clips.Count);
-        foreach (var clip in clips)
+        // Filter visibility before computing totals/paging: the number of
+        // foreign/invisible file links must never be disclosed indirectly.
+        // Scan fixed-size database batches; only retain MaxRows source details.
+        // This also finds eligible clips beyond a page of withheld rows.
+        var sources = new List<MovieVideoMakeoverSourceDto>(MaxRows);
+        var visibleCount = 0;
+        var offset = 0;
+        while (true)
         {
-            var asset = assetsByClip.GetValueOrDefault(clip.Id);
-            var storedFile = filesByClip.GetValueOrDefault(clip.Id);
-            if (MovieVideoMakeoverSourceEvaluator.ShouldWithhold(workspaceId, asset, storedFile, visibleToRequester))
-                continue; // cross-workspace or requester-invisible link: not disclosed at all
+            var clips = await db.MovieClips.AsNoTracking()
+                .Where(clip => clip.MovieProjectId == projectId)
+                .OrderBy(clip => clip.CreatedAt)
+                .ThenBy(clip => clip.Id)
+                .Skip(offset)
+                .Take(MaxRows)
+                .ToListAsync(cancellationToken);
+            if (clips.Count == 0) break;
+            offset += clips.Count;
 
-            sources.Add(MovieVideoMakeoverSourceEvaluator.Evaluate(
-                clip, projectId, asset, storedFile, requesterUserId, DateTime.UtcNow));
+            var (assetsByClip, filesByClip) = await LoadEvidenceAsync(clips, cancellationToken);
+            foreach (var clip in clips)
+            {
+                var asset = assetsByClip.GetValueOrDefault(clip.Id);
+                var storedFile = filesByClip.GetValueOrDefault(clip.Id);
+                if (MovieVideoMakeoverSourceEvaluator.ShouldWithhold(workspaceId, asset, storedFile, visibleToRequester))
+                    continue; // no IDs, existence, or counts for inaccessible links
+
+                visibleCount++;
+                if (sources.Count < MaxRows)
+                    sources.Add(MovieVideoMakeoverSourceEvaluator.Evaluate(
+                        clip, projectId, asset, storedFile, requesterUserId, DateTime.UtcNow));
+            }
+            if (clips.Count < MaxRows) break;
         }
 
         Response.Headers["X-Movie-Read-Model"] = MovieVideoMakeoverSourceCodes.ReadModel;
@@ -68,9 +81,9 @@ public sealed class MovieVideoMakeoverSourceController(
             projectId,
             workspaceId,
             DateTime.UtcNow,
-            clips.Count,
+            visibleCount,
             sources.Count,
-            truncated,
+            visibleCount > MaxRows,
             sources));
     }
 
