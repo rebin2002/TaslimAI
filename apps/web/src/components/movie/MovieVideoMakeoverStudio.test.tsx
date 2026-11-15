@@ -243,6 +243,44 @@ describe("studio: attaching a source is a draft edit and nothing more", () => {
     expect(result.previewPermitted).toBe(true);
   });
 
+  it("refreshes same-asset metadata and clears revoked privacy facts without mutating the caller", () => {
+    const selected = {
+      ...reduceMovieVideoMakeoverStudioSource(settledDraftParts(), "asset_take_01", catalogue()),
+      sourceOwnerPrincipalId: PRINCIPAL,
+      sourceVisibilityPrivate: true,
+      sourceRetentionVerified: true,
+      preserveOriginalAudio: true,
+    };
+    const changed = catalogue().map((entry) => entry.assetId === "asset_take_01"
+      ? {
+          ...entry,
+          source: {
+            ...entry.source,
+            durationSeconds: 17,
+            sizeBytes: 61_000_000,
+            ownerPrincipalId: null,
+            visibility: null,
+            retentionPolicyVerified: null,
+            audioPresent: null,
+          },
+        }
+      : entry);
+    const refreshed = reconcileMovieVideoMakeoverStudioSelection(selected, changed);
+    expect(refreshed.sourceAssetId).toBe("asset_take_01");
+    expect(refreshed.sourceDurationSeconds).toBe(17);
+    expect(refreshed.sourceSizeBytes).toBe(61_000_000);
+    expect(refreshed.sourceOwnerPrincipalId).toBeNull();
+    expect(refreshed.sourceVisibilityPrivate).toBe(false);
+    expect(refreshed.sourceRetentionVerified).toBe(false);
+    expect(refreshed.preserveOriginalAudio).toBe(false);
+    expect(refreshed.mode).toBe(selected.mode);
+    expect(refreshed.presetId).toBe(selected.presetId);
+    expect(selected.sourceDurationSeconds).toBe(12);
+    expect(selected.sourceOwnerPrincipalId).toBe(PRINCIPAL);
+    expect(selected.preserveOriginalAudio).toBe(true);
+    expect(admission(refreshed).launchPermitted).toBe(false);
+  });
+
   it("immediately masks a missing or revoked source without mutating the caller's selection", () => {
     const selected = reduceMovieVideoMakeoverStudioSource(settledDraftParts(), "asset_take_01", catalogue());
     const missing = reconcileMovieVideoMakeoverStudioSelection(selected, []);
