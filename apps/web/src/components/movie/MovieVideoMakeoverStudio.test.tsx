@@ -239,6 +239,7 @@ describe("studio: what the real Movie read models can and cannot say", () => {
       project: project(), assets: assets(),
       principalId: "principal_creator_B", workspaceId: WORKSPACE,
       sourceReadBinding: { principalId: "principal_creator_B", workspaceId: WORKSPACE },
+      draftReadBinding: { principalId: "principal_creator_B", workspaceId: WORKSPACE },
       selection: createEmptyMovieVideoMakeoverSelection(),
     });
     expect(freshMarkup).toContain("Interview room take 01");
