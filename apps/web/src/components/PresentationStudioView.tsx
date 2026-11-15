@@ -253,7 +253,7 @@ function IdentityScopedPresentationStudioView({ userId }: { userId: string }) {
   }, [current, draft, workspace]);
   useEffect(() => {
     if (!workspace || current) return;
-    const storedJobId = readPresentationActiveJobId(workspace.id);
+    const storedJobId = readPresentationActiveJobId(userId, workspace.id);
     if (!storedJobId) return;
     restoreJobId.current = storedJobId;
     const workspaceVersion = workspaceGeneration.current;
@@ -261,14 +261,14 @@ function IdentityScopedPresentationStudioView({ userId }: { userId: string }) {
     void api.getGenerationJob(storedJobId).then((job) => {
       if (!active || workspaceGeneration.current !== workspaceVersion || restoreJobId.current !== storedJobId) return;
       if (!isRestorablePresentationJob(job, workspace.id)) {
-        clearPresentationActiveJobId(workspace.id);
+        clearPresentationActiveJobId(userId, workspace.id);
         return;
       }
       setCurrent(job);
       setPollRetry(0);
     }).catch((cause) => {
       if (!active || workspaceGeneration.current !== workspaceVersion || restoreJobId.current !== storedJobId) return;
-      if (cause instanceof ApiError && (cause.status === 403 || cause.status === 404)) clearPresentationActiveJobId(workspace.id);
+      if (cause instanceof ApiError && (cause.status === 403 || cause.status === 404)) clearPresentationActiveJobId(userId, workspace.id);
     });
     return () => { active = false; };
   }, [workspace, current]);
@@ -321,7 +321,7 @@ function IdentityScopedPresentationStudioView({ userId }: { userId: string }) {
     const workspaceId = workspace.id;
     const workspaceVersion = workspaceGeneration.current;
     persistPresentationDraftState(userId, workspaceId, draft);
-    clearPresentationActiveJobId(workspaceId);
+    clearPresentationActiveJobId(userId, workspaceId);
     try {
       const job = await api.createPresentationGenerationJob({
         workspaceId,
@@ -340,7 +340,7 @@ function IdentityScopedPresentationStudioView({ userId }: { userId: string }) {
         attachmentIds: selected,
       });
       if (workspaceGeneration.current !== workspaceVersion || observedWorkspaceId.current !== workspaceId) return;
-      persistPresentationActiveJobId(workspaceId, job.id);
+      persistPresentationActiveJobId(userId, workspaceId, job.id);
       setCurrent(job);
       setActiveSlide(0);
       setPollRetry(0);
@@ -408,7 +408,7 @@ function IdentityScopedPresentationStudioView({ userId }: { userId: string }) {
 
   function createAnother() {
     restoreJobId.current = null;
-    if (workspace) clearPresentationActiveJobId(workspace.id);
+    if (workspace) clearPresentationActiveJobId(userId, workspace.id);
     setCurrent(null);
     setActiveSlide(0);
     setError("");
