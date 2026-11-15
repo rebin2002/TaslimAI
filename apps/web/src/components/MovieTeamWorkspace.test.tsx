@@ -39,6 +39,14 @@ describe("Movie Team review workflow", () => {
     expect(workspaceSource).toMatch(/setCollaboration\(null\);\s*setReviewIsFinal\(false\);/);
   });
 
+  it("does not offer note resolution to read-only collaborators", () => {
+    // ResolveCommentAsync requires the same Comment capability as AddCommentAsync.
+    // A read-only invited team member should never see a misleading write action.
+    expect(workspaceSource).toContain("const canComment = (collaboration?.currentUserPermissions ?? []).includes(\"Comment\")");
+    expect(workspaceSource).toMatch(/\) : canComment \? \(\s*<button[^>]*onClick=\{\(\) => void resolve\(comment.id\)\}/);
+    expect(workspaceSource).toContain("Read only · resolve requires Comment permission");
+  });
+
   it("exposes decisions only to the assigned authenticated reviewer", () => {
     expect(workspaceSource).toContain("review.reviewerUserId === user.id");
     expect(workspaceSource).toContain("api.decideMovieReview(project.id, reviewId");
