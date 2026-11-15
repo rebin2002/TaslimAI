@@ -1,9 +1,21 @@
+import type { Locale } from "@/lib/i18n";
+
 export const attachmentOnlyCreationPrompt = "Please review the attached files.";
 
-export function resolveHomeCreationPrompt(value: string, attachmentCount: number): string | null {
+/** Keep a no-text attachment-only create in the creator's chosen language.
+ * No provider or storage call happens here; only the future message text differs.
+ * Exhaustive locale keys prevent a newly added UI language silently using English.
+ */
+export const attachmentOnlyCreationPrompts: Readonly<Record<Locale, string>> = {
+  en: attachmentOnlyCreationPrompt,
+  ar: "يرجى مراجعة الملفات المرفقة.",
+  ku: "تکایە پێداچوونەوە بە فایلە هاوپێچکراوەکاندا بکە.",
+};
+
+export function resolveHomeCreationPrompt(value: string, attachmentCount: number, locale: Locale = "en"): string | null {
   const prompt = value.trim();
   if (prompt) return prompt;
-  return attachmentCount > 0 ? attachmentOnlyCreationPrompt : null;
+  return attachmentCount > 0 ? attachmentOnlyCreationPrompts[locale] : null;
 }
 
 export function canSubmitHomeCreation(value: string, attachmentCount: number): boolean {
