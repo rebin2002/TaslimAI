@@ -174,7 +174,10 @@ export function isStorableProductAdDraftAsset(
   file: Pick<File, "type" | "size"> | null | undefined,
 ): file is Pick<File, "type" | "size"> {
   if (!file) return false;
-  return typeof file.type === "string" && file.type.startsWith("image/") && file.size <= MAX_PRODUCT_AD_DRAFT_NAME_BYTES;
+  return (file.type === "image/jpeg" || file.type === "image/png" || file.type === "image/webp")
+    && Number.isFinite(file.size)
+    && file.size > 0
+    && file.size <= MAX_PRODUCT_AD_DRAFT_NAME_BYTES;
 }
 
 function toDraftAsset(file: ProductAdDraftEdit["productPhoto"]): ProductAdDraftAsset | null {
@@ -183,7 +186,7 @@ function toDraftAsset(file: ProductAdDraftEdit["productPhoto"]): ProductAdDraftA
   const mime = boundedText(file.type, limits.mime);
   if (!name || !mime) return null;
   if (new TextEncoder().encode(name).length > maxAssetNameBytes) return null;
-  const bytes = Number.isFinite(file.size) && file.size >= 0 && file.size <= MAX_PRODUCT_AD_DRAFT_NAME_BYTES
+  const bytes = Number.isFinite(file.size) && file.size > 0 && file.size <= MAX_PRODUCT_AD_DRAFT_NAME_BYTES
     ? Math.trunc(file.size)
     : 0;
   return { name, mime, bytes };
@@ -339,11 +342,10 @@ export function readProductAdDraft(
   }
   const storedUser = typeof parsed.savedByUser === "string" ? parsed.savedByUser : null;
   const storedWorkspace = typeof parsed.savedByWorkspace === "string" ? parsed.savedByWorkspace : null;
-  const attributed = storedUser !== null || storedWorkspace !== null;
   const owned = attributed
     && storedUser === encodeURIComponent(resolved.userId)
     && storedWorkspace === encodeURIComponent(resolved.workspaceId);
-  if (attributed && !owned) {
+  if (!owned) {
     // A foreign entry is never surfaced; it is removed unless the caller opted out.
     if (options.purgeOnOwnerMismatch !== false) clearProductAdDraft(store, key);
     return null;
