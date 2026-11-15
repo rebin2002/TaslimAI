@@ -74,12 +74,14 @@ describe("Movie Team review workflow", () => {
     expect(workspaceSource).toContain("const [loadError, setLoadError] = useState(false)");
     expect(workspaceSource).toMatch(/setCollaboration\(next\);\s*setLoadError\(false\);/);
     expect(workspaceSource).toMatch(/setCollaboration\(null\);\s*setReviewIsFinal\(false\);\s*setLoadError\(true\);/);
-    expect(workspaceSource).toContain("if (!loading && loadError) {");
+    expect(workspaceSource).toContain("if (loading || loadError) {");
+    expect(workspaceSource).toContain('role="status"');
+    expect(workspaceSource).toContain("Refreshing Movie Team permissions and reviews");
     expect(workspaceSource).toContain('role="alert"');
     expect(workspaceSource).toContain("Unable to load Movie Team permissions and reviews.");
     expect(workspaceSource).toContain("onClick={() => void load()}");
     expect(workspaceSource).toMatch(/const revision = \+\+loadRevision\.current;\s*setLoading\(true\);/);
-    expect(workspaceSource.indexOf("if (!loading && loadError) {")).toBeLessThan(
+    expect(workspaceSource.indexOf("if (loading || loadError) {")).toBeLessThan(
       workspaceSource.indexOf('<section className="movie-team-summary"'),
     );
   });
