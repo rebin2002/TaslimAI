@@ -104,23 +104,28 @@ export function clearPresentationDraftState(userId: string, workspaceId: string,
 }
 export type PresentationStudioState = "compose" | "pending" | "queued" | "running" | "succeeded" | "completed-unavailable" | "failed" | "cancelled";
 
-export function presentationActiveJobStorageKey(workspaceId: string) { return `${activeJobStoragePrefix}${workspaceId}`; }
-export function readPresentationActiveJobId(workspaceId: string) {
-  if (typeof window === "undefined") return null;
+// Active generation IDs are private to the authenticated principal as well as
+// its workspace. Never read legacy workspace-only keys: they can belong to a
+// previous account using this browser and would trigger stale-scope GETs.
+export function presentationActiveJobStorageKey(userId: string, workspaceId: string) {
+  return `${activeJobStoragePrefix}${encodeURIComponent(userId)}:${encodeURIComponent(workspaceId)}`;
+}
+export function readPresentationActiveJobId(userId: string, workspaceId: string) {
+  if (typeof window === "undefined" || !userId.trim() || !workspaceId.trim()) return null;
   try {
-    const jobId = window.sessionStorage.getItem(presentationActiveJobStorageKey(workspaceId));
+    const jobId = window.sessionStorage.getItem(presentationActiveJobStorageKey(userId, workspaceId));
     return jobId?.trim() || null;
   } catch {
     return null;
   }
 }
-export function persistPresentationActiveJobId(workspaceId: string, jobId: string) {
-  if (typeof window === "undefined" || !jobId.trim()) return;
-  try { window.sessionStorage.setItem(presentationActiveJobStorageKey(workspaceId), jobId); } catch { /* Storage may be unavailable. */ }
+export function persistPresentationActiveJobId(userId: string, workspaceId: string, jobId: string) {
+  if (typeof window === "undefined" || !userId.trim() || !workspaceId.trim() || !jobId.trim()) return;
+  try { window.sessionStorage.setItem(presentationActiveJobStorageKey(userId, workspaceId), jobId); } catch { /* Storage may be unavailable. */ }
 }
-export function clearPresentationActiveJobId(workspaceId: string) {
-  if (typeof window === "undefined") return;
-  try { window.sessionStorage.removeItem(presentationActiveJobStorageKey(workspaceId)); } catch { /* Storage may be unavailable. */ }
+export function clearPresentationActiveJobId(userId: string, workspaceId: string) {
+  if (typeof window === "undefined" || !userId.trim() || !workspaceId.trim()) return;
+  try { window.sessionStorage.removeItem(presentationActiveJobStorageKey(userId, workspaceId)); } catch { /* Storage may be unavailable. */ }
 }
 export function isPresentationJob(job: GenerationJob | null) {
   return job?.jobType.trim().toLowerCase() === "presentation.generate";
