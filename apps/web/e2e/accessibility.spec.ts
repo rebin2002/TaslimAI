@@ -236,6 +236,25 @@ test.describe("basic accessibility smoke", () => {
     expect(traffic.apiCalls.every((call) => call.startsWith("GET "))).toBe(true);
   });
 
+  test("rapid onboarding completion is single-flight and sends no duplicate writes", async ({ page }) => {
+    const traffic = await interceptOnboardingApi(page, { allowCompletion: true });
+    await page.goto("/projects");
+    const dialog = page.getByRole("dialog");
+    await expect(dialog).toBeVisible();
+    await dialog.locator(".onboarding-skip").evaluate((element) => {
+      const button = element as HTMLButtonElement;
+      // Consecutive DOM events in one synchronous task represent rapid clicks
+      // before the save operation has returned.
+      button.click();
+      button.click();
+    });
+    await expect(dialog).toBeHidden();
+    expect(traffic.completionRequests).toHaveLength(1);
+    expect(traffic.completionRequests[0].csrfToken).toBe("issue-109-synthetic-csrf");
+    expect(traffic.unexpectedApiCalls).toEqual([]);
+    expect(traffic.externalRequests).toEqual([]);
+  });
+
   const completionProfiles: Array<{ locale: Locale; lang: string; dir: string }> = [
     { locale: "en", lang: "en", dir: "ltr" },
     { locale: "ar", lang: "ar", dir: "rtl" },
