@@ -149,6 +149,8 @@ function IdentityScopedPresentationStudioView({ userId }: { userId: string }) {
   const [loadingSources, setLoadingSources] = useState(true);
   const [working, setWorking] = useState(false);
   const [pollRetry, setPollRetry] = useState(0);
+  const [sessionDenied, setSessionDenied] = useState(false);
+  const sessionDeniedRef = useRef(false);
   const [retryingCompleted, setRetryingCompleted] = useState(false);
   const [error, setError] = useState("");
   const [downloadError, setDownloadError] = useState("");
@@ -157,8 +159,34 @@ function IdentityScopedPresentationStudioView({ userId }: { userId: string }) {
   const observedWorkspaceId = useRef<string | null>(workspace?.id ?? null);
   const workspaceGeneration = useRef(0);
 
+  // A revoked session is terminal for this mounted user/workspace. Do not
+  // render cached private slides or start new protected requests after HTTP 401.
+  const revokeSession = useCallback(() => {
+    if (sessionDeniedRef.current) return;
+    sessionDeniedRef.current = true;
+    workspaceGeneration.current += 1;
+    restoreJobId.current = null;
+    if (workspace) clearPresentationActiveJobId(userId, workspace.id);
+    setSessionDenied(true);
+    setCurrent(null);
+    setProjects([]);
+    setFiles([]);
+    setRecentPresentations([]);
+    setSelected([]);
+    setTitle("");
+    setDescription("");
+    setAudience("");
+    setBrandCompany("");
+    setAdditionalInstructions("");
+    setWorking(false);
+    setRetryingCompleted(false);
+    setLoadingSources(false);
+    setPollRetry(0);
+    setError(t("presentation.pollError"));
+  }, [userId, workspace, t]);
+
   const loadSources = useCallback(async () => {
-    if (!workspace) return;
+    if (!workspace || sessionDeniedRef.current) return;
     const workspaceId = workspace.id;
     const workspaceVersion = workspaceGeneration.current;
     setLoadingSources(true);
@@ -169,7 +197,7 @@ function IdentityScopedPresentationStudioView({ userId }: { userId: string }) {
         api.listFiles(workspaceId),
         api.listAssets(workspaceId, { assetType: "presentation", sort: "recent", pageSize: 6 }),
       ]);
-      if (observedWorkspaceId.current !== workspaceId || workspaceGeneration.current !== workspaceVersion) return;
+      if (sessionDeniedRef.current || observedWorkspaceId.current !== workspaceId || workspaceGeneration.current !== workspaceVersion) return;
       const availableProjects = [...active, ...archived];
       const availableFiles = sourceFiles.filter((file) => extensions.includes(file.extension.toLowerCase()));
       setProjects(availableProjects);
@@ -178,15 +206,19 @@ function IdentityScopedPresentationStudioView({ userId }: { userId: string }) {
       const readyIds = new Set(availableFiles.filter((file) => isPresentationSourceReady(file)).map((file) => file.id));
       setSelected((value) => value.filter((id) => readyIds.has(id)).slice(0, 5));
       setRecentPresentations(assetResult.items);
-    } catch {
-      if (observedWorkspaceId.current !== workspaceId || workspaceGeneration.current !== workspaceVersion) return;
+    } catch (cause) {
+      if (sessionDeniedRef.current || observedWorkspaceId.current !== workspaceId || workspaceGeneration.current !== workspaceVersion) return;
+      if (cause instanceof ApiError && cause.status === 401) {
+        revokeSession();
+        return;
+      }
       setProjects([]);
       setFiles([]);
       setRecentPresentations([]);
     } finally {
-      if (observedWorkspaceId.current === workspaceId && workspaceGeneration.current === workspaceVersion) setLoadingSources(false);
+      if (!sessionDeniedRef.current && observedWorkspaceId.current === workspaceId && workspaceGeneration.current === workspaceVersion) setLoadingSources(false);
     }
-  }, [workspace]);
+  }, [workspace, revokeSession]);
 
   // Workspace-scoped jobs, briefs, selections, and source lists must not survive an ownership boundary.
   // The generation counter fences responses and actions that started in the previous workspace.
@@ -229,7 +261,7 @@ function IdentityScopedPresentationStudioView({ userId }: { userId: string }) {
   // eslint-disable-next-line react-hooks/set-state-in-effect
   useEffect(() => { void loadSources(); }, [loadSources]);
   useEffect(() => {
-    if (!workspace || current || draftHydratedWorkspace.current === workspace.id) return;
+    if (!workspace || sessionDeniedRef.current || current || draftHydratedWorkspace.current === workspace.id) return;
     const draft = loadPresentationDraftState(userId, workspace.id);
     setProjectId(searchParams.get("projectId") ?? draft.projectId);
     setSelected(draft.selected);
@@ -248,18 +280,18 @@ function IdentityScopedPresentationStudioView({ userId }: { userId: string }) {
   }, [current, searchParams, workspace]);
   const draft = useMemo(() => ({ projectId, selected, title, description, presentationType, length, tone, language, audience, brandCompany, additionalInstructions, includeAgenda, includeClosingNextSteps }), [additionalInstructions, audience, brandCompany, description, includeAgenda, includeClosingNextSteps, language, length, presentationType, projectId, selected, title, tone]);
   useEffect(() => {
-    if (!workspace || current || draftHydratedWorkspace.current !== workspace.id) return;
+    if (!workspace || sessionDeniedRef.current || current || draftHydratedWorkspace.current !== workspace.id) return;
     persistPresentationDraftState(userId, workspace.id, draft);
   }, [current, draft, workspace]);
   useEffect(() => {
-    if (!workspace || current) return;
+    if (!workspace || sessionDeniedRef.current || current) return;
     const storedJobId = readPresentationActiveJobId(userId, workspace.id);
     if (!storedJobId) return;
     restoreJobId.current = storedJobId;
     const workspaceVersion = workspaceGeneration.current;
     let active = true;
     void api.getGenerationJob(storedJobId).then((job) => {
-      if (!active || workspaceGeneration.current !== workspaceVersion || restoreJobId.current !== storedJobId) return;
+      if (!active || sessionDeniedRef.current || workspaceGeneration.current !== workspaceVersion || restoreJobId.current !== storedJobId) return;
       if (!isRestorablePresentationJob(job, workspace.id)) {
         clearPresentationActiveJobId(userId, workspace.id);
         return;
@@ -267,31 +299,50 @@ function IdentityScopedPresentationStudioView({ userId }: { userId: string }) {
       setCurrent(job);
       setPollRetry(0);
     }).catch((cause) => {
-      if (!active || workspaceGeneration.current !== workspaceVersion || restoreJobId.current !== storedJobId) return;
-      if (cause instanceof ApiError && (cause.status === 403 || cause.status === 404)) clearPresentationActiveJobId(userId, workspace.id);
+      if (!active || sessionDeniedRef.current || workspaceGeneration.current !== workspaceVersion || restoreJobId.current !== storedJobId) return;
+      if (cause instanceof ApiError && cause.status === 401) {
+        revokeSession();
+        return;
+      }
+      if (cause instanceof ApiError && (cause.status === 403 || cause.status === 404)) {
+        clearPresentationActiveJobId(userId, workspace.id);
+        restoreJobId.current = null;
+      }
     });
     return () => { active = false; };
-  }, [workspace, current]);
+  }, [workspace, current, userId, revokeSession]);
   useEffect(() => {
-    if (!current || !shouldPollPresentationJob(current)) return;
+    if (sessionDeniedRef.current || !current || !shouldPollPresentationJob(current)) return;
     const jobId = current.id;
     const workspaceVersion = workspaceGeneration.current;
     let active = true;
     const timer = window.setTimeout(async () => {
       try {
         const next = await api.getGenerationJob(jobId);
-        if (!active || workspaceGeneration.current !== workspaceVersion || current.id !== jobId) return;
+        if (!active || sessionDeniedRef.current || workspaceGeneration.current !== workspaceVersion || current.id !== jobId) return;
         setCurrent(next);
         setPollRetry(0);
         setError("");
-      } catch {
-        if (!active || workspaceGeneration.current !== workspaceVersion || current.id !== jobId) return;
+      } catch (cause) {
+        if (!active || sessionDeniedRef.current || workspaceGeneration.current !== workspaceVersion || current.id !== jobId) return;
+        if (cause instanceof ApiError && cause.status === 401) {
+          revokeSession();
+          return;
+        }
+        if (cause instanceof ApiError && (cause.status === 403 || cause.status === 404)) {
+          if (workspace) clearPresentationActiveJobId(userId, workspace.id);
+          restoreJobId.current = null;
+          setCurrent(null);
+          setPollRetry(0);
+          setError(t("presentation.pollError"));
+          return;
+        }
         setPollRetry((attempt) => attempt + 1);
         setError(t("presentation.pollError"));
       }
     }, nextPresentationPollDelay(current, pollRetry) ?? 700);
     return () => { active = false; window.clearTimeout(timer); };
-  }, [current, pollRetry, t]);
+  }, [current, pollRetry, t, workspace, userId, revokeSession]);
 
   const result = parsePresentationJobResult(current);
   const state = presentationStudioState(current, result);
@@ -304,12 +355,13 @@ function IdentityScopedPresentationStudioView({ userId }: { userId: string }) {
   const progressSteps = [t("presentation.progress.brief"), t("presentation.progress.structure"), t("presentation.progress.slides")];
 
   function toggleFile(file: StoredFile) {
-    if (!isPresentationSourceReady(file)) return;
+    if (sessionDeniedRef.current || !isPresentationSourceReady(file)) return;
     setSelected((value) => value.includes(file.id) ? value.filter((id) => id !== file.id) : value.length >= 5 ? value : [...value, file.id]);
   }
 
   async function create(event: FormEvent) {
     event.preventDefault();
+    if (sessionDeniedRef.current) return;
     if (!workspace || title.trim().length < 3 || description.trim().length < 3) {
       setError(t("presentation.required"));
       return;
@@ -339,20 +391,21 @@ function IdentityScopedPresentationStudioView({ userId }: { userId: string }) {
         includeClosingNextSteps,
         attachmentIds: selected,
       });
-      if (workspaceGeneration.current !== workspaceVersion || observedWorkspaceId.current !== workspaceId) return;
+      if (sessionDeniedRef.current || workspaceGeneration.current !== workspaceVersion || observedWorkspaceId.current !== workspaceId) return;
       persistPresentationActiveJobId(userId, workspaceId, job.id);
       setCurrent(job);
       setActiveSlide(0);
       setPollRetry(0);
-    } catch {
-      if (workspaceGeneration.current === workspaceVersion && observedWorkspaceId.current === workspaceId) setError(t("presentation.createError"));
+    } catch (cause) {
+      if (cause instanceof ApiError && cause.status === 401 && !sessionDeniedRef.current) revokeSession();
+      else if (!sessionDeniedRef.current && workspaceGeneration.current === workspaceVersion && observedWorkspaceId.current === workspaceId) setError(t("presentation.createError"));
     } finally {
-      if (workspaceGeneration.current === workspaceVersion && observedWorkspaceId.current === workspaceId) setWorking(false);
+      if (!sessionDeniedRef.current && workspaceGeneration.current === workspaceVersion && observedWorkspaceId.current === workspaceId) setWorking(false);
     }
   }
 
   async function cancel() {
-    if (!current || !canCancelPresentationJob(current)) return;
+    if (sessionDeniedRef.current || !current || !canCancelPresentationJob(current)) return;
     const workspaceVersion = workspaceGeneration.current;
     const jobId = current.id;
     setWorking(true);
@@ -360,53 +413,57 @@ function IdentityScopedPresentationStudioView({ userId }: { userId: string }) {
     try {
       await api.cancelGenerationJob(jobId);
       const next = await api.getGenerationJob(jobId);
-      if (workspaceGeneration.current !== workspaceVersion || current.id !== jobId) return;
+      if (sessionDeniedRef.current || workspaceGeneration.current !== workspaceVersion || current.id !== jobId) return;
       setCurrent(next);
-    } catch {
-      if (workspaceGeneration.current === workspaceVersion && current.id === jobId) setError(t("presentation.cancelError"));
+    } catch (cause) {
+      if (cause instanceof ApiError && cause.status === 401 && !sessionDeniedRef.current) revokeSession();
+      else if (!sessionDeniedRef.current && workspaceGeneration.current === workspaceVersion && current.id === jobId) setError(t("presentation.cancelError"));
     } finally {
-      if (workspaceGeneration.current === workspaceVersion) setWorking(false);
+      if (!sessionDeniedRef.current && workspaceGeneration.current === workspaceVersion) setWorking(false);
     }
   }
 
   async function retryCompleted() {
-    if (!current) return;
+    if (sessionDeniedRef.current || !current) return;
     const workspaceVersion = workspaceGeneration.current;
     const jobId = current.id;
     setRetryingCompleted(true);
     setError("");
     try {
       const next = await api.getGenerationJob(jobId);
-      if (workspaceGeneration.current === workspaceVersion && current.id === jobId) setCurrent(next);
-    } catch {
-      if (workspaceGeneration.current === workspaceVersion && current.id === jobId) setError(t("presentation.completedLoadError"));
+      if (!sessionDeniedRef.current && workspaceGeneration.current === workspaceVersion && current.id === jobId) setCurrent(next);
+    } catch (cause) {
+      if (cause instanceof ApiError && cause.status === 401 && !sessionDeniedRef.current) revokeSession();
+      else if (!sessionDeniedRef.current && workspaceGeneration.current === workspaceVersion && current.id === jobId) setError(t("presentation.completedLoadError"));
     } finally {
-      if (workspaceGeneration.current === workspaceVersion) setRetryingCompleted(false);
+      if (!sessionDeniedRef.current && workspaceGeneration.current === workspaceVersion) setRetryingCompleted(false);
     }
   }
 
   async function downloadRepresentation(representationId: string, fileName: string) {
-    if (!result?.assetId) return;
+    if (sessionDeniedRef.current || !result?.assetId) return;
     const workspaceVersion = workspaceGeneration.current;
     setWorking(true);
     setDownloadError("");
     try {
       const blob = await api.downloadAssetRepresentation(result.assetId, representationId);
-      if (workspaceGeneration.current !== workspaceVersion) return;
+      if (sessionDeniedRef.current || workspaceGeneration.current !== workspaceVersion) return;
       const url = URL.createObjectURL(blob);
       const anchor = window.document.createElement("a");
       anchor.href = url;
       anchor.download = fileName;
       anchor.click();
       window.setTimeout(() => URL.revokeObjectURL(url), 0);
-    } catch {
-      if (workspaceGeneration.current === workspaceVersion) setDownloadError(t("presentation.downloadError"));
+    } catch (cause) {
+      if (cause instanceof ApiError && cause.status === 401 && !sessionDeniedRef.current) revokeSession();
+      else if (!sessionDeniedRef.current && workspaceGeneration.current === workspaceVersion) setDownloadError(t("presentation.downloadError"));
     } finally {
-      if (workspaceGeneration.current === workspaceVersion) setWorking(false);
+      if (!sessionDeniedRef.current && workspaceGeneration.current === workspaceVersion) setWorking(false);
     }
   }
 
   function createAnother() {
+    if (sessionDeniedRef.current) return;
     restoreJobId.current = null;
     if (workspace) clearPresentationActiveJobId(userId, workspace.id);
     setCurrent(null);
@@ -429,7 +486,11 @@ function IdentityScopedPresentationStudioView({ userId }: { userId: string }) {
       <span className="presentation-studio-header-icon"><PresentationIcon size={26} /></span>
     </div>
 
-    {!current ? <>
+    {sessionDenied ? <section className="account-card presentation-generation-state presentation-terminal-state" role="alert">
+      <LockKeyhole size={28} />
+      <h2>{t("presentation.pollError")}</h2>
+      <p>{t("presentation.privateWorkspace")}</p>
+    </section> : !current ? <>
       <form className="presentation-compose-workspace" onSubmit={(event) => void create(event)} aria-busy={working}>
         <section className="presentation-compose-stage">
           <div className="presentation-stage-toolbar"><div><span className="stage-label">{t("presentation.stageLabel")}</span><strong>{t("presentation.stageTitle")}</strong></div><span className="stage-status"><LockKeyhole size={13} /> {t("presentation.privateWorkspace")}</span></div>
