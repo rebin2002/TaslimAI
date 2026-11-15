@@ -33,6 +33,7 @@ function IdentityScopedMovieTeamWorkspace({ project }: { project: MovieProject }
   const { t } = useLocale();
   const [collaboration, setCollaboration] = useState<MovieCollaboration | null>(null);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(false);
   const [busy, setBusy] = useState(false);
   const [commentBody, setCommentBody] = useState("");
   const [reviewerUserId, setReviewerUserId] = useState("");
@@ -49,10 +50,12 @@ function IdentityScopedMovieTeamWorkspace({ project }: { project: MovieProject }
   const load = useCallback(async () => {
     if (!mounted.current) return;
     const revision = ++loadRevision.current;
+    setLoading(true);
     try {
       const next = await api.getMovieCollaboration(project.id);
       if (mounted.current && revision === loadRevision.current) {
         setCollaboration(next);
+        setLoadError(false);
         // A fresh server permission snapshot revokes any stale final-gate choice.
         if (!next.currentUserPermissions.includes("FinalApproval")) setReviewIsFinal(false);
       }
@@ -60,6 +63,7 @@ function IdentityScopedMovieTeamWorkspace({ project }: { project: MovieProject }
       if (mounted.current && revision === loadRevision.current) {
         setCollaboration(null);
         setReviewIsFinal(false);
+        setLoadError(true);
       }
     } finally {
       if (mounted.current && revision === loadRevision.current) setLoading(false);
@@ -174,6 +178,22 @@ function IdentityScopedMovieTeamWorkspace({ project }: { project: MovieProject }
       && review.reviewerUserId === user.id
       && (review.isFinal ? (collaboration?.currentUserPermissions ?? []).includes("FinalApproval") : (collaboration?.currentUserPermissions ?? []).includes("Approve")),
   );
+
+  // A failed permissions fetch is not an empty team. Hide all forms, notes and
+  // review decisions until the authoritative snapshot can be loaded again.
+  if (!loading && loadError) {
+    return (
+      <div className="movie-team-workspace" data-testid="movie-team-workspace">
+        <div className="movie-selects-notice is-error" role="alert">
+          <AlertTriangle size={16} />
+          <span>Unable to load Movie Team permissions and reviews. No action is available until the connection is restored.</span>
+          <button type="button" className="movie-workspace-button is-quiet" onClick={() => void load()}>
+            <RefreshCw size={13} /> Retry
+          </button>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="movie-team-workspace" data-testid="movie-team-workspace">
