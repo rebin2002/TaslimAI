@@ -2,7 +2,7 @@
 import { localeTag, type Locale } from "@/lib/i18n";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { ArrowRight, ArrowUpRight, FolderKanban, LibraryBig, LoaderCircle, MessageSquare, Sparkles } from "lucide-react";
 import { ProtectedPage } from "@/components/ProtectedPage";
 import { HomeComposer } from "@/components/HomeComposer";
@@ -51,8 +51,12 @@ function HomeDashboard() {
   const [files, setFiles] = useState<File[]>([]);
   const [asking, setAsking] = useState(false);
   const submissionGate = useRef(createHomeCreationSubmissionGate());
-  // Remounts cancel in-flight continuation; recreate after a StrictMode effect replay.
-  useEffect(() => {
+  // Auth transitions replace HomeDashboard by identity key. Use layout cleanup
+  // so the old principal's in-flight create loses permission synchronously
+  // during the transition commit, before passive effects or a stale promise can
+  // resume and submit private attachments under the former session.
+  useLayoutEffect(() => {
+    submissionGate.current.cancel();
     const gate = createHomeCreationSubmissionGate();
     submissionGate.current = gate;
     return () => gate.cancel();
