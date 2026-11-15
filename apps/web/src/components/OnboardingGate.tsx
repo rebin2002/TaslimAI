@@ -98,6 +98,9 @@ function OnboardingFlow({ user, openerRef }: Readonly<{ user: User; openerRef: R
   const [preferredLanguage, setPreferredLanguage] = useState<Locale>(defaults.preferredLanguage);
   const [defaultGenerationLanguage, setDefaultGenerationLanguage] = useState<Locale>(defaults.defaultGenerationLanguage);
   const [saving, setSaving] = useState(false);
+  // A state-driven disabled button alone is not a synchronous single-flight
+  // boundary: two clicks can enter before React commits the saving render.
+  const finishingRef = useRef(false);
   const [error, setError] = useState("");
   const showOnboarding = shouldShowOnboarding(user);
   const stepHeadingRef = useRef<HTMLHeadingElement | null>(null);
@@ -117,6 +120,8 @@ function OnboardingFlow({ user, openerRef }: Readonly<{ user: User; openerRef: R
   const NextIcon = locale === "en" ? ArrowRight : ArrowLeft;
 
   async function finish(intent?: OnboardingIntent, href = "/projects") {
+    if (finishingRef.current) return;
+    finishingRef.current = true;
     setSaving(true);
     setError("");
     try {
@@ -130,6 +135,7 @@ function OnboardingFlow({ user, openerRef }: Readonly<{ user: User; openerRef: R
       router.push(href);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : t("onboarding.saveError"));
+      finishingRef.current = false; // Allow retry after a failed completion.
       setSaving(false);
     }
   }
