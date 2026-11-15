@@ -89,7 +89,7 @@ function HomeDashboard() {
   const projects = dashboard?.projects ?? [];
 
   async function askTaslim() {
-    const prompt = resolveHomeCreationPrompt(idea, files.length);
+    const prompt = resolveHomeCreationPrompt(idea, files.length, locale);
     if (!prompt) {
       if (!files.length) router.push("/chat");
       setAskError(t("chat.sendError"));
