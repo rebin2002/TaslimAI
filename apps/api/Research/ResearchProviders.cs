@@ -302,7 +302,7 @@ public sealed class OpenAiResearchSearchProvider(
         }
         var answer = string.Join("\n\n", answerParts);
         var orderedUrls = sourceUrls
-            .Where(IsHttpUrl)
+            .Where(IsSafeCitationUrl)
             .DistinctBy(Canonicalize, StringComparer.OrdinalIgnoreCase)
             .Take(options.MaxSourceCount)
             .ToArray();
@@ -328,7 +328,7 @@ public sealed class OpenAiResearchSearchProvider(
         return new ResearchSearchResult(sourceByUrl.Values.ToArray(), evidence, new AiUsageMetadata("openai", model, inputTokens, null, outputTokens, null, null, (int)Math.Min(int.MaxValue, latencyMs), "completed", false, PricingVersion: options.PricingVersion, Currency: "USD", CostBasis: UsageCostBasis.Estimated, SafeMetadataJson: metadata));
     }
 
-    private static bool IsHttpUrl(string value) => Uri.TryCreate(value, UriKind.Absolute, out var uri) && (uri.Scheme == Uri.UriSchemeHttp || uri.Scheme == Uri.UriSchemeHttps);
+    private static bool IsSafeCitationUrl(string value) => ResearchCitationUrlPolicy.IsSafe(value);
     private static string Canonicalize(string url) { var uri = new Uri(url); var builder = new UriBuilder(uri) { Query = string.Empty, Fragment = string.Empty }; return builder.Uri.ToString().TrimEnd('/'); }
     private static string Trim(string value, int max) => value.Length <= max ? value : value[..Math.Max(1, max - 3)].TrimEnd() + "...";
     private static int? ReadInt(JsonElement element, string property) => element.ValueKind == JsonValueKind.Object && element.TryGetProperty(property, out var value) && value.TryGetInt32(out var result) ? result : null;
