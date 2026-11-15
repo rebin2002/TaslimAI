@@ -148,7 +148,13 @@ export function MovieVideoMakeoverStudio({
   comparisonBinding = null,
 }: MovieVideoMakeoverStudioProps) {
   const context = { principalId, workspaceId };
-  const entries = describeMovieVideoMakeoverProjectSources(project, assets, context);
+  // Route authentication can briefly be unresolved after logout or an account
+  // switch. Fail closed before rendering even clip titles; no caller-supplied
+  // project/asset cache may stand in for the current authenticated identity.
+  const hasAuthenticatedScope = Boolean(principalId?.trim() && workspaceId?.trim());
+  const entries = hasAuthenticatedScope
+    ? describeMovieVideoMakeoverProjectSources(project, assets, context)
+    : [];
   const visibleSelection = reconcileMovieVideoMakeoverStudioSelection(selection, entries);
   const attached = entries.find((entry) => entry.selectable && entry.assetId === visibleSelection.sourceAssetId) ?? null;
   const copy = movieVideoMakeoverSourcePendingCopy(attached, visibleSelection.mode);
