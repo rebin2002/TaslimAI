@@ -68,6 +68,22 @@ describe("Movie Team review workflow", () => {
     expect(apiSource).toContain("/decision");
   });
 
+  it("fails visibly closed when the authoritative collaboration read fails", () => {
+    // A denied or unavailable permission fetch must not be displayed as
+    // "No team record yet", nor expose stale controls or private review notes.
+    expect(workspaceSource).toContain("const [loadError, setLoadError] = useState(false)");
+    expect(workspaceSource).toMatch(/setCollaboration\(next\);\s*setLoadError\(false\);/);
+    expect(workspaceSource).toMatch(/setCollaboration\(null\);\s*setReviewIsFinal\(false\);\s*setLoadError\(true\);/);
+    expect(workspaceSource).toContain("if (!loading && loadError) {");
+    expect(workspaceSource).toContain('role="alert"');
+    expect(workspaceSource).toContain("Unable to load Movie Team permissions and reviews.");
+    expect(workspaceSource).toContain("onClick={() => void load()}");
+    expect(workspaceSource).toMatch(/const revision = \+\+loadRevision\.current;\s*setLoading\(true\);/);
+    expect(workspaceSource.indexOf("if (!loading && loadError) {")).toBeLessThan(
+      workspaceSource.indexOf('<section className="movie-team-summary"'),
+    );
+  });
+
   it("keeps final-gate authority and server re-authorization visible", () => {
     expect(workspaceSource).toContain('includes("FinalApproval")');
     expect(workspaceSource).toContain("Final gate requests require FinalApproval authority.");
