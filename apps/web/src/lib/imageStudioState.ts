@@ -5,28 +5,28 @@ const activeJobStoragePrefix = "taslim:image-generation:";
 export const imageJobPollIntervalMs = 2_000;
 export const imageJobPollMaxDelayMs = 8_000;
 
-export function imageActiveJobStorageKey(workspaceId: string) {
-  return `${activeJobStoragePrefix}${workspaceId}`;
+export function imageActiveJobStorageKey(userId: string, workspaceId: string) {
+  return `${activeJobStoragePrefix}${encodeURIComponent(userId)}:${encodeURIComponent(workspaceId)}`;
 }
 
-export function readImageActiveJobId(workspaceId: string) {
-  if (typeof window === "undefined") return null;
+export function readImageActiveJobId(userId: string, workspaceId: string) {
+  if (typeof window === "undefined" || !userId.trim() || !workspaceId.trim()) return null;
   try {
-    const jobId = window.sessionStorage.getItem(imageActiveJobStorageKey(workspaceId));
+    const jobId = window.sessionStorage.getItem(imageActiveJobStorageKey(userId, workspaceId));
     return jobId?.trim() || null;
   } catch {
     return null;
   }
 }
 
-export function persistImageActiveJobId(workspaceId: string, jobId: string) {
-  if (typeof window === "undefined" || !jobId.trim()) return;
-  try { window.sessionStorage.setItem(imageActiveJobStorageKey(workspaceId), jobId); } catch { /* Storage may be unavailable. */ }
+export function persistImageActiveJobId(userId: string, workspaceId: string, jobId: string) {
+  if (typeof window === "undefined" || !userId.trim() || !workspaceId.trim() || !jobId.trim()) return;
+  try { window.sessionStorage.setItem(imageActiveJobStorageKey(userId, workspaceId), jobId); } catch { /* Storage may be unavailable. */ }
 }
 
-export function clearImageActiveJobId(workspaceId: string) {
-  if (typeof window === "undefined") return;
-  try { window.sessionStorage.removeItem(imageActiveJobStorageKey(workspaceId)); } catch { /* Storage may be unavailable. */ }
+export function clearImageActiveJobId(userId: string, workspaceId: string) {
+  if (typeof window === "undefined" || !userId.trim() || !workspaceId.trim()) return;
+  try { window.sessionStorage.removeItem(imageActiveJobStorageKey(userId, workspaceId)); } catch { /* Storage may be unavailable. */ }
 }
 
 export function isImageJob(job: GenerationJob | null): boolean {
@@ -50,7 +50,7 @@ export function shouldPollImageJob(job: GenerationJob | null) {
 }
 
 export function shouldClearImageJobAfterPollError(status: number | null | undefined) {
-  return status === 403 || status === 404;
+  return status === 401 || status === 403 || status === 404;
 }
 
 export function nextImagePollDelay(job: GenerationJob | null, retryAttempt = 0) {
