@@ -120,10 +120,19 @@ const inertHandlers: Pick<MovieVideoMakeoverStudioProps, "onChange"> = {
   },
 };
 
-function render(props: Pick<MovieVideoMakeoverStudioProps, "project" | "assets" | "principalId" | "workspaceId" | "selection"> & Pick<MovieVideoMakeoverStudioProps, "comparison" | "comparisonBinding"> & Partial<Pick<MovieVideoMakeoverStudioProps, "sourceReadBinding">>): string {
-  const { sourceReadBinding = { principalId: PRINCIPAL, workspaceId: WORKSPACE }, ...rest } = props;
+function render(props: Pick<MovieVideoMakeoverStudioProps, "project" | "assets" | "principalId" | "workspaceId" | "selection"> & Pick<MovieVideoMakeoverStudioProps, "comparison" | "comparisonBinding"> & Partial<Pick<MovieVideoMakeoverStudioProps, "sourceReadBinding" | "draftReadBinding">>): string {
+  const {
+    sourceReadBinding = { principalId: PRINCIPAL, workspaceId: WORKSPACE },
+    draftReadBinding = { principalId: PRINCIPAL, workspaceId: WORKSPACE },
+    ...rest
+  } = props;
   return renderToStaticMarkup(
-    <MovieVideoMakeoverStudio {...rest} sourceReadBinding={sourceReadBinding} {...inertHandlers} />,
+    <MovieVideoMakeoverStudio
+      {...rest}
+      sourceReadBinding={sourceReadBinding}
+      draftReadBinding={draftReadBinding}
+      {...inertHandlers}
+    />,
   );
 }
 
@@ -233,6 +242,47 @@ describe("studio: what the real Movie read models can and cannot say", () => {
       selection: createEmptyMovieVideoMakeoverSelection(),
     });
     expect(freshMarkup).toContain("Interview room take 01");
+  });
+
+  it("never renders a previous account's private makeover prompt after a fresh source fetch", () => {
+    const previousDraft = {
+      ...createEmptyMovieVideoMakeoverSelection(),
+      prompt: "PRIVATE CUSTOMER STORYBOARD FOR ACCOUNT A",
+      approvalReference: "PRIVATE-CONSENT-RECORD-A",
+      creatorApproved: true,
+    };
+    const freshSourceBinding = { principalId: "principal_creator_B", workspaceId: WORKSPACE };
+    for (const draftReadBinding of [
+      { principalId: PRINCIPAL, workspaceId: WORKSPACE }, // Account A's cached draft
+      { principalId: "principal_creator_B", workspaceId: "old_workspace" },
+      null, // No proof the draft was re-fetched
+    ]) {
+      const markup = render({
+        project: project(),
+        assets: assets(),
+        principalId: "principal_creator_B",
+        workspaceId: WORKSPACE,
+        sourceReadBinding: freshSourceBinding,
+        draftReadBinding,
+        selection: previousDraft,
+      });
+      expect(markup).not.toContain("PRIVATE CUSTOMER STORYBOARD FOR ACCOUNT A");
+      expect(markup).not.toContain("PRIVATE-CONSENT-RECORD-A");
+      expect(markup).not.toContain("Interview room take 01");
+      expect(markup).not.toContain("<textarea");
+      expect(markup).not.toContain("<button");
+      expect(markup).toContain("No source attached");
+      expect(markup).toContain('data-pending-source-facts="0"');
+    }
+    const correctlyScoped = render({
+      project: project(), assets: assets(),
+      principalId: "principal_creator_B", workspaceId: WORKSPACE,
+      sourceReadBinding: freshSourceBinding, draftReadBinding: freshSourceBinding,
+      selection: previousDraft,
+    });
+    // This only proves the component honors matching read provenance; the
+    // route owner must obtain both bindings at their respective fetch completions.
+    expect(correctlyScoped).toContain("PRIVATE CUSTOMER STORYBOARD FOR ACCOUNT A");
   });
 
   it("does not display an old project's private clips after an authenticated workspace switch", () => {
