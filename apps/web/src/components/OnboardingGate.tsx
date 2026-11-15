@@ -157,11 +157,11 @@ function OnboardingFlow({ user, openerRef }: Readonly<{ user: User; openerRef: R
           <h1 ref={stepHeadingRef} id="onboarding-title" tabIndex={-1}>{t("onboarding.preferencesTitle")}</h1>
           <p className="onboarding-description">{t("onboarding.preferencesDescription")}</p>
           <div className="onboarding-fields">
-            <label><span>{t("onboarding.displayName")}</span><input data-dialog-autofocus value={displayName} maxLength={120} onChange={(event) => setDisplayName(event.target.value)} placeholder={t("onboarding.displayNamePlaceholder")} autoComplete="name" /></label>
-            <label><span><Globe2 size={15} /> {t("onboarding.interfaceLanguage")}</span><select value={preferredLanguage} onChange={(event) => { const next = event.target.value as Locale; setPreferredLanguage(next); setLocale(next); }}>{locales.map((item) => <option key={item} value={item}>{localeNames[item]}</option>)}</select></label>
-            <label><span><Languages size={15} /> {t("onboarding.generationLanguage")}</span><select value={defaultGenerationLanguage} onChange={(event) => setDefaultGenerationLanguage(event.target.value as Locale)}>{locales.map((item) => <option key={item} value={item}>{localeNames[item]}</option>)}</select></label>
+            <label><span>{t("onboarding.displayName")}</span><input data-dialog-autofocus disabled={saving} value={displayName} maxLength={120} onChange={(event) => setDisplayName(event.target.value)} placeholder={t("onboarding.displayNamePlaceholder")} autoComplete="name" /></label>
+            <label><span><Globe2 size={15} /> {t("onboarding.interfaceLanguage")}</span><select disabled={saving} value={preferredLanguage} onChange={(event) => { const next = event.target.value as Locale; setPreferredLanguage(next); setLocale(next); }}>{locales.map((item) => <option key={item} value={item}>{localeNames[item]}</option>)}</select></label>
+            <label><span><Languages size={15} /> {t("onboarding.generationLanguage")}</span><select disabled={saving} value={defaultGenerationLanguage} onChange={(event) => setDefaultGenerationLanguage(event.target.value as Locale)}>{locales.map((item) => <option key={item} value={item}>{localeNames[item]}</option>)}</select></label>
           </div>
-          <footer className="onboarding-actions"><span>{t("onboarding.preferencesHint")}</span><button type="button" className="primary-button" onClick={() => setStep("tour")}><span>{t("onboarding.continue")}</span><NextIcon size={16} /></button></footer>
+          <footer className="onboarding-actions"><span>{t("onboarding.preferencesHint")}</span><button type="button" className="primary-button" disabled={saving} onClick={() => setStep("tour")}><span>{t("onboarding.continue")}</span><NextIcon size={16} /></button></footer>
         </div>}
 
         {step === "tour" && <div className="onboarding-body">
@@ -173,7 +173,7 @@ function OnboardingFlow({ user, openerRef }: Readonly<{ user: User; openerRef: R
             <article><span className="onboarding-intro-icon is-chat"><MessageSquare size={19} /></span><div><h2>{t("onboarding.chatTitle")}</h2><p>{t("onboarding.chatDescription")}</p></div></article>
             <article><span className="onboarding-intro-icon is-create"><Sparkles size={19} /></span><div><h2>{t("onboarding.createTitle")}</h2><p>{t("onboarding.createDescription")}</p></div></article>
           </div>
-          <footer className="onboarding-actions"><button type="button" className="onboarding-back" onClick={() => setStep("preferences")}>{t("onboarding.back")}</button><button type="button" className="primary-button" onClick={() => setStep("workflow")}><span>{t("onboarding.chooseAction")}</span><NextIcon size={16} /></button></footer>
+          <footer className="onboarding-actions"><button type="button" className="onboarding-back" disabled={saving} onClick={() => setStep("preferences")}>{t("onboarding.back")}</button><button type="button" className="primary-button" disabled={saving} onClick={() => setStep("workflow")}><span>{t("onboarding.chooseAction")}</span><NextIcon size={16} /></button></footer>
         </div>}
 
         {step === "workflow" && <div className="onboarding-body onboarding-workflow-body">
