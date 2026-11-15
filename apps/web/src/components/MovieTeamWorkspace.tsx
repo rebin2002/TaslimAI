@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { AlertTriangle, CheckCircle2, Clock3, MessageSquare, RefreshCw, ShieldCheck, UserCheck, Users, X } from "lucide-react";
 import { api, type MovieCollaboration, type MovieProject } from "@/lib/api";
 import { useAuth } from "@/components/AuthProvider";
@@ -41,19 +41,31 @@ function IdentityScopedMovieTeamWorkspace({ project }: { project: MovieProject }
   const [reviewIsFinal, setReviewIsFinal] = useState(false);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
+  // A refresh issued before a decision must never overwrite the newer
+  // server-authorized permission/review snapshot when it resolves last.
+  const loadRevision = useRef(0);
+  const mounted = useRef(false);
 
   const load = useCallback(async () => {
+    if (!mounted.current) return;
+    const revision = ++loadRevision.current;
     try {
-      setCollaboration(await api.getMovieCollaboration(project.id));
+      const next = await api.getMovieCollaboration(project.id);
+      if (mounted.current && revision === loadRevision.current) setCollaboration(next);
     } catch {
-      setCollaboration(null);
+      if (mounted.current && revision === loadRevision.current) setCollaboration(null);
     } finally {
-      setLoading(false);
+      if (mounted.current && revision === loadRevision.current) setLoading(false);
     }
   }, [project.id]);
 
   useEffect(() => {
+    mounted.current = true;
     void Promise.resolve().then(() => load());
+    return () => {
+      mounted.current = false;
+      loadRevision.current += 1;
+    };
   }, [load]);
 
   async function submitComment() {
