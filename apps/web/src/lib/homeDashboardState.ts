@@ -1,4 +1,5 @@
 import type { ActivityItem, Asset, Conversation, Project } from "@/lib/api";
+import { assetDestination } from "@/lib/searchNavigation";
 
 export type HomeRecentKind = "project" | "conversation" | "activity" | "asset";
 
@@ -57,7 +58,7 @@ export function buildHomeRecentItems({ projects, conversations, activity, assets
     kind: "activity",
     title: item.title,
     timestamp: item.completedAt ?? item.createdAt,
-    href: item.assetId ? `/assets?search=${encodeURIComponent(item.title)}` : "/notifications",
+    href: item.assetId ? assetDestination(item.assetId) : "/notifications",
     status: item.status,
     progressPercent: item.progressPercent,
     jobType: item.jobType,
@@ -68,7 +69,7 @@ export function buildHomeRecentItems({ projects, conversations, activity, assets
     kind: "asset",
     title: asset.name,
     timestamp: asset.updatedAt,
-    href: `/assets?search=${encodeURIComponent(asset.name)}`,
+    href: assetDestination(asset.id, asset.status),
     assetType: asset.assetType,
   }));
 
