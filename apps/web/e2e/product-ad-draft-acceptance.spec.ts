@@ -150,7 +150,7 @@ for (const entry of ["/create", "/"] as const) {
       await expect(wizard).toHaveAttribute("dir", profile.dir);
       await expect(wizard.locator("h1")).toHaveText(profile.heading);
       await expect(wizard.locator('input[id$="-product-name"]')).toBeVisible();
-      await expect(wizard.locator("aside p").last()).toContainText(/local-only preview|معاينة محلية فقط|تەنها پێشبینینی ناوخۆییە/);
+      await expect(wizard.locator("aside p").last()).toContainText(/local-only preview|معاينة محلية فقط|تەنها پێشبینینی ناوخۆییە/i);
       const geometry = await page.evaluate(() => ({
         html: document.documentElement.scrollWidth - document.documentElement.clientWidth,
         body: document.body.scrollWidth - document.documentElement.clientWidth,
