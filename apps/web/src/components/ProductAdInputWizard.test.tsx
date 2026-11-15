@@ -16,7 +16,7 @@ describe("ProductAdInputWizard", () => {
     expect(defaultProductAdOutput).toEqual({ channel: "instagram", format: "square" });
     expect(html).toContain("Product advertisement");
     expect(html).toContain('type="text"');
-    expect(html.match(/type="file" accept="image\\/jpeg,image\\/png,image\\/webp"/g)).toHaveLength(2);
+    expect(html.split('accept="image/jpeg,image/png,image/webp"')).toHaveLength(3);
     expect(html).toMatch(/type="file"[^>]*required=""/);
     expect(html.match(/required=""/g)).toHaveLength(2);
     expect(html).toContain("Product photo (required)");
