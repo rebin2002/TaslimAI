@@ -173,6 +173,12 @@ public sealed class MovieVideoMakeoverSourceApiTests : IClassFixture<GenerationJ
         var expiredRetention = await SeedSourceAsync(projectId, owner, Healthy(retentionDays: -0.01));
         var outOfBounds = await SeedSourceAsync(projectId, owner, Healthy(width: 20_000, durationSeconds: 7200));
         var orphanedFile = await SeedSourceAsync(projectId, owner, Healthy(), noFileEvidence: true);
+        using var otherClient = factory.CreateClient();
+        var anotherCreator = await RegisterAsync(otherClient);
+        // The file belongs to the requester, but the asset row names another
+        // creator: nonempty IDs alone must not prove ownership of the link.
+        var mismatchedOwner = await SeedSourceAsync(projectId, owner, Healthy(),
+            configureAsset: asset => asset.CreatedByUserId = anotherCreator.User.Id);
 
         var cases = new (SourceSeed Seed, string ExpectedCode)[]
         {
@@ -181,6 +187,7 @@ public sealed class MovieVideoMakeoverSourceApiTests : IClassFixture<GenerationJ
             (expiredRetention, MovieVideoMakeoverSourceCodes.RetentionUnverified),
             (outOfBounds, MovieVideoMakeoverSourceCodes.MetadataOutOfBounds),
             (orphanedFile, MovieVideoMakeoverSourceCodes.OwnershipUnverified),
+            (mismatchedOwner, MovieVideoMakeoverSourceCodes.OwnershipUnverified),
         };
 
         foreach (var (seed, expectedCode) in cases)
@@ -204,6 +211,11 @@ public sealed class MovieVideoMakeoverSourceApiTests : IClassFixture<GenerationJ
         Assert.True(missing.GetProperty("retentionVerified").GetBoolean());
         Assert.Contains(MovieVideoMakeoverSourceCodes.MetadataMissing,
             missing.GetProperty("blockers").EnumerateArray().Select(item => item.GetString()));
+
+        var ownerMismatch = await (await client.GetAsync($"{ListPath(projectId)}/{mismatchedOwner.ClipId}")).Content.ReadFromJsonAsync<JsonElement>();
+        Assert.False(ownerMismatch.GetProperty("ownershipVerified").GetBoolean());
+        Assert.True(ownerMismatch.GetProperty("ownerIsRequester").GetBoolean());
+        Assert.False(ownerMismatch.GetProperty("attachPermitted").GetBoolean());
 
         // The orphaned-file row proves visibility/retention/metadata all fail closed
         // together when the backing file evidence is gone.
