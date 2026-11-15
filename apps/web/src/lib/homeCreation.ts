@@ -13,13 +13,20 @@ export function canSubmitHomeCreation(value: string, attachmentCount: number): b
 /** Synchronous single-flight admission for Home create, independent of React renders. */
 export function createHomeCreationSubmissionGate() {
   let busy = false;
+  let cancelled = false;
   return {
     tryStart(): boolean {
-      if (busy) return false;
+      if (busy || cancelled) return false;
       busy = true;
       return true;
     },
+    // Check after each awaited boundary before touching the old auth scope.
+    isActive(): boolean { return busy && !cancelled; },
     finish(): void { busy = false; },
+    cancel(): void {
+      cancelled = true;
+      busy = false;
+    },
   };
 }
 
