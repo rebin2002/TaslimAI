@@ -37,14 +37,17 @@ export function describeCreditBalance(credits: BillingCredits | null | undefined
 
 
 /**
- * A Billing account response is private to its workspace. React can retain a
- * resolved response across a workspace switch until the next request finishes;
- * never render that old snapshot or its transaction reasons under the new
- * workspace, even for a single frame.
+ * A Billing account response is private to the authenticated principal and
+ * workspace. Two different users can belong to the SAME workspace, while an
+ * in-place account switch may retain a previous session's resolved response.
+ * Fail closed synchronously until both authenticated scope keys match; do not
+ * wait for a React effect to clear a previous user's transaction reasons.
  */
 export function scopedBillingAccount<T>(
-  snapshot: Readonly<{ workspaceId: string; account: T }> | null,
+  snapshot: Readonly<{ userId: string; workspaceId: string; account: T }> | null,
+  userId: string | null | undefined,
   workspaceId: string | null | undefined,
 ): T | null {
-  return workspaceId && snapshot?.workspaceId === workspaceId ? snapshot.account : null;
+  return userId && workspaceId && snapshot?.userId === userId && snapshot.workspaceId === workspaceId
+    ? snapshot.account : null;
 }
