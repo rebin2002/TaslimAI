@@ -13,6 +13,18 @@ describe("Movie Team review workflow", () => {
     expect(workspaceSource).not.toContain("project.workspaceId !== workspace.id");
   });
 
+  it("invalidates stale permission snapshots across review writes and remounts", () => {
+    expect(workspaceSource).toContain("const loadRevision = useRef(0)");
+    expect(workspaceSource).toContain("const mounted = useRef(false)");
+    expect(workspaceSource).toContain("const revision = ++loadRevision.current");
+    expect(workspaceSource).toContain("mounted.current && revision === loadRevision.current");
+    expect(workspaceSource).toContain("return () => {\n      mounted.current = false;");
+    // Four writes (comment, resolve, request, decide) plus unmount all
+    // invalidate earlier authorization reads before a late response can render.
+    expect(workspaceSource.split("loadRevision.current += 1").length - 1).toBe(5);
+    expect(workspaceSource).not.toContain("setCollaboration(await api.getMovieCollaboration(project.id))");
+  });
+
   it("requests project sign-off from a different current team member", () => {
     expect(workspaceSource).toContain("api.requestMovieReview(project.id");
     expect(workspaceSource).toContain('targetType: "project"');
