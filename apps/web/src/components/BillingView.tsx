@@ -10,28 +10,29 @@ import { api, type BillingAccount, type BillingPlanOption } from "@/lib/api";
 import { describeCreditBalance, scopedBillingAccount } from "@/lib/billingCreditBalance";
 
 export function BillingView() {
-  const { workspace } = useAuth();
+  const { user, workspace } = useAuth();
   const { t, locale } = useLocale();
+  const userId = user?.id ?? null;
   const workspaceId = workspace?.id ?? null;
-  const [snapshot, setSnapshot] = useState<{ workspaceId: string; account: BillingAccount } | null>(null);
-  const [failedWorkspaceId, setFailedWorkspaceId] = useState<string | null>(null);
+  const [snapshot, setSnapshot] = useState<{ userId: string; workspaceId: string; account: BillingAccount } | null>(null);
+  const [failedScope, setFailedScope] = useState<{ userId: string; workspaceId: string } | null>(null);
   // Resolve against the *current* auth/workspace identity during render. Waiting
   // for an effect to clear previous state can briefly expose the old workspace's
   // private credit ledger and transaction reasons after a same-tab switch.
-  const account = scopedBillingAccount(snapshot, workspaceId);
-  const error = Boolean(workspaceId && failedWorkspaceId === workspaceId);
+  const account = scopedBillingAccount(snapshot, userId, workspaceId);
+  const error = Boolean(userId && workspaceId && failedScope?.userId === userId && failedScope?.workspaceId === workspaceId);
   useEffect(() => {
-    if (!workspaceId) return;
+    if (!userId || !workspaceId) return;
     let active = true;
     void api.getBillingAccount(workspaceId).then((next) => {
       if (!active) return;
-      setSnapshot({ workspaceId, account: next });
-      setFailedWorkspaceId(null);
+      setSnapshot({ userId, workspaceId, account: next });
+      setFailedScope(null);
     }).catch(() => {
-      if (active) setFailedWorkspaceId(workspaceId);
+      if (active) setFailedScope({ userId, workspaceId });
     });
     return () => { active = false; };
-  }, [workspaceId]);
+  }, [userId, workspaceId]);
   const dateFormatter = useMemo(() => new Intl.DateTimeFormat(localeTag(locale), { dateStyle: "medium" }), [locale]);
   const numberFormatter = useMemo(() => new Intl.NumberFormat(localeTag(locale)), [locale]);
   // Only the API's totalRemaining is a spendable balance; other figures
