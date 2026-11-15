@@ -116,7 +116,15 @@ function RecentPresentationCard({ asset }: { asset: Asset }) {
   );
 }
 
+// Remount on any authenticated principal/workspace transition so old drafts,
+// file selections, previews and in-flight UI responses cannot appear in a new session.
 export function PresentationStudioView() {
+  const { user, workspace, loading } = useAuth();
+  if (loading || !user?.id || !workspace?.id) return null;
+  return <IdentityScopedPresentationStudioView key={`${encodeURIComponent(user.id)}:${encodeURIComponent(workspace.id)}`} userId={user.id} />;
+}
+
+function IdentityScopedPresentationStudioView({ userId }: { userId: string }) {
   const { workspace } = useAuth();
   const { locale, t } = useLocale();
   const searchParams = useSearchParams();
@@ -222,7 +230,7 @@ export function PresentationStudioView() {
   useEffect(() => { void loadSources(); }, [loadSources]);
   useEffect(() => {
     if (!workspace || current || draftHydratedWorkspace.current === workspace.id) return;
-    const draft = loadPresentationDraftState(workspace.id);
+    const draft = loadPresentationDraftState(userId, workspace.id);
     setProjectId(searchParams.get("projectId") ?? draft.projectId);
     setSelected(draft.selected);
     setTitle(draft.title);
@@ -241,7 +249,7 @@ export function PresentationStudioView() {
   const draft = useMemo(() => ({ projectId, selected, title, description, presentationType, length, tone, language, audience, brandCompany, additionalInstructions, includeAgenda, includeClosingNextSteps }), [additionalInstructions, audience, brandCompany, description, includeAgenda, includeClosingNextSteps, language, length, presentationType, projectId, selected, title, tone]);
   useEffect(() => {
     if (!workspace || current || draftHydratedWorkspace.current !== workspace.id) return;
-    persistPresentationDraftState(workspace.id, draft);
+    persistPresentationDraftState(userId, workspace.id, draft);
   }, [current, draft, workspace]);
   useEffect(() => {
     if (!workspace || current) return;
@@ -312,7 +320,7 @@ export function PresentationStudioView() {
     restoreJobId.current = null;
     const workspaceId = workspace.id;
     const workspaceVersion = workspaceGeneration.current;
-    persistPresentationDraftState(workspaceId, draft);
+    persistPresentationDraftState(userId, workspaceId, draft);
     clearPresentationActiveJobId(workspaceId);
     try {
       const job = await api.createPresentationGenerationJob({

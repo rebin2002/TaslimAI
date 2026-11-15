@@ -57,7 +57,7 @@ describe("presentationStudioState", () => {
     expect(parsePresentationDraftState("not-json")).toEqual(emptyPresentationDraftState());
     expect(parsePresentationDraftState(JSON.stringify({ selected: {}, title: 42 }))).toEqual(emptyPresentationDraftState());
   });
-  it("persists only the supported draft shape and isolates workspaces", () => {
+  it("persists only supported draft data and isolates both users and workspaces", () => {
     const values = new Map<string, string>();
     const browserStorage = {
       getItem: (key: string) => values.get(key) ?? null,
@@ -65,14 +65,22 @@ describe("presentationStudioState", () => {
       removeItem: (key: string) => { values.delete(key); },
     };
     const first = { ...emptyPresentationDraftState(), title: "Launch", description: "Plan", selected: ["source-1"], includeAgenda: false };
-    persistPresentationDraftState("workspace-a", first, browserStorage);
-    persistPresentationDraftState("workspace-b", { ...emptyPresentationDraftState(), title: "Other" }, browserStorage);
-    expect(presentationDraftStorageKey("workspace-a")).not.toBe(presentationDraftStorageKey("workspace-b"));
-    expect(loadPresentationDraftState("workspace-a", browserStorage)).toMatchObject(first);
-    expect(loadPresentationDraftState("workspace-b", browserStorage).title).toBe("Other");
+    persistPresentationDraftState("user-a", "workspace-a", first, browserStorage);
+    persistPresentationDraftState("user-a", "workspace-b", { ...emptyPresentationDraftState(), title: "Other" }, browserStorage);
+    persistPresentationDraftState("user-b", "workspace-a", { ...emptyPresentationDraftState(), title: "Private B" }, browserStorage);
+    expect(presentationDraftStorageKey("user-a", "workspace-a")).not.toBe(presentationDraftStorageKey("user-a", "workspace-b"));
+    expect(presentationDraftStorageKey("user-a", "workspace-a")).not.toBe(presentationDraftStorageKey("user-b", "workspace-a"));
+    expect(loadPresentationDraftState("user-a", "workspace-a", browserStorage)).toMatchObject(first);
+    expect(loadPresentationDraftState("user-a", "workspace-b", browserStorage).title).toBe("Other");
+    expect(loadPresentationDraftState("user-b", "workspace-a", browserStorage).title).toBe("Private B");
+    expect(loadPresentationDraftState("", "workspace-a", browserStorage)).toEqual(emptyPresentationDraftState());
+    expect(loadPresentationDraftState("user-a", "", browserStorage)).toEqual(emptyPresentationDraftState());
+    persistPresentationDraftState("", "workspace-a", first, browserStorage);
+    expect(loadPresentationDraftState("user-a", "workspace-a", browserStorage)).toMatchObject(first);
     expect(JSON.parse(serializePresentationDraftState({ ...first, extra: "not persisted" } as typeof first & { extra: string })).extra).toBeUndefined();
-    clearPresentationDraftState("workspace-a", browserStorage);
-    expect(loadPresentationDraftState("workspace-a", browserStorage)).toEqual(emptyPresentationDraftState());
-    expect(loadPresentationDraftState("workspace-b", browserStorage).title).toBe("Other");
+    clearPresentationDraftState("user-a", "workspace-a", browserStorage);
+    expect(loadPresentationDraftState("user-a", "workspace-a", browserStorage)).toEqual(emptyPresentationDraftState());
+    expect(loadPresentationDraftState("user-b", "workspace-a", browserStorage).title).toBe("Private B");
+    expect(loadPresentationDraftState("user-a", "workspace-b", browserStorage).title).toBe("Other");
   });
 });

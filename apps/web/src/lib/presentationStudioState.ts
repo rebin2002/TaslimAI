@@ -40,7 +40,7 @@ export function emptyPresentationDraftState(): PresentationDraftState {
     includeClosingNextSteps: true,
   };
 }
-export function presentationDraftStorageKey(workspaceId: string) { return `${draftStoragePrefix}${encodeURIComponent(workspaceId)}`; }
+export function presentationDraftStorageKey(userId: string, workspaceId: string) { return `${draftStoragePrefix}${encodeURIComponent(userId)}:${encodeURIComponent(workspaceId)}`; }
 function boundedString(value: unknown, maxLength: number) { return typeof value === "string" ? value.slice(0, maxLength) : ""; }
 function safeIdentifier(value: unknown) { return typeof value === "string" && value.trim().length > 0 && value.length <= 100 ? value : ""; }
 export function parsePresentationDraftState(raw: string | null): PresentationDraftState {
@@ -90,17 +90,17 @@ function browserStorage(): StorageLike | undefined {
   if (typeof window === "undefined") return undefined;
   try { return window.localStorage; } catch { return undefined; }
 }
-export function loadPresentationDraftState(workspaceId: string, storage: StorageLike | undefined = browserStorage()): PresentationDraftState {
-  if (!storage) return emptyPresentationDraftState();
-  try { return parsePresentationDraftState(storage.getItem(presentationDraftStorageKey(workspaceId))); } catch { return emptyPresentationDraftState(); }
+export function loadPresentationDraftState(userId: string, workspaceId: string, storage: StorageLike | undefined = browserStorage()): PresentationDraftState {
+  if (!storage || !userId.trim() || !workspaceId.trim()) return emptyPresentationDraftState();
+  try { return parsePresentationDraftState(storage.getItem(presentationDraftStorageKey(userId, workspaceId))); } catch { return emptyPresentationDraftState(); }
 }
-export function persistPresentationDraftState(workspaceId: string, state: PresentationDraftState, storage: StorageLike | undefined = browserStorage()): void {
-  if (!storage) return;
-  try { storage.setItem(presentationDraftStorageKey(workspaceId), serializePresentationDraftState(state)); } catch { /* Browser storage can be unavailable or full. */ }
+export function persistPresentationDraftState(userId: string, workspaceId: string, state: PresentationDraftState, storage: StorageLike | undefined = browserStorage()): void {
+  if (!storage || !userId.trim() || !workspaceId.trim()) return;
+  try { storage.setItem(presentationDraftStorageKey(userId, workspaceId), serializePresentationDraftState(state)); } catch { /* Browser storage can be unavailable or full. */ }
 }
-export function clearPresentationDraftState(workspaceId: string, storage: StorageLike | undefined = browserStorage()): void {
-  if (!storage) return;
-  try { storage.removeItem(presentationDraftStorageKey(workspaceId)); } catch { /* Clearing is best effort. */ }
+export function clearPresentationDraftState(userId: string, workspaceId: string, storage: StorageLike | undefined = browserStorage()): void {
+  if (!storage || !userId.trim() || !workspaceId.trim()) return;
+  try { storage.removeItem(presentationDraftStorageKey(userId, workspaceId)); } catch { /* Clearing is best effort. */ }
 }
 export type PresentationStudioState = "compose" | "pending" | "queued" | "running" | "succeeded" | "completed-unavailable" | "failed" | "cancelled";
 
