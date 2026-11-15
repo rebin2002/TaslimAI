@@ -342,8 +342,7 @@ export function readProductAdDraft(
   }
   const storedUser = typeof parsed.savedByUser === "string" ? parsed.savedByUser : null;
   const storedWorkspace = typeof parsed.savedByWorkspace === "string" ? parsed.savedByWorkspace : null;
-  const owned = attributed
-    && storedUser === encodeURIComponent(resolved.userId)
+  const owned = storedUser === encodeURIComponent(resolved.userId)
     && storedWorkspace === encodeURIComponent(resolved.workspaceId);
   if (!owned) {
     // A foreign entry is never surfaced; it is removed unless the caller opted out.
