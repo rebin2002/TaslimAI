@@ -36,7 +36,7 @@ describe("Movie Team review workflow", () => {
     expect(workspaceSource).toContain("isFinal: reviewIsFinal && canRequestFinalReview");
     expect(workspaceSource).toContain("checked={reviewIsFinal && canRequestFinalReview}");
     expect(workspaceSource).toContain('if (!next.currentUserPermissions.includes("FinalApproval")) setReviewIsFinal(false);');
-    expect(workspaceSource).toContain("setCollaboration(null);\\n        setReviewIsFinal(false);");
+    expect(workspaceSource).toMatch(/setCollaboration\(null\);\s*setReviewIsFinal\(false\);/);
   });
 
   it("exposes decisions only to the assigned authenticated reviewer", () => {
