@@ -45,6 +45,10 @@
 
 import { movieMakeoverCopy, movieMakeoverDirection, type MovieMakeoverLocale } from "./movieVideoMakeoverLocale";
 import {
+  describeVerifiedMovieMakeoverServerSources,
+  type MovieMakeoverServerSourceResponse,
+} from "@/lib/movieVideoMakeoverServerSourceAdapter";
+import {
   MovieMakeoverComparisonPanel,
   type MovieMakeoverComparisonPanelProps,
 } from "@/components/movie/MovieMakeoverComparisonPanel";
@@ -104,6 +108,12 @@ export type MovieVideoMakeoverStudioProps = {
   readonly comparisonBinding?: MovieVideoMakeoverComparisonBinding | null;
   /** Route-resolved UI locale; default English retains standalone behavior. */
   readonly locale?: MovieMakeoverLocale;
+  /** Optional authenticated API read model (#814). Route supplies both the
+   * exact fetched identity and project; never fall back to cached browser
+   * source rows when a server response was expected but became stale. */
+  readonly serverSourceResponse?: MovieMakeoverServerSourceResponse | null;
+  readonly serverReadBinding?: MovieVideoMakeoverSourceReadBinding | null;
+  readonly serverProjectId?: string | null;
 };
 
 /**
@@ -167,6 +177,9 @@ export function MovieVideoMakeoverStudio({
   comparison = null,
   comparisonBinding = null,
   locale = "en",
+  serverSourceResponse,
+  serverReadBinding = null,
+  serverProjectId = null,
 }: MovieVideoMakeoverStudioProps) {
   const c = movieMakeoverCopy(locale);
   const context = { principalId, workspaceId };
@@ -198,9 +211,21 @@ export function MovieVideoMakeoverStudio({
       </div>
     );
   }
-  const entries = hasAuthenticatedScope
-    ? describeMovieVideoMakeoverProjectSources(project, assets, context)
-    : [];
+  // If the route opts into authoritative source metadata, a missing response,
+  // stale identity binding, or project mismatch MUST NOT downgrade to old
+  // client-only models. Those models lack ownership/visibility verification.
+  const serverReadMatches = Boolean(
+    hasAuthenticatedScope && serverReadBinding
+      && serverReadBinding.principalId === principalId
+      && serverReadBinding.workspaceId === workspaceId,
+  );
+  const entries = serverSourceResponse !== undefined
+    ? serverReadMatches
+      ? describeVerifiedMovieMakeoverServerSources(serverSourceResponse, serverProjectId, context)
+      : []
+    : hasAuthenticatedScope
+      ? describeMovieVideoMakeoverProjectSources(project, assets, context)
+      : [];
   const visibleSelection = reconcileMovieVideoMakeoverStudioSelection(selection, entries);
   const attached = entries.find((entry) => entry.selectable && entry.assetId === visibleSelection.sourceAssetId) ?? null;
   const copy = movieVideoMakeoverSourcePendingCopy(attached, visibleSelection.mode);
