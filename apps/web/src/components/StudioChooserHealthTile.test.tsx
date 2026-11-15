@@ -40,7 +40,7 @@ describe("Health Care chooser tile", () => {
     const html = renderFull();
     const displayed = Number(/class="studio-chooser-count">(\d+)</.exec(html)?.[1] ?? -1);
 
-    expect(cardCount(html)).toBe(9);
+    expect(cardCount(html)).toBe(10);
     expect(displayed, "the badge matches the rendered cards").toBe(cardCount(html));
   });
 
