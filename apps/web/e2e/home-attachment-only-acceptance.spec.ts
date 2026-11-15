@@ -205,5 +205,5 @@ test("Home does not upload or send an old account's files after pending create a
   await page.waitForTimeout(300);
   expect(uploads).toBe(0);
   expect(messages).toBe(0);
-  await expect(page).toHaveURL(/\\/$/);
+  await expect(page).toHaveURL(/\/$/);
 });
