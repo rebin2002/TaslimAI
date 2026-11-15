@@ -13,7 +13,19 @@ const projectTarget = "MovieProject";
  * persisted server-side; the permissions shown here are the ones the server
  * actually granted to the signed-in user, not a client-side guess.
  */
+// Clear every project-scoped review form, permission and request result on
+// identity or project change; the API remains authoritative for all mutations.
 export function MovieTeamWorkspace({ project }: { project: MovieProject }) {
+  const { user, workspace, loading } = useAuth();
+  if (loading || !user?.id || !workspace?.id || project.workspaceId !== workspace.id) return null;
+  return <IdentityScopedMovieTeamWorkspace key={movieTeamIdentityKey(user.id, workspace.id, project.id)} project={project} />;
+}
+
+export function movieTeamIdentityKey(userId: string, workspaceId: string, projectId: string) {
+  return [userId, workspaceId, projectId].map(encodeURIComponent).join(":");
+}
+
+function IdentityScopedMovieTeamWorkspace({ project }: { project: MovieProject }) {
   const { user } = useAuth();
   const { t } = useLocale();
   const [collaboration, setCollaboration] = useState<MovieCollaboration | null>(null);
