@@ -128,10 +128,9 @@ public sealed class DocumentRenderer : IDocumentRenderer
 
     private static string SafeFileName(string title, string extension)
     {
-        var invalid = Path.GetInvalidFileNameChars();
-        var safe = new string(title.Select(character => invalid.Contains(character) ? '_' : character).ToArray()).Trim();
-        if (safe.Length == 0) safe = "Taslim document";
-        return (safe.Length > 120 ? safe[..120] : safe) + extension;
+        // Host-independent, path-safe encoding: Path.GetInvalidFileNameChars() differs per OS and
+        // keeps separators and control characters on Linux, which the download gate then rejects.
+        return DocumentFileName.Build(title, extension);
     }
 }
 
