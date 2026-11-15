@@ -198,19 +198,34 @@ internal sealed class AwsS3CompatibleObjectClient : IS3CompatibleObjectClient
         await client!.PutObjectAsync(CreatePutObjectRequest(bucket, key, content), cancellationToken);
     }
 
-    internal static PutObjectRequest CreatePutObjectRequest(string bucket, string key, Stream content) => new()
+    internal static PutObjectRequest CreatePutObjectRequest(string bucket, string key, Stream content)
     {
-        BucketName = bucket,
-        Key = key,
-        InputStream = content,
-        AutoCloseStream = false,
-        AutoResetStreamPosition = false,
-        DisablePayloadSigning = true,
-        DisableDefaultChecksumValidation = true,
-        // R2 does not support the SDK's streaming/chunked S3 upload signature.
-        // Keep object PUTs non-chunked over HTTPS; the input stream remains caller-owned.
-        UseChunkEncoding = false,
-    };
+        var request = new PutObjectRequest
+        {
+            BucketName = bucket,
+            Key = key,
+            InputStream = content,
+            AutoCloseStream = false,
+            AutoResetStreamPosition = false,
+            DisablePayloadSigning = true,
+            DisableDefaultChecksumValidation = true,
+            // Cloudflare R2 requires a plain, non-streaming SigV4 PUT.
+            UseChunkEncoding = false,
+        };
+
+        // FileProcessingService wraps uploads in a non-seekable CountingReadStream.
+        // The AWS SDK cannot infer Content-Length from that stream, even though the
+        // upload has already passed size validation. A normal S3 PUT needs this
+        // explicit header or the SDK may fail before sending an HTTP request.
+        long? contentLength = content is CountingReadStream { ExpectedContentLength: > 0 } counted
+            ? counted.ExpectedContentLength
+            : content.CanSeek ? content.Length - content.Position : null;
+
+        if (contentLength is > 0)
+            request.Headers["Content-Length"] = contentLength.Value.ToString(System.Globalization.CultureInfo.InvariantCulture);
+
+        return request;
+    }
 
     public async Task<Stream?> GetAsync(string bucket, string key, CancellationToken cancellationToken = default)
     {
