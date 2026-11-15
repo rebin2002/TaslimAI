@@ -31,6 +31,10 @@ describe("Movie Team review workflow", () => {
     expect(workspaceSource).toContain("reviewerOptions");
     expect(workspaceSource).toContain("member.userId !== user.id");
     expect(workspaceSource).toContain("reviewIsFinal");
+    // A revoked FinalApproval capability must clear a previously selected final gate
+    // from both the UI and the API payload, even before the server reauthorizes it.
+    expect(workspaceSource).toContain("isFinal: reviewIsFinal && canRequestFinalReview");
+    expect(workspaceSource).toContain("checked={reviewIsFinal && canRequestFinalReview}");
   });
 
   it("exposes decisions only to the assigned authenticated reviewer", () => {
