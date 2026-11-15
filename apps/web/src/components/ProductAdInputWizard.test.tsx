@@ -16,7 +16,7 @@ describe("ProductAdInputWizard", () => {
     expect(defaultProductAdOutput).toEqual({ channel: "instagram", format: "square" });
     expect(html).toContain("Product advertisement");
     expect(html).toContain('type="text"');
-    expect(html.match(/type="file" accept="image\/\*"/g)).toHaveLength(2);
+    expect(html.split('accept="image/jpeg,image/png,image/webp"')).toHaveLength(3);
     expect(html).toMatch(/type="file"[^>]*required=""/);
     expect(html.match(/required=""/g)).toHaveLength(2);
     expect(html).toContain("Product photo (required)");
@@ -65,6 +65,14 @@ describe("ProductAdInputWizard", () => {
     expect(buildProductAdMockPreview(input, "ar").caption).toContain("اكتشف صابون اليوم");
     expect(isSupportedProductAdImage(validImage)).toBe(true);
     expect(isSupportedProductAdImage({ type: "image/png", size: MAX_PRODUCT_AD_IMAGE_BYTES + 1 })).toBe(false);
+    expect(isSupportedProductAdImage({ type: "image/jpeg", size: 1 })).toBe(true);
+    expect(isSupportedProductAdImage({ type: "image/webp", size: 256 })).toBe(true);
+    expect(isSupportedProductAdImage({ type: "image/png", size: 0 })).toBe(false);
+    expect(isSupportedProductAdImage({ type: "image/svg+xml", size: 128 })).toBe(false);
+    expect(isSupportedProductAdImage({ type: "image/gif", size: 128 })).toBe(false);
+    expect(isSupportedProductAdImage({ type: "image/png", size: Number.NaN })).toBe(false);
+    expect(isSupportedProductAdImage({ type: "image/png", size: Number.POSITIVE_INFINITY })).toBe(false);
+    expect(isSupportedProductAdImage({ type: "image/png", size: -1 })).toBe(false);
     expect(isSupportedProductAdImage({ type: "text/plain", size: 128 })).toBe(false);
   });
 

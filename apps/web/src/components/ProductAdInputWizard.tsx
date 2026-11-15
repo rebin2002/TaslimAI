@@ -73,7 +73,7 @@ const copyByLocale: Record<Locale, ProductAdCopy> = {
     channels: { instagram: "Instagram", facebook: "Facebook", tiktok: "TikTok" },
     formats: { square: "Feed post · 1:1", story: "Story · 9:16", landscape: "Landscape · 16:9" },
     createPreview: "Create mock preview",
-    fileError: "Choose an image file no larger than 10 MB.",
+    fileError: "Choose a JPEG, PNG, or WebP image from 1 byte to 10 MB.",
     previewTitle: "Draft preview",
     previewEmptyTitle: "Your draft preview will appear here",
     previewEmpty: "Add a product name and photo to make a sample ad.",
@@ -99,7 +99,7 @@ const copyByLocale: Record<Locale, ProductAdCopy> = {
     channels: { instagram: "Instagram", facebook: "Facebook", tiktok: "TikTok" },
     formats: { square: "منشور الموجز · 1:1", story: "قصة · 9:16", landscape: "أفقي · 16:9" },
     createPreview: "إنشاء معاينة تجريبية",
-    fileError: "اختر ملف صورة لا يتجاوز حجمه 10 MB.",
+    fileError: "اختر صورة JPEG أو PNG أو WebP بحجم من 1 بايت إلى 10 MB.",
     previewTitle: "معاينة المسودة",
     previewEmptyTitle: "ستظهر معاينة المسودة هنا",
     previewEmpty: "أضف اسم المنتج وصورته لإنشاء إعلان تجريبي.",
@@ -125,7 +125,7 @@ const copyByLocale: Record<Locale, ProductAdCopy> = {
     channels: { instagram: "Instagram", facebook: "Facebook", tiktok: "TikTok" },
     formats: { square: "پۆستی فید · 1:1", story: "ستۆری · 9:16", landscape: "ئاسۆیی · 16:9" },
     createPreview: "پێشبینینی نموونەیی دروست بکە",
-    fileError: "فایلی وێنەیەک هەڵبژێرە کە قەبارەکەی لە 10 MB زیاتر نەبێت.",
+    fileError: "وێنەی JPEG، PNG، یان WebP لە 1 بایت تا 10 MB هەڵبژێرە.",
     previewTitle: "پێشبینینی ڕەشنووس",
     previewEmptyTitle: "پێشبینینی ڕەشنووسەکەت لێرە دەردەکەوێت",
     previewEmpty: "ناوی بەرهەم و وێنەکەی زیاد بکە بۆ دروستکردنی ڕیکلامێکی نموونەیی.",
@@ -137,7 +137,10 @@ const copyByLocale: Record<Locale, ProductAdCopy> = {
 };
 
 export function isSupportedProductAdImage(file: Pick<File, "type" | "size">): boolean {
-  return file.type.startsWith("image/") && file.size <= MAX_PRODUCT_AD_IMAGE_BYTES;
+  return (file.type === "image/jpeg" || file.type === "image/png" || file.type === "image/webp")
+    && Number.isFinite(file.size)
+    && file.size > 0
+    && file.size <= MAX_PRODUCT_AD_IMAGE_BYTES;
 }
 
 export function buildProductAdMockPreview(input: ProductAdDraftInput, locale: Locale): ProductAdMockPreview {
@@ -243,7 +246,7 @@ export function ProductAdInputWizard({ locale = "en" }: Readonly<{ locale?: Loca
               id={`${id}-product-photo`}
               className={styles.fileInput}
               type="file"
-              accept="image/*"
+              accept="image/jpeg,image/png,image/webp"
               aria-describedby={`${id}-photo-help`}
               aria-invalid={photoError ? true : undefined}
               required
@@ -260,7 +263,7 @@ export function ProductAdInputWizard({ locale = "en" }: Readonly<{ locale?: Loca
               id={`${id}-brand-logo`}
               className={styles.fileInput}
               type="file"
-              accept="image/*"
+              accept="image/jpeg,image/png,image/webp"
               aria-describedby={`${id}-logo-help`}
               aria-invalid={logoError ? true : undefined}
               onChange={updateBrandLogo}
