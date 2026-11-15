@@ -177,6 +177,29 @@ describe("studio: what the real Movie read models can and cannot say", () => {
     expect(orphan.blockers.map((blocker) => blocker.code)).toContain("source_asset_not_video");
   });
 
+  it("shows no private source names if the current principal or workspace is not resolved", () => {
+    const staleSelection = reduceMovieVideoMakeoverStudioSource(
+      settledDraftParts(), "asset_take_01", catalogue(),
+    );
+    for (const scope of [
+      { principalId: null, workspaceId: WORKSPACE },
+      { principalId: PRINCIPAL, workspaceId: null },
+      { principalId: "  ", workspaceId: WORKSPACE },
+      { principalId: PRINCIPAL, workspaceId: "" },
+    ]) {
+      const markup = render({
+        project: project(),
+        assets: assets(),
+        ...scope,
+        selection: staleSelection,
+      });
+      expect(markup).not.toContain("Interview room take 01");
+      expect(markup).not.toContain("Reel take 02");
+      expect(markup).toContain("No source attached");
+      expect(markup).not.toContain('data-attached="true"');
+    }
+  });
+
   it("does not display an old project's private clips after an authenticated workspace switch", () => {
     const foreignProject = project({ workspaceId: "other_workspace" });
     const entries = describeMovieVideoMakeoverProjectSources(
