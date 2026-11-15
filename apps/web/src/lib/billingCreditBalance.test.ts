@@ -16,22 +16,24 @@ const credits = (value: Partial<BillingCredits>): BillingCredits => ({
 
 describe("credit balance truth", () => {
 
-  it("never renders an account snapshot under a different or missing authenticated workspace", () => {
-    const accountA = { transactions: [{ reason: "Private workspace A credit history" }] };
-    const accountB = { transactions: [{ reason: "Private workspace B credit history" }] };
-    const a = { workspaceId: "workspace-A", account: accountA };
-    const b = { workspaceId: "workspace-B", account: accountB };
-    expect(scopedBillingAccount(a, "workspace-A")).toBe(accountA);
-    // Between the auth context switch and the next API response, the old
-    // resolved account must not flash in the newly selected workspace.
-    expect(scopedBillingAccount(a, "workspace-B")).toBeNull();
-    expect(scopedBillingAccount(a, null)).toBeNull();
-    expect(scopedBillingAccount(a, undefined)).toBeNull();
-    expect(scopedBillingAccount(b, "workspace-B")).toBe(accountB);
-    expect(scopedBillingAccount(b, "workspace-A")).toBeNull();
-    expect(scopedBillingAccount(null, "workspace-B")).toBeNull();
-    expect(viewSource).toContain("scopedBillingAccount(snapshot, workspaceId)");
-    expect(viewSource).toContain("failedWorkspaceId === workspaceId");
+  it("never renders a prior identity's Billing snapshot, even in the same workspace", () => {
+    const accountA = { transactions: [{ reason: "Private user A credit history" }] };
+    const accountB = { transactions: [{ reason: "Private user B credit history" }] };
+    const a = { userId: "user-A", workspaceId: "workspace-shared", account: accountA };
+    const b = { userId: "user-B", workspaceId: "workspace-shared", account: accountB };
+    expect(scopedBillingAccount(a, "user-A", "workspace-shared")).toBe(accountA);
+    expect(scopedBillingAccount(a, "user-B", "workspace-shared")).toBeNull();
+    expect(scopedBillingAccount(a, "user-A", "workspace-other")).toBeNull();
+    expect(scopedBillingAccount(a, null, "workspace-shared")).toBeNull();
+    expect(scopedBillingAccount(a, "user-A", null)).toBeNull();
+    expect(scopedBillingAccount(a, undefined, "workspace-shared")).toBeNull();
+    expect(scopedBillingAccount(a, "user-A", undefined)).toBeNull();
+    expect(scopedBillingAccount(b, "user-B", "workspace-shared")).toBe(accountB);
+    expect(scopedBillingAccount(b, "user-A", "workspace-shared")).toBeNull();
+    expect(scopedBillingAccount(null, "user-A", "workspace-shared")).toBeNull();
+    expect(viewSource).toContain("scopedBillingAccount(snapshot, userId, workspaceId)");
+    expect(viewSource).toContain("failedScope?.userId === userId && failedScope?.workspaceId === workspaceId");
+    expect(viewSource).toContain("}, [userId, workspaceId]);");
   });
 
   it("uses the authoritative API remaining amount after usage", () => {
