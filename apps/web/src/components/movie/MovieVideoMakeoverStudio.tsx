@@ -64,6 +64,17 @@ import {
   type MovieVideoMakeoverProjectSource,
 } from "@/lib/movieVideoMakeoverSourceCatalog";
 
+/**
+ * Route-owned identity/source evidence for the media URLs in a comparison.
+ * The embedding route must obtain this binding alongside the already-authorized
+ * previews. It is never inferred from the displayed URL or a draft field.
+ */
+export type MovieVideoMakeoverComparisonBinding = Readonly<{
+  principalId: string;
+  workspaceId: string;
+  sourceAssetId: string;
+}>;
+
 export type MovieVideoMakeoverStudioProps = {
   readonly project: MovieVideoMakeoverProjectSource | null;
   readonly assets: readonly MovieVideoMakeoverAssetSource[];
@@ -73,6 +84,8 @@ export type MovieVideoMakeoverStudioProps = {
   readonly onChange: (nextSelection: MovieVideoMakeoverSelection) => void;
   /** Already-authorized preview sources supplied by the route owner, never fetched here. */
   readonly comparison?: MovieMakeoverComparisonPanelProps | null;
+  /** Must match the current authenticated principal, workspace and attached clip. */
+  readonly comparisonBinding?: MovieVideoMakeoverComparisonBinding | null;
 };
 
 /**
@@ -132,6 +145,7 @@ export function MovieVideoMakeoverStudio({
   selection,
   onChange,
   comparison = null,
+  comparisonBinding = null,
 }: MovieVideoMakeoverStudioProps) {
   const context = { principalId, workspaceId };
   const entries = describeMovieVideoMakeoverProjectSources(project, assets, context);
@@ -140,6 +154,14 @@ export function MovieVideoMakeoverStudio({
   const copy = movieVideoMakeoverSourcePendingCopy(attached, visibleSelection.mode);
   const tally = tallyMovieVideoMakeoverSourceGaps(attached === null ? [] : [attached]);
   const pendingCount = Object.values(tally).reduce((total, count) => total + count, 0);
+  // Never render media from a previous principal, workspace or source clip.
+  // URL scheme validation in the comparison panel is not an ownership check.
+  const comparisonMatchesSource = Boolean(
+    comparison && comparisonBinding && attached && principalId && workspaceId &&
+    comparisonBinding.principalId === principalId &&
+    comparisonBinding.workspaceId === workspaceId &&
+    comparisonBinding.sourceAssetId === attached.assetId,
+  );
 
   return (
     <div className="movie-makeover-studio" data-pending-source-facts={String(pendingCount)}>
@@ -156,7 +178,7 @@ export function MovieVideoMakeoverStudio({
       <MovieVideoMakeoverInputPanel selection={visibleSelection} onChange={onChange} showPlaceholderSourceControl={false} />
       {/* No source is inferred from the draft. A missing makeover result must
           remain unavailable, never be replaced with the original clip. */}
-      {comparison ? <MovieMakeoverComparisonPanel {...comparison} /> : null}
+      {comparisonMatchesSource && comparison ? <MovieMakeoverComparisonPanel {...comparison} /> : null}
     </div>
   );
 }
