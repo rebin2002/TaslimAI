@@ -85,6 +85,13 @@ public sealed class DocumentGenerationUnitTests
         var arabicInput = new DocumentGenerationInput(Guid.NewGuid(), null, arabicDraft.Title, "Create a report.", "report", "short", null, null, [], "auto", "docx", "professional", true);
         var arabicXml = ReadMainDocumentXml(renderer.RenderDocx(arabicDraft, arabicInput, options));
         Assert.Contains("bidi", arabicXml, StringComparison.Ordinal);
+        Assert.Contains(arabicDraft.Title, arabicXml, StringComparison.Ordinal);
+        // DOCX structure alone does not prove the PDF path accepts auto Sorani.
+        // Exercise the rendered binary; visual glyph/layout review remains separate.
+        var soraniPdf = renderer.RenderPdf(arabicDraft, arabicInput, options);
+        Assert.Equal(AssetRepresentationTypes.Pdf, soraniPdf.RepresentationType);
+        Assert.StartsWith("%PDF-", Encoding.ASCII.GetString(soraniPdf.Content, 0, 5));
+        Assert.True(soraniPdf.Content.Length > 500);
 
         var englishDraft = new DocumentDraft
         {
