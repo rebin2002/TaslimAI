@@ -227,6 +227,43 @@ public sealed class MovieVideoMakeoverSourceApiTests : IClassFixture<GenerationJ
     }
 
     [Fact]
+    public async Task Conflicting_file_links_and_spoofed_video_mime_never_become_attachable()
+    {
+        using var client = factory.CreateClient();
+        var owner = await RegisterAsync(client);
+        var projectId = await CreateProjectAsync(client, owner, "Source link and MIME integrity");
+
+        // The asset and clip each point to an existing, requester-owned file,
+        // but the two persisted IDs disagree. Merely finding a valid file is
+        // not proof that it belongs to this clip's Asset.
+        var alternate = await SeedSourceAsync(projectId, owner, Healthy());
+        var mismatchedLink = await SeedSourceAsync(projectId, owner, Healthy(),
+            configureAsset: asset => asset.StoredFileId = alternate.FileId);
+
+        // The asset's type label can be "video" even when the stored bytes were
+        // classified as an image, or its own MIME claim contradicts the file.
+        var nonVideoStoredFile = await SeedSourceAsync(projectId, owner, Healthy(),
+            configureFile: file => file.ContentType = "image/png");
+        var nonVideoAssetMime = await SeedSourceAsync(projectId, owner, Healthy(),
+            configureAsset: asset => asset.MimeType = "image/jpeg");
+
+        await AssertBlockedAsync(client, projectId, mismatchedLink,
+            MovieVideoMakeoverSourceCodes.FileLinkMismatch);
+        await AssertBlockedAsync(client, projectId, nonVideoStoredFile,
+            MovieVideoMakeoverSourceCodes.NotVideo);
+        await AssertBlockedAsync(client, projectId, nonVideoAssetMime,
+            MovieVideoMakeoverSourceCodes.NotVideo);
+
+        // A healthy independent clip remains available; this is a targeted
+        // fail-closed admission check, not a blanket disablement.
+        var healthy = await client.GetAsync($"{ListPath(projectId)}/{alternate.ClipId}");
+        Assert.Equal(HttpStatusCode.OK, healthy.StatusCode);
+        var dto = await healthy.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.True(dto.GetProperty("attachPermitted").GetBoolean());
+        Assert.Empty(dto.GetProperty("blockers").EnumerateArray());
+    }
+
+    [Fact]
     public async Task Structural_blockers_are_reported_and_the_audio_and_frame_rate_gaps_stay_listed()
     {
         using var client = factory.CreateClient();
