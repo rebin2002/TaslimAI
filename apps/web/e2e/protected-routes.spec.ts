@@ -23,3 +23,42 @@ test.describe("anonymous protected-route boundary", () => {
     });
   }
 });
+
+
+const newlyServerGatedRoutes = [
+  "/create",
+  "/create/document",
+  "/create/social",
+  "/chat/e2e-auth-boundary",
+] as const;
+
+test.describe("server-gated private routes: session verification", () => {
+  test("rejects a forged auth cookie on every newly gated route", async ({ page, context }) => {
+    await page.goto("/login");
+    await context.addCookies([{
+      name: "taslim.auth",
+      value: "forged-cookie-not-a-session",
+      url: new URL(page.url()).origin,
+    }]);
+
+    for (const path of newlyServerGatedRoutes) {
+      const response = await page.request.get(path, {
+        maxRedirects: 0,
+        failOnStatusCode: false,
+      });
+      expect(response.status(), `forged session at ${path}`).toBe(307);
+      expect(response.headers()["location"]).toBe(`/login?next=${encodeURIComponent(path)}`);
+    }
+  });
+
+  test("accepts a genuine API-authenticated session without a login bounce", async ({ authenticatedPage }) => {
+    for (const path of newlyServerGatedRoutes) {
+      const response = await authenticatedPage.request.get(path, {
+        maxRedirects: 0,
+        failOnStatusCode: false,
+      });
+      expect(response.status(), `authenticated session at ${path}`).toBe(200);
+      expect(response.headers()["location"], `unexpected redirect at ${path}`).toBeUndefined();
+    }
+  });
+});
