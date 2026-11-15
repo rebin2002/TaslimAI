@@ -51,9 +51,16 @@ function IdentityScopedMovieTeamWorkspace({ project }: { project: MovieProject }
     const revision = ++loadRevision.current;
     try {
       const next = await api.getMovieCollaboration(project.id);
-      if (mounted.current && revision === loadRevision.current) setCollaboration(next);
+      if (mounted.current && revision === loadRevision.current) {
+        setCollaboration(next);
+        // A fresh server permission snapshot revokes any stale final-gate choice.
+        if (!next.currentUserPermissions.includes("FinalApproval")) setReviewIsFinal(false);
+      }
     } catch {
-      if (mounted.current && revision === loadRevision.current) setCollaboration(null);
+      if (mounted.current && revision === loadRevision.current) {
+        setCollaboration(null);
+        setReviewIsFinal(false);
+      }
     } finally {
       if (mounted.current && revision === loadRevision.current) setLoading(false);
     }
@@ -161,10 +168,6 @@ function IdentityScopedMovieTeamWorkspace({ project }: { project: MovieProject }
   const canComment = (collaboration?.currentUserPermissions ?? []).includes("Comment");
   const canRequestReviews = Boolean(user && canComment);
   const canRequestFinalReview = (collaboration?.currentUserPermissions ?? []).includes("FinalApproval");
-  // Discard any previously checked final gate when the server revokes its capability.
-  useEffect(() => {
-    if (!canRequestFinalReview) setReviewIsFinal(false);
-  }, [canRequestFinalReview]);
   const reviewerOptions = user ? team.filter((member) => member.userId !== user.id) : [];
   const canDecide = (review: MovieCollaboration["reviews"][number]) => Boolean(
     user
