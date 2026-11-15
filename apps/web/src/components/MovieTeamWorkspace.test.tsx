@@ -29,6 +29,19 @@ describe("Movie Team review workflow", () => {
     expect(workspaceSource).toContain('decideReview(review.id, "Rejected")');
   });
 
+  it("captures a bounded per-review decision note and sends it to the existing authorized API", () => {
+    const apiSource = readFileSync(new URL("../lib/api.ts", import.meta.url), "utf8");
+    expect(workspaceSource).toContain('const [decisionNotes, setDecisionNotes] = useState<Record<string, string>>({});');
+    expect(workspaceSource).toContain('value={decisionNotes[review.id] ?? ""}');
+    expect(workspaceSource).toContain("maxLength={4000}");
+    expect(workspaceSource).toContain("onChange={(event) => setDecisionNotes");
+    expect(workspaceSource).toContain("decisionNote: decisionNotes[reviewId]?.trim() || null");
+    expect(workspaceSource).toContain("delete next[reviewId]");
+    expect(workspaceSource).toContain("review.decisionNote");
+    expect(apiSource).toContain("decisionNote?: string | null");
+    expect(apiSource).toContain("/decision");
+  });
+
   it("keeps final-gate authority and server re-authorization visible", () => {
     expect(workspaceSource).toContain('includes("FinalApproval")');
     expect(workspaceSource).toContain("Final gate requests require FinalApproval authority.");
