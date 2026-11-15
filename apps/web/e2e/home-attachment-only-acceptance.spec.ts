@@ -7,7 +7,14 @@ import type { Route } from "@playwright/test";
  * after registration are intercepted; no message reaches a generation provider,
  * ledger, file store or customer charging service.
  */
-test("Home attachment-only creates exactly one scoped Chat submission without a provider call", async ({ authenticatedPage: page }) => {
+const attachmentOnlyLocales = [
+  { locale: "en", htmlLang: "en", prompt: "Please review the attached files." },
+  { locale: "ar", htmlLang: "ar", prompt: "يرجى مراجعة الملفات المرفقة." },
+  { locale: "ku", htmlLang: "ckb", prompt: "تکایە پێداچوونەوە بە فایلە هاوپێچکراوەکاندا بکە." },
+] as const;
+
+for (const { locale, htmlLang, prompt: expectedPrompt } of attachmentOnlyLocales) {
+test(`Home attachment-only creates one provider-free Chat submission in ${locale}`, async ({ authenticatedPage: page }) => {
   const conversationId = "00000000-0000-4000-8000-000000000821";
   const fileId = "00000000-0000-4000-8000-000000000527";
   const seen: { conversation: number; upload: number; messages: { content: string; attachmentIds: string[] }[] } = {
@@ -58,6 +65,8 @@ test("Home attachment-only creates exactly one scoped Chat submission without a 
     });
   });
   await page.goto("/");
+  await page.locator(".language-select select").selectOption(locale);
+  await expect(page.locator("html")).toHaveAttribute("lang", htmlLang);
   const composer = page.locator(".home-composer");
   await expect(composer).toBeVisible();
   const submit = composer.locator(".home-composer-submit");
@@ -81,9 +90,10 @@ test("Home attachment-only creates exactly one scoped Chat submission without a 
   expect(seen).toEqual({
     conversation: 1,
     upload: 1,
-    messages: [{ content: "Please review the attached files.", attachmentIds: [fileId] }],
+    messages: [{ content: expectedPrompt, attachmentIds: [fileId] }],
   });
 });
+}
 
 /**
  * The browser can keep a private unsent File handle and text in React state.
