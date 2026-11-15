@@ -99,7 +99,11 @@ export function describeVerifiedMovieMakeoverServerSources(
     // admission. For private source drafts we additionally require verified
     // self-ownership; collaborators may inspect authorized clip metadata but
     // may not silently attach another person's asset.
-    if (!selfOwned || row.attachPermitted !== true) {
+    // The server's explicit blockers are authoritative even if a malformed
+    // or inconsistent response also claims attachPermitted=true. A missing
+    // blockers array is not permission to attach a private media asset.
+    const serverHasBlockers = !Array.isArray(row.blockers) || row.blockers.length > 0;
+    if (!selfOwned || row.attachPermitted !== true || serverHasBlockers) {
       result.push({
         ...source,
         selectable: false,
