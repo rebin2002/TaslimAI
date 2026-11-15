@@ -7,19 +7,31 @@ import { useEffect, useMemo, useState } from "react";
 import { useAuth } from "@/components/AuthProvider";
 import { useLocale } from "@/components/LocaleProvider";
 import { api, type BillingAccount, type BillingPlanOption } from "@/lib/api";
-import { describeCreditBalance } from "@/lib/billingCreditBalance";
+import { describeCreditBalance, scopedBillingAccount } from "@/lib/billingCreditBalance";
 
 export function BillingView() {
   const { workspace } = useAuth();
   const { t, locale } = useLocale();
-  const [account, setAccount] = useState<BillingAccount | null>(null);
-  const [error, setError] = useState(false);
+  const workspaceId = workspace?.id ?? null;
+  const [snapshot, setSnapshot] = useState<{ workspaceId: string; account: BillingAccount } | null>(null);
+  const [failedWorkspaceId, setFailedWorkspaceId] = useState<string | null>(null);
+  // Resolve against the *current* auth/workspace identity during render. Waiting
+  // for an effect to clear previous state can briefly expose the old workspace's
+  // private credit ledger and transaction reasons after a same-tab switch.
+  const account = scopedBillingAccount(snapshot, workspaceId);
+  const error = Boolean(workspaceId && failedWorkspaceId === workspaceId);
   useEffect(() => {
-    if (!workspace?.id) return;
+    if (!workspaceId) return;
     let active = true;
-    void api.getBillingAccount(workspace.id).then((next) => { if (active) setAccount(next); }).catch(() => { if (active) setError(true); });
+    void api.getBillingAccount(workspaceId).then((next) => {
+      if (!active) return;
+      setSnapshot({ workspaceId, account: next });
+      setFailedWorkspaceId(null);
+    }).catch(() => {
+      if (active) setFailedWorkspaceId(workspaceId);
+    });
     return () => { active = false; };
-  }, [workspace?.id]);
+  }, [workspaceId]);
   const dateFormatter = useMemo(() => new Intl.DateTimeFormat(localeTag(locale), { dateStyle: "medium" }), [locale]);
   const numberFormatter = useMemo(() => new Intl.NumberFormat(localeTag(locale)), [locale]);
   // Only the API's totalRemaining is a spendable balance; other figures
