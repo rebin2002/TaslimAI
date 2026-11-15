@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { GenerationJob } from "./api";
-import { canCancelImageJob, clearImageActiveJobId, imageActiveJobStorageKey, imageJobPollIntervalMs, imageJobPollMaxDelayMs, isImageJob, isImageTerminal, isRestorableImageJob, nextImagePollDelay, parseImageJobResult, persistImageActiveJobId, readImageActiveJobId, safeImageJobView, shouldPollImageJob, shouldResetImageWorkspaceState } from "./imageStudioState";
+import { canCancelImageJob, clearImageActiveJobId, imageActiveJobStorageKey, imageJobPollIntervalMs, imageJobPollMaxDelayMs, isImageJob, isImageTerminal, isRestorableImageJob, nextImagePollDelay, parseImageJobResult, persistImageActiveJobId, readImageActiveJobId, safeImageJobView, shouldClearImageJobAfterPollError, shouldPollImageJob, shouldResetImageWorkspaceState } from "./imageStudioState";
 
 function job(overrides: Partial<GenerationJob> = {}): GenerationJob {
   return {
@@ -42,6 +42,15 @@ describe("image studio state", () => {
     expect(nextImagePollDelay(job({ status: "Succeeded" }), 0)).toBeNull();
   });
 
+  it("treats inaccessible active jobs as orphaned instead of retrying forever", () => {
+    expect(shouldClearImageJobAfterPollError(401)).toBe(true);
+    expect(shouldClearImageJobAfterPollError(403)).toBe(true);
+    expect(shouldClearImageJobAfterPollError(404)).toBe(true);
+    expect(shouldClearImageJobAfterPollError(408)).toBe(false);
+    expect(shouldClearImageJobAfterPollError(500)).toBe(false);
+    expect(shouldClearImageJobAfterPollError(null)).toBe(false);
+  });
+
   it("parses only the safe Asset result fields", () => {
     const result = parseImageJobResult(job({ status: "Succeeded", progressPercent: 100, resultJson: '{"assetId":"asset-1","format":"png","width":1024,"height":1024,"provider":"openai","providerModel":"secret"}' }));
     expect(result).toMatchObject({ assetId: "asset-1", format: "png", width: 1024, height: 1024 });
@@ -55,14 +64,20 @@ describe("image studio state", () => {
     expect(parseImageJobResult(job({ status: "Succeeded", resultJson: "not-json" }))).toBeNull();
   });
 
-  it("persists the active job by workspace and clears stale pointers", () => {
+  it("isolates active jobs by user and workspace without importing legacy pointers", () => {
     const values = new Map<string, string>();
     vi.stubGlobal("window", { sessionStorage: { getItem: (key: string) => values.get(key) ?? null, setItem: (key: string, value: string) => values.set(key, value), removeItem: (key: string) => values.delete(key) } });
-    persistImageActiveJobId("workspace-1", "image-job-1");
-    expect(values.get(imageActiveJobStorageKey("workspace-1"))).toBe("image-job-1");
-    expect(readImageActiveJobId("workspace-1")).toBe("image-job-1");
-    expect(readImageActiveJobId("workspace-2")).toBeNull();
-    clearImageActiveJobId("workspace-1");
-    expect(readImageActiveJobId("workspace-1")).toBeNull();
+    persistImageActiveJobId("user-A", "workspace-1", "image-job-1");
+    expect(values.get(imageActiveJobStorageKey("user-A", "workspace-1"))).toBe("image-job-1");
+    expect(readImageActiveJobId("user-A", "workspace-1")).toBe("image-job-1");
+    expect(readImageActiveJobId("user-B", "workspace-1")).toBeNull();
+    expect(readImageActiveJobId("user-A", "workspace-2")).toBeNull();
+    expect(readImageActiveJobId("", "workspace-1")).toBeNull();
+    values.set("taslim:image-generation:workspace-1", "legacy-job");
+    expect(readImageActiveJobId("user-B", "workspace-1")).toBeNull();
+    persistImageActiveJobId("", "workspace-1", "invalid");
+    expect(values.has(imageActiveJobStorageKey("", "workspace-1"))).toBe(false);
+    clearImageActiveJobId("user-A", "workspace-1");
+    expect(readImageActiveJobId("user-A", "workspace-1")).toBeNull();
   });
 });
