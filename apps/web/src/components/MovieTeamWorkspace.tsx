@@ -71,6 +71,8 @@ function IdentityScopedMovieTeamWorkspace({ project }: { project: MovieProject }
   async function submitComment() {
     if (commentBody.trim().length === 0) return;
     setBusy(true);
+    // Any earlier authorization read is invalid after a mutation begins.
+    loadRevision.current += 1;
     setError("");
     setMessage("");
     try {
@@ -92,6 +94,8 @@ function IdentityScopedMovieTeamWorkspace({ project }: { project: MovieProject }
 
   async function resolve(commentId: string) {
     setBusy(true);
+    // Any earlier authorization read is invalid after a mutation begins.
+    loadRevision.current += 1;
     setError("");
     try {
       setCollaboration(await api.resolveMovieComment(project.id, commentId));
@@ -106,6 +110,8 @@ function IdentityScopedMovieTeamWorkspace({ project }: { project: MovieProject }
   async function requestReview() {
     if (!user || !reviewerUserId) return;
     setBusy(true);
+    // Any earlier authorization read is invalid after a mutation begins.
+    loadRevision.current += 1;
     setError("");
     setMessage("");
     try {
@@ -130,6 +136,8 @@ function IdentityScopedMovieTeamWorkspace({ project }: { project: MovieProject }
 
   async function decideReview(reviewId: string, status: "Approved" | "ChangesRequested" | "Rejected") {
     setBusy(true);
+    // Any earlier authorization read is invalid after a mutation begins.
+    loadRevision.current += 1;
     setError("");
     setMessage("");
     try {
