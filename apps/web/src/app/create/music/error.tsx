@@ -5,13 +5,7 @@ import { RefreshCw } from "lucide-react";
 import { useEffect } from "react";
 import { useLocale } from "@/components/LocaleProvider";
 
-export default function MusicStudioError({ reset }: { error: Error & { digest?: string }; reset: () => void }) {
-  const { t } = useLocale();
-
-  useEffect(() => {
-    console.error("Music Studio route recovery", "route_error");
-  }, []);
-
+export function MusicStudioRecoveryView({ reset, t }: Readonly<{ reset: () => void; t: (key: string) => string }>) {
   return (
     <main className="placeholder-page">
       <section className="placeholder-panel" role="alert" aria-live="assertive">
@@ -28,4 +22,14 @@ export default function MusicStudioError({ reset }: { error: Error & { digest?: 
       </section>
     </main>
   );
+}
+
+export default function MusicStudioError({ reset }: { error: Error & { digest?: string }; reset: () => void }) {
+  const { t } = useLocale();
+
+  useEffect(() => {
+    console.error("Music Studio route recovery", "route_error");
+  }, []);
+
+  return <MusicStudioRecoveryView reset={reset} t={t} />;
 }
