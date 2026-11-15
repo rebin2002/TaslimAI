@@ -177,7 +177,10 @@ public static class MovieVideoMakeoverSourceEvaluator
         // another workspace member is never emitted; only the boolean relationship.
         var ownershipVerified = asset is not null && storedFile is not null
             && asset.CreatedByUserId != Guid.Empty
-            && storedFile.UserId != Guid.Empty;
+            && storedFile.UserId != Guid.Empty
+            // A valid owner on each separate row is not proof that this asset
+            // belongs to the file's owner. A mismatched link is unverified.
+            && asset.CreatedByUserId == storedFile.UserId;
         if (!ownershipVerified) blockers.Add(MovieVideoMakeoverSourceCodes.OwnershipUnverified);
 
         // --- visibility ----------------------------------------------------------
