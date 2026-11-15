@@ -43,7 +43,7 @@
  * this composer is mounted, which its owner can do without touching any file here.
  */
 
-import { movieMakeoverCopy, movieMakeoverDirection, type MovieMakeoverLocale } from "./movieVideoMakeoverLocale";
+import { movieMakeoverCopy, movieMakeoverDirection, localizedMovieMakeoverSourcePendingCopy, type MovieMakeoverLocale } from "./movieVideoMakeoverLocale";
 import {
   describeVerifiedMovieMakeoverServerSources,
   type MovieMakeoverServerSourceResponse,
@@ -63,7 +63,6 @@ import {
   applyMovieVideoMakeoverSourceSelection,
   clearMovieVideoMakeoverSourceSelection,
   describeMovieVideoMakeoverProjectSources,
-  movieVideoMakeoverSourcePendingCopy,
   tallyMovieVideoMakeoverSourceGaps,
   type MovieVideoMakeoverAssetSource,
   type MovieVideoMakeoverProjectSource,
@@ -228,7 +227,7 @@ export function MovieVideoMakeoverStudio({
       : [];
   const visibleSelection = reconcileMovieVideoMakeoverStudioSelection(selection, entries);
   const attached = entries.find((entry) => entry.selectable && entry.assetId === visibleSelection.sourceAssetId) ?? null;
-  const copy = movieVideoMakeoverSourcePendingCopy(attached, visibleSelection.mode);
+  const copy = localizedMovieMakeoverSourcePendingCopy(attached, visibleSelection.mode, locale);
   const tally = tallyMovieVideoMakeoverSourceGaps(attached === null ? [] : [attached]);
   const pendingCount = Object.values(tally).reduce((total, count) => total + count, 0);
   // Never render media from a previous principal, workspace or source clip.
