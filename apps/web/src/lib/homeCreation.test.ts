@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { attachmentOnlyCreationPrompt, canSubmitHomeCreation, createHomeCreationSubmissionGate, isHomeCreationSubmitKey, resolveHomeCreationPrompt } from "./homeCreation";
+import { attachmentOnlyCreationPrompt, attachmentOnlyCreationPrompts, canSubmitHomeCreation, createHomeCreationSubmissionGate, isHomeCreationSubmitKey, resolveHomeCreationPrompt } from "./homeCreation";
 
 describe("home creation prompt", () => {
   it("does not submit while Enter confirms an IME candidate or while Shift is held", () => {
@@ -19,6 +19,17 @@ describe("home creation prompt", () => {
   it("provides a deterministic review instruction for attachment-only creation", () => {
     expect(resolveHomeCreationPrompt("   ", 1)).toBe(attachmentOnlyCreationPrompt);
     expect(canSubmitHomeCreation("   ", 1)).toBe(true);
+  });
+
+  it("uses the active English, Arabic or Sorani locale for attachment-only Home creation", () => {
+    for (const locale of ["en", "ar", "ku"] as const) {
+      expect(resolveHomeCreationPrompt("  ", 1, locale)).toBe(attachmentOnlyCreationPrompts[locale]);
+      expect(resolveHomeCreationPrompt("", 2, locale)).toBe(attachmentOnlyCreationPrompts[locale]);
+      expect(resolveHomeCreationPrompt("  Summarize the report ", 1, locale)).toBe("Summarize the report");
+      expect(resolveHomeCreationPrompt("  ", 0, locale)).toBeNull();
+    }
+    expect(attachmentOnlyCreationPrompts.ar).toContain("الملفات");
+    expect(attachmentOnlyCreationPrompts.ku).toContain("فایل");
   });
 
   it("rejects repeated submission until the in-flight creation finishes", () => {
