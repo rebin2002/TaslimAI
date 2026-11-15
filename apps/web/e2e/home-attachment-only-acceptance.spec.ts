@@ -1,4 +1,5 @@
-import { test, expect } from "./fixtures";
+import { randomUUID } from "node:crypto";
+import { E2E_PASSWORD, logoutInUi, registerInUi, test, expect } from "./fixtures";
 import type { Route } from "@playwright/test";
 
 /**
@@ -82,4 +83,37 @@ test("Home attachment-only creates exactly one scoped Chat submission without a 
     upload: 1,
     messages: [{ content: "Please review the attached files.", attachmentIds: [fileId] }],
   });
+});
+
+/**
+ * The browser can keep a private unsent File handle and text in React state.
+ * Those belong to the authenticated principal only; neither should be
+ * exposed or submitted after a same-tab account transition.
+ */
+test("Home does not carry local files or draft text into a different account", async ({ authenticatedPage: page }) => {
+  await page.goto("/");
+  const composer = page.locator(".home-composer");
+  await expect(composer).toBeVisible();
+  await composer.locator(".home-composer-input").fill("Private Account A instructions");
+  await composer.locator('input[type="file"]').setInputFiles({
+    name: "account-A-private-file.txt",
+    mimeType: "text/plain",
+    buffer: Buffer.from("Private account A attachment (synthetic)."),
+  });
+  await expect(composer).toContainText("account-A-private-file.txt");
+  await expect(composer.locator(".home-composer-submit")).toBeEnabled();
+
+  await logoutInUi(page);
+  await registerInUi(page, {
+    displayName: "E2E Alternate Home Account",
+    email: `e2e+home-switch-${randomUUID()}@example.test`,
+    password: E2E_PASSWORD,
+  });
+  await page.goto("/");
+  await expect(composer).toBeVisible();
+  await expect(composer.locator(".home-composer-input")).toHaveValue("");
+  await expect(composer).not.toContainText("account-A-private-file.txt");
+  await expect(composer).not.toContainText("Private Account A instructions");
+  await expect(composer.locator(".home-composer-submit")).toBeDisabled();
+  expect(await composer.locator('input[type="file"]').evaluate((el) => (el as HTMLInputElement).files?.length ?? 0)).toBe(0);
 });
