@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { describeCreditBalance } from "./billingCreditBalance";
+import { describeCreditBalance, scopedBillingAccount } from "./billingCreditBalance";
 import type { BillingCredits } from "./api";
 
 const viewSource = readFileSync(new URL("../components/BillingView.tsx", import.meta.url), "utf8");
@@ -15,6 +15,25 @@ const credits = (value: Partial<BillingCredits>): BillingCredits => ({
 });
 
 describe("credit balance truth", () => {
+
+  it("never renders an account snapshot under a different or missing authenticated workspace", () => {
+    const accountA = { transactions: [{ reason: "Private workspace A credit history" }] };
+    const accountB = { transactions: [{ reason: "Private workspace B credit history" }] };
+    const a = { workspaceId: "workspace-A", account: accountA };
+    const b = { workspaceId: "workspace-B", account: accountB };
+    expect(scopedBillingAccount(a, "workspace-A")).toBe(accountA);
+    // Between the auth context switch and the next API response, the old
+    // resolved account must not flash in the newly selected workspace.
+    expect(scopedBillingAccount(a, "workspace-B")).toBeNull();
+    expect(scopedBillingAccount(a, null)).toBeNull();
+    expect(scopedBillingAccount(a, undefined)).toBeNull();
+    expect(scopedBillingAccount(b, "workspace-B")).toBe(accountB);
+    expect(scopedBillingAccount(b, "workspace-A")).toBeNull();
+    expect(scopedBillingAccount(null, "workspace-B")).toBeNull();
+    expect(viewSource).toContain("scopedBillingAccount(snapshot, workspaceId)");
+    expect(viewSource).toContain("failedWorkspaceId === workspaceId");
+  });
+
   it("uses the authoritative API remaining amount after usage", () => {
     const balance = describeCreditBalance(credits({
       includedGranted: 10_000,
