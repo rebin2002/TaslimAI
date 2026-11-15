@@ -134,15 +134,22 @@ public sealed class MovieVideoMakeoverSourceApiTests : IClassFixture<GenerationJ
         var invisible = await SeedSourceAsync(projectId, owner, Healthy(),
             configureFile: file => file.UserId = otherUser.User.Id);
 
+        // One accessible source is interleaved with the two withheld links.
+        // Response totals, not just the list body, must disclose only this row.
+        var accessible = await SeedSourceAsync(projectId, owner, Healthy());
+
         var response = await client.GetAsync(ListPath(projectId));
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         var body = await response.Content.ReadAsStringAsync();
         using var json = JsonDocument.Parse(body);
-        Assert.Equal(2, json.RootElement.GetProperty("totalClipCount").GetInt32());
-        Assert.Equal(0, json.RootElement.GetProperty("disclosedCount").GetInt32());
-        Assert.Empty(json.RootElement.GetProperty("sources").EnumerateArray());
+        Assert.Equal(1, json.RootElement.GetProperty("totalClipCount").GetInt32());
+        Assert.Equal(1, json.RootElement.GetProperty("disclosedCount").GetInt32());
+        Assert.False(json.RootElement.GetProperty("truncated").GetBoolean());
+        var onlyVisibleSource = Assert.Single(json.RootElement.GetProperty("sources").EnumerateArray());
+        Assert.Equal(accessible.ClipId, onlyVisibleSource.GetProperty("clipId").GetGuid());
 
-        // The withheld rows are not even described: ids of the foreign asset/file
+        // The withheld rows do not affect totals/truncation and are not described:
+        // ids of the foreign asset/file
         // and the other user's file never appear in the payload.
         Assert.DoesNotContain(crossWorkspace.AssetId.ToString("D"), body, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain(crossWorkspace.FileId.ToString("D"), body, StringComparison.OrdinalIgnoreCase);
