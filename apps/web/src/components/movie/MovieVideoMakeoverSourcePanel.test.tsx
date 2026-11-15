@@ -184,3 +184,25 @@ describe("source panel markup: honest and inert", () => {
     expect(markup).toMatch(/non-billable/i);
   });
 });
+
+describe("locale-specific source eligibility explanations", () => {
+  it.each(["ar", "ku"] as const)("translates blockers, pending gaps and disabled future modes for %s", (locale) => {
+    const blocked = entry({ assetId: "asset_not_video", assetType: "image", mimeType: "image/png" });
+    const denied = movieVideoMakeoverSourcePanelModel([blocked], null, "studio-swap", locale);
+    expect(denied.rows[0].attachable).toBe(false);
+    expect(denied.rows[0].reasons.join(" ")).not.toMatch(/finished video asset/i);
+    expect(denied.rows[0].reasons.join(" ")).toMatch(locale === "ar" ? /فيديو/ : /ڤیدیۆ/);
+    const selected = entry({ frameRate: null, audioPresent: null });
+    const pending = movieVideoMakeoverSourcePanelModel([selected], selected.assetId, "studio-swap", locale);
+    expect(pending.rows[0].pendingFacts).toHaveLength(2);
+    expect(pending.details).toEqual(pending.rows[0].pendingFacts);
+    expect(pending.headline).not.toContain("source facts still need verification");
+    expect(pending.details.join(" ")).not.toMatch(/frame rate|whether the source has audio/i);
+    const markup = renderToStaticMarkup(<MovieVideoMakeoverSourcePanel entries={[selected]} selectedAssetId={selected.assetId} mode="studio-swap" locale={locale} {...handlers} />);
+    expect(markup).toContain('dir="rtl"');
+    expect(markup).toContain(pending.headline);
+    const unsupported = movieVideoMakeoverSourcePanelModel([selected], selected.assetId, "wardrobe-change", locale);
+    expect(unsupported.headline).not.toContain("Outfit change is a future feature");
+    expect(unsupported.details).toHaveLength(1);
+  });
+});
