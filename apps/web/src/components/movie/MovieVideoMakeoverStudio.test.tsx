@@ -1,4 +1,5 @@
 import { renderToStaticMarkup } from "react-dom/server";
+import { movieMakeoverCopy } from "./movieVideoMakeoverLocale";
 import { describe, expect, it } from "vitest";
 import {
   MovieVideoMakeoverStudio,
@@ -158,6 +159,48 @@ describe("Movie Makeover locale-safe provider-free composition", () => {
       expect(markup).not.toContain('title="Not wired yet"');
     });
   }
+
+  it("keeps localized comparison labels when its route supplies default English overrides", () => {
+    const selection = reduceMovieVideoMakeoverStudioSource(
+      settledDraftParts(), "asset_take_01", catalogue(),
+    );
+    for (const locale of ["ar", "ku"] as const) {
+      const copy = movieMakeoverCopy(locale);
+      const markup = render({
+        project: project(),
+        assets: assets(),
+        principalId: PRINCIPAL,
+        workspaceId: WORKSPACE,
+        selection,
+        locale,
+        comparisonBinding: {
+          principalId: PRINCIPAL,
+          workspaceId: WORKSPACE,
+          sourceAssetId: "asset_take_01",
+        },
+        comparison: {
+          beforeSource: { url: "/api/test-asset/video" },
+          afterSource: null,
+          viewMode: "split",
+          splitPercent: 50,
+          labels: {
+            region: "ENGLISH ROUTE COMPARISON",
+            modeSplit: "ENGLISH ROUTE SPLIT",
+            afterUnavailable: "ENGLISH ROUTE NO RESULT",
+          },
+          onSplitPercentChange: () => {},
+          onViewModeChange: () => {},
+        },
+      });
+      expect(markup).toContain(copy.region);
+      expect(markup).toContain(copy.split);
+      expect(markup).toContain(copy.afterUnavailable);
+      expect(markup).not.toContain("ENGLISH ROUTE COMPARISON");
+      expect(markup).not.toContain("ENGLISH ROUTE SPLIT");
+      expect(markup).not.toContain("ENGLISH ROUTE NO RESULT");
+      expect(markup).toContain('dir="rtl"');
+    }
+  });
 
   it("translates the honest unavailable result without replacing it with the source clip", () => {
     const markup = render({
