@@ -179,18 +179,25 @@ function IdentityScopedMovieTeamWorkspace({ project }: { project: MovieProject }
       && (review.isFinal ? (collaboration?.currentUserPermissions ?? []).includes("FinalApproval") : (collaboration?.currentUserPermissions ?? []).includes("Approve")),
   );
 
-  // A failed permissions fetch is not an empty team. Hide all forms, notes and
-  // review decisions until the authoritative snapshot can be loaded again.
-  if (!loading && loadError) {
+  // A failed or pending permissions fetch is not an empty team. Do not
+  // expose prior notes, reviewer identities or actions during a refresh either.
+  if (loading || loadError) {
     return (
       <div className="movie-team-workspace" data-testid="movie-team-workspace">
-        <div className="movie-selects-notice is-error" role="alert">
-          <AlertTriangle size={16} />
-          <span>Unable to load Movie Team permissions and reviews. No action is available until the connection is restored.</span>
-          <button type="button" className="movie-workspace-button is-quiet" onClick={() => void load()}>
-            <RefreshCw size={13} /> Retry
-          </button>
-        </div>
+        {loading ? (
+          <div className="movie-team-empty" role="status">
+            <Clock3 size={18} />
+            <span>Refreshing Movie Team permissions and reviews…</span>
+          </div>
+        ) : (
+          <div className="movie-selects-notice is-error" role="alert">
+            <AlertTriangle size={16} />
+            <span>Unable to load Movie Team permissions and reviews. No action is available until the connection is restored.</span>
+            <button type="button" className="movie-workspace-button is-quiet" onClick={() => void load()}>
+              <RefreshCw size={13} /> Retry
+            </button>
+          </div>
+        )}
       </div>
     );
   }
