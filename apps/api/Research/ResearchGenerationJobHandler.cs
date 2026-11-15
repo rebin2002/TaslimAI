@@ -315,6 +315,8 @@ internal static class ResearchDocumentMapper
             new() { Heading = "Key findings", Blocks = draft.KeyFindings.Select(ToDocumentBlock).ToList() },
         };
         sections.AddRange(draft.Sections.Select(section => new DocumentSection { Heading = section.Heading, Blocks = section.Blocks.Select(ToDocumentBlock).ToList() }));
+        if (!string.IsNullOrWhiteSpace(draft.Conclusion))
+            sections.Add(new DocumentSection { Heading = "Conclusion", Blocks = [new DocumentBlock { Type = DocumentBlockTypes.Paragraph, Text = draft.Conclusion }] });
         sections.Add(new DocumentSection { Heading = "Sources", Blocks = sources.Select(source => new DocumentBlock { Type = DocumentBlockTypes.Paragraph, Text = $"[{source.CitationId}] {source.Title} — {source.Url ?? "Uploaded source"}" }).ToList() });
         return new DocumentDraft { Title = draft.Title, Summary = AppendCitations(draft.ExecutiveSummary, []) ?? string.Empty, Sections = sections };
     }
