@@ -55,7 +55,7 @@ test("revoked Presentation session clears private preview and stops protected po
   await expect.poll(() => deniedResponses, { timeout: 15_000 }).toBeGreaterThan(0);
   await expect(page.locator(".presentation-progress-workspace")).toHaveCount(0);
   await expect(page.locator(".presentation-compose-workspace")).toHaveCount(0);
-  await expect(page.getByRole("alert")).toBeVisible();
+  await expect(page.locator(".presentation-generation-state[role='alert']")).toBeVisible();
   await expect.poll(async () => page.evaluate((key) => sessionStorage.getItem(key), storageKey)).toBeNull();
   const requestsAtRejection = privateJobGets;
   await page.waitForTimeout(5_000);
