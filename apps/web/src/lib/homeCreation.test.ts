@@ -24,11 +24,27 @@ describe("home creation prompt", () => {
   it("rejects repeated submission until the in-flight creation finishes", () => {
     const gate = createHomeCreationSubmissionGate();
     expect(gate.tryStart()).toBe(true);
+    expect(gate.isActive()).toBe(true);
     expect(gate.tryStart()).toBe(false);
     expect(gate.tryStart()).toBe(false);
     gate.finish();
+    expect(gate.isActive()).toBe(false);
     expect(gate.tryStart()).toBe(true);
     gate.finish();
+  });
+
+  it("revokes a pending submission when the authenticated Home scope unmounts", () => {
+    const oldScope = createHomeCreationSubmissionGate();
+    expect(oldScope.tryStart()).toBe(true);
+    oldScope.cancel();
+    expect(oldScope.isActive()).toBe(false);
+    expect(oldScope.tryStart()).toBe(false);
+    oldScope.finish();
+    expect(oldScope.tryStart()).toBe(false);
+    const nextScope = createHomeCreationSubmissionGate();
+    expect(nextScope.tryStart()).toBe(true);
+    expect(nextScope.isActive()).toBe(true);
+    nextScope.finish();
   });
 
   it("preserves explicit instructions when attachments are also selected", () => {
