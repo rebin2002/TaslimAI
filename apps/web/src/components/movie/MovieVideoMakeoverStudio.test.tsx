@@ -177,6 +177,50 @@ describe("studio: what the real Movie read models can and cannot say", () => {
     expect(orphan.blockers.map((blocker) => blocker.code)).toContain("source_asset_not_video");
   });
 
+  it("does not display an old project's private clips after an authenticated workspace switch", () => {
+    const foreignProject = project({ workspaceId: "other_workspace" });
+    const entries = describeMovieVideoMakeoverProjectSources(
+      foreignProject, assets(), { principalId: PRINCIPAL, workspaceId: WORKSPACE },
+    );
+    expect(entries).toEqual([]);
+    const staleSelection = reduceMovieVideoMakeoverStudioSource(
+      settledDraftParts(), "asset_take_01", catalogue(),
+    );
+    const markup = render({
+      project: foreignProject,
+      assets: assets(),
+      principalId: PRINCIPAL,
+      workspaceId: WORKSPACE,
+      selection: staleSelection,
+    });
+    expect(markup).not.toContain("Interview room take 01");
+    expect(markup).not.toContain("Reel take 02");
+    expect(markup).toContain("No source attached");
+    expect(markup).not.toContain('data-attached="true"');
+  });
+
+  it("hides a stale other-workspace asset's title even when the project itself is current", () => {
+    const foreignName = "OTHER WORKSPACE PRIVATE ASSET NAME";
+    const staleAssets = assets().map((asset) => asset.id === "asset_take_01"
+      ? { ...asset, workspaceId: "other_workspace", name: foreignName }
+      : asset);
+    const entries = describeMovieVideoMakeoverProjectSources(
+      project(), staleAssets, { principalId: PRINCIPAL, workspaceId: WORKSPACE },
+    );
+    expect(entries[0].label).toBe("clip_1");
+    expect(entries[0].selectable).toBe(false);
+    expect(entries[0].blockers.map((blocker) => blocker.code)).toContain("source_asset_not_video");
+    const markup = render({
+      project: project(),
+      assets: staleAssets,
+      principalId: PRINCIPAL,
+      workspaceId: WORKSPACE,
+      selection: createEmptyMovieVideoMakeoverSelection(),
+    });
+    expect(markup).not.toContain(foreignName);
+    expect(markup).toContain("clip_1");
+  });
+
   it("ignores an absent project and duplicate asset rows", () => {
     expect(describeMovieVideoMakeoverProjectSources(null, assets(), {})).toEqual([]);
     const doubled = [...assets(), assets()[0]];
