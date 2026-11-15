@@ -119,7 +119,7 @@ function IdentityScopedMovieTeamWorkspace({ project }: { project: MovieProject }
         targetType: "project",
         targetId: project.id,
         reviewerUserId,
-        isFinal: reviewIsFinal,
+        isFinal: reviewIsFinal && canRequestFinalReview,
         requestNote: reviewNote.trim() || null,
       });
       await load();
@@ -343,7 +343,7 @@ function IdentityScopedMovieTeamWorkspace({ project }: { project: MovieProject }
               {reviewerOptions.map((member) => <option key={member.userId} value={member.userId}>{member.displayName} · {member.role}</option>)}
             </select>
             <textarea id="movie-team-review-note" value={reviewNote} rows={2} maxLength={4000} placeholder="What should the reviewer check?" onChange={(event) => setReviewNote(event.target.value)} disabled={busy} />
-            <label><input type="checkbox" checked={reviewIsFinal} onChange={(event) => setReviewIsFinal(event.target.checked)} disabled={busy || !canRequestFinalReview} /> <span>Mark this as a final gate request</span></label>
+            <label><input type="checkbox" checked={reviewIsFinal && canRequestFinalReview} onChange={(event) => setReviewIsFinal(event.target.checked)} disabled={busy || !canRequestFinalReview} /> <span>Mark this as a final gate request</span></label>
             <div className="movie-team-compose-actions">
               <button type="button" className="movie-workspace-button is-primary" onClick={() => void requestReview()} disabled={busy || !reviewerUserId}>{busy ? "Saving…" : "Request review"}</button>
               {!canRequestFinalReview && <span>Final gate requests require FinalApproval authority.</span>}
