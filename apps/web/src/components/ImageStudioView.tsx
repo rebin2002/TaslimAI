@@ -46,6 +46,37 @@ const purposeStyles: Record<Purpose, (typeof styles)[number]> = {
   other: "auto",
 };
 
+export type ImageFailureCanvasLabels = Readonly<{
+  eyebrow: string;
+  title: string;
+  message: string;
+  retry: string;
+  retrying: string;
+}>;
+
+/**
+ * Terminal Image Studio failure state, including upload/save failures such as
+ * `IMAGE_OUTPUT_STORAGE_FAILED`, with its recovery action.
+ *
+ * The retry control stays focusable while busy (`aria-disabled` instead of the `disabled`
+ * attribute, which drops browser focus and with it the screen reader's place) and exposes the
+ * in-flight state through `aria-busy` plus a swapped accessible name. The reason for the failure
+ * is associated with the action through `aria-describedby`, so the user learns whether retrying
+ * the upload is the correct recovery step.
+ */
+export function ImageFailureCanvas({ labels, working, onRetry }: Readonly<{ labels: ImageFailureCanvasLabels; working: boolean; onRetry: () => void }>) {
+  const messageId = "image-failure-message";
+  return <div className="image-failure-canvas" aria-busy={working}>
+    <div className="image-failure-icon"><XCircle size={24} /></div>
+    <p className="image-canvas-eyebrow">{labels.eyebrow}</p>
+    <h2>{labels.title}</h2>
+    <p id={messageId}>{labels.message}</p>
+    <button className="image-retry-button" type="button" onClick={onRetry} aria-disabled={working || undefined} aria-busy={working} aria-describedby={messageId}>
+      <RefreshCw size={15} /> {working ? labels.retrying : labels.retry}
+    </button>
+  </div>;
+}
+
 export function ImageStudioView() {
   const { workspace } = useAuth();
   const { t, locale } = useLocale();
@@ -179,6 +210,9 @@ export function ImageStudioView() {
   }, [current, pollRetry, t, workspace?.id]);
 
   async function startGeneration() {
+    // The retry control stays focusable while busy, so activation can arrive again before the
+    // first request settles; a second submission would create a duplicate active studio job.
+    if (working) return;
     if (!workspace || description.trim().length < 3) {
       setError(t("image.descriptionRequired"));
       return;
@@ -316,7 +350,7 @@ export function ImageStudioView() {
       <main className="image-result-canvas" aria-live="polite">
         {!current && <div className="image-empty-canvas"><div className="image-canvas-orbit image-canvas-orbit-one" /><div className="image-canvas-orbit image-canvas-orbit-two" /><div className="image-canvas-core"><Sparkles size={25} /></div><p className="image-canvas-eyebrow">{t("image.canvasEmptyEyebrow")}</p><h2>{t("image.canvasEmptyTitle")}</h2><p>{t("image.canvasEmptyText")}</p><span className="image-canvas-hint">{t("image.canvasHint")}</span></div>}
         {current && !isSuccess && !isFailure && <div className="image-generating-canvas"><div className="image-generating-spinner"><LoaderCircle size={26} aria-hidden="true" /></div><p className="image-canvas-eyebrow">{t("image.progressEyebrow")}</p><h2>{t(`jobs.status${current.status}`)}</h2><p>{t("image.progressText")}</p><div className="image-progress-meta"><span>{t("jobs.progress")}</span><strong>{current.progressPercent ?? 0}%</strong></div><AccessibleProgressBar className="image-progress-track" label={t("jobs.progress")} value={current.progressPercent} />{canCancelImageJob(current) && <button className="image-cancel-button" type="button" onClick={() => void cancel()} disabled={working}><XCircle size={15} /> {t("image.cancel")}</button>}</div>}
-        {isFailure && <div className="image-failure-canvas"><div className="image-failure-icon"><XCircle size={24} /></div><p className="image-canvas-eyebrow">{t("image.failedEyebrow")}</p><h2>{current?.status === "Cancelled" ? t("jobs.statusCancelled") : t("image.failedTitle")}</h2><p>{failureMessage}</p><button className="image-retry-button" type="button" onClick={() => void startGeneration()} disabled={working}><RefreshCw size={15} /> {t("image.retry")}</button></div>}
+        {isFailure && <ImageFailureCanvas labels={{ eyebrow: t("image.failedEyebrow"), title: current?.status === "Cancelled" ? t("jobs.statusCancelled") : t("image.failedTitle"), message: failureMessage, retry: t("image.retry"), retrying: t("image.working") }} working={working} onRetry={() => void startGeneration()} />}
         {isSuccess && result && <div className="image-success-canvas"><div className="image-result-heading"><div><p className="image-canvas-eyebrow">{t("image.resultEyebrow")}</p><h2>{t("image.resultTitle")}</h2></div><span className="image-saved-badge"><Check size={14} /> {t("image.savedToAssets")}</span></div><div className={`image-result-frame is-${result.aspectRatio ?? "square"}`}><img crossOrigin="use-credentials" src={api.assetFileUrl(result.assetId!, true)} alt={description} /></div><div className="image-result-actions"><a className="image-result-action" href={api.assetFileUrl(result.assetId!)}><Download size={15} /> {t("image.download")}</a><Link className="image-result-action" href={`/assets?search=${encodeURIComponent(title || "Generated image")}`}><ImageIcon size={15} /> {t("image.openAssets")}</Link><button className="image-result-action is-primary" type="button" onClick={createAnother}><RefreshCw size={15} /> {t("image.createAnother")}</button></div></div>}
       </main>
 
