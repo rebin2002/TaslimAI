@@ -20,11 +20,15 @@ public sealed class PresentationColumnLayoutGeometryTests
     private const int SlideHeight = 6_858_000;
 
     [Theory]
-    [InlineData(3)]
-    [InlineData(PresentationRendererLimits.MaxBlocksPerSlide)]
-    public void Column_blocks_share_a_short_content_area_without_non_positive_extents(int blockCount)
+    [InlineData(PresentationSlideTypes.Title, 3)]
+    [InlineData(PresentationSlideTypes.Title, PresentationRendererLimits.MaxBlocksPerSlide)]
+    [InlineData(PresentationSlideTypes.Section, 3)]
+    [InlineData(PresentationSlideTypes.Section, PresentationRendererLimits.MaxBlocksPerSlide)]
+    [InlineData(PresentationSlideTypes.Closing, 3)]
+    [InlineData(PresentationSlideTypes.Closing, PresentationRendererLimits.MaxBlocksPerSlide)]
+    public void Column_blocks_share_a_short_content_area_without_non_positive_extents(string slideType, int blockCount)
     {
-        var shapes = RenderSlide(PresentationSlideTypes.Section, Blocks(blockCount));
+        var shapes = RenderSlide(slideType, Blocks(blockCount));
 
         Assert.All(shapes, shape =>
         {
@@ -34,11 +38,15 @@ public sealed class PresentationColumnLayoutGeometryTests
     }
 
     [Theory]
-    [InlineData(3)]
-    [InlineData(PresentationRendererLimits.MaxBlocksPerSlide)]
-    public void Column_heading_and_body_stay_inside_their_card_on_short_blocks(int blockCount)
+    [InlineData(PresentationSlideTypes.Title, 3)]
+    [InlineData(PresentationSlideTypes.Title, PresentationRendererLimits.MaxBlocksPerSlide)]
+    [InlineData(PresentationSlideTypes.Section, 3)]
+    [InlineData(PresentationSlideTypes.Section, PresentationRendererLimits.MaxBlocksPerSlide)]
+    [InlineData(PresentationSlideTypes.Closing, 3)]
+    [InlineData(PresentationSlideTypes.Closing, PresentationRendererLimits.MaxBlocksPerSlide)]
+    public void Column_heading_and_body_stay_inside_their_card_on_short_blocks(string slideType, int blockCount)
     {
-        var shapes = RenderSlide(PresentationSlideTypes.Section, Blocks(blockCount));
+        var shapes = RenderSlide(slideType, Blocks(blockCount));
         var byId = shapes.ToDictionary(shape => shape.Id);
         var cards = ColumnCards(shapes);
 
