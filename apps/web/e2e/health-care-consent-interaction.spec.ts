@@ -1,4 +1,5 @@
-import { test, expect } from "./fixtures";
+import { randomUUID } from "node:crypto";
+import { E2E_PASSWORD, logoutInUi, registerInUi, loginInUi, test, expect } from "./fixtures";
 
 /**
  * Actual authenticated, disposable-API browser acceptance for the synthetic-only
@@ -111,4 +112,43 @@ test.describe("Health Care synthetic consent journey — authenticated localized
       expect(unexpectedRequests).toEqual([]);
     });
   }
+});
+
+test("Health consent remains opt-in across a same-tab account switch", async ({ authenticatedPage: page }) => {
+  const unexpectedHealthRequests: string[] = [];
+  page.on("request", (request) => {
+    if (/\/api\/(health|uploads|generation|providers)|sunoapi|runway/i.test(request.url())) {
+      unexpectedHealthRequests.push(request.url());
+    }
+  });
+  await page.goto("/create/health");
+  const journey = page.locator(".health-consent-journey");
+  const consent = journey.locator(".health-consent-selection");
+  await consent.getByRole("button", { name: "Enable private documents" }).click();
+  const originalSample = consent.getByRole("button", { name: "Sample lab report (synthetic)" });
+  await originalSample.click();
+  await expect(originalSample).toHaveAttribute("aria-pressed", "true");
+  const previews = consent.getByRole("button", { name: "Open preview" });
+  await previews.first().click();
+  await expect(journey.getByText("No preview is available yet. Nothing was uploaded or analyzed.")).toBeVisible();
+
+  const originalAccount = page.testUser;
+  await logoutInUi(page);
+  await registerInUi(page, {
+    displayName: "Health Consent Account B",
+    email: `e2e+health-consent-${randomUUID()}@example.test`,
+    password: E2E_PASSWORD,
+  });
+  await page.goto("/create/health");
+  await expect(consent.getByRole("button", { name: "Enable private documents" })).toBeVisible();
+  await expect(consent.getByText("Sample lab report (synthetic)")).toHaveCount(0);
+  await expect(previews).toHaveCount(0);
+
+  await logoutInUi(page);
+  await loginInUi(page, originalAccount);
+  await page.goto("/create/health");
+  await expect(consent.getByRole("button", { name: "Enable private documents" })).toBeVisible();
+  await expect(consent.getByText("Sample lab report (synthetic)")).toHaveCount(0);
+  await expect(previews).toHaveCount(0);
+  expect(unexpectedHealthRequests).toEqual([]);
 });
