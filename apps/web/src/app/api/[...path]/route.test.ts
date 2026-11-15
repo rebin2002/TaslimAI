@@ -44,6 +44,11 @@ describe("same-origin API proxy", () => {
         "x-forwarded-host": "attacker.example",
         "x-forwarded-port": "80",
         "x-forwarded-prefix": "/spoofed",
+        "x-forwarded-client-cert": "spoofed-client-certificate",
+        "x-forwarded-server": "spoofed-upstream",
+        "x-forwarded-custom-future-header": "spoofed-extension",
+        "x-csrf-token": "legitimate-csrf",
+        cookie: "taslim.auth=synthetic-session",
         "x-forwarded-proto": "http",
         "x-real-ip": "198.51.100.7",
       },
@@ -58,11 +63,16 @@ describe("same-origin API proxy", () => {
       "x-forwarded-host",
       "x-forwarded-port",
       "x-forwarded-prefix",
+      "x-forwarded-client-cert",
+      "x-forwarded-server",
+      "x-forwarded-custom-future-header",
       "x-forwarded-proto",
       "x-real-ip",
     ]) {
       expect(forwardedHeaders.get(header)).toBeNull();
     }
+    expect(forwardedHeaders.get("x-csrf-token")).toBe("legitimate-csrf");
+    expect(forwardedHeaders.get("cookie")).toBe("taslim.auth=synthetic-session");
     vi.unstubAllGlobals();
   });
 
