@@ -92,7 +92,10 @@ public sealed record MovieVideoMakeoverSourceDto(
 /// Response envelope. <c>WorkspaceId</c> is the caller's own authorized workspace,
 /// resolved server-side from the project; no identifiers of other users or other
 /// workspaces are ever emitted, and cross-workspace or requester-invisible links are
-/// withheld as a whole row instead of being described.
+/// withheld as a whole row instead of being described. TotalClipCount counts only
+/// caller-visible clip rows, including those beyond the response page; Truncated
+/// indicates more than the response bound of these visible rows. Neither field
+/// reveals the number of private links withheld from this requester.
 /// </summary>
 public sealed record MovieVideoMakeoverSourceResponse(
     string Module,
