@@ -16,9 +16,12 @@ const projectTarget = "MovieProject";
 // Clear every project-scoped review form, permission and request result on
 // identity or project change; the API remains authoritative for all mutations.
 export function MovieTeamWorkspace({ project }: { project: MovieProject }) {
-  const { user, workspace, loading } = useAuth();
-  if (loading || !user?.id || !workspace?.id || project.workspaceId !== workspace.id) return null;
-  return <IdentityScopedMovieTeamWorkspace key={movieTeamIdentityKey(user.id, workspace.id, project.id)} project={project} />;
+  const { user, loading } = useAuth();
+  // Collaboration can be granted on a project in another user's workspace.
+  // Verify the authenticated user, but key the boundary to the actual project
+  // workspace rather than incorrectly requiring the personal workspace to match.
+  if (loading || !user?.id || !project.workspaceId || !project.id) return null;
+  return <IdentityScopedMovieTeamWorkspace key={movieTeamIdentityKey(user.id, project.workspaceId, project.id)} project={project} />;
 }
 
 export function movieTeamIdentityKey(userId: string, workspaceId: string, projectId: string) {
