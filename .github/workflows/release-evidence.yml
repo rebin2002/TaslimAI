@@ -22,13 +22,21 @@ jobs:
           fetch-depth: 0
       - name: Test release evidence behavior
         run: bash scripts/release-evidence.test.sh
+      - name: Test release governance evidence behavior
+        run: bash scripts/release-governance-evidence.test.sh
       - name: Generate release evidence manifest
         env:
           RELEASE_EVIDENCE_PATH: ${{ runner.temp }}/taslim-release-evidence.json
         run: bash scripts/release-evidence.sh
+      - name: Generate release governance evidence
+        env:
+          GOVERNANCE_EVIDENCE_PATH: ${{ runner.temp }}/taslim-release-governance-evidence.json
+        run: bash scripts/release-governance-evidence.sh
       - if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: taslim-release-evidence-${{ github.run_id }}
-          path: ${{ runner.temp }}/taslim-release-evidence.json
+          path: |
+            ${{ runner.temp }}/taslim-release-evidence.json
+            ${{ runner.temp }}/taslim-release-governance-evidence.json
           if-no-files-found: ignore

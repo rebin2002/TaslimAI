@@ -77,6 +77,9 @@ else:
     database = next((check for check in checks if check.get("name") == "database"), None)
     if database is None or database.get("status") != "available" or database.get("required") is not True:
         raise SystemExit(f"{endpoint}: required database check is not available")
+    storage = next((check for check in checks if check.get("name") == "storage"), None)
+    if storage is None or storage.get("status") != "available" or storage.get("required") is not True:
+        raise SystemExit(f"{endpoint}: required storage check is not available")
     for check in checks:
         if check.get("required") is True and check.get("status") != "available":
             raise SystemExit(f"{endpoint}: required check {check.get('name', '<unnamed>')} is not available")
