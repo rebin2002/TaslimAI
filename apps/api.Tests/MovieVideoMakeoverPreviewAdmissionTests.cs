@@ -201,7 +201,7 @@ public sealed class MovieVideoMakeoverPreviewAdmissionTests
         await connection.OpenAsync();
         await using var db = CreateDb(connection);
         var fixture = await SeedAsync(db);
-        var service = new MovieVideoMakeoverPreviewAdmissionService(db, new WorkspaceAccessService(db));
+        var service = CreateService(db);
 
         var decision = await service.EvaluateAsync(fixture.UserId, fixture.ProjectId, fixture.SourceAssetId, fixture.ResultAssetId, CancellationToken.None);
 
@@ -218,7 +218,7 @@ public sealed class MovieVideoMakeoverPreviewAdmissionTests
         await connection.OpenAsync();
         await using var db = CreateDb(connection);
         var fixture = await SeedAsync(db);
-        var service = new MovieVideoMakeoverPreviewAdmissionService(db, new WorkspaceAccessService(db));
+        var service = CreateService(db);
         var strangerId = Guid.NewGuid();
         db.Users.Add(new ApplicationUser { Id = strangerId, UserName = "stranger", NormalizedUserName = "STRANGER", DisplayName = "Stranger", CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow });
         await db.SaveChangesAsync();
@@ -236,7 +236,7 @@ public sealed class MovieVideoMakeoverPreviewAdmissionTests
         await connection.OpenAsync();
         await using var db = CreateDb(connection);
         var fixture = await SeedAsync(db);
-        var service = new MovieVideoMakeoverPreviewAdmissionService(db, new WorkspaceAccessService(db));
+        var service = CreateService(db);
 
         var unknown = await service.EvaluateAsync(fixture.UserId, Guid.NewGuid(), fixture.SourceAssetId, fixture.ResultAssetId, CancellationToken.None);
         Assert.False(unknown.Admitted);
@@ -248,6 +248,47 @@ public sealed class MovieVideoMakeoverPreviewAdmissionTests
         var unfinished = await service.EvaluateAsync(fixture.UserId, fixture.ProjectId, fixture.SourceAssetId, fixture.ResultAssetId, CancellationToken.None);
         Assert.False(unfinished.Admitted);
         Assert.Equal(MovieVideoMakeoverPreviewAdmissionCodes.PreviewNotFinished, unfinished.Code);
+    }
+
+    [Fact]
+    public async Task Service_denies_same_workspace_user_without_movie_project_view()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = CreateDb(connection);
+        var fixture = await SeedAsync(db);
+        var memberId = Guid.NewGuid();
+        var now = DateTime.UtcNow;
+        var workspaceId = await db.MovieProjects.Where(p => p.Id == fixture.ProjectId)
+            .Select(p => p.WorkspaceId).SingleAsync();
+        db.Users.Add(new ApplicationUser
+        {
+            Id = memberId, UserName = "workspace-only",
+            NormalizedUserName = "WORKSPACE-ONLY", DisplayName = "Workspace Member",
+            CreatedAt = now, UpdatedAt = now
+        });
+        db.WorkspaceMembers.Add(new WorkspaceMember
+        {
+            Id = Guid.NewGuid(), WorkspaceId = workspaceId,
+            UserId = memberId, Role = WorkspaceRole.Member, JoinedAt = now
+        });
+        await db.SaveChangesAsync();
+
+        // Same-workspace access must not imply Movie project View capability.
+        var service = CreateService(db);
+        var denied = await service.EvaluateAsync(memberId, fixture.ProjectId,
+            fixture.SourceAssetId, fixture.ResultAssetId, CancellationToken.None);
+        Assert.False(denied.Admitted);
+        Assert.Equal(MovieVideoMakeoverPreviewAdmissionCodes.PrincipalNotProjectViewer, denied.Code);
+        Assert.Null(denied.SourceAssetId);
+        Assert.Null(denied.ResultAssetId);
+    }
+
+    private static MovieVideoMakeoverPreviewAdmissionService CreateService(TaslimDbContext db)
+    {
+        var workspaceAccess = new WorkspaceAccessService(db);
+        return new MovieVideoMakeoverPreviewAdmissionService(
+            db, workspaceAccess, new MovieCollaborationAccess(db, workspaceAccess));
     }
 
     private sealed record Fixture(
@@ -283,6 +324,12 @@ public sealed class MovieVideoMakeoverPreviewAdmissionTests
         db.WorkspaceMembers.Add(new WorkspaceMember { Id = Guid.NewGuid(), WorkspaceId = workspaceId, UserId = userId, Role = WorkspaceRole.Owner });
         db.MovieProjects.Add(new MovieProject { Id = Guid.NewGuid(), WorkspaceId = workspaceId, CreatedByUserId = userId, Title = "Makeover project", Description = "Talking-head reel.", DurationSeconds = 30, CreatedAt = now, UpdatedAt = now, Guide = new MovieContinuityGuide { Id = Guid.NewGuid(), UpdatedAt = now } });
         var projectId = db.MovieProjects.Local.Single().Id;
+        db.MovieTeamMembers.Add(new MovieTeamMember
+        {
+            Id = Guid.NewGuid(), MovieProjectId = projectId, UserId = userId,
+            Role = MovieTeamRoles.Producer, IsProjectOwner = true,
+            CreatedAt = now, UpdatedAt = now
+        });
         var sourceFile = new StoredFile { Id = Guid.NewGuid(), WorkspaceId = workspaceId, UserId = userId, OriginalFileName = "source.mp4", StoredFileName = "source.mp4", ContentType = "video/mp4", Extension = ".mp4", SizeBytes = 1024, StorageKey = $"source-{Guid.NewGuid():N}", Status = StoredFileStatus.Ready, CreatedAt = now };
         var resultFile = new StoredFile { Id = Guid.NewGuid(), WorkspaceId = workspaceId, UserId = userId, OriginalFileName = "result.mp4", StoredFileName = "result.mp4", ContentType = "video/mp4", Extension = ".mp4", SizeBytes = 2048, StorageKey = $"result-{Guid.NewGuid():N}", Status = StoredFileStatus.Ready, CreatedAt = now };
         db.StoredFiles.AddRange(sourceFile, resultFile);
