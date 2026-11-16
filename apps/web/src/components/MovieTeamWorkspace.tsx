@@ -63,8 +63,11 @@ function IdentityScopedMovieTeamWorkspace({ project }: { project: MovieProject }
     if (mounted.current) setBusy(false);
   };
 
-  const load = useCallback(async () => {
-    if (!mounted.current) return;
+  const load = useCallback(async (afterMutation = false) => {
+    // A user-triggered Refresh during a write must not fetch pre-write state
+    // and overwrite the authoritative mutation response when it arrives later.
+    // Only the post-write reconciliation read may bypass this gate.
+    if (!mounted.current || (mutationInFlight.current && !afterMutation)) return;
     const revision = ++loadRevision.current;
     setLoading(true);
     try {
@@ -141,7 +144,7 @@ function IdentityScopedMovieTeamWorkspace({ project }: { project: MovieProject }
         isFinal: reviewIsFinal && canRequestFinalReview,
         requestNote: reviewNote.trim() || null,
       });
-      await load();
+      await load(true);
       setReviewerUserId("");
       setReviewNote("");
       setReviewIsFinal(false);
@@ -160,7 +163,7 @@ function IdentityScopedMovieTeamWorkspace({ project }: { project: MovieProject }
     setMessage("");
     try {
       await api.decideMovieReview(project.id, reviewId, { status, decisionNote: decisionNotes[reviewId]?.trim() || null });
-      await load();
+      await load(true);
       setDecisionNotes((notes) => { const next = { ...notes }; delete next[reviewId]; return next; });
       setMessage(status === "Approved" ? "Review approved." : status === "ChangesRequested" ? "Changes requested." : "Review rejected.");
     } catch (cause) {
@@ -200,7 +203,7 @@ function IdentityScopedMovieTeamWorkspace({ project }: { project: MovieProject }
           <div className="movie-selects-notice is-error" role="alert">
             <AlertTriangle size={16} />
             <span>Unable to load Movie Team permissions and reviews. No action is available until the connection is restored.</span>
-            <button type="button" className="movie-workspace-button is-quiet" onClick={() => void load()}>
+            <button type="button" className="movie-workspace-button is-quiet" onClick={() => void load()} disabled={busy}>
               <RefreshCw size={13} /> Retry
             </button>
           </div>
@@ -267,7 +270,7 @@ function IdentityScopedMovieTeamWorkspace({ project }: { project: MovieProject }
             <h3 id="movie-team-members-title">Who can act on this movie.</h3>
             <p>Membership and role changes are enforced by the API, not by this view.</p>
           </div>
-          <button type="button" className="movie-workspace-button is-quiet" onClick={() => void load()}>
+          <button type="button" className="movie-workspace-button is-quiet" onClick={() => void load()} disabled={busy}>
             <RefreshCw size={13} /> {t("movieTeam.refresh")}
           </button>
         </div>
