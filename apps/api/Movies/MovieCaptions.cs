@@ -251,6 +251,9 @@ public sealed class MovieCaptionService(
     private const int MaxCueTextLength = 10_000;
     private const int MaxCueCount = 50_000;
     private const int MaxImportLength = 2_000_000;
+    // Matches the persisted MovieCaptionTrack.Language boundary (HasMaxLength(35));
+    // RFC 5646 caps a complete langtag at 35 characters.
+    private const int MaxLanguageTagLength = 35;
 
     public async Task<IReadOnlyList<MovieCaptionTrackDto>?> GetTracksAsync(Guid userId, Guid movieProjectId, CancellationToken cancellationToken)
     {
@@ -452,7 +455,9 @@ public sealed class MovieCaptionService(
         if (string.IsNullOrWhiteSpace(value)) throw new MovieCaptionValidationException("Caption language is required.");
         var parts = value.Trim().Split('-', StringSplitOptions.RemoveEmptyEntries);
         if (parts.Length == 0 || parts[0].Length is < 2 or > 8 || parts.Any(part => part.Length is < 1 or > 8 || !part.All(char.IsLetterOrDigit))) throw new MovieCaptionValidationException("Caption language must be a valid BCP-47 language tag.");
-        return string.Join('-', parts.Select((part, index) => index == 0 ? part.ToLowerInvariant() : part.Length == 2 && part.All(char.IsLetter) ? part.ToUpperInvariant() : part));
+        var normalized = string.Join('-', parts.Select((part, index) => index == 0 ? part.ToLowerInvariant() : part.Length == 2 && part.All(char.IsLetter) ? part.ToUpperInvariant() : part));
+        if (normalized.Length > MaxLanguageTagLength) throw new MovieCaptionValidationException($"Caption language must be a valid BCP-47 language tag of {MaxLanguageTagLength} characters or fewer.");
+        return normalized;
     }
     private static string? Clean(string? value) => string.IsNullOrWhiteSpace(value) ? null : value.Trim();
     private static MovieCaptionTrackDto ToDto(MovieCaptionTrack track) => new(track.Id, track.MovieProjectId, track.MovieAssemblyId, track.Sequence, track.Name, track.TrackType, track.Language, track.IsRtl, track.IsDefault, track.Status, track.SourceFormat, track.SourceFileName, track.CreatedAt, track.UpdatedAt, track.Cues.OrderBy(item => item.Sequence).Select(ToCueDto).ToArray());
