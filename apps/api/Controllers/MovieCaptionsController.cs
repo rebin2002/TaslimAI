@@ -87,6 +87,10 @@ public sealed class MovieCaptionsController(IMovieCaptionService captions) : Con
     private async Task<IActionResult> Execute(Func<Task<IActionResult>> action)
     {
         try { return await action(); }
+        // Caption deletion enforces permission through the fail-closed collaboration
+        // guard. Map that denial to 403 like the sibling Movie controllers, instead of
+        // letting an authorization outcome escape as an unhandled 500.
+        catch (MovieCollaborationForbiddenException exception) { return ApiResults.Error(this, 403, "MOVIE_PERMISSION_DENIED", exception.Message); }
         catch (MovieCaptionValidationException exception) { return ApiResults.Error(this, 400, "MOVIE_CAPTION_REQUEST_INVALID", exception.Message); }
         catch (MovieCaptionFormatException exception) { return ApiResults.Error(this, 400, "MOVIE_CAPTION_FORMAT_INVALID", exception.Message); }
     }
