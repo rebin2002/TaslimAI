@@ -228,6 +228,41 @@ public sealed class ProviderResilienceTests
     }
 
     [Fact]
+    public async Task Cumulative_estimate_overflow_rejects_before_any_provider_call()
+    {
+        var store = new FakeResilienceStore { CumulativeEstimatedCostUsd = decimal.MaxValue };
+        var provider = new TestProvider("overflow-estimate",
+            _ => Task.FromResult("must-not-run"),
+            new ProviderRoutingProfile(EstimatedCostUsd: 1m));
+
+        var result = await Create(store, maxCostUsd: decimal.MaxValue).ExecuteAsync(
+            JobId, Token, "image.generate", "request-overflow-preflight", "input", [provider]);
+
+        Assert.Equal(ProviderAttemptResultCategory.CostGuardRejected, result.Category);
+        Assert.Equal("COST_LIMIT_EXCEEDED", result.ErrorCode);
+        Assert.Equal(0, provider.Calls);
+        Assert.Empty(store.Attempts);
+        Assert.Equal("completed", store.FinalizationState);
+    }
+
+    [Fact]
+    public async Task Cumulative_reported_cost_overflow_rejects_completed_provider_output()
+    {
+        var store = new FakeResilienceStore { CumulativeEstimatedCostUsd = decimal.MaxValue };
+        var provider = new TestProvider("overflow-reported",
+            _ => Task.FromResult("must-not-accept"), reportedCostUsd: 1m);
+
+        var result = await Create(store, maxCostUsd: decimal.MaxValue).ExecuteAsync(
+            JobId, Token, "image.generate", "request-overflow-postflight", "input", [provider]);
+
+        Assert.Equal(ProviderAttemptResultCategory.CostGuardRejected, result.Category);
+        Assert.Equal("COST_LIMIT_EXCEEDED", result.ErrorCode);
+        Assert.Equal(1, provider.Calls);
+        Assert.Equal(ProviderAttemptResultCategory.CostGuardRejected, Assert.Single(store.Attempts).Category);
+        Assert.Equal("completed", store.FinalizationState);
+    }
+
+    [Fact]
     public async Task Provider_reported_cost_is_checked_before_accepting_the_result()
     {
         var store = new FakeResilienceStore();
@@ -410,6 +445,7 @@ public sealed class ProviderResilienceTests
         public bool StaleWorker { get; set; }
         public bool CancellationRequested { get; set; }
         public int FailureThreshold { get; set; } = 3;
+        public decimal CumulativeEstimatedCostUsd { get; set; }
         public int FinalizationCompletions { get; private set; }
         public string? FinalizationState { get; private set; }
 
@@ -482,7 +518,7 @@ public sealed class ProviderResilienceTests
             return Task.FromResult<ProviderCircuitSnapshot?>(new ProviderCircuitSnapshot(providerKey, capability, circuit.State, circuit.Failures, circuit.OpenUntil.UtcDateTime, null));
         }
         public Task<bool> IsCancellationRequestedAsync(Guid generationJobId, CancellationToken cancellationToken = default) => Task.FromResult(CancellationRequested);
-        public Task<decimal> GetCumulativeEstimatedCostAsync(Guid generationJobId, CancellationToken cancellationToken = default) => Task.FromResult(0m);
+        public Task<decimal> GetCumulativeEstimatedCostAsync(Guid generationJobId, CancellationToken cancellationToken = default) => Task.FromResult(CumulativeEstimatedCostUsd);
         public void AdvanceCircuitWindow() => Time.Advance(TimeSpan.FromMinutes(1));
     }
 }
