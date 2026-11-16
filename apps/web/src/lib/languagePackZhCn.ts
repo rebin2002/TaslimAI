@@ -3,12 +3,19 @@ import type { LanguagePackResource } from "./languagePackTypes";
 /**
  * Initial zh-CN coverage is intentionally partial. Missing keys resolve through
  * the manifest fallback instead of displaying a key or implying full coverage.
+ *
+ * `coverage` is measured against the shipped English catalog, which is the
+ * authoritative key universe for the shared `t()` boundary. The registry verifies
+ * these figures at install time, so the pack can never claim more translated copy
+ * than it actually ships. Movie Studio is the widest surface and only partly
+ * covered: `movieModule`, `movieShell`, `movieAudio`, `movieTeam`, `movieExports`
+ * and `movieQc` are still served entirely by the English fallback.
  */
 export const simplifiedChineseLanguagePack: LanguagePackResource = {
   manifest: {
     schemaVersion: 1,
     id: "zh-CN",
-    version: "0.1.0",
+    version: "0.2.0",
     displayName: "Simplified Chinese",
     nativeName: "简体中文",
     languageTag: "zh-CN",
@@ -22,7 +29,23 @@ export const simplifiedChineseLanguagePack: LanguagePackResource = {
       { code: "priority-module-draft", scope: "module", module: "ui" },
       { code: "priority-module-draft", scope: "module", module: "auth" },
       { code: "priority-module-draft", scope: "module", module: "account" },
-      { code: "priority-module-draft", scope: "module", module: "movie" },
+      { code: "priority-module-draft", scope: "module", module: "movie", note: "36 of 151 keys; brief, workspace and guide copy only." },
+      { code: "priority-module-draft", scope: "module", module: "movieDeep", note: "10 of 92 keys; room sheet and take-review copy only." },
+      { code: "module-untranslated", scope: "module", module: "movieModule", note: "0 of 56 keys; served by the English fallback." },
+      { code: "module-untranslated", scope: "module", module: "movieShell", note: "0 of 14 keys; served by the English fallback." },
+      { code: "module-untranslated", scope: "module", module: "movieAudio", note: "0 of 10 keys; served by the English fallback." },
+      { code: "module-untranslated", scope: "module", module: "movieTeam", note: "0 of 9 keys; served by the English fallback." },
+      { code: "module-untranslated", scope: "module", module: "movieExports", note: "0 of 8 keys; served by the English fallback." },
+      { code: "module-untranslated", scope: "module", module: "movieQc", note: "0 of 6 keys; served by the English fallback." },
+    ],
+    coverage: [
+      { namespace: "movie", translated: 36, total: 151 },
+      { namespace: "movieDeep", translated: 10, total: 92 },
+      { namespace: "account", translated: 20, total: 80 },
+      { namespace: "auth", translated: 20, total: 30 },
+      { namespace: "navigation", translated: 11, total: 21 },
+      { namespace: "common", translated: 3, total: 5 },
+      { namespace: "brand", translated: 1, total: 1 },
     ],
   },
   translations: {
