@@ -18,6 +18,8 @@ test.describe("language-pack foundation", () => {
     await expect(page.locator("html")).toHaveAttribute("dir", "ltr");
     await expect(selectors.nth(1)).toHaveValue("en");
     await expect(onboarding.getByText(/Simplified Chinese is in preview/)).toBeVisible();
+    // Preview is not yet a saved account or anonymous preference.
+    expect(await page.evaluate(() => localStorage.getItem("taslim-language-pack"))).toBeNull();
 
     // The skip path must persist the account locale without launching paid generation.
     await onboarding.locator(".onboarding-skip").click();
@@ -25,15 +27,41 @@ test.describe("language-pack foundation", () => {
     await expect(page).toHaveURL((url) => url.pathname === "/projects");
     const response = await page.request.get("/api/auth/me");
     expect(response.ok()).toBe(true);
-    const session = await response.json() as { user: { preferredLanguage: string; defaultGenerationLanguage: string; onboardingCompletedAt: string | null } };
+    const session = await response.json() as { user: { id: string; preferredLanguage: string; defaultGenerationLanguage: string; onboardingCompletedAt: string | null } };
     expect(session.user.preferredLanguage).toBe("zh-CN");
     expect(session.user.defaultGenerationLanguage).toBe("en");
     expect(session.user.onboardingCompletedAt).toBeTruthy();
+    await expect.poll(() => page.evaluate((id) => localStorage.getItem(`taslim-language-pack:user:${encodeURIComponent(id)}`), session.user.id)).toBe("zh-CN");
+    expect(await page.evaluate(() => localStorage.getItem("taslim-language-pack"))).toBeNull();
 
     await page.reload();
     await expect(page.locator("html")).toHaveAttribute("lang", "zh-CN");
     await page.goto("/account");
     await expect(page.locator(".account-control-grid select").first()).toHaveValue("zh-CN");
+  });
+
+
+  test("does not persist an abandoned Chinese preview for a still-unfinished first login", async ({ page, testUser }) => {
+    await registerInUi(page, testUser, false);
+    const onboarding = page.getByRole("dialog");
+    await expect(onboarding).toBeVisible();
+    await onboarding.locator(".onboarding-fields select").first().selectOption("zh-CN");
+    await expect(page.locator("html")).toHaveAttribute("lang", "zh-CN");
+
+    const before = await page.request.get("/api/auth/me");
+    expect(before.ok()).toBe(true);
+    const session = await before.json() as { user: { id: string; preferredLanguage: string; onboardingCompletedAt: string | null } };
+    expect(session.user.preferredLanguage).toBe("en");
+    expect(session.user.onboardingCompletedAt).toBeNull();
+    expect(await page.evaluate(() => localStorage.getItem("taslim-language-pack"))).toBeNull();
+    expect(await page.evaluate((id) => localStorage.getItem(`taslim-language-pack:user:${encodeURIComponent(id)}`), session.user.id)).not.toBe("zh-CN");
+
+    // A page reload before pressing Skip/Continue must follow server truth,
+    // not silently accept the preview as a profile change.
+    await page.reload();
+    await expect(page.getByRole("dialog")).toBeVisible();
+    await expect(page.locator("html")).toHaveAttribute("lang", "en");
+    await expect(page.locator(".onboarding-fields select").first()).toHaveValue("en");
   });
 
   test("switches between zh-CN and Arabic, persists the choice, and keeps direction metadata correct", async ({ authenticatedPage: page }) => {
