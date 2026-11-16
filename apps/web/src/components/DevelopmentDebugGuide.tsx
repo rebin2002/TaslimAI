@@ -68,7 +68,7 @@ export function DevelopmentDebugGuide() {
   };
 
   return (
-    <main className={styles.page} aria-labelledby="development-debug-title" aria-busy={!isReady}>
+    <div className={styles.page} aria-labelledby="development-debug-title" aria-busy={!isReady}>
       <header className={styles.header}>
         <div className={styles.headerCopy}>
           <p className="section-eyebrow">{t("debugGuide.eyebrow")}</p>
@@ -154,6 +154,6 @@ export function DevelopmentDebugGuide() {
         <Link href="/development" className="secondary-button"><ArrowLeft size={15} aria-hidden="true" /> {t("debugGuide.back")}</Link>
         <Link href="/" className="primary-button">{t("debugGuide.home")}</Link>
       </footer>
-    </main>
+    </div>
   );
 }
