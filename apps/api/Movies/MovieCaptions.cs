@@ -158,7 +158,7 @@ public sealed class SrtMovieCaptionFormatAdapter : IMovieCaptionFormatAdapter
             builder.Append(index + 1).Append("\r\n")
                 .Append(MovieCaptionTimecode.FormatSrt(cue.StartMilliseconds)).Append(" --> ")
                 .Append(MovieCaptionTimecode.FormatSrt(cue.EndMilliseconds)).Append("\r\n")
-                .Append(cue.Text.Replace("\r\n", "\n", StringComparison.Ordinal).Replace("\n", "\r\n", StringComparison.Ordinal))
+                .Append(MovieCaptionTextFolding.Fold(cue.Text).Replace("\n", "\r\n", StringComparison.Ordinal))
                 .Append("\r\n\r\n");
         }
         return builder.ToString().TrimEnd('\r', '\n') + (ordered.Length == 0 ? string.Empty : "\r\n");
@@ -219,7 +219,7 @@ public sealed class WebVttMovieCaptionFormatAdapter : IMovieCaptionFormatAdapter
             builder.Append(index + 1).Append("\r\n")
                 .Append(MovieCaptionTimecode.FormatVtt(cue.StartMilliseconds)).Append(" --> ")
                 .Append(MovieCaptionTimecode.FormatVtt(cue.EndMilliseconds)).Append("\r\n");
-            var text = cue.Text.Replace("&", "&amp;", StringComparison.Ordinal).Replace("<", "&lt;", StringComparison.Ordinal).Replace(">", "&gt;", StringComparison.Ordinal).Replace("\r\n", "\n", StringComparison.Ordinal).Replace("\n", "\r\n", StringComparison.Ordinal);
+            var text = MovieCaptionTextFolding.Fold(cue.Text).Replace("&", "&amp;", StringComparison.Ordinal).Replace("<", "&lt;", StringComparison.Ordinal).Replace(">", "&gt;", StringComparison.Ordinal).Replace("\n", "\r\n", StringComparison.Ordinal);
             builder.Append(cue.SpeakerName is null ? text : $"<v {WebUtility.HtmlEncode(cue.SpeakerName)}>{text}</v>")
                 .Append("\r\n\r\n");
         }
