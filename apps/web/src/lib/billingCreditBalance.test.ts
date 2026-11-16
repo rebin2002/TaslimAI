@@ -36,6 +36,17 @@ describe("credit balance truth", () => {
     expect(viewSource).toContain("}, [userId, workspaceId]);");
   });
 
+  it("remounts the ledger on every principal/workspace switch and hides old balances after fetch failure", () => {
+    // A → B → A used to rematch A's cached snapshot before the new A request
+    // resolved, briefly implying an old spendable balance was current.
+    // The identity key forces a fresh component instance with no prior ledger.
+    expect(viewSource).toContain("function ScopedBillingView({ userId, workspaceId }");
+    expect(viewSource).toContain('key={`${user.id}:${workspace.id}`}');
+    expect(viewSource).toContain("if (loading || !user?.id || !workspace?.id) return null;");
+    expect(viewSource).toContain("const account = error ? null : scopedBillingAccount(snapshot, userId, workspaceId);");
+    expect(viewSource).not.toContain("const { user, workspace } = useAuth();");
+  });
+
   it("uses the authoritative API remaining amount after usage", () => {
     const balance = describeCreditBalance(credits({
       includedGranted: 10_000,
