@@ -77,4 +77,9 @@ export function useLocale() {
   return context;
 }
 
+/** Optional for framework recovery boundaries rendered outside the root provider. */
+export function useOptionalLocale() {
+  return useContext(LocaleContext);
+}
+
 export { localeNames, locales };
