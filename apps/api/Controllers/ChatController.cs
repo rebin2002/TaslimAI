@@ -25,6 +25,7 @@ public sealed class ChatController(
     TaslimDbContext db,
     WorkspaceAccessService access,
     IChatCompletionService completion,
+    IAiModelRouter modelRouter,
     AiContextBuilder contextBuilder,
     IUsageLedgerService usageLedger,
     IOptions<Microsoft.AspNetCore.Mvc.JsonOptions> mvcJsonOptions,
@@ -204,6 +205,12 @@ public sealed class ChatController(
             return;
         }
 
+        if (!modelRouter.IsChatGenerationAvailable())
+        {
+            await WriteEventAsync("message.failed", new { code = ProviderUnavailableCode, message = ProviderUnavailableMessage }, cancellationToken);
+            return;
+        }
+
         await StreamRegenerationAsync(conversation, sourceUser, request.RequestId.Trim(), cancellationToken);
     }
 
@@ -311,6 +318,7 @@ public sealed class ChatController(
     public async Task<IActionResult> SendMessage(Guid conversationId, SendMessageRequest request, CancellationToken cancellationToken)
     {
         if (!ModelState.IsValid) return ApiResults.Validation(this, "Please enter a message.");
+        if (!modelRouter.IsChatGenerationAvailable()) return ProviderUnavailable();
         var prepared = await PrepareMessageAsync(conversationId, request, cancellationToken);
         if (prepared.Error is not null) return prepared.Error;
         if (prepared.ExistingResult is not null) return Ok(prepared.ExistingResult);
@@ -360,6 +368,12 @@ public sealed class ChatController(
         if (!ModelState.IsValid)
         {
             await WriteEventAsync("message.failed", new { code = "VALIDATION_ERROR", message = "Please enter a message." }, cancellationToken);
+            return;
+        }
+
+        if (!modelRouter.IsChatGenerationAvailable())
+        {
+            await WriteEventAsync("message.failed", new { code = ProviderUnavailableCode, message = ProviderUnavailableMessage }, cancellationToken);
             return;
         }
 
@@ -733,6 +747,12 @@ public sealed class ChatController(
     private static object ErrorData(IActionResult result) => result is ObjectResult { Value: ErrorEnvelope envelope }
         ? new { code = envelope.Error.Code, message = envelope.Error.Message }
         : new { code = "CHAT_REQUEST_FAILED", message = "Taslim could not process that chat request." };
+
+    private const string ProviderUnavailableCode = "AI_PROVIDER_UNAVAILABLE";
+
+    private const string ProviderUnavailableMessage = "Taslim Chat is not available right now. Please try again later.";
+
+    private IActionResult ProviderUnavailable() => ApiResults.Error(this, StatusCodes.Status503ServiceUnavailable, ProviderUnavailableCode, ProviderUnavailableMessage);
 
     private IActionResult GenerationFailure() => ApiResults.Error(this, StatusCodes.Status503ServiceUnavailable, "AI_GENERATION_FAILED", "Taslim could not generate a response right now. Your message was saved.");
 
