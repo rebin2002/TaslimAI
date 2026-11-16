@@ -42,8 +42,8 @@ public sealed class ChatController(
 
         if (request.ProjectId is not null)
         {
-            var belongsToWorkspace = await db.Projects.AnyAsync(project => project.Id == request.ProjectId && project.WorkspaceId == workspaceId, cancellationToken);
-            if (!belongsToWorkspace) return ApiResults.Error(this, StatusCodes.Status404NotFound, "PROJECT_NOT_FOUND", "Project not found.");
+            var belongsToActiveProject = await db.Projects.AnyAsync(project => project.Id == request.ProjectId && project.WorkspaceId == workspaceId && project.Status == ProjectStatuses.Active, cancellationToken);
+            if (!belongsToActiveProject) return ApiResults.Error(this, StatusCodes.Status404NotFound, "PROJECT_NOT_FOUND", "Project not found.");
         }
 
         var now = DateTime.UtcNow;
