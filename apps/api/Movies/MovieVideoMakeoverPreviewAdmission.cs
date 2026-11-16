@@ -25,6 +25,8 @@ public static class MovieVideoMakeoverPreviewAdmissionCodes
     public const string ResultBindsSourceToItself = "result_binds_source_to_itself";
     public const string ResultNotBoundToGeneration = "result_not_bound_to_generation";
     public const string ResultJobCrossWorkspace = "result_job_cross_workspace";
+    public const string ResultJobCrossProject = "result_job_cross_project";
+    public const string ResultJobNotMovie = "result_job_not_movie";
     public const string PreviewNotFinished = "preview_not_finished";
 }
 
@@ -89,7 +91,7 @@ public static class MovieVideoMakeoverPreviewAdmissionEvaluator
             if (asset.Status != AssetStatus.Active || asset.ArchivedAt is not null || asset.StoredFileId is null)
                 return Denied(MovieVideoMakeoverPreviewAdmissionCodes.PreviewAssetUnavailable,
                     "A preview asset must be active, unarchived, and backed by a stored file.", project, sourceAsset, resultAsset);
-            if (asset.ProjectId.HasValue && project.ProjectId.HasValue && asset.ProjectId != project.ProjectId)
+            if (asset.ProjectId.HasValue && asset.ProjectId != project.ProjectId)
                 return Denied(MovieVideoMakeoverPreviewAdmissionCodes.AssetCrossProject,
                     "The preview references an asset bound to a different project.", project, sourceAsset, resultAsset);
         }
@@ -105,6 +107,16 @@ public static class MovieVideoMakeoverPreviewAdmissionEvaluator
         if (resultJob.WorkspaceId != project.WorkspaceId)
             return Denied(MovieVideoMakeoverPreviewAdmissionCodes.ResultJobCrossWorkspace,
                     "The makeover generation belongs to a different workspace.", project, sourceAsset, resultAsset);
+        // Some Movie projects have no general ProjectId. Even for those, a job
+        // explicitly bound to another general project must never be reused.
+        if (resultJob.ProjectId.HasValue && resultJob.ProjectId != project.ProjectId)
+            return Denied(MovieVideoMakeoverPreviewAdmissionCodes.ResultJobCrossProject,
+                "The result generation belongs to a different project.", project, sourceAsset, resultAsset);
+        // A successful Image/Document/etc. job cannot certify a Movie preview.
+        // This is Movie provenance only: no Makeover-specific provider is enabled here.
+        if (!GenerationJobTypes.MovieTypes.Contains(resultJob.JobType))
+            return Denied(MovieVideoMakeoverPreviewAdmissionCodes.ResultJobNotMovie,
+                "The result was not produced by a Movie generation job.", project, sourceAsset, resultAsset);
         if (resultJob.Status != GenerationJobStatus.Succeeded)
             return Denied(MovieVideoMakeoverPreviewAdmissionCodes.PreviewNotFinished,
                 "The makeover generation has not completed successfully, so there is nothing to preview yet.",
