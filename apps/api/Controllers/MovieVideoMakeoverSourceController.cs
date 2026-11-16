@@ -2,6 +2,7 @@ using System.Security.Claims;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Configuration;
 using Taslim.Api.Domain;
 using Taslim.Api.Files;
 using Taslim.Api.Infrastructure;
@@ -17,13 +18,18 @@ namespace Taslim.Api.Controllers;
 /// are persisted authoritatively today; every unprovable fact is reported as
 /// unverified so the #775 draft admission can fail closed. No provider call, no
 /// cost admission, no mutation of any other slice's files or routes.
+/// Both endpoints sit behind <see cref="MovieVideoMakeoverSourceFeatureGate"/>:
+/// default-off, fail-closed production admission - until an operator opts the
+/// feature in via configuration, every request receives the same opaque 404 as
+/// an inaccessible project, before any database read.
 /// </summary>
 [ApiController]
 [Authorize]
 [Route("api/movie-studio/projects/{projectId:guid}/video-makeover-sources")]
 public sealed class MovieVideoMakeoverSourceController(
     TaslimDbContext db,
-    MovieCollaborationAccess collaboration) : ControllerBase
+    MovieCollaborationAccess collaboration,
+    IConfiguration configuration) : ControllerBase
 {
     /// <summary>
     /// Defensive page bound: Makeover drafts attach exactly one source, so a
@@ -34,6 +40,13 @@ public sealed class MovieVideoMakeoverSourceController(
     [HttpGet]
     public async Task<IActionResult> List(Guid projectId, CancellationToken cancellationToken)
     {
+        // Default-off feature admission (#698 release gate): while unconfigured,
+        // this read model does not exist. Answer before resolving identity or
+        // touching the database, with the same opaque 404 an inaccessible
+        // project gets (see ProjectNotFound), and set no marker header.
+        if (!MovieVideoMakeoverSourceFeatureGate.IsEnabled(configuration))
+            return ProjectNotFound();
+
         var access = await ResolveProjectAccessAsync(projectId, cancellationToken);
         if (access is null) return ProjectNotFound();
 
@@ -90,6 +103,11 @@ public sealed class MovieVideoMakeoverSourceController(
     [HttpGet("{clipId:guid}")]
     public async Task<IActionResult> Get(Guid projectId, Guid clipId, CancellationToken cancellationToken)
     {
+        // Same default-off gate as List: no clip-, asset-, or file-scoped
+        // database read happens until the feature is explicitly admitted.
+        if (!MovieVideoMakeoverSourceFeatureGate.IsEnabled(configuration))
+            return ProjectNotFound();
+
         var access = await ResolveProjectAccessAsync(projectId, cancellationToken);
         if (access is null) return ProjectNotFound();
 
@@ -109,6 +127,15 @@ public sealed class MovieVideoMakeoverSourceController(
         return Ok(MovieVideoMakeoverSourceEvaluator.Evaluate(
             clip, projectId, asset, storedFile, requesterUserId, DateTime.UtcNow));
     }
+
+    /// <summary>
+    /// Opaque 404 shared by the inaccessible-project path and the feature-off
+    /// path of both endpoints: an unadmitted deployment must not disclose that
+    /// this read model exists, so the disabled answer is byte-identical in
+    /// shape to a request for a project the caller cannot see.
+    /// </summary>
+    private IActionResult ProjectNotFound() =>
+        ApiResults.Error(this, StatusCodes.Status404NotFound, "MOVIE_PROJECT_NOT_FOUND", "Movie project not found.");
 
     /// <summary>
     /// Requires the established Movie collaboration View permission over the project
@@ -175,9 +202,6 @@ public sealed class MovieVideoMakeoverSourceController(
 
         return (assetsByClip, filesByClip);
     }
-
-    private IActionResult ProjectNotFound() =>
-        ApiResults.Error(this, StatusCodes.Status404NotFound, "MOVIE_PROJECT_NOT_FOUND", "Movie project not found.");
 
     private IActionResult SourceNotFound() =>
         ApiResults.Error(this, StatusCodes.Status404NotFound, "MOVIE_MAKEOVER_SOURCE_NOT_FOUND", "Movie Makeover source not found.");

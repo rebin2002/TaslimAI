@@ -1,5 +1,6 @@
 using Taslim.Api.Domain;
 using Taslim.Api.Files;
+using Microsoft.Extensions.Configuration;
 
 namespace Taslim.Api.Movies;
 
@@ -55,6 +56,40 @@ public static class MovieVideoMakeoverSourceLimits
     public const int MinDimension = 1;
     public const int MaxDimension = 16384;
     public const long MaxSourceBytes = 5_368_709_120;
+}
+
+/// <summary>
+/// Default-off, fail-closed production admission for the Video Makeover source
+/// read model (#698 release preparation). The attributed controller maps as soon
+/// as it ships, so the endpoints must not answer from code presence alone: until
+/// an operator explicitly opts this feature in, both GETs respond exactly like a
+/// nonexistent or inaccessible Movie project (404, opaque error envelope) before
+/// any database read, so no source metadata, totals, ids, or the read-model
+/// marker header can leak. This gate admits a read model only: it never enables
+/// a provider, a cost admission, or any generation.
+/// </summary>
+public static class MovieVideoMakeoverSourceFeatureGate
+{
+    /// <summary>
+    /// The only configuration key that admits the source read model. It is
+    /// deliberately absent from every committed appsettings file, so an
+    /// unconfigured deployment - production included - fails closed. Enable via
+    /// deployment configuration (e.g. the environment variable
+    /// <c>MovieVideoMakeoverSource__Enabled=true</c>) as a reviewed release step.
+    /// </summary>
+    public const string EnabledConfigKey = "MovieVideoMakeoverSource:Enabled";
+
+    /// <summary>
+    /// True only when the key's value trims to the boolean literal <c>true</c>
+    /// (case-insensitive). Missing, empty, <c>false</c>, and every non-boolean
+    /// string such as <c>1</c>, <c>yes</c>, or <c>on</c> fail closed: an ambiguous
+    /// deployment value must never turn a gated read model on.
+    /// </summary>
+    public static bool IsEnabled(IConfiguration? configuration)
+    {
+        var raw = configuration?[EnabledConfigKey];
+        return raw is not null && bool.TryParse(raw.Trim(), out var enabled) && enabled;
+    }
 }
 
 public sealed record MovieVideoMakeoverSourceDto(

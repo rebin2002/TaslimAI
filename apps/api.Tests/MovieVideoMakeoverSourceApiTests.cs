@@ -1,7 +1,9 @@
 using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
+using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Taslim.Api.Contracts;
 using Taslim.Api.Domain;
@@ -13,18 +15,40 @@ using Xunit;
 namespace Taslim.Api.Tests;
 
 /// <summary>
+/// Explicit test-only opt-in for the default-off production admission of the
+/// Video Makeover source read model (#698 release gate,
+/// <see cref="MovieVideoMakeoverSourceFeatureGate"/>). No committed appsettings
+/// file sets this key, so production stays off; only this fixture admits the
+/// endpoints, and the established authorised-fixture contract below keeps its
+/// exact behaviour with zero test-body changes.
+/// </summary>
+public sealed class MovieVideoMakeoverSourceEnabledTestFactory : GenerationJobsApiFactory
+{
+    protected override bool WorkerEnabled => false;
+
+    protected override void ConfigureWebHost(IWebHostBuilder builder)
+    {
+        base.ConfigureWebHost(builder);
+        builder.UseSetting(MovieVideoMakeoverSourceFeatureGate.EnabledConfigKey, "true");
+    }
+}
+
+/// <summary>
 /// Provider-free HTTP contract for the AI Video Makeover source-metadata read
 /// model (#698 slice, the server-side descriptor #811 identified as missing from
 /// the browser read models). Covers: authenticated owner access, cross-user and
 /// cross-workspace non-disclosure, fail-closed handling of absent or unbounded
 /// persisted facts, and the honest frame-rate/audio gaps that #775 admission
 /// keeps gating. No provider, no cost, no storage reads of file bytes.
+/// Reached only through <see cref="MovieVideoMakeoverSourceEnabledTestFactory"/>'s
+/// explicit opt-in; see <see cref="MovieVideoMakeoverSourceDisabledApiTests"/>
+/// for the default-off contract this opt-in is opting out of.
 /// </summary>
-public sealed class MovieVideoMakeoverSourceApiTests : IClassFixture<GenerationJobsNoWorkerFactory>
+public sealed class MovieVideoMakeoverSourceApiTests : IClassFixture<MovieVideoMakeoverSourceEnabledTestFactory>
 {
-    private readonly GenerationJobsNoWorkerFactory factory;
+    private readonly MovieVideoMakeoverSourceEnabledTestFactory factory;
 
-    public MovieVideoMakeoverSourceApiTests(GenerationJobsNoWorkerFactory factory)
+    public MovieVideoMakeoverSourceApiTests(MovieVideoMakeoverSourceEnabledTestFactory factory)
     {
         this.factory = factory;
         using var scope = factory.Services.CreateScope();
@@ -516,5 +540,250 @@ public sealed class MovieVideoMakeoverSourceApiTests : IClassFixture<GenerationJ
         var response = await client.SendAsync(request);
         Assert.True(response.IsSuccessStatusCode, await response.Content.ReadAsStringAsync());
         return (await response.Content.ReadFromJsonAsync<T>())!;
+    }
+}
+
+/// <summary>
+/// Default-off, fail-closed production admission for the two source GET
+/// endpoints (#698 release preparation). This fixture uses the shared
+/// <see cref="GenerationJobsNoWorkerFactory"/> exactly as an unconfigured
+/// deployment runs today - the opt-in key is never set - and pins the contract
+/// that makes shipping the controller safe: every request receives the same
+/// opaque project 404 as an inaccessible project, with no read-model marker
+/// header and no source metadata, before any database read. A paid provider is
+/// never involved; no generation path is enabled by anything here.
+/// </summary>
+public sealed class MovieVideoMakeoverSourceDisabledApiTests : IClassFixture<GenerationJobsNoWorkerFactory>
+{
+    private readonly GenerationJobsNoWorkerFactory factory;
+
+    public MovieVideoMakeoverSourceDisabledApiTests(GenerationJobsNoWorkerFactory factory)
+    {
+        this.factory = factory;
+        using var scope = factory.Services.CreateScope();
+        scope.ServiceProvider.GetRequiredService<TaslimDbContext>().Database.EnsureCreated();
+    }
+
+    [Fact]
+    public async Task Unconfigured_deployment_opaques_both_source_gets_behind_the_project_404()
+    {
+        using var client = factory.CreateClient();
+        var owner = await RegisterAsync(client);
+        var projectId = await CreateProjectAsync(client, owner, "Disabled gate project");
+
+        // A genuinely attachable, fully healthy source exists in the database:
+        // the gate must hide it at the admission layer, not rely on data absence.
+        var clipId = Guid.NewGuid();
+        var assetId = Guid.NewGuid();
+        var fileId = Guid.NewGuid();
+        await using (var scope = factory.Services.CreateAsyncScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            var now = DateTime.UtcNow;
+            db.StoredFiles.Add(new StoredFile
+            {
+                Id = fileId,
+                WorkspaceId = owner.PersonalWorkspace.Id,
+                UserId = owner.User.Id,
+                OriginalFileName = "source.mp4",
+                StoredFileName = $"{fileId:N}.mp4",
+                Extension = ".mp4",
+                ContentType = "video/mp4",
+                SizeBytes = 1_500_000,
+                StorageProvider = FileStorageProviders.Local,
+                StorageKey = $"tests/makeover-source-disabled/{fileId:N}.mp4",
+                Status = StoredFileStatus.Ready,
+                CreatedAt = now,
+                ProcessedAt = now,
+                ContainerFormat = "mp4",
+                Width = 1280,
+                Height = 720,
+                DurationSeconds = 12,
+                RetainUntil = now.AddDays(30),
+            });
+            db.Assets.Add(new Asset
+            {
+                Id = assetId,
+                WorkspaceId = owner.PersonalWorkspace.Id,
+                CreatedByUserId = owner.User.Id,
+                StoredFileId = fileId,
+                Name = "Disabled gate source clip",
+                AssetType = AssetTypes.Video,
+                MimeType = "video/mp4",
+                Status = AssetStatus.Active,
+                CreatedAt = now,
+                UpdatedAt = now,
+            });
+            db.MovieClips.Add(new MovieClip
+            {
+                Id = clipId,
+                MovieProjectId = projectId,
+                GenerationJobId = null,
+                AssetId = assetId,
+                StoredFileId = fileId,
+                Status = MovieClipStatuses.Ready,
+                DurationSeconds = 12,
+                CreatedAt = now,
+                UpdatedAt = now,
+            });
+            await db.SaveChangesAsync();
+        }
+
+        // The project's own owner - the exact caller the enabled contract serves -
+        // sees an opaque 404 on both endpoints, no marker header, no metadata.
+        var list = await client.GetAsync(ListPath(projectId));
+        Assert.Equal(HttpStatusCode.NotFound, list.StatusCode);
+        var listBody = await list.Content.ReadAsStringAsync();
+        AssertOpaqueProjectNotFound(list, listBody);
+        Assert.DoesNotContain(clipId.ToString("D"), listBody, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(assetId.ToString("D"), listBody, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(fileId.ToString("D"), listBody, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("attachPermitted", listBody, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("video-makeover-sources", listBody, StringComparison.OrdinalIgnoreCase);
+
+        var single = await client.GetAsync($"{ListPath(projectId)}/{clipId}");
+        Assert.Equal(HttpStatusCode.NotFound, single.StatusCode);
+        var singleBody = await single.Content.ReadAsStringAsync();
+        AssertOpaqueProjectNotFound(single, singleBody);
+        Assert.DoesNotContain(clipId.ToString("D"), singleBody, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("blockers", singleBody, StringComparison.OrdinalIgnoreCase);
+
+        // Non-disclosure across identities: an outsider and the owner receive the
+        // byte-identical envelope, so the response cannot confirm the project,
+        // the read model, or the seeded source exists.
+        using var outsiderClient = factory.CreateClient();
+        await RegisterAsync(outsiderClient);
+        var outsiderList = await outsiderClient.GetAsync(ListPath(projectId));
+        Assert.Equal(list.StatusCode, outsiderList.StatusCode);
+        Assert.Equal(listBody, await outsiderList.Content.ReadAsStringAsync());
+    }
+
+    [Fact]
+    public async Task Anonymous_request_is_rejected_before_the_gate_without_disclosing_it()
+    {
+        using var anonymous = factory.CreateClient();
+        var response = await anonymous.GetAsync(ListPath(Guid.NewGuid()));
+        Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+        Assert.False(response.Headers.Contains("X-Movie-Read-Model"));
+    }
+
+    private static void AssertOpaqueProjectNotFound(HttpResponseMessage response, string body)
+    {
+        Assert.False(response.Headers.Contains("X-Movie-Read-Model"));
+        using var json = JsonDocument.Parse(body);
+        Assert.Equal("MOVIE_PROJECT_NOT_FOUND", json.RootElement.GetProperty("error").GetProperty("code").GetString());
+    }
+
+    private static string ListPath(Guid projectId) =>
+        $"/api/movie-studio/projects/{projectId}/video-makeover-sources";
+
+    private async Task<AuthResponse> RegisterAsync(HttpClient client) =>
+        await SendWithCsrfAsync<AuthResponse>(client, HttpMethod.Post, "/api/auth/register", new
+        {
+            displayName = "Makeover Gate Tester",
+            email = $"makeover-gate-{Guid.NewGuid():N}@example.com",
+            password = "StrongPassword!123",
+            preferredLanguage = "en",
+        });
+
+    private async Task<Guid> CreateProjectAsync(HttpClient client, AuthResponse owner, string title)
+    {
+        var response = await SendWithCsrfAsync<JsonElement>(client, HttpMethod.Post, "/api/movie-studio/projects", new
+        {
+            workspaceId = owner.PersonalWorkspace.Id,
+            mode = "Full",
+            title,
+            description = "A deterministic provider-free gate test.",
+            durationSeconds = 120,
+            aspectRatio = "16:9",
+            style = "cinematic",
+            language = "en",
+        });
+        return response.GetProperty("project").GetProperty("id").GetGuid();
+    }
+
+    private static async Task<T> SendWithCsrfAsync<T>(HttpClient client, HttpMethod method, string path, object payload)
+    {
+        var csrf = await client.GetFromJsonAsync<JsonElement>("/api/auth/csrf");
+        using var request = new HttpRequestMessage(method, path);
+        request.Headers.Add("X-CSRF-TOKEN", csrf.GetProperty("token").GetString());
+        if (payload is not null) request.Content = JsonContent.Create(payload);
+        var response = await client.SendAsync(request);
+        Assert.True(response.IsSuccessStatusCode, await response.Content.ReadAsStringAsync());
+        return (await response.Content.ReadFromJsonAsync<T>())!;
+    }
+}
+
+/// <summary>
+/// Pure parsing contract of the admission key: only the boolean literal true
+/// (whitespace-tolerant, case-insensitive) admits the read model. Everything
+/// ambiguous - absent, empty, "1", "yes", "on", junk - fails closed. No web
+/// host, no database, no provider.
+/// </summary>
+public sealed class MovieVideoMakeoverSourceFeatureGateTests
+{
+    [Theory]
+    [InlineData("true", true)]
+    [InlineData("True", true)]
+    [InlineData("TRUE", true)]
+    [InlineData(" true ", true)]
+    [InlineData("false", false)]
+    [InlineData("False", false)]
+    [InlineData("", false)]
+    [InlineData(" ", false)]
+    [InlineData("1", false)]
+    [InlineData("yes", false)]
+    [InlineData("on", false)]
+    [InlineData("enabled", false)]
+    [InlineData("true1", false)]
+    [InlineData("0", false)]
+    public void Gate_admits_only_the_boolean_true_literal(string raw, bool expected)
+    {
+        var configuration = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                [MovieVideoMakeoverSourceFeatureGate.EnabledConfigKey] = raw,
+            })
+            .Build();
+        Assert.Equal(expected, MovieVideoMakeoverSourceFeatureGate.IsEnabled(configuration));
+    }
+
+    [Fact]
+    public void Gate_fails_closed_without_the_key_or_without_configuration()
+    {
+        Assert.False(MovieVideoMakeoverSourceFeatureGate.IsEnabled(null));
+        Assert.False(MovieVideoMakeoverSourceFeatureGate.IsEnabled(new ConfigurationBuilder().Build()));
+    }
+
+    [Fact]
+    public void No_committed_appsettings_enables_the_gate()
+    {
+        // The default-off guarantee is a repository property, not only a runtime
+        // one: neither appsettings.json nor appsettings.Production.json may set
+        // the admission key. A future edit adding it must be a reviewed release
+        // decision, and this test fails first.
+        var apiDirectory = LocateApiProjectDirectory();
+        foreach (var file in new[] { "appsettings.json", "appsettings.Production.json" })
+        {
+            var path = Path.Combine(apiDirectory, file);
+            Assert.True(File.Exists(path), $"Missing {file} next to the API project.");
+            using var document = JsonDocument.Parse(File.ReadAllText(path));
+            Assert.False(
+                document.RootElement.TryGetProperty("MovieVideoMakeoverSource", out _),
+                $"{file} must not carry the MovieVideoMakeoverSource admission section while #698 stays unlaunched.");
+        }
+    }
+
+    private static string LocateApiProjectDirectory()
+    {
+        // Test output lives under apps/api.Tests/bin; the appsettings files are
+        // linked into the API project. Walk up to the repository apps/ folder.
+        var directory = new DirectoryInfo(AppContext.BaseDirectory);
+        while (directory is not null && !string.Equals(directory.Name, "apps", StringComparison.Ordinal))
+            directory = directory.Parent;
+        var apiDirectory = directory is null ? null : Path.Combine(directory.FullName, "api");
+        Assert.NotNull(apiDirectory);
+        Assert.True(Directory.Exists(apiDirectory));
+        return apiDirectory!;
     }
 }
