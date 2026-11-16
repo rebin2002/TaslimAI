@@ -41,6 +41,8 @@ describe("Music Studio route recovery focus restoration", () => {
     // alert panel that receives focus is announced as an unnamed region.
     expect(panel).toContain('tabindex="-1"');
     expect(panel).toContain('role="alert"');
+    // AppShell supplies the page's <main>; the nested recovery boundary must not add another.
+    expect(html).not.toMatch(/<main\b/i);
     expect(panel).toContain('aria-live="assertive"');
     expect(panel).toContain('aria-labelledby="music-error-title"');
     expect(panel).toContain('aria-describedby="music-error-description"');
