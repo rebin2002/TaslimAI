@@ -1,5 +1,6 @@
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
+using System.Text.RegularExpressions;
 using Taslim.Api.Ai;
 using Taslim.Api.Domain;
 using Taslim.Api.Images;
@@ -29,6 +30,12 @@ public sealed class ProviderHealthService(
     IEnumerable<IMovieVideoProvider> movieProviders)
 {
     private const int RecentFailureLimit = 8;
+    private const string FallbackErrorCode = "GENERATION_FAILURE";
+    // A failure code that reaches the operations dashboard must be a bounded,
+    // delimiter-free token: that is the shape every persisted code already uses.
+    private static readonly Regex SafeErrorCodeShape = new(
+        "^[A-Za-z0-9][A-Za-z0-9_.-]{0,95}$",
+        RegexOptions.Compiled | RegexOptions.CultureInvariant);
     private sealed record ProviderDefinition(
         string Key,
         string Category,
@@ -165,15 +172,30 @@ public sealed class ProviderHealthService(
         var successfulUsage = providerUsage.Where(item => item.Status == UsageTransactionStatus.Completed).ToArray();
         var failedUsage = providerUsage.Where(item => item.Status == UsageTransactionStatus.Failed).ToArray();
         var failedJobs = providerJobs.Where(item => item.Status == GenerationJobStatus.Failed).ToArray();
-        var recentFailures = failedJobs
+        var recentJobFailures = failedJobs
             .Where(item => !string.IsNullOrWhiteSpace(item.ErrorCode))
             .OrderByDescending(item => item.FailedAt ?? item.CreatedAt)
+            .ThenBy(item => item.JobType, StringComparer.Ordinal)
             .Take(RecentFailureLimit)
             .Select(item => new AdminSanitizedGenerationFailureDto(
                 item.JobType,
                 SanitizeErrorCode(item.ErrorCode),
                 item.FailedAt ?? item.CreatedAt))
             .ToArray();
+        // A failure can be recorded in the usage ledger with no matching failed job row:
+        // the chat provider has no generation job types at all, and a ledger entry can be
+        // failed after its job left the failure window. Job evidence stays authoritative;
+        // ledger evidence is the fallback, exactly like the count fallbacks below.
+        var recentUsageFailures = failedUsage
+            .OrderByDescending(item => item.CompletedAt ?? item.CreatedAt)
+            .ThenBy(item => item.FailureCode, StringComparer.Ordinal)
+            .Take(RecentFailureLimit)
+            .Select(item => new AdminSanitizedGenerationFailureDto(
+                definition.Category,
+                SanitizeErrorCode(item.FailureCode),
+                item.CompletedAt ?? item.CreatedAt))
+            .ToArray();
+        var recentFailures = recentJobFailures.Length > 0 ? recentJobFailures : recentUsageFailures;
         var successCount = successfulUsage.Length > 0
             ? successfulUsage.Length
             : providerJobs.Count(item => item.Status == GenerationJobStatus.Succeeded);
@@ -193,11 +215,28 @@ public sealed class ProviderHealthService(
             .Concat(providerJobs.Where(item => item.Status == GenerationJobStatus.Succeeded).Select(item => item.CompletedAt ?? item.CreatedAt))
             .OrderByDescending(item => item)
             .FirstOrDefault();
-        var lastFailure = failedJobs
+        var lastJobFailure = failedJobs
             .OrderByDescending(item => item.FailedAt ?? item.CreatedAt)
+            .ThenBy(item => item.JobType, StringComparer.Ordinal)
+            .FirstOrDefault();
+        var lastUsageFailure = failedUsage
+            .OrderByDescending(item => item.CompletedAt ?? item.CreatedAt)
+            .ThenBy(item => item.FailureCode, StringComparer.Ordinal)
             .FirstOrDefault();
         var hasLastSuccess = successCount > 0;
         var hasLastFailure = failureCount > 0;
+        // Both last-failure fields describe one observed failure, so they are either both
+        // present or both absent. A code is never emitted for a failure whose evidence is
+        // missing, because the bounded fallback code would read as an observed failure code.
+        var lastFailureAt = hasLastFailure
+            ? lastJobFailure?.FailedAt ?? lastJobFailure?.CreatedAt
+                ?? lastUsageFailure?.CompletedAt ?? lastUsageFailure?.CreatedAt
+            : null;
+        var lastFailureCode = hasLastFailure && (lastJobFailure is not null || lastUsageFailure is not null)
+            ? lastJobFailure is not null
+                ? SanitizeErrorCode(lastJobFailure.ErrorCode)
+                : SanitizeErrorCode(lastUsageFailure!.FailureCode)
+            : null;
         var status = !definition.Enabled
             ? "disabled"
             : !definition.Configured
@@ -227,8 +266,8 @@ public sealed class ProviderHealthService(
             providerUsage.Sum(item => item.EstimatedProviderCostUsd ?? 0m),
             providerUsage.Sum(item => item.ProviderCostUsd),
             hasLastSuccess ? lastSuccessAt : null,
-            hasLastFailure ? lastFailure?.FailedAt ?? lastFailure?.CreatedAt : null,
-            hasLastFailure ? SanitizeErrorCode(lastFailure?.ErrorCode) : null,
+            lastFailureAt,
+            lastFailureCode,
             recentFailures);
     }
 
@@ -240,9 +279,14 @@ public sealed class ProviderHealthService(
 
     private static string SanitizeErrorCode(string? errorCode)
     {
-        if (string.IsNullOrWhiteSpace(errorCode)) return "GENERATION_FAILURE";
-        var safe = new string(errorCode.Trim().Take(96).Where(character => char.IsLetterOrDigit(character) || character is '_' or '-' or '.').ToArray());
-        return string.IsNullOrWhiteSpace(safe) ? "GENERATION_FAILURE" : safe;
+        // Redaction fails closed. Scrubbing disallowed characters out of an arbitrary
+        // string keeps everything that is not a delimiter, so a value that carries URL,
+        // credential or contact-shaped text would still surface its payload to
+        // administrators with only the separators removed. Anything that is not already
+        // a bounded token is therefore replaced by the stable fallback code.
+        if (string.IsNullOrWhiteSpace(errorCode)) return FallbackErrorCode;
+        var candidate = errorCode.Trim();
+        return SafeErrorCodeShape.IsMatch(candidate) ? candidate : FallbackErrorCode;
     }
 
     private static bool IsRateLimit(string? code) => Has(code, "RATE_LIMIT") || Has(code, "RATE_LIMITED");
