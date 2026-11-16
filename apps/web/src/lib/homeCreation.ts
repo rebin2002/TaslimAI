@@ -57,3 +57,19 @@ export function isHomeCreationSubmitKey(event: Readonly<{
   return event.key === "Enter" && !event.shiftKey
     && !event.isComposing && event.keyCode !== 229;
 }
+
+/** Keep only the newest private Home dashboard fetch authoritative. Locale and
+ * workspace transitions can start another request before an older one settles.
+ * Cancellation also invalidates requests after unmount, without changing the
+ * authenticated creation/upload gate.
+ */
+export function createLatestHomeDashboardReadGate() {
+  let generation = 0;
+  return {
+    begin(): () => boolean {
+      const current = ++generation;
+      return () => current === generation;
+    },
+    cancel(): void { generation++; },
+  };
+}
