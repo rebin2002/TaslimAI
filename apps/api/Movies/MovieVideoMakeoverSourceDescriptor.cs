@@ -221,8 +221,12 @@ public static class MovieVideoMakeoverSourceEvaluator
         if (!retentionVerified) blockers.Add(MovieVideoMakeoverSourceCodes.RetentionUnverified);
 
         // --- technical metadata ------------------------------------------------------
-        double? duration = storedFile?.DurationSeconds
+        // Corrupt/non-finite persisted probe values must never become "verified"
+        // source facts or reach JSON serialization (which rejects NaN/Infinity).
+        double? rawDuration = storedFile?.DurationSeconds
             ?? (clip.DurationSeconds.HasValue ? (double?)clip.DurationSeconds.Value : null);
+        double? duration = rawDuration is { } measured && double.IsFinite(measured)
+            ? rawDuration : null;
         var sizeBytes = storedFile?.SizeBytes;
         int? width = storedFile?.Width;
         int? height = storedFile?.Height;
@@ -239,8 +243,10 @@ public static class MovieVideoMakeoverSourceEvaluator
         if (height is null) missing.Add("height");
         else if (height.Value < MovieVideoMakeoverSourceLimits.MinDimension || height.Value > MovieVideoMakeoverSourceLimits.MaxDimension)
             outOfBounds.Add("height");
-        if (duration is null) missing.Add("duration");
-        else if (duration.Value < MovieVideoMakeoverSourceLimits.MinDurationSeconds || duration.Value > MovieVideoMakeoverSourceLimits.MaxDurationSeconds)
+        if (rawDuration is null) missing.Add("duration");
+        else if (!double.IsFinite(rawDuration.Value)
+            || rawDuration.Value < MovieVideoMakeoverSourceLimits.MinDurationSeconds
+            || rawDuration.Value > MovieVideoMakeoverSourceLimits.MaxDurationSeconds)
             outOfBounds.Add("duration");
         if (sizeBytes is null || sizeBytes.Value <= 0) missing.Add("size");
         else if (sizeBytes.Value > MovieVideoMakeoverSourceLimits.MaxSourceBytes) outOfBounds.Add("size");
