@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { attachmentOnlyCreationPrompt, attachmentOnlyCreationPrompts, canSubmitHomeCreation, createHomeCreationSubmissionGate, isHomeCreationSubmitKey, resolveHomeCreationPrompt } from "./homeCreation";
+import { attachmentOnlyCreationPrompt, attachmentOnlyCreationPrompts, canSubmitHomeCreation, createHomeCreationSubmissionGate, createLatestHomeDashboardReadGate, isHomeCreationSubmitKey, resolveHomeCreationPrompt } from "./homeCreation";
 
 describe("home creation prompt", () => {
   it("does not submit while Enter confirms an IME candidate or while Shift is held", () => {
@@ -56,6 +56,21 @@ describe("home creation prompt", () => {
     expect(nextScope.tryStart()).toBe(true);
     expect(nextScope.isActive()).toBe(true);
     nextScope.finish();
+  });
+
+  it("accepts only the newest workspace dashboard response and cancels reads on unmount", () => {
+    const gate = createLatestHomeDashboardReadGate();
+    const first = gate.begin();
+    expect(first()).toBe(true);
+    const second = gate.begin();
+    expect(first()).toBe(false);
+    expect(second()).toBe(true);
+    gate.cancel();
+    expect(first()).toBe(false);
+    expect(second()).toBe(false);
+    const third = gate.begin();
+    expect(third()).toBe(true);
+    expect(first()).toBe(false);
   });
 
   it("preserves explicit instructions when attachments are also selected", () => {
