@@ -377,9 +377,30 @@ public sealed class PaymentLifecycleService(TaslimDbContext db, ICreditLedgerSer
             db.BillingPeriods.Add(period);
             await db.SaveChangesAsync(cancellationToken);
         }
+        await ExpireEndedPeriodsAsync(subscription.Id, period.Id, periodStart, cancellationToken);
         var idempotencyKey = $"included:{subscription.Id}:{period.Id}";
         await creditLedger.GrantAsync(subscription.WorkspaceId, CreditEntitlementType.IncludedMonthly, plan.MonthlyCreditAllowance,
             idempotencyKey, reason, periodEnd, period.Id, sourceReference: subscription.ProviderSubscriptionReference, cancellationToken: cancellationToken);
+    }
+
+    // Rollover boundary state. A billing period ends when the next one opens: the included
+    // entitlement granted into it already stops being spendable at that boundary, so the
+    // auditable period row has to record the same fact instead of staying Open forever.
+    // Only boundaries that end at or before the period being provisioned expire, so a
+    // redelivered event for an older period can never walk a later, still-open period back
+    // in time, and an already-closed period is never reopened or re-closed by a replay.
+    private async Task ExpireEndedPeriodsAsync(Guid subscriptionId, Guid currentPeriodId, DateTime periodStart, CancellationToken cancellationToken)
+    {
+        var ended = await db.BillingPeriods
+            .Where(item => item.SubscriptionId == subscriptionId && item.Id != currentPeriodId && item.Status == BillingPeriodStatus.Open && item.EndsAt <= periodStart)
+            .ToListAsync(cancellationToken);
+        if (ended.Count == 0) return;
+        foreach (var item in ended)
+        {
+            item.Status = BillingPeriodStatus.Expired;
+            item.ClosedAt = item.EndsAt;
+        }
+        await db.SaveChangesAsync(cancellationToken);
     }
 
     private async Task<PaymentAttempt> GetAttemptAsync(Guid workspaceId, Guid id, CancellationToken cancellationToken) =>
