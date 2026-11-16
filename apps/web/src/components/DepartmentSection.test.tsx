@@ -9,4 +9,10 @@ describe("homepage department navigation accessibility", () => {
     expect(source).toContain('<Link key={feature.id}');
     expect(source).not.toContain('className="feature-row" tabIndex={0}');
   });
+
+  it("marks the feature-link wrapper with a role so its accessible name is announced", () => {
+    const row = /<div\s+className="feature-row"([^>]*)>/.exec(source);
+    expect(row).not.toBeNull();
+    expect(row?.[1]).toContain('role="group"');
+  });
 });
