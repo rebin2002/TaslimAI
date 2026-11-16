@@ -27,6 +27,7 @@ import {
   displayDocumentProgress,
   documentPresentationState,
   isDocumentSourceReady,
+  isDocumentJobUnavailableError,
   isRestorableDocumentJob,
   nextDocumentPollDelay,
   parseDocumentJobResult,
@@ -45,8 +46,13 @@ type DocumentLanguage = "auto" | "en" | "ar" | "ku";
 type DocumentOutputFormat = "docx" | "pdf" | "both";
 type DocumentTone = "professional" | "formal" | "friendly" | "persuasive" | "neutral";
 
-function formatAssetDate(value: string, locale: string) {
-  return new Intl.DateTimeFormat(localeTag(locale), { month: "short", day: "numeric", year: "numeric" }).format(new Date(value));
+export function formatAssetDate(value: string, locale: string) {
+  const date = new Date(value);
+  // Degrade like the Research rail instead of throwing: Intl.DateTimeFormat.format raises
+  // RangeError on an invalid instant, which would take the whole Document Studio view,
+  // recent downloads included, down with it. The raw value is returned untouched.
+  if (Number.isNaN(date.getTime())) return value;
+  return new Intl.DateTimeFormat(localeTag(locale), { month: "short", day: "numeric", year: "numeric" }).format(date);
 }
 
 function assetSnippet(asset: Asset) {
@@ -224,8 +230,18 @@ export function DocumentStudioView() {
         setCurrent(next);
         setError("");
         setPollRetry(0);
-      } catch {
+      } catch (cause) {
         if (!active || workspaceGeneration.current !== workspaceVersion || current.id !== jobId) return;
+        if (isDocumentJobUnavailableError(cause)) {
+          clearDocumentActiveJobId(current.workspaceId);
+          restoreJobId.current = null;
+          activeJobId.current = null;
+          activeAssetId.current = null;
+          setCurrent(null);
+          setPollRetry(0);
+          setError("");
+          return;
+        }
         setError(t("document.pollError"));
         // Keep polling after a transient request failure; the current job remains the source of truth.
         setPollRetry((attempt) => attempt + 1);

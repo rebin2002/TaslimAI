@@ -4,29 +4,33 @@ const terminalStatuses = new Set<GenerationJob["status"]>(["Succeeded", "Failed"
 const activeJobStoragePrefix = "taslim:image-generation:";
 export const imageJobPollIntervalMs = 2_000;
 export const imageJobPollMaxDelayMs = 8_000;
+// A persisted active-job pointer is adopted with a single read today. The generation it names is
+// usually still running server-side when that read fails, so the read gets its own small, bounded
+// budget instead of silently dropping the job from view.
+export const imageRestoreMaxAttempts = 3;
 
-export function imageActiveJobStorageKey(workspaceId: string) {
-  return `${activeJobStoragePrefix}${workspaceId}`;
+export function imageActiveJobStorageKey(userId: string, workspaceId: string) {
+  return `${activeJobStoragePrefix}${encodeURIComponent(userId)}:${encodeURIComponent(workspaceId)}`;
 }
 
-export function readImageActiveJobId(workspaceId: string) {
-  if (typeof window === "undefined") return null;
+export function readImageActiveJobId(userId: string, workspaceId: string) {
+  if (typeof window === "undefined" || !userId.trim() || !workspaceId.trim()) return null;
   try {
-    const jobId = window.sessionStorage.getItem(imageActiveJobStorageKey(workspaceId));
+    const jobId = window.sessionStorage.getItem(imageActiveJobStorageKey(userId, workspaceId));
     return jobId?.trim() || null;
   } catch {
     return null;
   }
 }
 
-export function persistImageActiveJobId(workspaceId: string, jobId: string) {
-  if (typeof window === "undefined" || !jobId.trim()) return;
-  try { window.sessionStorage.setItem(imageActiveJobStorageKey(workspaceId), jobId); } catch { /* Storage may be unavailable. */ }
+export function persistImageActiveJobId(userId: string, workspaceId: string, jobId: string) {
+  if (typeof window === "undefined" || !userId.trim() || !workspaceId.trim() || !jobId.trim()) return;
+  try { window.sessionStorage.setItem(imageActiveJobStorageKey(userId, workspaceId), jobId); } catch { /* Storage may be unavailable. */ }
 }
 
-export function clearImageActiveJobId(workspaceId: string) {
-  if (typeof window === "undefined") return;
-  try { window.sessionStorage.removeItem(imageActiveJobStorageKey(workspaceId)); } catch { /* Storage may be unavailable. */ }
+export function clearImageActiveJobId(userId: string, workspaceId: string) {
+  if (typeof window === "undefined" || !userId.trim() || !workspaceId.trim()) return;
+  try { window.sessionStorage.removeItem(imageActiveJobStorageKey(userId, workspaceId)); } catch { /* Storage may be unavailable. */ }
 }
 
 export function isImageJob(job: GenerationJob | null): boolean {
@@ -47,6 +51,44 @@ export function isImageTerminal(job: GenerationJob | null) {
 
 export function shouldPollImageJob(job: GenerationJob | null) {
   return !!job && !isImageTerminal(job);
+}
+
+export function shouldClearImageJobAfterPollError(status: number | null | undefined) {
+  return status === 401 || status === 403 || status === 404;
+}
+
+/**
+ * Reconciles a freshly read job snapshot with the one the studio already renders.
+ *
+ * Three independent readers write the active job: the bounded poll, the read-back that follows a
+ * cancellation request, and the restore that adopts a persisted pointer. Their responses settle in
+ * no particular order, so a late frame must never undo a newer decision — that would hand the user
+ * back an in-progress canvas for a generation they already cancelled, and quietly drop the terminal
+ * failure state together with the only accessible retry affordance for it.
+ */
+export function mergeImageJobUpdate(previous: GenerationJob | null, incoming: GenerationJob): GenerationJob {
+  if (!previous || previous.id !== incoming.id) return incoming;
+  // The first settled frame is the durable boundary for this job: a contradictory or merely
+  // older read must not remove a rendered result or the failure canvas that replaces it.
+  if (isImageTerminal(previous)) return previous;
+  // Only a non-terminal frame can lose the cancellation the user already requested. The API's
+  // immediate path settles a Pending/Queued job straight to Cancelled and never sets the flag,
+  // so the authoritative terminal read always wins over the request.
+  if (previous.cancellationRequested && !incoming.cancellationRequested && !isImageTerminal(incoming)) return previous;
+  return incoming;
+}
+
+export function nextImageRestoreDelay(failedAttempt: number): number {
+  return Math.min(imageJobPollIntervalMs * Math.max(1, failedAttempt + 1), imageJobPollMaxDelayMs);
+}
+
+/**
+ * Retries a restore only while the pointer is still credible. An inaccessible job stays on the
+ * orphaned-pointer path, which clears the pointer instead of asking for it again.
+ */
+export function shouldRetryImageRestore(status: number | null | undefined, failedAttempt: number): boolean {
+  if (shouldClearImageJobAfterPollError(status)) return false;
+  return failedAttempt + 1 < imageRestoreMaxAttempts;
 }
 
 export function nextImagePollDelay(job: GenerationJob | null, retryAttempt = 0) {
