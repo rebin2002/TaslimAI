@@ -32,7 +32,7 @@ describe("not-found boundary", () => {
     expect(html).toContain('aria-labelledby="not-found-title"');
     expect(html).toContain('href="/"');
     expect(html).toContain('href="/assets"');
-    expect(html).not.toMatch(/<main\\b/);
+    expect(html).not.toMatch(/<main\b/);
     expect(html).not.toContain("useLocale must be used within LocaleProvider");
     expect(html).not.toContain("digest");
   });
