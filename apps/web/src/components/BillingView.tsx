@@ -7,7 +7,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useAuth } from "@/components/AuthProvider";
 import { useLocale } from "@/components/LocaleProvider";
 import { api, type BillingAccount, type BillingPlanOption } from "@/lib/api";
-import { describeCreditBalance, scopedBillingAccount } from "@/lib/billingCreditBalance";
+import { describeCreditBalance, formatBillingDate, scopedBillingAccount } from "@/lib/billingCreditBalance";
 
 export function BillingView() {
   const { user, workspace, loading } = useAuth();
@@ -48,7 +48,7 @@ function ScopedBillingView({ userId, workspaceId }: { userId: string; workspaceI
   // Only the API's totalRemaining is a spendable balance; other figures
   // describe issued or allocated credit and must not be presented as usage.
   const balance = useMemo(() => describeCreditBalance(account?.credits), [account]);
-  const formatDate = (value: string) => dateFormatter.format(new Date(value));
+  const formatDate = (value: string) => formatBillingDate(value, dateFormatter);
   const formatCredits = (value: number) => numberFormatter.format(value);
   const formatPrice = (plan: Pick<BillingPlanOption, "monthlyPriceUsd">) => plan.monthlyPriceUsd === 0 ? t("billing.noCharge") : `$${plan.monthlyPriceUsd} / ${t("billing.month")}`;
   const entryLabel = (type: string) => t(`billing.entry.${type.toLowerCase()}`);
