@@ -91,10 +91,11 @@ function HomeDashboard() {
   }, [t, workspace]);
 
   // Fetch workspace-scoped records after authentication state is available.
-  // eslint-disable-next-line react-hooks/set-state-in-effect
   useEffect(() => {
+    const gate = dashboardReadGate.current;
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     void loadDashboard();
-    return () => dashboardReadGate.current.cancel();
+    return () => gate.cancel();
   }, [loadDashboard]);
   const recentItems = useMemo(() => dashboard ? buildHomeRecentItems(dashboard, 4) : [], [dashboard]);
   const hasWorkingGeneration = hasInFlightActivity(dashboard?.activity ?? []);
