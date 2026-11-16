@@ -22,7 +22,7 @@ test.describe("language-pack foundation", () => {
     // The skip path must persist the account locale without launching paid generation.
     await onboarding.locator(".onboarding-skip").click();
     await expect(onboarding).toBeHidden();
-    await expect(page).toHaveURL(/\\/projects/);
+    await expect(page).toHaveURL((url) => url.pathname === "/projects");
     const response = await page.request.get("/api/auth/me");
     expect(response.ok()).toBe(true);
     const session = await response.json() as { user: { preferredLanguage: string; defaultGenerationLanguage: string; onboardingCompletedAt: string | null } };
