@@ -1,5 +1,6 @@
 using System.ComponentModel.DataAnnotations;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using Taslim.Api.Domain;
 using Taslim.Api.Research;
 
@@ -271,10 +272,25 @@ public static class ResearchBlockTypes
 
 public static class ResearchDraftValidator
 {
+    /// <summary>
+    /// Server-generated citation identifiers are <c>S</c> followed by digits (for example <c>S1</c>).
+    /// Only bracketed tokens of exactly that shape are treated as inline citation markers, so
+    /// ordinary bracketed prose such as <c>[TBD]</c> or <c>[2030 target]</c> is never misread as a
+    /// citation.
+    /// </summary>
+    private static readonly Regex InlineCitationMarker = new(@"\[(S[0-9]{1,4})\]",
+        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.NonBacktracking);
+
     public static void Validate(ResearchDraft draft, IReadOnlySet<string> sourceCitationIds, ResearchGenerationOptions options)
     {
         if (string.IsNullOrWhiteSpace(draft.Title) || draft.Title.Length > 255 || string.IsNullOrWhiteSpace(draft.ExecutiveSummary) || draft.ExecutiveSummary.Length > options.MaxReportBlockCharacters)
             throw new ResearchOutputValidationException();
+        // The structured citationIds arrays are not the only citation surface: providers also write
+        // [S1]-style markers inline, and the executive summary and conclusion carry no structured
+        // citation field. Every marker that would survive into the persisted report result, the CSV
+        // citation manifest and the DOCX/PDF Sources appendix must resolve to a source row.
+        ValidateInlineMarkers(draft.ExecutiveSummary, sourceCitationIds);
+        ValidateInlineMarkers(draft.Conclusion, sourceCitationIds);
         if (!ResearchGenerationDefaults.Languages.Contains(draft.Language) || draft.Sections.Count < 1 || draft.Sections.Count > options.MaxSections || draft.KeyFindings.Count > options.MaxKeyFindings)
             throw new ResearchOutputValidationException();
         if (draft.Conclusion.Length > options.MaxReportBlockCharacters || draft.Sources.Count > options.MaxSourceCount)
@@ -286,12 +302,12 @@ public static class ResearchDraftValidator
         foreach (var section in draft.Sections)
         {
             if (string.IsNullOrWhiteSpace(section.Heading) || section.Heading.Length > options.MaxHeadingCharacters) throw new ResearchOutputValidationException();
-            foreach (var block in section.Blocks) ValidateBlock(block, options);
+            foreach (var block in section.Blocks) ValidateBlock(block, sourceCitationIds, options);
         }
-        foreach (var block in draft.KeyFindings) ValidateBlock(block, options);
+        foreach (var block in draft.KeyFindings) ValidateBlock(block, sourceCitationIds, options);
     }
 
-    private static void ValidateBlock(ResearchReportBlock block, ResearchGenerationOptions options)
+    private static void ValidateBlock(ResearchReportBlock block, IReadOnlySet<string> sourceCitationIds, ResearchGenerationOptions options)
     {
         if (!ResearchBlockTypes.Supported.Contains(block.Type)) throw new ResearchOutputValidationException();
         if ((block.Text?.Length ?? 0) > options.MaxReportBlockCharacters) throw new ResearchOutputValidationException();
@@ -299,6 +315,20 @@ public static class ResearchDraftValidator
         if (block.Items?.Any(item => item.Length > options.MaxReportBlockCharacters) == true) throw new ResearchOutputValidationException();
         if (block.Rows?.Any(row => row.Cells.Count > 12 || row.Cells.Any(cell => cell.Length > options.MaxReportBlockCharacters)) == true) throw new ResearchOutputValidationException();
         if (ContainsMarkup(block.Text) || block.Items?.Any(ContainsMarkup) == true || block.Rows?.SelectMany(row => row.Cells).Any(ContainsMarkup) == true) throw new ResearchOutputValidationException();
+        ValidateInlineMarkers(block.Text, sourceCitationIds);
+        if (block.Items is not null)
+            foreach (var item in block.Items) ValidateInlineMarkers(item, sourceCitationIds);
+        if (block.Rows is not null)
+            foreach (var row in block.Rows)
+                foreach (var cell in row.Cells) ValidateInlineMarkers(cell, sourceCitationIds);
+    }
+
+    private static void ValidateInlineMarkers(string? value, IReadOnlySet<string> sourceCitationIds)
+    {
+        if (value is null || !value.Contains('[', StringComparison.Ordinal)) return;
+        foreach (Match match in InlineCitationMarker.Matches(value))
+            if (!sourceCitationIds.Contains(match.Groups[1].Value))
+                throw new ResearchCitationValidationException();
     }
 
     private static bool ContainsMarkup(string? value) => value?.Contains('<') == true || value?.Contains('>') == true;
