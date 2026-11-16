@@ -107,7 +107,14 @@ function HomeDashboard() {
     try {
       const conversation = await api.createConversation(workspace.id, projectId ? { projectId } : {});
       if (!gate.isActive()) return;
-      const uploaded = await Promise.all(files.map((file) => api.uploadFile(workspace.id, file, { conversationId: conversation.id, projectId: projectId || undefined })));
+      // Upload serially so a logout or workspace transition stops the next
+      // private attachment before its request starts. An already-sent upload
+      // cannot be retroactively undone by the client.
+      const uploaded: Awaited<ReturnType<typeof api.uploadFile>>[] = [];
+      for (const file of files) {
+        if (!gate.isActive()) return;
+        uploaded.push(await api.uploadFile(workspace.id, file, { conversationId: conversation.id, projectId: projectId || undefined }));
+      }
       if (!gate.isActive()) return;
       await api.sendMessage(conversation.id, prompt, undefined, uploaded.map((file) => file.id));
       if (!gate.isActive()) return;
