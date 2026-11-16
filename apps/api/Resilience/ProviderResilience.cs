@@ -262,7 +262,7 @@ public static class ProviderRoutingPolicy
         if (estimate < 0) return false;
 
         var requestMax = requirements.MaxEstimatedCostUsd ?? decimal.MaxValue;
-        var configuredMax = configuredMaxCostUsd >= 0 ? configuredMaxCostUsd : decimal.MaxValue;
+        var configuredMax = configuredMaxCostUsd >= 0 ? configuredMaxCostUsd : 0m;
         return estimate <= Math.Min(requestMax, configuredMax);
     }
 }
@@ -318,6 +318,16 @@ public sealed class ProviderResilienceOrchestrator(
             return new(ProviderAttemptResultCategory.Success, default, null, 0, null, true);
         if (claim == ProviderFinalizationClaimResult.AlreadyClaimed)
             return new(ProviderAttemptResultCategory.TransientFailure, default, "EXECUTION_ALREADY_CLAIMED", 0, null, false);
+        if (settings.MaxEstimatedCostUsd < 0)
+        {
+            await store.CompleteFinalizationAsync(
+                generationJobId,
+                jobConcurrencyToken,
+                idempotencyKey,
+                ProviderAttemptResultCategory.CostGuardRejected,
+                cancellationToken);
+            return new(ProviderAttemptResultCategory.CostGuardRejected, default, "INVALID_COST_LIMIT", 0, null);
+        }
         if (providers.Count == 0)
         {
             await store.CompleteFinalizationAsync(generationJobId, jobConcurrencyToken, idempotencyKey, ProviderAttemptResultCategory.Unavailable, cancellationToken);
@@ -476,8 +486,8 @@ public sealed class ProviderResilienceOrchestrator(
             var cumulativeCost = await store.GetCumulativeEstimatedCostAsync(generationJobId, cancellationToken);
             var maxCost = Math.Min(
                 requirements.MaxEstimatedCostUsd ?? decimal.MaxValue,
-                settings.MaxEstimatedCostUsd >= 0 ? settings.MaxEstimatedCostUsd : decimal.MaxValue);
-            if (profile.EstimatedCostUsd is { } estimate && estimate >= 0 && cumulativeCost + estimate > maxCost)
+                Math.Max(0m, settings.MaxEstimatedCostUsd));
+            if (ExceedsCostLimit(cumulativeCost, profile.EstimatedCostUsd, maxCost))
             {
                 return new(ProviderAttemptResultCategory.CostGuardRejected, default, "COST_LIMIT_EXCEEDED", attemptCounter.Value, provider.Key);
             }
@@ -529,7 +539,7 @@ public sealed class ProviderResilienceOrchestrator(
                     input,
                     timeout.Token);
                 actualCost = success.EstimatedCostUsd ?? profile.EstimatedCostUsd;
-                if (actualCost is { } reportedCost && reportedCost >= 0 && cumulativeCost + reportedCost > maxCost)
+                if (ExceedsCostLimit(cumulativeCost, actualCost, maxCost))
                 {
                     category = ProviderAttemptResultCategory.CostGuardRejected;
                     code = "COST_LIMIT_EXCEEDED";
@@ -586,6 +596,15 @@ public sealed class ProviderResilienceOrchestrator(
         }
 
         return last ?? new(ProviderAttemptResultCategory.Unavailable, default, "PROVIDER_UNAVAILABLE", attemptCounter.Value, provider.Key);
+    }
+
+    // Subtraction avoids decimal overflow when accumulated and next estimated costs
+    // are individually representable but their sum is not. Unknown next costs
+    // retain their existing provider-policy handling; invalid/corrupt totals fail closed.
+    private static bool ExceedsCostLimit(decimal accumulatedUsd, decimal? nextUsd, decimal ceilingUsd)
+    {
+        if (accumulatedUsd < 0m || accumulatedUsd > ceilingUsd) return true;
+        return nextUsd is { } cost && (cost < 0m || cost > ceilingUsd - accumulatedUsd);
     }
 
     private async Task TryCompleteCancellationAsync(Guid generationJobId, Guid jobConcurrencyToken, string idempotencyKey)
