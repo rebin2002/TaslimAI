@@ -121,7 +121,7 @@ describe("credit balance truth", () => {
     for (const flag of ["checkoutAvailable", "upgradeAvailable", "downgradeAvailable", "cancelAvailable"]) {
       expect(viewSource).not.toContain(`disabled={!account.actions.${flag}}`);
     }
-    expect(viewSource.match(/<button[^>]*\\sdisabled>/g)).toHaveLength(4);
+    expect(viewSource.match(/<button[^>]*\sdisabled>/g)).toHaveLength(4);
     expect(viewSource).toContain("The billing action buttons have no mutation handlers yet.");
   });
 
