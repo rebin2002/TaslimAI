@@ -51,3 +51,11 @@ export function scopedBillingAccount<T>(
   return userId && workspaceId && snapshot?.userId === userId && snapshot.workspaceId === workspaceId
     ? snapshot.account : null;
 }
+
+/** Invalid or absent API timestamps must not crash the private Billing ledger.
+ * Display an unknown date instead of fabricating a billing/renewal date.
+ */
+export function formatBillingDate(value: string | null | undefined, formatter: Intl.DateTimeFormat): string {
+  const date = typeof value === "string" && value.trim() ? new Date(value) : null;
+  return date && Number.isFinite(date.getTime()) ? formatter.format(date) : "—";
+}
