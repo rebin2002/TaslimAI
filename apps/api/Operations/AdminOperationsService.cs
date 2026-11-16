@@ -377,7 +377,7 @@ public sealed class AdminOperationsService(
     private async Task<AdminWorkerOperationsDto> BuildWorkersAsync(CancellationToken cancellationToken)
     {
         var now = DateTime.UtcNow;
-        var staleAfter = TimeSpan.FromSeconds(Math.Clamp(generationOptions.Value.HeartbeatStaleAfterSeconds, 30, 3_600));
+        var staleAfter = GenerationWorkerLiveness.StaleWindow(generationOptions.Value.HeartbeatStaleAfterSeconds);
         var rows = await db.GenerationWorkerHeartbeats.AsNoTracking()
             .OrderByDescending(item => item.LastSeenAt)
             .Take(100)
@@ -392,7 +392,7 @@ public sealed class AdminOperationsService(
             item.ActiveJobId,
             item.ConsecutiveIterationFailures,
             item.WorkerConcurrency,
-            item.Status != GenerationWorkerStatuses.Running || now - item.LastSeenAt > staleAfter)).ToArray();
+            GenerationWorkerLiveness.IsStale(item.Status, item.LastSeenAt, now, staleAfter))).ToArray();
         return new AdminWorkerOperationsDto(
             Math.Max(1, generationOptions.Value.WorkerConcurrency),
             workers.Length,
