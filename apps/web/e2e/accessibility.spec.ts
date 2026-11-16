@@ -143,6 +143,16 @@ test.describe("basic accessibility smoke", () => {
     }
   });
 
+  test("server-authenticated Document route persists across reload", async ({ authenticatedPage: page }) => {
+    // The real login fixture supplies an actual server cookie: unlike the
+    // synthetic /api/auth/me mock, this exercises the SSR authorization gate.
+    await page.goto("/create/document");
+    await expect(page).toHaveURL((url) => url.pathname === "/create/document");
+    await page.reload();
+    await expect(page).toHaveURL((url) => url.pathname === "/create/document");
+    await expect(page.getByRole("dialog")).toHaveCount(0);
+  });
+
   test("authentication forms expose labels and keyboard focus", async ({ page }) => {
     await page.goto("/login");
     await expect(page.getByLabel(/email/i)).toBeVisible();
@@ -372,7 +382,14 @@ test.describe("basic accessibility smoke", () => {
         const authMeResponseCountBeforeReload = traffic.authMeResponses.length;
         await page.reload();
         await expect.poll(() => traffic.authMeResponses.length).toBeGreaterThan(authMeResponseCountBeforeReload);
-        await expect(page).toHaveURL((url) => url.pathname === target.destination);
+        // The mock intercepts only browser API requests. A full Document route
+        // reload is server-authenticated and must reject this synthetic session.
+        // Other routes remain client-gated in this test's mock-only scope.
+        if (target.destination === "/create/document") {
+          await expect(page).toHaveURL(/\/login\?next=%2Fcreate%2Fdocument$/);
+        } else {
+          await expect(page).toHaveURL((url) => url.pathname === target.destination);
+        }
         await expect(page.getByRole("dialog")).toHaveCount(0);
         expect(traffic.authMeResponses.length).toBeGreaterThanOrEqual(2);
         const persistedResponse = traffic.authMeResponses[traffic.authMeResponses.length - 1];
