@@ -331,6 +331,13 @@ public sealed class AutopilotPolicyTests
         Assert.False(authenticator.Verify("sha256=abc", $"{new DateTimeOffset(now.AddMinutes(-30)).ToUnixTimeSeconds()}", payload, now).Valid);
         Assert.Equal("timestamp_invalid", authenticator.Verify("sha256=abc", long.MaxValue.ToString(), payload, now).FailureReason);
         Assert.Equal("timestamp_invalid", authenticator.Verify("sha256=abc", long.MinValue.ToString(), payload, now).FailureReason);
+        // Exact DateTimeOffset edges: one second beyond either bound must fail closed
+        // with a stable reason instead of throwing, while the valid extremes still
+        // classify as out-of-tolerance rather than malformed.
+        Assert.Equal("timestamp_invalid", authenticator.Verify("sha256=abc", "253402300800", payload, now).FailureReason);
+        Assert.Equal("timestamp_invalid", authenticator.Verify("sha256=abc", "-62135596801", payload, now).FailureReason);
+        Assert.Equal("timestamp_out_of_tolerance", authenticator.Verify("sha256=abc", "253402300799", payload, now).FailureReason);
+        Assert.Equal("timestamp_out_of_tolerance", authenticator.Verify("sha256=abc", "-62135596800", payload, now).FailureReason);
 
         var unsignedDisabled = new AutopilotOptions { RequireSignedEvents = false };
         unsignedDisabled.Normalize();

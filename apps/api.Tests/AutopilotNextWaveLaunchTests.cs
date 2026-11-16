@@ -266,6 +266,80 @@ public sealed class AutopilotNextWaveLaunchTests
     }
 
     [Fact]
+    public async Task Provider_rejected_launch_releases_the_backlog_claim_without_consuming_the_item()
+    {
+        using var host = new Host(options =>
+        {
+            options.DryRun = false;
+            options.SimulationMode = false;
+            options.AllowNextWaveLaunch = true;
+            options.AllowNextWaveLaunchWhenReleasePending = true;
+            options.MaxLaunchAttempts = 3;
+        });
+        await host.AddBacklogAsync("bl-rejected-launch", "Add workspace audit export");
+        host.Provider.Results.Enqueue(WaveLaunchProviderResult.Rejected("policy_denied"));
+
+        await host.GreenRunAsync("wave-rejected-claim");
+
+        // Exactly one provider call happened despite the durable claim; a rejected
+        // launch must roll the claim back so the approved item stays available.
+        Assert.Equal(1, host.Provider.LaunchCalls);
+        using var db = host.CreateContext();
+        var task = await db.AutopilotWaveLaunchTasks.SingleAsync();
+        Assert.Equal(AutopilotWaveLaunchStatuses.Failed, task.Status);
+        Assert.Equal("policy_denied", task.ReasonCode);
+        var backlog = await db.AutopilotBacklogItems.SingleAsync();
+        Assert.Null(backlog.ConsumedByWaveKey);
+        Assert.Null(backlog.ConsumedAt);
+        Assert.Contains(await db.AutopilotAuditEvents.ToListAsync(), item =>
+            item.Action == AutopilotAuditActions.NextWaveLaunchFailed
+            && item.Reason == "policy_denied");
+    }
+
+    [Fact]
+    public async Task Scheduled_retry_releases_the_claim_and_a_later_attempt_reclaims_it_before_launch()
+    {
+        using var host = new Host(options =>
+        {
+            options.DryRun = false;
+            options.SimulationMode = false;
+            options.AllowNextWaveLaunch = true;
+            options.AllowNextWaveLaunchWhenReleasePending = true;
+            options.MaxLaunchAttempts = 3;
+        });
+        await host.AddBacklogAsync("bl-retry-claim", "Add workspace audit export");
+        host.Provider.Results.Enqueue(WaveLaunchProviderResult.Unavailable("bridge_unreachable"));
+
+        await host.GreenRunAsync("wave-retry-claim");
+        Assert.Equal(1, host.Provider.LaunchCalls);
+        using (var db = host.CreateContext())
+        {
+            var task = await db.AutopilotWaveLaunchTasks.SingleAsync();
+            Assert.Equal(AutopilotWaveLaunchStatuses.Planned, task.Status);
+            Assert.NotNull(task.NextReconcileAt);
+            // While a bounded retry is pending no worker may own the item, so a
+            // parallel planner can still legitimately re-plan it.
+            var backlog = await db.AutopilotBacklogItems.SingleAsync();
+            Assert.Null(backlog.ConsumedByWaveKey);
+            Assert.Null(backlog.ConsumedAt);
+        }
+
+        host.Time.Advance(TimeSpan.FromHours(1));
+        await host.LaunchAsync();
+        Assert.Equal(2, host.Provider.LaunchCalls);
+        using (var db = host.CreateContext())
+        {
+            var task = await db.AutopilotWaveLaunchTasks.SingleAsync();
+            Assert.Equal(AutopilotWaveLaunchStatuses.Launched, task.Status);
+            // The eventual winner atomically re-claims the item right before the
+            // provider boundary; the durable record now names its owning wave.
+            var backlog = await db.AutopilotBacklogItems.SingleAsync();
+            Assert.Equal(task.WaveKey, backlog.ConsumedByWaveKey);
+            Assert.NotNull(backlog.ConsumedAt);
+        }
+    }
+
+    [Fact]
     public async Task Missing_approved_backlog_stops_with_a_human_decision_and_resumes_when_supplied()
     {
         using var host = new Host(options => options.AllowNextWaveLaunch = true);

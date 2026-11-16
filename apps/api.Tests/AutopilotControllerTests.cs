@@ -71,6 +71,116 @@ public sealed class AutopilotControllerTests
     }
 
     [Fact]
+    public async Task Different_payload_race_at_the_insert_boundary_is_rejected_as_a_conflict()
+    {
+        using var host = new AutopilotTestHost();
+        const string source = "bridge-insert-race";
+        const string external = "evt-insert-race";
+
+        // The winner commits strictly after the intake pre-check and before the
+        // INSERT, so this delivery can only resolve through the unique-index
+        // race handler, not the sequential replay guard.
+        await host.InstallConcurrentRaceWinnerFixtureAsync(source, external, "committed-winner-hash");
+
+        var submission = await host.SubmitRawAsync(
+            source,
+            external,
+            "wave-race-insert",
+            "task-1",
+            AutopilotTaskOutcomes.Succeeded,
+            CompleteChecks());
+
+        Assert.Equal(AutopilotIntakeOutcomes.PayloadConflict, submission.Outcome);
+        Assert.Equal("idempotency_key_payload_conflict", submission.Reason);
+
+        using var db = host.CreateContext();
+        var stored = await db.AutopilotEvents.SingleAsync();
+        Assert.Equal("committed-winner-hash", stored.PayloadHash);
+        Assert.Equal(stored.Id, submission.EventId);
+        Assert.Contains(await db.AutopilotAuditEvents.ToListAsync(), item =>
+            item.Action == AutopilotAuditActions.EventRejected
+            && item.Reason == "idempotency_key_payload_conflict");
+    }
+
+    [Fact]
+    public async Task Same_payload_race_at_the_insert_boundary_is_deduplicated_not_blocked()
+    {
+        using var host = new AutopilotTestHost();
+        const string source = "bridge-duplicate-race";
+        const string external = "evt-duplicate-race";
+
+        // The conflict guard must only refuse to reinterpret history when the
+        // payload differs; an identical concurrent delivery stays a pure replay.
+        var payloadHash = new AutopilotEventAuthenticator(host.Options).ComputePayloadHash(
+            AutopilotTestHost.BuildCompletionPayloadJson(
+                "wave-race-duplicate", "task-1", AutopilotTaskOutcomes.Succeeded, CompleteChecks()));
+        await host.InstallConcurrentRaceWinnerFixtureAsync(source, external, payloadHash);
+
+        var submission = await host.SubmitRawAsync(
+            source,
+            external,
+            "wave-race-duplicate",
+            "task-1",
+            AutopilotTaskOutcomes.Succeeded,
+            CompleteChecks());
+
+        Assert.Equal(AutopilotIntakeOutcomes.Duplicate, submission.Outcome);
+        Assert.Equal("concurrent_duplicate_delivery", submission.Reason);
+
+        using var db = host.CreateContext();
+        var stored = await db.AutopilotEvents.SingleAsync();
+        Assert.Equal(payloadHash, stored.PayloadHash);
+        Assert.DoesNotContain(await db.AutopilotAuditEvents.ToListAsync(), item =>
+            item.Action == AutopilotAuditActions.EventRejected);
+    }
+
+    [Fact]
+    public async Task The_composite_event_identity_index_makes_duplicate_inserts_throwable_for_the_race_handler()
+    {
+        using var host = new AutopilotTestHost();
+        using var db = host.CreateContext();
+        db.AutopilotEvents.Add(new AutopilotEvent
+        {
+            Id = Guid.NewGuid(),
+            EventType = AutopilotEventTypes.WaveTaskCompleted,
+            SourceSystem = "bridge-index",
+            ExternalEventId = "evt-index",
+            IdempotencyKey = "index-fixture:evt-index:first",
+            PayloadHash = "first-hash",
+            Status = AutopilotEventStatuses.Queued,
+            SignatureVerified = true,
+            ReplayProtected = true,
+            Attempt = 0,
+            ReconciliationCount = 0,
+            ReceivedAt = DateTime.UtcNow,
+            ConcurrencyToken = Guid.NewGuid(),
+        });
+        await db.SaveChangesAsync();
+
+        // The intake race handlers depend on a second INSERT with the same
+        // (SourceSystem, ExternalEventId) identity always throwing at the
+        // provider boundary, even when the idempotency key itself differs.
+        db.AutopilotEvents.Add(new AutopilotEvent
+        {
+            Id = Guid.NewGuid(),
+            EventType = AutopilotEventTypes.WaveTaskCompleted,
+            SourceSystem = "bridge-index",
+            ExternalEventId = "evt-index",
+            IdempotencyKey = AutopilotEventIntake.BuildIdempotencyKey("bridge-index", "evt-index"),
+            PayloadHash = "second-hash",
+            Status = AutopilotEventStatuses.Queued,
+            SignatureVerified = true,
+            ReplayProtected = true,
+            Attempt = 0,
+            ReconciliationCount = 0,
+            ReceivedAt = DateTime.UtcNow,
+            ConcurrencyToken = Guid.NewGuid(),
+        });
+        await Assert.ThrowsAsync<DbUpdateException>(async () => await db.SaveChangesAsync());
+        Assert.Equal(1, await db.AutopilotEvents.CountAsync());
+    }
+
+    [Fact]
     public async Task Invalid_completion_outcome_is_rejected_without_creating_success_evidence()
     {
         using var host = new AutopilotTestHost();
@@ -653,6 +763,7 @@ public sealed class AutopilotControllerTests
         {
             var builder = new DbContextOptionsBuilder<TaslimDbContext>().UseSqlite(connection);
             if (conflictInterceptor is not null) builder.AddInterceptors(conflictInterceptor);
+            if (raceInterceptor is not null) builder.AddInterceptors(raceInterceptor);
             return builder;
         }
 
@@ -722,7 +833,30 @@ public sealed class AutopilotControllerTests
             string candidateSha = CandidateSha,
             int? expectedTaskCount = 1)
         {
-            var payload = JsonSerializer.Serialize(new
+            var payload = BuildCompletionPayloadJson(
+               waveKey, taskId, outcome, checks, failureClass, attempt, candidateSha, expectedTaskCount);
+            using var db = CreateContext();
+            var intake = new AutopilotEventIntake(
+                db,
+                new AutopilotEventAuthenticator(Options),
+                new EfAutopilotAuditLog(db),
+                Options,
+                TimeProvider.System);
+            return await intake.SubmitAsync(new AutopilotIntakeRequest(null, null, payload, sourceSystem, externalEventId, AutopilotEventTypes.WaveTaskCompleted));
+        }
+
+        /// <summary>Serializes the exact completion payload that <see cref="SubmitRawAsync"/> submits.</summary>
+        public static string BuildCompletionPayloadJson(
+            string waveKey,
+            string taskId,
+            string outcome,
+            Dictionary<string, bool>? checks = null,
+            string? failureClass = null,
+            int attempt = 0,
+            string candidateSha = CandidateSha,
+            int? expectedTaskCount = 1)
+        {
+            return JsonSerializer.Serialize(new
             {
                 waveKey,
                 taskId,
@@ -736,15 +870,34 @@ public sealed class AutopilotControllerTests
                 checks,
                 expectedTaskCount,
             });
+        }
 
+        public Task InstallConcurrentRaceWinnerFixtureAsync(string sourceSystem, string externalEventId, string payloadHash)
+        {
+            raceInterceptor = new(() => InsertConcurrentRaceWinnerAsync(sourceSystem, externalEventId, payloadHash));
+            return Task.CompletedTask;
+        }
+
+        private async Task InsertConcurrentRaceWinnerAsync(string sourceSystem, string externalEventId, string payloadHash)
+        {
             using var db = CreateContext();
-            var intake = new AutopilotEventIntake(
-                db,
-                new AutopilotEventAuthenticator(Options),
-                new EfAutopilotAuditLog(db),
-                Options,
-                TimeProvider.System);
-            return await intake.SubmitAsync(new AutopilotIntakeRequest(null, null, payload, sourceSystem, externalEventId, AutopilotEventTypes.WaveTaskCompleted));
+            db.AutopilotEvents.Add(new AutopilotEvent
+            {
+                Id = Guid.Parse("00000000-0000-0000-0000-000000000097"),
+                EventType = AutopilotEventTypes.WaveTaskCompleted,
+                SourceSystem = sourceSystem,
+                ExternalEventId = externalEventId,
+                IdempotencyKey = AutopilotEventIntake.BuildIdempotencyKey(sourceSystem, externalEventId),
+                PayloadHash = payloadHash,
+                Status = AutopilotEventStatuses.Queued,
+                SignatureVerified = true,
+                ReplayProtected = true,
+                Attempt = 0,
+                ReconciliationCount = 0,
+                ReceivedAt = DateTime.UtcNow,
+                ConcurrencyToken = Guid.Parse("00000000-0000-0000-0000-000000000096"),
+            });
+            await db.SaveChangesAsync();
         }
 
         public Task InstallConcurrentPayloadConflictFixtureAsync()
@@ -794,6 +947,7 @@ public sealed class AutopilotControllerTests
         }
 
         private InjectedAutopilotConflictInterceptor? conflictInterceptor;
+        private InjectedAutopilotRaceInterceptor? raceInterceptor;
     }
 
     private sealed class InjectedAutopilotConflictInterceptor(Func<Task> insertWinner) : DbCommandInterceptor
@@ -842,6 +996,38 @@ public sealed class AutopilotControllerTests
                 || !values.Contains("evt-race", StringComparer.Ordinal)
                 || values.Contains("winner-hash", StringComparer.Ordinal)
                 || Interlocked.Exchange(ref injected, 1) != 0)
+                return;
+            await insertWinner();
+            cancellationToken.ThrowIfCancellationRequested();
+        }
+    }
+
+    /// <summary>
+    /// Commits a race-winner event exactly once, immediately after the SHA-conflict
+    /// lookup on AutopilotRuns has executed but before the intake INSERT starts. That
+    /// interleaving is impossible to hit by wall-clock luck and forces the delivery
+    /// through the unique-index DbUpdateException handler deterministically.
+    /// </summary>
+    private sealed class InjectedAutopilotRaceInterceptor(Func<Task> insertWinner) : DbCommandInterceptor
+    {
+        private int injected;
+
+        public override async ValueTask<DbDataReader> ReaderExecutedAsync(
+            DbCommand command,
+            CommandExecutedEventData eventData,
+            DbDataReader result,
+            CancellationToken cancellationToken = default)
+        {
+            await InjectWinnerAfterRunLookupAsync(command, cancellationToken);
+            return await base.ReaderExecutedAsync(command, eventData, result, cancellationToken);
+        }
+
+        private async Task InjectWinnerAfterRunLookupAsync(DbCommand command, CancellationToken cancellationToken)
+        {
+            if (Volatile.Read(ref injected) != 0
+                || !command.CommandText.Contains("\"AutopilotRuns\"", StringComparison.Ordinal))
+                return;
+            if (Interlocked.Exchange(ref injected, 1) != 0)
                 return;
             await insertWinner();
             cancellationToken.ThrowIfCancellationRequested();
