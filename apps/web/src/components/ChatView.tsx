@@ -53,6 +53,11 @@ export function ChatView({ conversationId }: Readonly<ChatViewProps>) {
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [projects, setProjects] = useState<Project[]>([]);
   const [selected, setSelected] = useState<Conversation | null>(null);
+  // The conversation this ChatView session created for the draft it is composing.
+  // Rewriting the address bar after a send does not republish the Next.js route
+  // parameter, so follow-up uploads need this binding to stay scoped to the
+  // conversation that owns them instead of falling back to project-only scope.
+  const [sessionConversationId, setSessionConversationId] = useState<string | null>(null);
   const [selectedProjectId, setSelectedProjectId] = useState("");
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [search, setSearch] = useState("");
@@ -125,11 +130,15 @@ export function ChatView({ conversationId }: Readonly<ChatViewProps>) {
           const [conversation, history] = await Promise.all([api.getConversation(conversationId, controller.signal), api.getMessages(conversationId, controller.signal)]);
           if (!active) return;
           setSelected(conversation);
+          setSessionConversationId(conversation.id);
           setSelectedProjectId(conversation.projectId ?? "");
           setMessages(history);
           if (!items?.some(item => item.id === conversation.id)) setConversations(current => [conversation, ...current]);
         } else {
           setSelected(null);
+          // A new-chat route owns no conversation until this session creates one, so a
+          // binding left behind by an earlier draft must not scope the next upload.
+          setSessionConversationId(null);
           setSelectedProjectId(requestedProjectId);
           setMessages([]);
         }
@@ -177,6 +186,7 @@ export function ChatView({ conversationId }: Readonly<ChatViewProps>) {
     setStreamAnnouncement("idle");
     setRetryRequest(null);
     setSelected(null);
+    setSessionConversationId(null);
     setMessages([]);
     setContent("");
     setRenaming(false);
@@ -189,7 +199,7 @@ export function ChatView({ conversationId }: Readonly<ChatViewProps>) {
     if (!files || !workspace) return;
     const queue = Array.from(files);
     const uploadGeneration = beginChatAttachmentUpload(attachmentUploadGenerationRef);
-    const scope = resolveChatAttachmentScope(conversationId, selected, selectedProjectId);
+    const scope = resolveChatAttachmentScope(conversationId, selected, selectedProjectId, sessionConversationId);
     setUploadProgress({ complete: 0, total: queue.length, fileName: queue[0]?.name ?? "" });
     setError("");
     try {
@@ -279,6 +289,9 @@ export function ChatView({ conversationId }: Readonly<ChatViewProps>) {
         if (!isCurrentStream()) return;
         activeConversationId = conversation.id;
         setSelected(conversation);
+        // From here on this composer is inside a real conversation even though the
+        // route parameter still reports the new-chat route.
+        setSessionConversationId(conversation.id);
         setConversations(current => [conversation!, ...current]);
       }
       if (!isCurrentStream()) return;
