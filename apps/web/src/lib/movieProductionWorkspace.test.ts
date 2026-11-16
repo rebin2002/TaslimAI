@@ -114,6 +114,46 @@ describe("movie production workspace model", () => {
     expect(matchesProductionFilter(model.shots[0], "blocked")).toBe(false);
   });
 
+  it("does not treat an invalidated selected take as timeline-ready", () => {
+    const model = buildMovieProductionWorkspaceModel(projectWith({
+      scenes: [{
+        id: "scene-1",
+        sequence: 1,
+        title: "Platform",
+        summary: "The train arrives.",
+        durationSeconds: 8,
+        continuityNotes: null,
+        narration: null,
+        dialogue: null,
+        clips: [],
+        shots: [shot({
+          takes: [{
+            id: "take-invalidated",
+            movieShotId: "shot-1",
+            versionNumber: 1,
+            label: "Invalidated selected take",
+            status: "ReviewRequired",
+            qualityLevel: "Standard",
+            autoDirectorEnabled: false,
+            movieClipId: null,
+            generationJobId: "job-1",
+            assetId: "asset-video",
+            notes: null,
+            selectedAt: "2026-09-30T00:00:00Z",
+            finalizedAt: null,
+            createdAt: "2026-09-30T00:00:00Z",
+            updatedAt: "2026-09-30T00:00:00Z",
+            approvals: [],
+            execution: null,
+          }],
+        })],
+      }],
+    }));
+
+    expect(model.shots[0].readiness).not.toBe("ready");
+    expect(model.timelineReady).toBe(false);
+  });
+
   it("uses a deterministic internal fake adapter without contacting a service", async () => {
     const adapter = createFakeMovieProductionWorkspaceAdapter();
     await adapter.reviewVersion("version-1", { approve: true, reason: "Looks good." });
