@@ -44,13 +44,15 @@ type SaveState = "idle" | "saving" | "saved";
 
 export function AccountView() {
   const { user } = useAuth();
-  const { languagePackId } = useLocale();
-  return <AccountProfileForm key={`${accountProfileSessionKey(user)}:${languagePackId}`} />;
+  // The draft is keyed off the persisted profile only. Re-mounting on the live
+  // language pack would discard unsaved edits the moment a new language is
+  // picked, so the pack is applied by `updateProfile` after a successful save.
+  return <AccountProfileForm key={accountProfileSessionKey(user)} />;
 }
 
 function AccountProfileForm() {
   const { user, workspace, updateProfile, signOut } = useAuth();
-  const { t, languagePackId, languagePackIds, languagePackNames, setLanguagePack } = useLocale();
+  const { t, languagePackId, languagePackIds, languagePackNames } = useLocale();
   const profileDefaults = accountProfileDraftFromUser(user);
   const [displayName, setDisplayName] = useState(profileDefaults.displayName);
   const [preferredLanguage, setPreferredLanguage] = useState<LanguagePackId>(languagePackId);
@@ -148,7 +150,7 @@ function AccountProfileForm() {
           <div className="account-form-divider" />
           <div className="card-subheading"><Languages size={15} /><span>{t("account.preferences")}</span></div>
           <div className="account-control-grid">
-            <label><span>{t("account.interfaceLanguage")}</span><div className="select-shell"><Globe2 size={16} /><select value={preferredLanguage} onChange={(event) => { const next = event.target.value; setPreferredLanguage(next); setLanguagePack(next); }}>{languagePackIds.map((item) => <option key={item} value={item}>{languagePackNames[item]}</option>)}</select></div></label>
+            <label><span>{t("account.interfaceLanguage")}</span><div className="select-shell"><Globe2 size={16} /><select value={preferredLanguage} onChange={(event) => setPreferredLanguage(event.target.value)}>{languagePackIds.map((item) => <option key={item} value={item}>{languagePackNames[item]}</option>)}</select></div></label>
             <label><span>{t("account.defaultGenerationLanguage")}</span><div className="select-shell"><Languages size={16} /><select value={defaultGenerationLanguage} onChange={(event) => setDefaultGenerationLanguage(event.target.value as Locale)}>{locales.map((item) => <option key={item} value={item}>{localeNames[item]}</option>)}</select></div></label>
             <label><span>{t("account.timezone")}</span><div className="select-shell"><Clock3 size={16} /><select value={timeZone} onChange={(event) => setTimeZone(event.target.value)}>{!timeZones.includes(timeZone) && <option value={timeZone}>{timeZone}</option>}{timeZones.map((item) => <option key={item} value={item}>{item}</option>)}</select></div></label>
             <label><span>{t("account.outputPreference")}</span><div className="select-shell"><SlidersHorizontal size={16} /><select value={outputPreference} onChange={(event) => setOutputPreference(event.target.value as typeof outputPreferences[number])}>{outputPreferences.map((item) => <option key={item} value={item}>{t(`account.output.${item}`)}</option>)}</select></div></label>
