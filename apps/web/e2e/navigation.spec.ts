@@ -95,6 +95,51 @@ test.describe("workspace navigation and protected views", () => {
     await expect(bell).toBeFocused();
   });
 
+  test("keeps the header badge on the live unread count after the popover closes", async ({ authenticatedPage: page }) => {
+    const notification = {
+      id: "00000000-0000-0000-0000-00000000000b",
+      workspaceId: "00000000-0000-0000-0000-00000000000c",
+      projectId: null,
+      generationJobId: null,
+      assetId: null,
+      type: "generation.completed",
+      resourceTitle: "E2E badge lifecycle notification",
+      createdAt: new Date().toISOString(),
+      destination: "/activity",
+    };
+    let unread = true;
+    const listBody = () => JSON.stringify({ items: [{ ...notification, isRead: !unread, readAt: unread ? null : new Date().toISOString() }], page: 1, pageSize: 20, totalCount: 1, totalPages: 1, unreadCount: unread ? 1 : 0 });
+    // Register the broadest pattern first so the more specific unread-count
+    // and read-all routes win for their URLs.
+    await page.route("**/api/notifications?*", async (route) => {
+      await route.fulfill({ contentType: "application/json", body: listBody() });
+    });
+    await page.route("**/api/notifications/unread-count*", async (route) => {
+      await route.fulfill({ contentType: "application/json", body: JSON.stringify({ unreadCount: unread ? 1 : 0 }) });
+    });
+    await page.route("**/api/notifications/read-all", async (route) => {
+      unread = false;
+      await route.fulfill({ contentType: "application/json", body: JSON.stringify({ read: true }) });
+    });
+    await page.goto("/notifications");
+    const badge = page.locator(".notification-badge");
+    await expect(badge.first()).toHaveText("1");
+    const bell = page.getByRole("button", { name: /notifications/i }).first();
+    // A count event scoped to another workspace must never move this user's badge.
+    await page.evaluate(() => window.dispatchEvent(new CustomEvent("taslim:notification-unread-count", { detail: { workspaceId: "ffffffff-ffff-ffff-ffff-ffffffffffff", unreadCount: 0 } })));
+    await expect(badge.first()).toHaveText("1");
+    // Open the popover so the header badge adopts the panel snapshot, then close it.
+    await bell.click();
+    await expect(page.getByRole("dialog", { name: /notifications panel/i })).toBeVisible();
+    await bell.click();
+    await expect(page.getByRole("dialog", { name: /notifications panel/i })).toHaveCount(0);
+    // Marking everything read from the full center publishes the live count;
+    // after the popover closed, the panel snapshot may not freeze the badge.
+    await page.getByRole("button", { name: /mark all as read|mark all read/i }).click();
+    await expect(badge).toHaveCount(0);
+    await expect(bell).toHaveAccessibleName("Notifications");
+  });
+
   test("keeps the notification popover open when an unread notification cannot be marked read", async ({ authenticatedPage: page }) => {
     const notification = {
       id: "00000000-0000-0000-0000-000000000005",

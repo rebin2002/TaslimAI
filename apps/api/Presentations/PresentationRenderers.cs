@@ -55,7 +55,7 @@ public sealed class PresentationRenderer : IPresentationRenderer
         shapeId = 1;
         var requestedLanguage = input.Language.Trim().ToLowerInvariant();
         var resolvedLanguage = requestedLanguage == "auto" ? draftLanguage : requestedLanguage;
-        var rtl = resolvedLanguage is "ar" or "ku" || slide.Title.Any(character => character >= '\u0600' && character <= '\u08ff');
+        var rtl = resolvedLanguage is "ar" or "ku" || SlideRequiresRtl(slide);
         var language = rtl ? (resolvedLanguage == "ku" ? "ku-Arab" : "ar-SA") : "en-US";
         var body = new StringBuilder();
         body.Append(ShapeTreeStart());
@@ -184,6 +184,30 @@ public sealed class PresentationRenderer : IPresentationRenderer
             }
         }
     }
+
+    // The provider decides where the Arabic script lands in a draft, so the bidi/layout decision cannot read
+    // the slide title alone. A slide whose body, subtitle, table cell, column heading or metric carries Arabic
+    // script while its title stays Latin would otherwise export every one of those runs in the Latin fallback
+    // typeface with a left-to-right base direction, which PowerPoint draws unshaped and reversed. The package
+    // still passes PresentationOutputIntegrityValidator, because that validator checks parts and relationships
+    // rather than run fonts, so nothing downstream notices. Scan the whole slide instead.
+    private static bool SlideRequiresRtl(PresentationSlide slide) =>
+        ContainsArabicScript(slide.Title)
+        || ContainsArabicScript(slide.Subtitle)
+        || slide.Blocks.Any(BlockRequiresRtl);
+
+    private static bool BlockRequiresRtl(PresentationContentBlock block) =>
+        ContainsArabicScript(block.Text)
+        || ContainsArabicScript(block.Label)
+        || ContainsArabicScript(block.Value)
+        || block.Items.Any(ContainsArabicScript)
+        || block.Columns.Any(column => ContainsArabicScript(column.Heading) || column.Items.Any(ContainsArabicScript))
+        || block.Rows.Any(row => row.Cells.Any(ContainsArabicScript))
+        || block.Metrics.Any(metric => ContainsArabicScript(metric.Label) || ContainsArabicScript(metric.Value) || ContainsArabicScript(metric.Detail));
+
+    private static bool ContainsArabicScript(string? value) => value?.Any(IsArabicScriptCharacter) == true;
+
+    private static bool IsArabicScriptCharacter(char character) => character >= '\u0600' && character <= '\u08ff';
 
     private string ShapeTreeStart() => "<p:spTree><p:nvGrpSpPr><p:cNvPr id=\"1\" name=\"\"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/>";
     private string Card(int id, int x, int y, int cx, int cy, string fill, string line) => Rectangle(id, x, y, cx, cy, fill, line, 12_000);

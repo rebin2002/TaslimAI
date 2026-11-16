@@ -121,12 +121,12 @@ public interface IMovieCharacterContinuityService
     Task<MovieCharacterContinuitySnapshotDto> BuildSnapshotForTargetAsync(Guid movieProjectId, Guid? sceneId, Guid? shotId, bool persist, CancellationToken cancellationToken = default);
 }
 
-public sealed class MovieCharacterContinuityService(TaslimDbContext db, WorkspaceAccessService access) : IMovieCharacterContinuityService
+public sealed class MovieCharacterContinuityService(TaslimDbContext db, MovieCollaborationAccess collaboration) : IMovieCharacterContinuityService
 {
     public async Task<MovieCharacterContinuityProjectionDto?> ProjectAsync(Guid userId, Guid movieProjectId, Guid? sceneId, Guid? shotId, CancellationToken cancellationToken = default)
     {
         var movie = await db.MovieProjects.AsNoTracking().Where(item => item.Id == movieProjectId).Select(item => new { item.Id, item.WorkspaceId }).FirstOrDefaultAsync(cancellationToken);
-        if (movie is null || !await access.IsMemberAsync(userId, movie.WorkspaceId, cancellationToken)) return null;
+        if (movie is null || !await collaboration.HasPermissionAsync(userId, movieProjectId, MoviePermissions.View, cancellationToken)) return null;
         var target = await ResolveTargetAsync(movieProjectId, sceneId, shotId, cancellationToken);
         return await BuildProjectionAsync(movieProjectId, target, cancellationToken);
     }
@@ -134,7 +134,7 @@ public sealed class MovieCharacterContinuityService(TaslimDbContext db, Workspac
     public async Task<MovieCharacterContinuitySnapshotDto?> BuildSnapshotAsync(Guid userId, Guid movieProjectId, Guid? sceneId, Guid? shotId, CancellationToken cancellationToken = default)
     {
         var movie = await db.MovieProjects.AsNoTracking().Where(item => item.Id == movieProjectId).Select(item => new { item.Id, item.WorkspaceId }).FirstOrDefaultAsync(cancellationToken);
-        if (movie is null || !await access.IsMemberAsync(userId, movie.WorkspaceId, cancellationToken)) return null;
+        if (movie is null || !await collaboration.HasPermissionAsync(userId, movieProjectId, MoviePermissions.View, cancellationToken)) return null;
         return await BuildSnapshotForTargetAsync(movieProjectId, sceneId, shotId, true, cancellationToken);
     }
 
@@ -142,7 +142,7 @@ public sealed class MovieCharacterContinuityService(TaslimDbContext db, Workspac
     {
         var snapshot = await db.MovieCharacterContinuitySnapshots.AsNoTracking().Include(item => item.MovieProject)
             .FirstOrDefaultAsync(item => item.Id == snapshotId, cancellationToken);
-        return snapshot is null || !await access.IsMemberAsync(userId, snapshot.MovieProject.WorkspaceId, cancellationToken)
+        return snapshot is null || !await collaboration.HasPermissionAsync(userId, snapshot.MovieProjectId, MoviePermissions.View, cancellationToken)
             ? null
             : DeserializeSnapshot(snapshot);
     }

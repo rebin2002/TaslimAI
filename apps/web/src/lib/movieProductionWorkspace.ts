@@ -67,7 +67,7 @@ function latestVersion(versions: MovieProductionVersion[], predicate: (version: 
 }
 
 function isReadyTake(take: MovieTake | null) {
-  return Boolean(take && take.assetId && ["Ready", "ReviewRequired", "Approved", "Selected"].includes(take.status));
+  return Boolean(take && take.assetId && ["Ready", "Approved", "Selected"].includes(take.status));
 }
 
 function shotPlanReady(shot: ProductionWorkspaceShot["shot"]) {
