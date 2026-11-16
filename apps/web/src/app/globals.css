@@ -915,7 +915,7 @@ select.memory-control { appearance: auto; cursor: pointer; }
 /* Parallel Voice Studio */
 .voice-studio-page { max-width: 1040px; margin: 0 auto; padding: 60px 0 70px; }
 .voice-studio-header { display: flex; justify-content: space-between; align-items: flex-end; gap: 25px; margin-bottom: 31px; }
-.voice-studio-header h1 { margin: 7px 0 10px; color: var(--navy-950); font-size: clamp(38px, 5vw, 59px); line-height: 1; letter-spacing: -.075em; }
+.voice-studio-header h1 { margin: 7px 0 10px; color: var(--white); font-size: clamp(38px, 5vw, 59px); line-height: 1; letter-spacing: -.075em; }
 .voice-studio-header p:not(.section-eyebrow) { max-width: 590px; margin: 0; color: var(--muted); font-size: 13px; line-height: 1.6; }
 .voice-studio-header-icon { width: 51px; height: 51px; display: grid; place-items: center; color: var(--teal); background: #e7f7f4; border-radius: 14px; }
 .voice-studio-layout { display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(250px, .65fr); gap: 15px; max-width: 1040px; margin: 0 auto; }
@@ -2927,6 +2927,9 @@ body { background: var(--canvas); }
 .movie-edit-status.is-needs-review strong { color: #f1c58b; }
 .movie-edit-status.is-blocked strong { color: #ffc4b8; }
 .movie-edit-status span { color: #7895a6; font-size: 9px; }
+.movie-edit-output-preview { grid-column: 1 / -1; padding-top: 13px; border-top: 1px solid rgba(143, 176, 204, .13); }
+.movie-edit-output-preview .movie-section-head { margin-bottom: 10px; }
+.movie-edit-output-preview .movie-production-output, .movie-edit-output-preview .movie-production-preview-empty { margin-top: 0; }
 .movie-edit-blockers { grid-column: 1 / -1; padding-top: 13px; border-top: 1px solid rgba(143, 176, 204, .13); }
 .movie-edit-blockers ul { display: grid; gap: 5px; margin: 7px 0 0; padding-inline-start: 18px; color: #f0b4a9; font-size: 9px; line-height: 1.45; }
 .movie-edit-clear { grid-column: 1 / -1; display: flex; align-items: center; gap: 7px; padding-top: 13px; color: #a9dcd4; border-top: 1px solid rgba(143, 176, 204, .13); font-size: 9px; }

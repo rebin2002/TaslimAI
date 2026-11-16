@@ -27,7 +27,7 @@ import { useLocale } from "@/components/LocaleProvider";
 import { useSearchParams } from "next/navigation";
 import { ApiError, api, type Asset, type GenerationJob, type ImageGenerationInput, type Project } from "@/lib/api";
 import { localizedImageErrorMessage } from "@/lib/imageStudioErrors";
-import { canCancelImageJob, clearImageActiveJobId, isRestorableImageJob, nextImagePollDelay, parseImageJobResult, persistImageActiveJobId, readImageActiveJobId, shouldPollImageJob, shouldResetImageWorkspaceState } from "@/lib/imageStudioState";
+import { canCancelImageJob, clearImageActiveJobId, isRestorableImageJob, nextImagePollDelay, parseImageJobResult, persistImageActiveJobId, readImageActiveJobId, shouldClearImageJobAfterPollError, shouldPollImageJob, shouldResetImageWorkspaceState } from "@/lib/imageStudioState";
 
 const styles = ["auto", "photorealistic", "product", "illustration", "3d", "minimal", "poster", "social_media"] as const;
 const aspects = ["square", "portrait", "landscape"] as const;
@@ -78,7 +78,13 @@ export function ImageFailureCanvas({ labels, working, onRetry }: Readonly<{ labe
 }
 
 export function ImageStudioView() {
-  const { workspace } = useAuth();
+  const { user, workspace } = useAuth();
+  // Clear all private component state and in-flight timers across identity boundaries.
+  return <ImageStudioContent key={`${user?.id ?? "anonymous"}:${workspace?.id ?? "none"}`} />;
+}
+
+function ImageStudioContent() {
+  const { user, workspace } = useAuth();
   const { t, locale } = useLocale();
   const searchParams = useSearchParams();
   const [projects, setProjects] = useState<Project[]>([]);
@@ -96,6 +102,8 @@ export function ImageStudioView() {
   const [projectId, setProjectId] = useState(() => searchParams.get("projectId") ?? "");
   const [current, setCurrent] = useState<GenerationJob | null>(null);
   const [pollRetry, setPollRetry] = useState(0);
+  const [sessionDenied, setSessionDenied] = useState(false);
+  const sessionDeniedRef = useRef(false);
   const restoreJobId = useRef<string | null>(null);
   const observedWorkspaceId = useRef<string | null>(workspace?.id ?? null);
   const workspaceGeneration = useRef(0);
@@ -105,36 +113,36 @@ export function ImageStudioView() {
   const [error, setError] = useState("");
 
   const loadProjects = useCallback(async () => {
-    if (!workspace) return;
+    if (!user?.id || !workspace || sessionDeniedRef.current) return;
     const workspaceId = workspace.id;
     setLoadingProjects(true);
     try {
       const [active, archived] = await Promise.all([api.listProjects(workspace.id, "Active"), api.listProjects(workspace.id, "Archived")]);
-      if (observedWorkspaceId.current !== workspaceId) return;
+      if (sessionDeniedRef.current || observedWorkspaceId.current !== workspaceId) return;
       setProjects([...active, ...archived]);
     } catch {
-      if (observedWorkspaceId.current !== workspaceId) return;
+      if (sessionDeniedRef.current || observedWorkspaceId.current !== workspaceId) return;
       setProjects([]);
     } finally {
-      if (observedWorkspaceId.current === workspaceId) setLoadingProjects(false);
+      if (!sessionDeniedRef.current && observedWorkspaceId.current === workspaceId) setLoadingProjects(false);
     }
-  }, [workspace]);
+  }, [workspace, user?.id]);
 
   const loadRecent = useCallback(async () => {
-    if (!workspace) return;
+    if (!user?.id || !workspace || sessionDeniedRef.current) return;
     const workspaceId = workspace.id;
     setLoadingRecent(true);
     try {
       const result = await api.listAssets(workspace.id, { assetType: "image", status: "Active", sort: "recent", page: 1, pageSize: 6 });
-      if (observedWorkspaceId.current !== workspaceId) return;
+      if (sessionDeniedRef.current || observedWorkspaceId.current !== workspaceId) return;
       setRecentAssets(result.items);
     } catch {
-      if (observedWorkspaceId.current !== workspaceId) return;
+      if (sessionDeniedRef.current || observedWorkspaceId.current !== workspaceId) return;
       setRecentAssets([]);
     } finally {
-      if (observedWorkspaceId.current === workspaceId) setLoadingRecent(false);
+      if (!sessionDeniedRef.current && observedWorkspaceId.current === workspaceId) setLoadingRecent(false);
     }
-  }, [workspace]);
+  }, [workspace, user?.id]);
 
   // Loading remote projects and assets after the workspace changes is an external synchronization.
   // eslint-disable-next-line react-hooks/set-state-in-effect
@@ -165,8 +173,8 @@ export function ImageStudioView() {
   }, [current, workspace?.id]);
 
   useEffect(() => {
-    if (!workspace || current) return;
-    const storedJobId = readImageActiveJobId(workspace.id);
+    if (!user?.id || !workspace || current || sessionDeniedRef.current) return;
+    const storedJobId = readImageActiveJobId(user.id, workspace.id);
     if (!storedJobId) return;
     restoreJobId.current = storedJobId;
     const workspaceVersion = workspaceGeneration.current;
@@ -174,20 +182,35 @@ export function ImageStudioView() {
     void api.getGenerationJob(storedJobId).then((job) => {
       if (!active || workspaceGeneration.current !== workspaceVersion || restoreJobId.current !== storedJobId) return;
       if (!isRestorableImageJob(job, workspace.id)) {
-        clearImageActiveJobId(workspace.id);
+        clearImageActiveJobId(user.id, workspace.id);
+        restoreJobId.current = null;
         return;
       }
       setCurrent(job);
       setPollRetry(0);
     }).catch((cause) => {
       if (!active || workspaceGeneration.current !== workspaceVersion || restoreJobId.current !== storedJobId) return;
-      if (cause instanceof ApiError && (cause.status === 403 || cause.status === 404)) clearImageActiveJobId(workspace.id);
+      if (cause instanceof ApiError && shouldClearImageJobAfterPollError(cause.status)) {
+        clearImageActiveJobId(user.id, workspace.id);
+        restoreJobId.current = null;
+        if (cause.status === 401) {
+          sessionDeniedRef.current = true;
+          setSessionDenied(true);
+          setProjects([]);
+          setRecentAssets([]);
+          setSelectedAsset(null);
+          setLoadingProjects(false);
+          setLoadingRecent(false);
+          setError(localizedImageErrorMessage(cause.code, t, "image.pollError"));
+        }
+      }
     });
     return () => { active = false; };
-  }, [workspace, current]);
+  }, [user?.id, workspace, current, t]);
 
   useEffect(() => {
-    if (!current || !shouldPollImageJob(current)) return;
+    const workspaceId = workspace?.id;
+    if (!user?.id || !workspaceId || sessionDeniedRef.current || !current || !shouldPollImageJob(current)) return;
     let active = true;
     const jobId = current.id;
     const workspaceVersion = workspaceGeneration.current;
@@ -201,19 +224,37 @@ export function ImageStudioView() {
         }
       } catch (caught) {
         if (active && workspaceGeneration.current === workspaceVersion && current.id === jobId) {
+          if (caught instanceof ApiError && shouldClearImageJobAfterPollError(caught.status)) {
+            clearImageActiveJobId(user.id, workspaceId);
+            restoreJobId.current = null;
+            if (caught.status === 401) {
+              // Revoked authentication is terminal: no new private GET or POST in this mount.
+              sessionDeniedRef.current = true;
+              setSessionDenied(true);
+              setProjects([]);
+              setRecentAssets([]);
+              setSelectedAsset(null);
+              setLoadingProjects(false);
+              setLoadingRecent(false);
+            }
+            setCurrent(null);
+            setPollRetry(0);
+            setError(localizedImageErrorMessage(caught.code, t, "image.pollError"));
+            return;
+          }
           setPollRetry((attempt) => attempt + 1);
           setError(localizedImageErrorMessage(caught instanceof ApiError ? caught.code : null, t, "image.pollError"));
         }
       }
     }, nextImagePollDelay(current, pollRetry) ?? 650);
     return () => { active = false; window.clearTimeout(timer); };
-  }, [current, pollRetry, t, workspace?.id]);
+  }, [current, pollRetry, t, user?.id, workspace?.id]);
 
   async function startGeneration() {
     // The retry control stays focusable while busy, so activation can arrive again before the
     // first request settles; a second submission would create a duplicate active studio job.
     if (working) return;
-    if (!workspace || description.trim().length < 3) {
+    if (sessionDenied || sessionDeniedRef.current || !user?.id || !workspace || description.trim().length < 3) {
       setError(t("image.descriptionRequired"));
       return;
     }
@@ -237,7 +278,7 @@ export function ImageStudioView() {
     try {
       const job = await api.createImageGenerationJob(input);
       if (workspaceGeneration.current === requestWorkspaceVersion) {
-        persistImageActiveJobId(workspace.id, job.id);
+        persistImageActiveJobId(user.id, workspace.id, job.id);
         setCurrent(job);
       }
     } catch (caught) {
@@ -248,7 +289,7 @@ export function ImageStudioView() {
   }
 
   async function cancel() {
-    if (!current) return;
+    if (!user?.id || sessionDeniedRef.current || !current) return;
     const job = current;
     const requestWorkspaceVersion = workspaceGeneration.current;
     setWorking(true);
@@ -273,7 +314,7 @@ export function ImageStudioView() {
 
   function createAnother() {
     restoreJobId.current = null;
-    if (workspace) clearImageActiveJobId(workspace.id);
+    if (user?.id && workspace) clearImageActiveJobId(user.id, workspace.id);
     setCurrent(null);
     setError("");
   }
@@ -343,7 +384,7 @@ export function ImageStudioView() {
 
         <details className="image-advanced-options"><summary>{t("image.moreOptions")} <ChevronDown size={15} /></summary><div className="image-advanced-grid"><label className="image-field"><span>{t("image.style")}</span><select value={style} onChange={(event) => setStyle(event.target.value)}>{styles.map((value) => <option key={value} value={value}>{t(`image.style.${value}`)}</option>)}</select></label><label className="image-field"><span>{t("image.quality")}</span><select value={quality} onChange={(event) => setQuality(event.target.value)}>{qualities.map((value) => <option key={value} value={value}>{t(`image.quality.${value}`)}</option>)}</select></label><label className="image-field"><span>{t("image.titleLabel")}</span><input value={title} onChange={(event) => setTitle(event.target.value)} maxLength={120} placeholder={t("image.titlePlaceholder")} /></label><label className="image-field"><span>{t("image.mood")}</span><input value={mood} onChange={(event) => setMood(event.target.value)} maxLength={120} placeholder={t("image.moodPlaceholder")} /></label><label className="image-field image-field-wide"><span>{t("image.background")}</span><input value={background} onChange={(event) => setBackground(event.target.value)} maxLength={240} placeholder={t("image.backgroundPlaceholder")} /></label><label className="image-field image-field-wide"><span>{t("image.textInImage")}</span><input value={textInImage} onChange={(event) => setTextInImage(event.target.value)} maxLength={500} placeholder={t("image.textInImagePlaceholder")} /></label></div></details>
         {error && <div className="image-panel-error" role="alert"><XCircle size={15} /> {error}</div>}
-        <button className="image-generate-button" type="submit" disabled={working || description.trim().length < 3}><span>{working ? <LoaderCircle className="image-button-spinner" size={16} /> : <Sparkles size={16} />}</span>{working ? t("image.working") : t("image.generate")}<span className="image-button-arrow">↗</span></button>
+        <button className="image-generate-button" type="submit" disabled={working || sessionDenied || !user?.id || description.trim().length < 3}><span>{working ? <LoaderCircle className="image-button-spinner" size={16} /> : <Sparkles size={16} />}</span>{working ? t("image.working") : t("image.generate")}<span className="image-button-arrow">↗</span></button>
         <p className="image-panel-note"><CheckCircle2 size={13} /> {t("image.privateNote")}</p>
       </form>
 
