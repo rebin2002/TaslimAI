@@ -19,7 +19,7 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import { useAuth } from "@/components/AuthProvider";
-import { languagePackIds, languagePackNames, locales, useLocale } from "@/components/LocaleProvider";
+import { languagePackIds, languagePackNames, localeNames, locales, useLocale } from "@/components/LocaleProvider";
 import { languagePackDirection } from "@/lib/languagePackRegistry";
 import type { User } from "@/lib/api";
 import { onboardingFormDefaults, onboardingWorkflowDefinitions, shouldShowOnboarding, type OnboardingIntent } from "@/lib/onboarding";
