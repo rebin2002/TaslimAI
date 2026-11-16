@@ -13,6 +13,9 @@ describe("Image Studio route recovery", () => {
     expect(routeError).toContain('onClick={reset}');
     expect(routeError).toContain('t("error.retry")');
     expect(routeError).toContain('href="/assets"');
+    // AppShell owns the single main landmark; this boundary must not nest another.
+    expect(routeError).not.toContain("<main");
+    expect(routeError).toContain('<div className="placeholder-page">');
   });
 
   it("does not expose route error details", () => {
