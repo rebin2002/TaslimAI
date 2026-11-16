@@ -1,6 +1,7 @@
 using Microsoft.EntityFrameworkCore;
 using Taslim.Api.Authorization;
 using Taslim.Api.Domain;
+using Taslim.Api.Files;
 using Taslim.Api.Persistence;
 
 namespace Taslim.Api.Movies;
@@ -16,6 +17,8 @@ public static class MovieVideoMakeoverPreviewAdmissionCodes
     public const string ProjectNotFound = "project_not_found";
     public const string PrincipalNotWorkspaceMember = "principal_not_workspace_member";
     public const string PrincipalNotProjectViewer = "principal_not_project_viewer";
+    public const string SourceNotOwned = "source_not_owned";
+    public const string PreviewFileNotVisible = "preview_file_not_visible";
     public const string SourceAssetMissing = "source_asset_missing";
     public const string ResultAssetMissing = "result_asset_missing";
     public const string AssetCrossWorkspace = "asset_cross_workspace";
@@ -197,13 +200,51 @@ public sealed class MovieVideoMakeoverPreviewAdmissionService(
 
         var sourceAsset = await db.Assets.AsNoTracking()
             .FirstOrDefaultAsync(item => item.Id == sourceAssetId, cancellationToken);
+        // The source-catalogue attach contract requires ownership by the caller.
+        // Movie-project View access alone cannot authorize a colleague's private
+        // source asset, even when both users belong to the same workspace.
+        if (sourceAsset is not null && sourceAsset.WorkspaceId == project.WorkspaceId
+            && sourceAsset.CreatedByUserId != userId)
+            return new MovieVideoMakeoverPreviewAdmissionDecision(false,
+                MovieVideoMakeoverPreviewAdmissionCodes.SourceNotOwned,
+                "The caller does not own this source video.", project.Id, null, null);
+        // Do not query or disclose result identifiers until the requested source
+        // passes its actual StoredFile visibility and owner checks.
+        if (sourceAsset is not null && sourceAsset.WorkspaceId == project.WorkspaceId
+            && !await HasVisiblePreviewFileAsync(sourceAsset, project, userId, requireUploader: true, cancellationToken))
+            return new MovieVideoMakeoverPreviewAdmissionDecision(false,
+                MovieVideoMakeoverPreviewAdmissionCodes.PreviewFileNotVisible,
+                "The source video file is unavailable to the caller.", project.Id, null, null);
         var resultAsset = await db.Assets.AsNoTracking()
             .FirstOrDefaultAsync(item => item.Id == resultAssetId, cancellationToken);
+        if (resultAsset is not null && resultAsset.WorkspaceId == project.WorkspaceId
+            && !await HasVisiblePreviewFileAsync(resultAsset, project, userId, requireUploader: false, cancellationToken))
+            return new MovieVideoMakeoverPreviewAdmissionDecision(false,
+                MovieVideoMakeoverPreviewAdmissionCodes.PreviewFileNotVisible,
+                "The result video file is unavailable to the caller.", project.Id, null, null);
         GenerationJob? resultJob = null;
         if (resultAsset?.SourceGenerationJobId is Guid resultJobId)
             resultJob = await db.GenerationJobs.AsNoTracking()
                 .FirstOrDefaultAsync(item => item.Id == resultJobId, cancellationToken);
 
         return MovieVideoMakeoverPreviewAdmissionEvaluator.Evaluate(project, isMember, sourceAsset, resultAsset, resultJob);
+    }
+
+    private async Task<bool> HasVisiblePreviewFileAsync(
+        Asset asset,
+        MovieProject project,
+        Guid userId,
+        bool requireUploader,
+        CancellationToken cancellationToken)
+    {
+        if (asset.StoredFileId is not Guid fileId) return false;
+        var file = await db.StoredFiles.AsNoTracking()
+            .FirstOrDefaultAsync(item => item.Id == fileId, cancellationToken);
+        if (file is null || file.WorkspaceId != project.WorkspaceId
+            || file.Status != StoredFileStatus.Ready || file.DeletedAt is not null
+            || (file.ProjectId.HasValue && file.ProjectId != project.ProjectId)
+            || (requireUploader && file.UserId != userId))
+            return false;
+        return StoredFileVisibility.ForWorkspaceMember(userId).Compile()(file);
     }
 }
