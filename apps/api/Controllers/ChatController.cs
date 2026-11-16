@@ -476,7 +476,18 @@ public sealed class ChatController(
         {
             if (!string.Equals(existingUser.Content, content, StringComparison.Ordinal))
                 return PreparedChat.Failure(ApiResults.Error(this, StatusCodes.Status409Conflict, "REQUEST_ID_REUSED", "That message request cannot be reused with different content."));
-            var existingAssistant = await db.ChatMessages.FirstOrDefaultAsync(message => message.ConversationId == conversationId && message.Role == ChatMessageRole.Assistant && message.CreatedAt > existingUser.CreatedAt, cancellationToken);
+            // Pair the replayed user message with its own turn response through the deterministic
+            // Sequence key. CreatedAt cannot carry this boundary: PostgreSQL timestamptz stores
+            // microseconds, so the 0.1-microsecond offset the send path adds to the assistant row
+            // truncates onto the user row's stored timestamp. A strict `>` comparison then hides
+            // the paired response (a completed turn replays as a stuck in-progress conflict) and
+            // the unordered scan slides onto a later turn's answer, duplicating and skipping
+            // thread items at the equal-timestamp boundary. That turn's response is the first
+            // assistant whose Sequence follows the user message's.
+            var existingAssistant = await db.ChatMessages
+                .Where(message => message.ConversationId == conversationId && message.Role == ChatMessageRole.Assistant && message.Sequence > existingUser.Sequence)
+                .OrderBy(message => message.Sequence)
+                .FirstOrDefaultAsync(cancellationToken);
             if (existingAssistant is null) return PreparedChat.Failure(ApiResults.Error(this, StatusCodes.Status409Conflict, "MESSAGE_IN_PROGRESS", "That message is already being generated."));
             if (existingAssistant.Status == ChatMessageStatus.Failed)
             {
