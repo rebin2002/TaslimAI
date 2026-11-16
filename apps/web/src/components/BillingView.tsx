@@ -44,7 +44,10 @@ export function BillingView() {
   const entryLabel = (type: string) => t(`billing.entry.${type.toLowerCase()}`);
   const paymentStatusLabel = (status: string) => t(`billing.paymentStatus.${status}`);
 
-  // The billing action buttons have no mutation handlers yet. API availability\n  // flags are not a substitute for wired, CSRF-protected checkout/cancel flows;\n  // keep these visible placeholders disabled even if server policy changes.\n  return <div className="account-page billing-page">
+  // The billing action buttons have no mutation handlers yet. API availability
+  // flags are not a substitute for wired, CSRF-protected checkout/cancel flows;
+  // keep these visible placeholders disabled even if server policy changes.
+  return <div className="account-page billing-page">
     <div className="detail-header usage-header"><div><Link className="back-link" href="/account"><ArrowLeft size={14} /> {t("navigation.account")}</Link><p className="section-eyebrow">{t("billing.eyebrow")}</p><h1>{t("billing.title")}</h1><p>{t("billing.subtitle")}</p></div><div className="detail-icon"><CreditCard size={21} /></div></div>
     <div className="billing-notice"><CheckCircle2 size={16} /><span>{t("billing.transparentNotice")}</span></div>
     {error && <div className="form-error">{t("billing.loadError")}</div>}
