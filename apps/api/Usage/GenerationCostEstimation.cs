@@ -99,9 +99,11 @@ public sealed class GenerationCostEstimator(Microsoft.Extensions.Options.IOption
         if (string.IsNullOrWhiteSpace(request.ProviderKey)) return GenerationCostEstimate.Unknown("provider_missing", settings.Currency);
         var pricing = FindPricing(request.ProviderKey, request.ModelKey);
         if (pricing is null) return GenerationCostEstimate.Unknown("pricing_rule_missing", settings.Currency);
+        if (HasNegativeRate(pricing)) return GenerationCostEstimate.Unknown("pricing_rule_invalid", settings.Currency);
 
         var components = new List<GenerationCostComponent>();
         var unknown = false;
+        var overflow = false;
         Add(GenerationCostDimension.ProviderFixed, pricing.FixedUsd.HasValue ? 1m : null, "request", pricing.FixedUsd, "fixed");
         var cachedInputTokens = request.InputTokens.HasValue && request.CachedInputTokens.HasValue
             ? Math.Min(Math.Max(0, request.InputTokens.Value), Math.Max(0, request.CachedInputTokens.Value))
@@ -120,7 +122,21 @@ public sealed class GenerationCostEstimator(Microsoft.Extensions.Options.IOption
         Add(GenerationCostDimension.MusicDurationSeconds, request.MusicDurationSeconds, "seconds", pricing.MusicUsdPerSecond, "musicPerSecond");
         Add(GenerationCostDimension.VideoDurationSeconds, request.VideoDurationSeconds, "seconds", pricing.VideoUsdPerSecond, "videoPerSecond");
 
-        decimal? amount = components.Count == 0 || unknown ? null : decimal.Round(components.Sum(item => item.AmountUsd!.Value), 8, MidpointRounding.AwayFromZero);
+        if (overflow) return GenerationCostEstimate.Unknown("estimate_overflow", settings.Currency);
+
+        decimal? amount = null;
+        if (components.Count > 0 && !unknown)
+        {
+            try
+            {
+                amount = decimal.Round(components.Sum(item => item.AmountUsd!.Value), 8, MidpointRounding.AwayFromZero);
+            }
+            catch (OverflowException)
+            {
+                return GenerationCostEstimate.Unknown("estimate_overflow", settings.Currency);
+            }
+        }
+
         return new GenerationCostEstimate(
             !unknown && amount.HasValue,
             amount,
@@ -141,7 +157,16 @@ public sealed class GenerationCostEstimator(Microsoft.Extensions.Options.IOption
                 return;
             }
             var divisor = unit is "tokens" ? 1_000_000m : 1m;
-            var componentAmount = decimal.Round(normalizedQuantity * unitPrice.Value / divisor, 8, MidpointRounding.AwayFromZero);
+            decimal componentAmount;
+            try
+            {
+                componentAmount = decimal.Round(normalizedQuantity * unitPrice.Value / divisor, 8, MidpointRounding.AwayFromZero);
+            }
+            catch (OverflowException)
+            {
+                overflow = true;
+                return;
+            }
             components.Add(new GenerationCostComponent(dimension, normalizedQuantity, unit, unitPrice, componentAmount, rateKey));
         }
     }
@@ -151,4 +176,17 @@ public sealed class GenerationCostEstimator(Microsoft.Extensions.Options.IOption
         if (!string.IsNullOrWhiteSpace(modelKey) && settings.Providers.TryGetValue($"{providerKey}:{modelKey}", out var modelPricing)) return modelPricing;
         return settings.Providers.TryGetValue(providerKey, out var providerPricing) ? providerPricing : null;
     }
+
+    private static bool HasNegativeRate(GenerationProviderPricingOptions pricing) =>
+        pricing.FixedUsd is < 0m
+        || pricing.TextInputUsdPerMillionTokens is < 0m
+        || pricing.CachedTextInputUsdPerMillionTokens is < 0m
+        || pricing.TextOutputUsdPerMillionTokens is < 0m
+        || pricing.ImageInputUsdPerMillionTokens is < 0m
+        || pricing.ImageOutputUsdPerMillionTokens is < 0m
+        || pricing.ImageGenerationUsdPerUnit is < 0m
+        || pricing.VoiceUsdPerSecond is < 0m
+        || pricing.VoiceUsdPerCharacter is < 0m
+        || pricing.MusicUsdPerSecond is < 0m
+        || pricing.VideoUsdPerSecond is < 0m;
 }
