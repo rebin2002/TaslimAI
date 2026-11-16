@@ -48,12 +48,18 @@ So "core Movie Studio copy" means the brief, workspace, and continuity-guide lab
 
 The manifest supplies the browser language tag and text direction. Anonymous and account-scoped preferences use separate local-storage keys through `languagePackPersistence.ts`; account keys URL-encode the user ID so an ID containing a separator cannot collide with another account. Invalid or unavailable storage fails closed without breaking the in-memory UI.
 
+Within the anonymous scope, `taslim-locale` outranks `taslim-language-pack` on read. That ordering is load-bearing rather than incidental: the legacy key is the cross-feature contract other lanes persist through, and the session effect promotes the anonymous preference into the account-scoped key and then clears both. A pack key that shadows the legacy key therefore pins the interface to English and destroys the preference that was just made, which is a regression that only shows up in the browser suites, not in unit tests.
+
+Persisting keeps the two anonymous keys in step, and removes the legacy value when the selected pack cannot be represented by it, so a stale legacy entry can never mask a newer installable pack on the next load.
+
 `LocaleProvider` keeps the legacy `locale` compatibility value for number/date formatting and module-specific helpers while exposing the selected `languagePackId` and routing shared `t()` calls through the registry. For `zh-CN` the compatibility locale resolves to English, so legacy-only specialized catalogs remain English until their module-owned integration paths exist.
 
 Two selection paths, deliberately different:
 
 - The **header** selector applies a pack immediately, which is the pre-existing behaviour for the legacy locales and what the RTL suites depend on.
 - The **account** form edits a draft. The pack is applied by `AuthProvider.updateProfile` after the profile persists, which preserves the "Save changes" accessible name under the language the user is reading, keeps unsaved edits from being discarded by a re-mount, and leaves a failed save in the previous language.
+
+Because the draft is no longer re-mounted on the live pack, its interface-language field must seed from the persisted profile (`accountProfileDraftFromUser`) like every sibling field, never from `languagePackId`: the provider renders English on the first pass and restores the saved pack in an effect, so reading that transient value leaves the control on `en` permanently even when `html lang` is already correct.
 
 ## Backend boundary
 
