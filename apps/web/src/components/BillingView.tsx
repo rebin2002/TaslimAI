@@ -10,17 +10,27 @@ import { api, type BillingAccount, type BillingPlanOption } from "@/lib/api";
 import { describeCreditBalance, scopedBillingAccount } from "@/lib/billingCreditBalance";
 
 export function BillingView() {
-  const { user, workspace } = useAuth();
+  const { user, workspace, loading } = useAuth();
+  // Remount the private billing state on every principal/workspace transition.
+  // Render-time scope comparisons already prevent A's data showing to B, but
+  // without a remount an A → B → A switch can show A's *old* ledger/balance
+  // while A's fresh request is still in flight. A credit page must not imply
+  // stale balances are current.
+  if (loading || !user?.id || !workspace?.id) return null;
+  return <ScopedBillingView key={`${user.id}:${workspace.id}`} userId={user.id} workspaceId={workspace.id} />;
+}
+
+function ScopedBillingView({ userId, workspaceId }: { userId: string; workspaceId: string }) {
   const { t, locale } = useLocale();
-  const userId = user?.id ?? null;
-  const workspaceId = workspace?.id ?? null;
   const [snapshot, setSnapshot] = useState<{ userId: string; workspaceId: string; account: BillingAccount } | null>(null);
   const [failedScope, setFailedScope] = useState<{ userId: string; workspaceId: string } | null>(null);
   // Resolve against the *current* auth/workspace identity during render. Waiting
   // for an effect to clear previous state can briefly expose the old workspace's
   // private credit ledger and transaction reasons after a same-tab switch.
-  const account = scopedBillingAccount(snapshot, userId, workspaceId);
   const error = Boolean(userId && workspaceId && failedScope?.userId === userId && failedScope?.workspaceId === workspaceId);
+  // On any failed current-scope refresh never leave a cached ledger visible
+  // beside the error, even if the snapshot came from the same identity.
+  const account = error ? null : scopedBillingAccount(snapshot, userId, workspaceId);
   useEffect(() => {
     if (!userId || !workspaceId) return;
     let active = true;
