@@ -94,6 +94,32 @@ public sealed class ChatAttachmentStorageReadbackTests
     }
 
     [Fact]
+    public async Task Attachment_readback_fault_records_attachment_usage_code_not_generation_failure()
+    {
+        using var factory = new ReadbackFaultFactory(ReadbackFault.ProviderFaultDuringBodyRead);
+        factory.EnsureSchema();
+        using var client = factory.CreateClient();
+        var auth = await Register(client, "Usage Code Reader");
+        var file = await UploadImage(client, auth, "scan.png");
+        var conversation = await CreateConversation(client, auth);
+
+        var (status, code, _) = await SendMessage(client, conversation, file.Id);
+        Assert.Equal(HttpStatusCode.UnprocessableEntity, status);
+        Assert.Equal("ATTACHMENT_CONTENT_UNAVAILABLE", code);
+
+        // The accounting trail must name the storage readback, not the model
+        // provider, otherwise incident triage charges a storage fault to AI
+        // generation.
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        var transaction = Assert.Single(await db.UsageTransactions.AsNoTracking()
+            .Where(item => item.ConversationId == conversation.Id)
+            .ToListAsync());
+        Assert.Equal(UsageTransactionStatus.Failed, transaction.Status);
+        Assert.Equal("ATTACHMENT_CONTENT_UNAVAILABLE", transaction.FailureCode);
+    }
+
+    [Fact]
     public async Task Stalled_object_body_fails_closed_within_the_storage_operation_timeout()
     {
         using var factory = new ReadbackFaultFactory(ReadbackFault.StalledBody);
