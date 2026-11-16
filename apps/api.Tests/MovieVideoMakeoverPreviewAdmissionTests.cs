@@ -335,6 +335,89 @@ public sealed class MovieVideoMakeoverPreviewAdmissionTests
         Assert.Null(denied.ResultAssetId);
     }
 
+    [Fact]
+    public async Task Service_refuses_a_source_asset_created_by_another_principal()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = CreateDb(connection);
+        var fixture = await SeedAsync(db);
+        var otherId = Guid.NewGuid();
+        var now = DateTime.UtcNow;
+        db.Users.Add(new ApplicationUser
+        {
+            Id = otherId, UserName = "foreign-source-creator",
+            NormalizedUserName = "FOREIGN-SOURCE-CREATOR",
+            DisplayName = "Foreign Creator", CreatedAt = now, UpdatedAt = now
+        });
+        var source = await db.Assets.SingleAsync(item => item.Id == fixture.SourceAssetId);
+        source.CreatedByUserId = otherId;
+        await db.SaveChangesAsync();
+
+        var decision = await CreateService(db).EvaluateAsync(
+            fixture.UserId, fixture.ProjectId, fixture.SourceAssetId,
+            fixture.ResultAssetId, CancellationToken.None);
+        Assert.False(decision.Admitted);
+        Assert.Equal(MovieVideoMakeoverPreviewAdmissionCodes.SourceNotOwned, decision.Code);
+        Assert.Null(decision.SourceAssetId);
+        Assert.Null(decision.ResultAssetId);
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task Service_refuses_a_private_file_owned_by_another_principal(bool sourceFile)
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = CreateDb(connection);
+        var fixture = await SeedAsync(db);
+        var otherId = Guid.NewGuid();
+        var now = DateTime.UtcNow;
+        db.Users.Add(new ApplicationUser
+        {
+            Id = otherId, UserName = "private-file-owner",
+            NormalizedUserName = "PRIVATE-FILE-OWNER",
+            DisplayName = "File Owner", CreatedAt = now, UpdatedAt = now
+        });
+        var assetId = sourceFile ? fixture.SourceAssetId : fixture.ResultAssetId;
+        var fileId = await db.Assets.Where(item => item.Id == assetId)
+            .Select(item => item.StoredFileId).SingleAsync();
+        var storedFile = await db.StoredFiles.SingleAsync(file => file.Id == fileId);
+        storedFile.UserId = otherId;
+        await db.SaveChangesAsync();
+
+        var decision = await CreateService(db).EvaluateAsync(
+            fixture.UserId, fixture.ProjectId, fixture.SourceAssetId,
+            fixture.ResultAssetId, CancellationToken.None);
+        Assert.False(decision.Admitted);
+        Assert.Equal(MovieVideoMakeoverPreviewAdmissionCodes.PreviewFileNotVisible, decision.Code);
+        Assert.Null(decision.SourceAssetId);
+        Assert.Null(decision.ResultAssetId);
+    }
+
+    [Fact]
+    public async Task Service_refuses_deleted_result_file_even_with_live_asset_and_succeeded_job()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = CreateDb(connection);
+        var fixture = await SeedAsync(db);
+        var fileId = await db.Assets.Where(item => item.Id == fixture.ResultAssetId)
+            .Select(item => item.StoredFileId).SingleAsync();
+        var storedFile = await db.StoredFiles.SingleAsync(file => file.Id == fileId);
+        storedFile.DeletedAt = DateTime.UtcNow;
+        await db.SaveChangesAsync();
+
+        var decision = await CreateService(db).EvaluateAsync(
+            fixture.UserId, fixture.ProjectId, fixture.SourceAssetId,
+            fixture.ResultAssetId, CancellationToken.None);
+        Assert.False(decision.Admitted);
+        Assert.Equal(MovieVideoMakeoverPreviewAdmissionCodes.PreviewFileNotVisible, decision.Code);
+        Assert.Null(decision.SourceAssetId);
+        Assert.Null(decision.ResultAssetId);
+    }
+
     private static MovieVideoMakeoverPreviewAdmissionService CreateService(TaslimDbContext db)
     {
         var workspaceAccess = new WorkspaceAccessService(db);
