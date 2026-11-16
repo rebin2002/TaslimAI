@@ -19,7 +19,8 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import { useAuth } from "@/components/AuthProvider";
-import { localeNames, locales, useLocale } from "@/components/LocaleProvider";
+import { languagePackIds, languagePackNames, locales, useLocale } from "@/components/LocaleProvider";
+import { languagePackDirection } from "@/lib/languagePackRegistry";
 import type { User } from "@/lib/api";
 import { onboardingFormDefaults, onboardingWorkflowDefinitions, shouldShowOnboarding, type OnboardingIntent } from "@/lib/onboarding";
 import type { Locale } from "@/lib/i18n";
@@ -90,12 +91,12 @@ export function OnboardingGate() {
 
 function OnboardingFlow({ user, openerRef }: Readonly<{ user: User; openerRef: RefObject<HTMLElement | null> }>) {
   const { completeOnboarding } = useAuth();
-  const { locale, setLocale, t } = useLocale();
+  const { locale, languagePackId, setLanguagePack, t } = useLocale();
   const router = useRouter();
   const [step, setStep] = useState<OnboardingStep>("preferences");
   const defaults = onboardingFormDefaults(user, locale);
   const [displayName, setDisplayName] = useState(defaults.displayName);
-  const [preferredLanguage, setPreferredLanguage] = useState<Locale>(defaults.preferredLanguage);
+  const [preferredLanguage, setPreferredLanguage] = useState<string>(defaults.preferredLanguage);
   const [defaultGenerationLanguage, setDefaultGenerationLanguage] = useState<Locale>(defaults.defaultGenerationLanguage);
   const [saving, setSaving] = useState(false);
   // A state-driven disabled button alone is not a synchronous single-flight
@@ -117,7 +118,7 @@ function OnboardingFlow({ user, openerRef }: Readonly<{ user: User; openerRef: R
   if (!showOnboarding) return null;
   const steps: OnboardingStep[] = ["preferences", "tour", "workflow"];
   const currentStep = steps.indexOf(step) + 1;
-  const NextIcon = locale === "en" ? ArrowRight : ArrowLeft;
+  const NextIcon = languagePackDirection(languagePackId) === "ltr" ? ArrowRight : ArrowLeft;
 
   async function finish(intent?: OnboardingIntent, href = "/projects") {
     if (finishingRef.current) return;
@@ -131,7 +132,7 @@ function OnboardingFlow({ user, openerRef }: Readonly<{ user: User; openerRef: R
         defaultGenerationLanguage,
         intent,
       });
-      setLocale(preferredLanguage);
+      setLanguagePack(preferredLanguage);
       router.push(href);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : t("onboarding.saveError"));
@@ -158,9 +159,10 @@ function OnboardingFlow({ user, openerRef }: Readonly<{ user: User; openerRef: R
           <p className="onboarding-description">{t("onboarding.preferencesDescription")}</p>
           <div className="onboarding-fields">
             <label><span>{t("onboarding.displayName")}</span><input data-dialog-autofocus disabled={saving} value={displayName} maxLength={120} onChange={(event) => setDisplayName(event.target.value)} placeholder={t("onboarding.displayNamePlaceholder")} autoComplete="name" /></label>
-            <label><span><Globe2 size={15} /> {t("onboarding.interfaceLanguage")}</span><select disabled={saving} value={preferredLanguage} onChange={(event) => { const next = event.target.value as Locale; setPreferredLanguage(next); setLocale(next); }}>{locales.map((item) => <option key={item} value={item}>{localeNames[item]}</option>)}</select></label>
+            <label><span><Globe2 size={15} /> {t("onboarding.interfaceLanguage")}</span><select disabled={saving} value={preferredLanguage} onChange={(event) => { const next = event.target.value; setPreferredLanguage(next); setLanguagePack(next); }}>{languagePackIds.map((item) => <option key={item} value={item}>{languagePackNames[item]}</option>)}</select></label>
             <label><span><Languages size={15} /> {t("onboarding.generationLanguage")}</span><select disabled={saving} value={defaultGenerationLanguage} onChange={(event) => setDefaultGenerationLanguage(event.target.value as Locale)}>{locales.map((item) => <option key={item} value={item}>{localeNames[item]}</option>)}</select></label>
           </div>
+          {preferredLanguage === "zh-CN" && <p className="onboarding-description" role="status">Simplified Chinese is in preview. Some onboarding and Movie Studio text remains in English.</p>}
           <footer className="onboarding-actions"><span>{t("onboarding.preferencesHint")}</span><button type="button" className="primary-button" disabled={saving} onClick={() => setStep("tour")}><span>{t("onboarding.continue")}</span><NextIcon size={16} /></button></footer>
         </div>}
 
