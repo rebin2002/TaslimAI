@@ -49,5 +49,7 @@ public sealed class ActivityController(IActivityCenterService activity) : Contro
         return result ? Ok(new { read = true }) : Forbid();
     }
 
-    private bool TryGetUserId(out Guid userId) => Guid.TryParse(User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value, out userId);
+    private bool TryGetUserId(out Guid userId) =>
+        Guid.TryParse(User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value, out userId)
+        && userId != Guid.Empty;
 }

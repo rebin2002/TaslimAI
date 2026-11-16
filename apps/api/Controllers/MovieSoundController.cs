@@ -104,5 +104,6 @@ public sealed class MovieSoundController(IMovieSoundService sounds) : Controller
     }
 
     private bool TryGetUserId(out Guid userId) =>
-        Guid.TryParse(User.FindFirstValue(ClaimTypes.NameIdentifier), out userId);
+        Guid.TryParse(User.FindFirstValue(ClaimTypes.NameIdentifier), out userId)
+        && userId != Guid.Empty;
 }
