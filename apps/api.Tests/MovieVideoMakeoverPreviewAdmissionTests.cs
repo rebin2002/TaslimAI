@@ -125,6 +125,57 @@ public sealed class MovieVideoMakeoverPreviewAdmissionTests
     }
 
     [Fact]
+    public void Denies_asset_from_another_general_project_when_movie_project_has_none()
+    {
+        var (project, source, result, job) = CreateHappyPath(out _);
+        Assert.Null(project.ProjectId);
+        result.ProjectId = Guid.NewGuid();
+
+        var decision = MovieVideoMakeoverPreviewAdmissionEvaluator.Evaluate(project, true, source, result, job);
+
+        Assert.False(decision.Admitted);
+        Assert.Equal(MovieVideoMakeoverPreviewAdmissionCodes.AssetCrossProject, decision.Code);
+    }
+
+    [Fact]
+    public void Denies_result_job_from_another_general_project()
+    {
+        var (project, source, result, job) = CreateHappyPath(out _);
+        project.ProjectId = Guid.NewGuid();
+        job.ProjectId = Guid.NewGuid();
+
+        var decision = MovieVideoMakeoverPreviewAdmissionEvaluator.Evaluate(project, true, source, result, job);
+
+        Assert.False(decision.Admitted);
+        Assert.Equal(MovieVideoMakeoverPreviewAdmissionCodes.ResultJobCrossProject, decision.Code);
+    }
+
+    [Fact]
+    public void Denies_project_scoped_result_job_for_unbound_movie_project()
+    {
+        var (project, source, result, job) = CreateHappyPath(out _);
+        Assert.Null(project.ProjectId);
+        job.ProjectId = Guid.NewGuid();
+
+        var decision = MovieVideoMakeoverPreviewAdmissionEvaluator.Evaluate(project, true, source, result, job);
+
+        Assert.False(decision.Admitted);
+        Assert.Equal(MovieVideoMakeoverPreviewAdmissionCodes.ResultJobCrossProject, decision.Code);
+    }
+
+    [Fact]
+    public void Denies_non_movie_job_even_if_succeeded_and_in_the_same_workspace()
+    {
+        var (project, source, result, job) = CreateHappyPath(out _);
+        job.JobType = GenerationJobTypes.ImageGenerate;
+
+        var decision = MovieVideoMakeoverPreviewAdmissionEvaluator.Evaluate(project, true, source, result, job);
+
+        Assert.False(decision.Admitted);
+        Assert.Equal(MovieVideoMakeoverPreviewAdmissionCodes.ResultJobNotMovie, decision.Code);
+    }
+
+    [Fact]
     public void Denies_non_video_result_asset()
     {
         var (project, source, result, job) = CreateHappyPath(out _);
