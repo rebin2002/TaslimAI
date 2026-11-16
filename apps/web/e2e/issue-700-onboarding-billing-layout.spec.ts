@@ -198,6 +198,10 @@ async function interceptLiveAppApi(page: Page, onboardingCompletedAt: string | n
       if (url.pathname === "/api/auth/me") body = auth;
       else if (url.pathname === "/api/notifications/unread-count") body = { unreadCount: 0 };
       else if (url.pathname === `/api/workspaces/${liveWorkspace.id}/billing`) body = liveBillingAccount();
+      // Current main's account surface reads the password policy on mount.
+      // Mock the exact contract (deterministic values from the isolated test
+      // API) so the read-only census keeps blocking every unmocked endpoint.
+      else if (url.pathname === "/api/auth/password-policy") body = { requiredLength: 10, requireUppercase: true, requireLowercase: true, requireDigit: true, requireNonAlphanumeric: true, requiredUniqueChars: 1 };
       else {
         unexpectedApiCalls.push(`${method} ${url.pathname}`);
         await route.fulfill({ status: 404, contentType: "application/json", body: JSON.stringify({ error: "unmocked_test_endpoint" }) });
@@ -739,6 +743,10 @@ test.describe("issue #700 onboarding and billing layout", () => {
         "/create/image",
         "/create/movie",
         "/create/presentation",
+        // #817 released Product Ad discovery on main after this spec's census
+        // was written; main's own chooser tests assert this tile is visible,
+        // so the beta layout lane must preserve it rather than hide it.
+        "/create/product-ad",
       ].sort());
       for (const excludedPath of ["/create/research", "/create/social", "/create/music", "/create/voice", "/personal/health", "/health"]) {
         expect.soft(await page.locator(`a.studio-card[href='${excludedPath}']`).isVisible(), `a.studio-card[href='${excludedPath}'] must not be visible in the beta chooser at ${width}px`).toBe(false);
