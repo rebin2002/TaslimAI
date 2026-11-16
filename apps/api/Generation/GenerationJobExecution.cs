@@ -1435,6 +1435,12 @@ public sealed class GenerationJobWorker(
             var current = await db.GenerationJobs.FirstOrDefaultAsync(item => item.Id == claimedJob.Id, stoppingToken);
             if (current is null || current.Status != GenerationJobStatus.Running || current.ConcurrencyToken != claimedJob.ConcurrencyToken || current.CancellationRequested || cancellation.IsCancellationRequested)
             {
+                // A cancellation observed at this fence means the handler finished late while
+                // representation publication was still pending. The provider attempt must
+                // reach the same terminal state as the OperationCanceledException path, so
+                // telemetry never keeps a Started attempt for an already-Cancelled job.
+                if (providerAttempt is not null)
+                    await budget.CompleteAttemptAsync(providerAttempt, null, false, GenerationProviderAttemptStatus.Cancelled, GenerationJobErrorCodes.Cancelled, CancellationToken.None);
                 await CancelRunningAsync(db, usage, claimedJob, claimedJob.ConcurrencyToken, stoppingToken);
                 return;
             }
@@ -1549,6 +1555,12 @@ public sealed class GenerationJobWorker(
             if (completed == 0)
             {
                 foreach (var publication in publications) await publisher.DiscardAsync(publication, stoppingToken);
+                // The fenced completion lost to a cancellation committed during publication.
+                // Prepared representations are discarded above and never become readable
+                // assets; the provider attempt is finalized with the same guard as the
+                // OperationCanceledException path so its terminal state matches the job.
+                if (providerAttempt is not null)
+                    await budget.CompleteAttemptAsync(providerAttempt, null, false, GenerationProviderAttemptStatus.Cancelled, GenerationJobErrorCodes.Cancelled, CancellationToken.None);
                 await CancelRunningAsync(db, usage, claimedJob, claimedJob.ConcurrencyToken, stoppingToken);
                 return;
             }
