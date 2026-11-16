@@ -55,7 +55,11 @@ function AccountProfileForm() {
   const { t, languagePackId, languagePackIds, languagePackNames } = useLocale();
   const profileDefaults = accountProfileDraftFromUser(user);
   const [displayName, setDisplayName] = useState(profileDefaults.displayName);
-  const [preferredLanguage, setPreferredLanguage] = useState<LanguagePackId>(languagePackId);
+  // Seed the draft from the persisted profile like every sibling field, not from
+  // the live language pack: on a cold load the provider renders English first and
+  // restores the saved pack in an effect, so reading that transient value here left
+  // the select on "en" after a reload even though `html lang` was already correct.
+  const [preferredLanguage, setPreferredLanguage] = useState<LanguagePackId>(profileDefaults.preferredLanguage);
   const [defaultGenerationLanguage, setDefaultGenerationLanguage] = useState<Locale>(profileDefaults.defaultGenerationLanguage);
   const [timeZone, setTimeZone] = useState(profileDefaults.timeZone);
   const [outputPreference, setOutputPreference] = useState<(typeof outputPreferences)[number]>(profileDefaults.outputPreference);
