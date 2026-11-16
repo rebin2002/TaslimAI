@@ -330,7 +330,8 @@ public sealed class MovieVideoMakeoverSourceApiTests : IClassFixture<GenerationJ
         Assert.Null(result.DurationSeconds);
         Assert.Contains(MovieVideoMakeoverSourceCodes.MetadataOutOfBounds, result.Blockers);
         var json = JsonSerializer.Serialize(result);
-        Assert.Contains("\\\"durationSeconds\\\":null", json, StringComparison.OrdinalIgnoreCase);
+        using var serialized = JsonDocument.Parse(json);
+        Assert.Equal(JsonValueKind.Null, serialized.RootElement.GetProperty("DurationSeconds").ValueKind);
     }
 
     [Fact]
