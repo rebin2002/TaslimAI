@@ -145,3 +145,24 @@ A `CODEOWNERS` entry naming a security owner for `apps/api/Controllers/` and `ap
 ## 11. Boundaries respected
 
 Nothing was merged, closed, approved, labelled or rebased. No force push. No branch protection or repository setting was changed. No customer charging, provider enablement, production secret, production data or deployment target was touched; `Ai__OpenAI__Enabled` and every provider flag remain as configured in the repository, and no paid provider was contacted. No security route other than the eight under review was opened, and the remaining 23 controllers that still parse `NameIdentifier` directly are recorded as out of scope for this branch rather than edited here. One observation is worth carrying forward: `MovieDirectorController`, whose hardened helper this branch copies, is itself internally inconsistent — it keeps a throwing legacy `GetUserId()` at line 113 beside the strict `TryGetUserId` at line 224, so the safe helper is available to that controller's authors and simply not used by all of its actions. `AdminOperationsController` and `AutopilotConsoleController` sit in the same category, using `TryParse` without the zero check.
+
+## 12. Verification record for this branch (`#850`)
+
+The seven GitHub CI gates were run against `review/pr825-zero-guid-contract-20261116`. Six executed and passed; the seventh is skipped by its own `if:` condition because the base is a dependency branch rather than `main`, so it was rehearsed locally instead of being left unverified.
+
+| Gate | Result on #850 |
+| --- | --- |
+| Deployment smoke helper contracts | pass |
+| Frontend checks | pass |
+| API integration tests | pass |
+| Browser E2E | pass |
+| Build production images and smoke-test API | pass |
+| Release evidence and safety contract | pass |
+| Autopilot next-wave gate | skipped by `if:` — rehearsed locally, **PASS** |
+
+Local rehearsal of the next-wave gate in the pull-request-against-`main` context this change will run under once #825 lands: ref-resolution regression tests 15 passed / 0 failed; repository hygiene, safety defaults and bounds, the no-destructive/force-push/release-path scan, the provider-neutral and credential-isolation assertions, and the additive-migration check all clean; API build succeeded; Autopilot deterministic acceptance 78 passed / 0 failed; `dotnet ef migrations has-pending-model-changes` clean and `dotnet ef database update` applied all migrations to a fresh PostgreSQL 15 database.
+
+Separately, the complete `Taslim.Api.Tests` suite was run against this branch on that local instance: **1211 passed, 0 failed, 0 skipped**.
+
+PR #825 itself was re-checked after this branch was published: its head is unchanged at `28b757ea`, all seven of its gates remain green, and its only review is the comment recorded by this work — no approval exists on it from any account.
+
