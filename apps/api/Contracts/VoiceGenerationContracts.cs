@@ -120,7 +120,17 @@ public static class VoiceGenerationContractMapper
         try
         {
             input = JsonSerializer.Deserialize<VoiceGenerationInput>(json, new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
-            return input is not null;
+            if (input is null
+                || input.Text is null
+                || input.Language is null
+                || input.VoiceStyle is null
+                || input.SpeakingStyle is null)
+            {
+                input = null;
+                return false;
+            }
+
+            return true;
         }
         catch (JsonException)
         {

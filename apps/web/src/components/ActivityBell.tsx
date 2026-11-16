@@ -10,7 +10,7 @@ import { useLocale } from "@/components/LocaleProvider";
 import { api, type NotificationItem, type NotificationList } from "@/lib/api";
 import { isNotificationRequestCurrent, startNotificationRequest } from "@/lib/notificationRequest";
 import { applyAllNotificationsRead, applyNotificationRead } from "@/lib/notificationReadState";
-import { resolveNotificationUnreadCount } from "@/lib/notificationUnreadState";
+import { resolveNotificationBadgeCount, resolveNotificationUnreadCount } from "@/lib/notificationUnreadState";
 
 const notificationLabels = {
   "generation.completed": "notification.generationCompleted",
@@ -193,10 +193,15 @@ export function NotificationBell({ unreadCount }: Readonly<{ unreadCount: number
   }
 
   async function openNotification(item: NotificationItem, event: React.MouseEvent<HTMLAnchorElement>) {
-    setOpen(false);
-    if (item.isRead) return;
+    if (item.isRead) {
+      setOpen(false);
+      return;
+    }
     event.preventDefault();
-    if (await markRead(item)) router.push(item.destination);
+    if (await markRead(item)) {
+      setOpen(false);
+      router.push(item.destination);
+    }
   }
 
   async function markAllRead() {
@@ -224,7 +229,8 @@ export function NotificationBell({ unreadCount }: Readonly<{ unreadCount: number
     }
   }
 
-  const badgeCount = result?.unreadCount ?? unreadCount;
+  // A closed or reloading panel snapshot must not freeze the header badge below.
+  const badgeCount = resolveNotificationBadgeCount({ panelOpen: open, panelLoading: loading, panelUnreadCount: result?.unreadCount ?? null, liveUnreadCount: unreadCount });
   const bellLabel = badgeCount > 0 ? `${t("navigation.notifications")}, ${t("notification.unread", { count: String(badgeCount) })}` : t("navigation.notifications");
   return <div className="notification-popover" ref={popoverRef}>
     <button ref={triggerRef} type="button" className="icon-button notification-button" aria-label={bellLabel} aria-haspopup="dialog" aria-expanded={open} aria-controls={panelId} onClick={() => void openPanel()}>
