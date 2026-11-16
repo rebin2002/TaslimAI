@@ -1,4 +1,4 @@
-import { test, expect } from "./fixtures";
+import { test, expect, registerInUi } from "./fixtures";
 
 /**
  * The account form holds a draft: the interface language becomes visible when the
@@ -7,6 +7,35 @@ import { test, expect } from "./fixtures";
  * the immediate switch, so both paths are covered here.
  */
 test.describe("language-pack foundation", () => {
+  test("persists zh-CN chosen during real first-login onboarding without changing generation language", async ({ page, testUser }) => {
+    await registerInUi(page, testUser, false);
+    const onboarding = page.getByRole("dialog");
+    await expect(onboarding).toBeVisible();
+
+    const selectors = onboarding.locator(".onboarding-fields select");
+    await selectors.first().selectOption("zh-CN");
+    await expect(page.locator("html")).toHaveAttribute("lang", "zh-CN");
+    await expect(page.locator("html")).toHaveAttribute("dir", "ltr");
+    await expect(selectors.nth(1)).toHaveValue("en");
+    await expect(onboarding.getByText(/Simplified Chinese is in preview/)).toBeVisible();
+
+    // The skip path must persist the account locale without launching paid generation.
+    await onboarding.locator(".onboarding-skip").click();
+    await expect(onboarding).toBeHidden();
+    await expect(page).toHaveURL(/\\/projects/);
+    const response = await page.request.get("/api/auth/me");
+    expect(response.ok()).toBe(true);
+    const session = await response.json() as { user: { preferredLanguage: string; defaultGenerationLanguage: string; onboardingCompletedAt: string | null } };
+    expect(session.user.preferredLanguage).toBe("zh-CN");
+    expect(session.user.defaultGenerationLanguage).toBe("en");
+    expect(session.user.onboardingCompletedAt).toBeTruthy();
+
+    await page.reload();
+    await expect(page.locator("html")).toHaveAttribute("lang", "zh-CN");
+    await page.goto("/account");
+    await expect(page.locator(".account-control-grid select").first()).toHaveValue("zh-CN");
+  });
+
   test("switches between zh-CN and Arabic, persists the choice, and keeps direction metadata correct", async ({ authenticatedPage: page }) => {
     await page.goto("/account");
     await expect(page.getByRole("heading", { name: /^account$/i })).toBeVisible();
