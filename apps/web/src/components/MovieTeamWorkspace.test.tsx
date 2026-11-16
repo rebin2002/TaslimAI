@@ -37,6 +37,18 @@ describe("Movie Team review workflow", () => {
     expect(workspaceSource).toContain("!canDecide(review) || !beginMutation()");
   });
 
+  it("blocks user-triggered refresh while a mutation is in flight", () => {
+    // A refresh that starts mid-write can return stale permissions and undo the
+    // just-saved review/comment in the UI. The synchronous ref gate must apply
+    // to ordinary refresh; only explicit post-write reconciliation bypasses it.
+    expect(workspaceSource).toContain("const load = useCallback(async (afterMutation = false) => {");
+    expect(workspaceSource).toContain("mutationInFlight.current && !afterMutation");
+    expect(workspaceSource.split("await load(true);").length - 1).toBe(2);
+    expect(workspaceSource).not.toContain("      await load();");
+    expect(workspaceSource.split('onClick={() => void load()} disabled={busy}').length - 1).toBe(2);
+    expect(workspaceSource).toMatch(/const revision = \+\+loadRevision\.current/);
+  });
+
   it("requests project sign-off from a different current team member", () => {
     expect(workspaceSource).toContain("api.requestMovieReview(project.id");
     expect(workspaceSource).toContain('targetType: "project"');
