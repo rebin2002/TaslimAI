@@ -53,7 +53,7 @@ public sealed class AuthController(
     [HttpPost("register")]
     [AllowAnonymous]
     [ValidateAntiForgeryToken]
-    [EnableRateLimiting(RateLimiting.Authentication)]
+    [EnableRateLimiting(RateLimiting.Registration)]
     public async Task<IActionResult> Register(RegisterRequest request, CancellationToken cancellationToken)
     {
         if (!ModelState.IsValid || string.IsNullOrWhiteSpace(request.DisplayName) || !IsSupportedLanguage(request.PreferredLanguage, allowEmpty: true))
