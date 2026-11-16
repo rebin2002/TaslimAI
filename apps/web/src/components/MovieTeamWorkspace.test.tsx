@@ -19,10 +19,22 @@ describe("Movie Team review workflow", () => {
     expect(workspaceSource).toContain("const revision = ++loadRevision.current");
     expect(workspaceSource).toContain("mounted.current && revision === loadRevision.current");
     expect(workspaceSource).toContain("return () => {\n      mounted.current = false;");
-    // Four writes (comment, resolve, request, decide) plus unmount all
-    // invalidate earlier authorization reads before a late response can render.
-    expect(workspaceSource.split("loadRevision.current += 1").length - 1).toBe(5);
+    // The single mutation gate invalidates earlier reads for all writes;
+    // unmount independently invalidates reads from the previous identity.
+    expect(workspaceSource.split("loadRevision.current += 1").length - 1).toBe(2);
     expect(workspaceSource).not.toContain("setCollaboration(await api.getMovieCollaboration(project.id))");
+  });
+
+  it("synchronously admits one authorized write at a time", () => {
+    expect(workspaceSource).toContain("const mutationInFlight = useRef(false)");
+    expect(workspaceSource).toMatch(/if \(mutationInFlight\.current \|\| !mounted\.current\) return false;/);
+    expect(workspaceSource).toContain("mutationInFlight.current = true");
+    expect(workspaceSource).toContain("mutationInFlight.current = false");
+    expect(workspaceSource.split("!beginMutation()").length - 1).toBe(4);
+    expect(workspaceSource.split("endMutation();").length - 1).toBe(4);
+    expect(workspaceSource).toContain("!canComment || !beginMutation()");
+    expect(workspaceSource).toContain("!canRequestReviews || !reviewerOptions.some");
+    expect(workspaceSource).toContain("!canDecide(review) || !beginMutation()");
   });
 
   it("requests project sign-off from a different current team member", () => {
