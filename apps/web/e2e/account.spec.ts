@@ -45,4 +45,23 @@ test.describe("account profile persistence", () => {
     await expect(page.getByLabel(/output style/i)).toHaveValue("detailed");
     await expect(page.getByLabel(/include source links/i)).not.toBeChecked();
   });
+
+  test("accepts canonical zh-CN account preference while keeping generation language separate", async ({ authenticatedPage: page }) => {
+    await page.goto("/account");
+    await expect(page.getByRole("heading", { name: /^account$/i })).toBeVisible();
+
+    await page.locator(".account-control-grid select").first().selectOption("zh-CN");
+    await page.locator(".account-control-grid select").nth(1).selectOption("ar");
+    await page.locator(".account-profile-card button.primary-button").click();
+
+    const saved = await apiJson<AuthResponse>(page.request, "GET", "/api/auth/me");
+    expect(saved.user.preferredLanguage).toBe("zh-CN");
+    expect(saved.user.defaultGenerationLanguage).toBe("ar");
+
+    await page.reload();
+    await expect(page.locator("html")).toHaveAttribute("lang", "zh-CN");
+    await expect(page.locator("html")).toHaveAttribute("dir", "ltr");
+    await expect(page.locator(".account-control-grid select").first()).toHaveValue("zh-CN");
+    await expect(page.locator(".account-control-grid select").nth(1)).toHaveValue("ar");
+  });
 });
