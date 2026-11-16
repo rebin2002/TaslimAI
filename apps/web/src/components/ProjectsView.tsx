@@ -2,7 +2,7 @@
 import { localeTag } from "@/lib/i18n";
 
 import Link from "next/link";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Archive, ArrowUpRight, BriefcaseBusiness, CalendarDays, FolderOpen, Pencil, Plus, RotateCcw } from "lucide-react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { api, type Project, type ProjectInput } from "@/lib/api";
@@ -37,17 +37,28 @@ export function ProjectsView() {
   const [error, setError] = useState("");
   const workspaceTypeLabel = workspace?.type === "Business" ? t("projects.businessWorkspace") : t("projects.personalWorkspace");
   const workspaceRoleLabel = workspace ? t(`projects.role.${workspace.role.toLowerCase()}`) : "";
+  // Only the most recent tab/workspace load may publish its pages; a slow
+  // earlier walk must not overwrite the tab that replaced it.
+  const projectLoadRef = useRef<AbortController | null>(null);
 
   const load = useCallback(async () => {
     if (!workspace) return;
+    projectLoadRef.current?.abort();
+    const controller = new AbortController();
+    projectLoadRef.current = controller;
     setLoading(true);
     setError("");
     try {
-      setProjects(await api.listProjects(workspace.id, status));
+      // A single request only ever returns one server page; walking all
+      // pages is what keeps the tab counts honest for large workspaces.
+      const items = await api.listAllProjects(workspace.id, status, controller.signal);
+      if (controller.signal.aborted) return;
+      setProjects(items);
     } catch (caught) {
+      if (controller.signal.aborted) return;
       setError(caught instanceof Error ? caught.message : t("projects.loadError"));
     } finally {
-      setLoading(false);
+      if (!controller.signal.aborted) setLoading(false);
     }
   }, [status, t, workspace]);
 
