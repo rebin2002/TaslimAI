@@ -26,6 +26,7 @@ test.describe("anonymous protected-route boundary", () => {
 
 
 const newlyServerGatedRoutes = [
+  "/account",
   "/create",
   "/create/document",
   "/create/social",
