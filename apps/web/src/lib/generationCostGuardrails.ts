@@ -7,10 +7,11 @@ export type SafeGenerationCostPreview = Pick<
 
 export function safeGenerationCostPreview(preview: GenerationCostPreview | null | undefined): SafeGenerationCostPreview | null {
   if (!preview) return null;
+  const estimateIsKnown = preview.estimatedProviderCostKnown && preview.estimateStatus === "known";
   return {
     estimateStatus: preview.estimateStatus,
-    estimatedProviderCostUsd: preview.estimatedProviderCostKnown ? preview.estimatedProviderCostUsd : null,
-    estimatedProviderCostKnown: preview.estimatedProviderCostKnown && preview.estimateStatus === "known",
+    estimatedProviderCostUsd: estimateIsKnown ? preview.estimatedProviderCostUsd : null,
+    estimatedProviderCostKnown: estimateIsKnown,
     currency: preview.currency,
     unknownReason: preview.unknownReason,
     warning: preview.warning,
