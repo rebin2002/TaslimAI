@@ -21,4 +21,19 @@ describe("not-found boundary", () => {
     expect(html).not.toContain("error.message");
     expect(html).not.toContain("digest");
   });
+  it("recovers without a locale provider when Next renders the not-found boundary outside root layout", () => {
+    // Server output must remain deterministic, avoiding a second hydration failure.
+    const html = renderToStaticMarkup(<NotFound />);
+
+    expect(html).toContain("Page not found");
+    expect(html).toContain("We could not find that page");
+    expect(html).toContain('lang="en"');
+    expect(html).toContain('dir="ltr"');
+    expect(html).toContain('aria-labelledby="not-found-title"');
+    expect(html).toContain('href="/"');
+    expect(html).toContain('href="/assets"');
+    expect(html).not.toMatch(/<main\\b/);
+    expect(html).not.toContain("useLocale must be used within LocaleProvider");
+    expect(html).not.toContain("digest");
+  });
 });
