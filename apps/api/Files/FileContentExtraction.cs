@@ -4,6 +4,7 @@ using System.Xml;
 using System.Xml.Linq;
 using Microsoft.Extensions.Options;
 using UglyToad.PdfPig;
+using UglyToad.PdfPig.Core;
 using Taslim.Api.Domain;
 
 namespace Taslim.Api.Files;
@@ -141,14 +142,30 @@ public sealed class FileContentExtractor(IOptions<FileOptions> options) : IFileC
 
     private static string ExtractPdf(Stream content)
     {
-        using var document = PdfDocument.Open(content);
-        var builder = new StringBuilder();
-        foreach (var page in document.GetPages())
+        // Upload admission only verifies the "%PDF-" magic, so every structurally broken document
+        // reaches this call. PdfPig signals those documents with PdfDocumentFormatException, and
+        // with ArgumentOutOfRangeException when the content is shorter than the cross-reference
+        // window it reads from the end; neither derives from InvalidDataException, so they would
+        // otherwise escape the extraction boundary's format-exception filter and be logged by the
+        // generic processing-failure path, which includes parser text quoting tokens from the
+        // uploaded document. Convert them here, where the meaning is unambiguously "unreadable
+        // upload", leaving the outer filter (and its handling of genuinely unexpected failures)
+        // unchanged.
+        try
         {
-            builder.AppendLine($"[Page {page.Number}]");
-            builder.AppendLine(page.Text);
+            using var document = PdfDocument.Open(content);
+            var builder = new StringBuilder();
+            foreach (var page in document.GetPages())
+            {
+                builder.AppendLine($"[Page {page.Number}]");
+                builder.AppendLine(page.Text);
+            }
+            return builder.ToString();
         }
-        return builder.ToString();
+        catch (Exception exception) when (exception is PdfDocumentFormatException or ArgumentOutOfRangeException)
+        {
+            throw new InvalidDataException("The PDF could not be parsed.", exception);
+        }
     }
 
     private string ExtractDocx(Stream content)
