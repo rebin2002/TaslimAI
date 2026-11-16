@@ -14,8 +14,11 @@
  * and checks the request shape before it is handed off. Reference media is
  * carried exclusively as private workspace asset identifiers (the selection
  * state owned by PR #745) — never URLs, file names, or inline bytes — and
- * lyrics never appear in issue payloads, so nothing beyond the user's own
- * draft text is exposed.
+ * issue payloads carry codes, ordinals and numeric limits only: no lyric line,
+ * no dialect copy, no reference file name, and no draft-local identifier that
+ * is not an opaque bounded token (see `safeDraftSectionId`). A failure
+ * therefore describes the problem without publishing the material it was
+ * found in, and an issue array can be logged or reported as-is.
  */
 
 /** Section vocabulary of the shared request contract (PR #709). */
@@ -79,6 +82,17 @@ export const MUSIC_LYRICS_MAX_LINES_PER_SECTION = 30;
 export const MUSIC_LYRICS_MAX_LINE_CHARACTERS = 200;
 export const MUSIC_LYRICS_MAX_TOTAL_CHARACTERS = 3_500;
 export const MUSIC_REFERENCES_MAX_ASSETS = 10;
+
+/**
+ * Ceiling for a draft-local section identifier that may be echoed back into an
+ * issue. Section rows are addressed in issues by their draft-local id, so the
+ * id has to stay an opaque token: anything long enough, or punctuation-rich
+ * enough, to be content instead of a name is dropped. Sixty-four characters
+ * bounds every token the editor family generates (`s1`, `section-0`, `hook1`)
+ * with room to spare, while a lyric line, a reference file name or a private
+ * asset URL cannot fit the shape.
+ */
+export const MUSIC_LYRICS_MAX_SECTION_ID_CHARACTERS = 64;
 
 /** Pinned song-mode values from the shared creation-mode vocabulary. */
 export const MUSIC_LYRICS_SONG_CREATION_MODE = "song_with_vocals";
@@ -211,6 +225,31 @@ export function splitLyricsDraftLines(text: string): string[] {
 
 type RetainedSection = { sectionId?: string; type: MusicLyricsSectionTypeName; lines: string[] };
 
+/**
+ * Draft-local section identifiers reach an issue so a screen-reader label, a
+ * list key and the reported problem address the same row. They are names, not
+ * content, so only an opaque ASCII token may be echoed: a leading alphanumeric,
+ * then letters, digits, `-` and `_`, bounded by
+ * `MUSIC_LYRICS_MAX_SECTION_ID_CHARACTERS`. Anything else is dropped rather
+ * than truncated, because a truncated echo still publishes a prefix of the
+ * user's words, of a private reference file name, or of a signed asset URL.
+ * The rest of the Music Studio family builds row identities straight out of
+ * that content — `localReferenceAudioId` is `local:<size>:<file name>` and
+ * `localReferenceVideoId` is `local-video:<size>:<file name>` — and the guided
+ * handoff copies a caller's `id` through verbatim, so an identifier cannot be
+ * assumed harmless at this boundary. `sectionOrdinal` is always present, so
+ * dropping an unsafe identifier costs the row's name, never the problem's
+ * addressability.
+ */
+const draftSectionIdPattern = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
+
+export function safeDraftSectionId(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const candidate = value.trim();
+  if (candidate.length === 0 || candidate.length > MUSIC_LYRICS_MAX_SECTION_ID_CHARACTERS) return undefined;
+  return draftSectionIdPattern.test(candidate) ? candidate : undefined;
+}
+
 function mapSections(
   sections: readonly MusicLyricsDraftSectionInput[] | null | undefined,
   issues: MusicLyricsDraftIssue[],
@@ -231,15 +270,16 @@ function mapSections(
     const ordinal = index + 1;
     const type = normalizeToken(entry?.type);
     if (!type || !(musicLyricsSectionTypes as readonly string[]).includes(type)) {
+      const sectionId = safeDraftSectionId(entry?.id);
       issues.push({
         code: "section_type_invalid",
-        ...(typeof entry?.id === "string" ? { sectionId: entry.id } : {}),
+        ...(sectionId === undefined ? {} : { sectionId }),
         params: { sectionOrdinal: ordinal },
       });
       return;
     }
     const lines = splitLyricsDraftLines(typeof entry?.text === "string" ? entry.text : "");
-    const sectionId = typeof entry?.id === "string" ? entry.id : undefined;
+    const sectionId = safeDraftSectionId(entry?.id);
     if (lines.length === 0) {
       issues.push({
         code: "section_empty",

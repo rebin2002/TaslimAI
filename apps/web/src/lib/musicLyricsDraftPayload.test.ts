@@ -408,3 +408,72 @@ describe("buildMusicLyricsDraft scope guard", () => {
     }
   });
 });
+
+describe("buildMusicLyricsDraft issue payloads never echo draft-local identifiers as content", () => {
+  // The module documents `id` as a draft-local identifier that "never leaves the
+  // payload", and the issue array as containing "never ... lyric text, dialect
+  // copy or reference file names". The rest of the Music Studio family builds
+  // identifiers straight out of private user content — `localReferenceAudioId`
+  // is `local:<size>:<file name>` and `localReferenceVideoId` is
+  // `local-video:<size>:<file name>` — and the guided handoff copies a caller's
+  // `id` verbatim, so an unbounded identifier is a content channel into the
+  // failure payload. Only opaque tokens may survive.
+  const rejects = (sections: unknown[]) =>
+    buildMusicLyricsDraft({ sections, vocalLanguage: "ku", lyricsRightsConfirmed: true } as MusicLyricsDraftInput).issues;
+
+  it("drops an identifier shaped like a private reference file name", () => {
+    const issues = rejects([{ id: "local:2048:MySecretStudioTake.mp3", type: "hook", text: "[TEST ONLY] ڕۆژ ئاوا دەبێت" }]);
+    expect(issues).toEqual([{ code: "section_type_invalid", params: { sectionOrdinal: 1 } }]);
+    expect(JSON.stringify(issues)).not.toContain("MySecretStudioTake");
+    expect(JSON.stringify(issues)).not.toContain(".mp3");
+  });
+
+  it("drops an identifier derived from the lyric text itself", () => {
+    const lyric = "[TEST ONLY] ئەڵێم بگەڕێمەوە";
+    const issues = rejects([{ id: lyric, type: "hook", text: lyric }]);
+    expect(issues).toEqual([{ code: "section_type_invalid", params: { sectionOrdinal: 1 } }]);
+    expect(JSON.stringify(issues)).not.toContain("ئەڵێم");
+  });
+
+  it("drops an over-long identifier instead of truncating it into the payload", () => {
+    const longId = `s-${"k".repeat(120)}`;
+    const issues = rejects([{ id: longId, type: "verse", text: "x".repeat(201) }]);
+    expect(issues.map((issue) => issue.code)).toContain("line_too_long");
+    for (const issue of issues) expect(JSON.stringify(issue)).not.toContain(longId);
+  });
+
+  it("drops identifiers carrying control, zero-width or bidi format characters", () => {
+    for (const id of ["s1\u0000s2", "ho\u200BKst", "verse\u202E", "s1\ns2", "s1\t"]) {
+      for (const issue of rejects([{ id, type: "hook", text: "[TEST ONLY] line" }]))
+        expect(JSON.stringify(issue)).not.toContain(id);
+    }
+  });
+
+  it("keeps opaque draft-local tokens so existing rows still address their section", () => {
+    const issues = rejects([
+      { id: "a", type: "verse", text: "x".repeat(201) },
+      { id: "hook1", type: "hook", text: "[TEST ONLY] line" },
+      { id: "section-3", type: "chorus", text: "   \n\t " },
+      { id: "row_7", type: "hook", text: "[TEST ONLY] unsupported type" },
+    ]);
+    expect(issues.map((issue) => issue.sectionId)).toEqual(["a", "hook1", "section-3", "row_7"]);
+  });
+
+  it("mirrors the reference channel, which already refuses to echo the offending value", () => {
+    const outcome = buildMusicLyricsDraft({
+      sections: [{ id: "local:2048:MySecretStudioTake.mp3", type: "hook", text: "[TEST ONLY] line" }],
+      vocalLanguage: "ku",
+      lyricsRightsConfirmed: true,
+      references: [{ mediaType: "audio", assetId: "https://private.example/MySecretStudioTake.mp3" }],
+      referenceRightsConfirmed: true,
+    } as MusicLyricsDraftInput);
+    const serialized = JSON.stringify(outcome.issues);
+    expect(serialized).not.toContain("private.example");
+    expect(serialized).not.toContain("MySecretStudioTake");
+  });
+
+  it("keeps the guarantee in the source, not only in the assertion", () => {
+    expect(source).toMatch(/isSafeDraftSectionId|safeDraftSectionId/);
+    expect(source).toMatch(/export const MUSIC_LYRICS_MAX_SECTION_ID_CHARACTERS = 64/);
+  });
+});

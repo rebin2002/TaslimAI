@@ -1,0 +1,138 @@
+# Music Studio lyrics and reference privacy in failure logs
+
+Scope: the provider-free Music Studio paths that turn a rejected or failed
+lyrics/reference draft into a **failure record** — an operational log line, a
+persisted job failure, a usage record, or a client-visible issue payload. This
+lane exists to keep user-authored lyric text and private reference material out
+of those records. It is a verification lane: the product behaviour it pins is
+described here, exercised deterministically in tests, and deliberately not
+extended.
+
+Out of scope by instruction: the `#708` preflight **UI** (open PR #772 editor,
+open PRs #560/#561 studio wiring, `MusicLyricsPreflightPanel.tsx`) and the
+**reference isolation worker** (open PRs #774, #805, #815 and the sibling
+`Music Studio selected reference isolation` task). No file owned by those lanes
+is read as a mutation target or changed here.
+
+## What the guarantee is
+
+1. **Server side.** `docs/MUSIC_STUDIO_ARCHITECTURE.md` states that upstream
+   response bodies are never copied into job messages, usage metadata, or logs,
+   and `docs/OPERATIONS_RUNBOOK.md` states that logs deliberately omit full
+   prompts and private contents. For Music Studio that means a failure record
+   carries identifiers (`JobId`, `WorkspaceId`, `RequestId`), a bounded failure
+   code, a normalized category, an exception **type**, provider status when the
+   adapter already exposes one safely, and elapsed time — never the `Description`,
+   `Purpose`, `AdditionalInstructions`, `Title`, any lyric line, or a reference
+   asset identifier.
+2. **Client side.** `buildMusicLyricsDraft` returns an `issues` array as the
+   *failure description* of a draft. It must stay a pure diagnostic: codes,
+   ordinals and numeric limits. Anything a renderer prints, a test reporter
+   serialises, or an error boundary forwards verbatim is exactly this array, so
+   an issue that quotes user content is a leak channel.
+
+## What was verified, and how
+
+Verification is empirical, not by reading. `MusicStudioFailureLogPrivacyTests`
+runs the real request pipeline against a locally injected deterministic
+provider and a capturing `ILoggerProvider`, with reserved markers standing in
+for lyric lines, description text, additional instructions, a title, and a
+reference asset id:
+
+| Scenario | Why it is the interesting one | Result |
+| --- | --- | --- |
+| `song_with_vocals` with lyric markers, admitted with the deterministic `test` provider key | The capability catalog returns `SupportsLyricsToVocals: false` for every key, so this fails closed **before** cost preflight, job creation, usage persistence and any provider call. | `400`, no job row, no usage row, **0 marker hits in the captured log** |
+| A `lyrics` field of the wrong JSON type | Model binding rejects it, so the rejected *value* is the thing at risk of being echoed. | `400`, **0 marker hits** |
+| Lyric text persisted through the generic job endpoint, then the job fails | This is the honest stress case: the lyric text genuinely exists in `GenerationJob.InputJson` and the job reaches `Failed`. | `Failed`; marker present in `InputJson` exactly once and absent from `ErrorMessage`, `UsageTransaction.SafeMetadataJson`/`FailureCode` and `GenerationProviderAttempt.SafeMetadataJson`/`FailureCode`; **0 marker hits** |
+| A provider adapter that quotes the caller's own words into its own exception text | The worst realistic upstream behaviour: the words are inside `Exception.Message`, which every `Log*(exception, ...)` site renders. | `Failed`; the worker's `Error` record is present and carries `ExceptionType` only — the quoted text never reaches the log |
+
+Each assertion is guarded against a silent pass: the test fails if the scenario
+produced no log records at all, and separately requires at least one
+`Taslim.Api*` category record, so an unwired capture cannot masquerade as
+evidence.
+
+A broad static sweep of every `ILogger` call site in `apps/api` accompanied this
+(no lyric-, reference-, `InputJson`- or prompt-bearing template or argument was
+found), as did inspection of `MusicGenerationRequestValidator`,
+`MusicGenerationContractMapper`, `MusicGenerationJobHandler`,
+`GenerationJobErrorMessages`, `GenerationJobContractMapper.ToDto` and the global
+exception handler.
+
+## The defect this lane fixes
+
+The client half was not clean. `musicLyricsDraftPayload.ts` documented that the
+draft-local section `id` "never leaves the payload" and that issues contain
+"never ... lyric text, dialect copy or reference file names", but `mapSections`
+copied `entry.id` **verbatim, unbounded and unfiltered**, into
+`issues[].sectionId` for `section_type_invalid`, `section_empty`,
+`lines_too_many` and `line_too_long`.
+
+That is a content channel, not a naming convenience, because the assumption the
+code makes is false in this repository: the rest of the Music Studio family
+builds identifiers straight out of private user content.
+`localReferenceAudioId` is `local:<size>:<file name>`,
+`localReferenceVideoId` is `local-video:<size>:<file name>`, and the guided
+handoff in `musicGuidedSongDraft.ts` copies a caller's `id` through with only a
+`trim()`. Any editor row keyed from a section heading, a first line, or a picked
+file name therefore had its text reproduced inside the failure payload, and the
+preflight panel renders `issue.sectionId` into visible text.
+
+The tell is the asymmetry inside the same module: the **reference** channel was
+already hardened. `mapReferences` validates `assetId` against a canonical GUID
+pattern and, when it fails, reports `reason: "asset_id"` — it deliberately
+refuses to echo the offending value, which is precisely how a private URL or
+file name is kept out of the diagnostic. The lyrics channel never got the
+equivalent treatment.
+
+The fix adds `safeDraftSectionId` with
+`MUSIC_LYRICS_MAX_SECTION_ID_CHARACTERS = 64` and routes every `sectionId`
+emission through it. A `sectionId` survives only as an opaque ASCII token
+(`[A-Za-z0-9][A-Za-z0-9_-]{0,63}` after trimming); everything else is **dropped,
+never truncated**, because a truncated echo still publishes a prefix of the
+user's words. `sectionOrdinal` is always present, so dropping an unsafe
+identifier costs the row's name and never the problem's addressability. Opaque
+tokens the editors already generate (`s1`, `a`, `hook1`, `blank`, `section-3`,
+`row_7`) keep working, which is asserted positively as well as negatively.
+
+## Ownership boundaries respected
+
+Audited file-by-file against all 516 open PRs on `main` before this branch was
+cut. This slice touches exactly four paths, none claimed by any open PR:
+
+- `apps/web/src/lib/musicLyricsDraftPayload.ts` (fix + corrected header claim)
+- `apps/web/src/lib/musicLyricsDraftPayload.test.ts` (reproduction + regression)
+- `apps/api.Tests/MusicStudioFailureLogPrivacyTests.cs` (new provider-free lock)
+- `docs/MUSIC_STUDIO_LOG_PRIVACY.md` (this file)
+
+Deliberately untouched, with their owners:
+
+| Path | Owner | Why untouched |
+| --- | --- | --- |
+| `MusicGenerationContracts.cs`, `MusicGenerationRequestValidator.cs`, `MusicGenerationCapabilityCatalog.cs`, `MusicGenerationSongContractTests.cs`, `MusicInvisibleTextAdmissionTests.cs` | open PR #709 (with #812 as co-claimant) | Contract and validator authority stays there; this lane only observes their fail-closed behaviour. |
+| `MusicGenerationJobHandler.cs`, `MusicOutputInspectorTests.cs` | open PRs #547/#551 | Handler wiring is that lane's deliverable. |
+| `MubertMusicGenerationProvider.cs`, `StableAudioMusicGenerationProvider.cs` | open PRs #508/#511 | Adapter-level redaction belongs to the provider lane; the log lock here is adapter-independent. |
+| `MusicGenerationController.cs`, `MusicGenerationAuthorizationTests.cs` | open PR #359 | Controller surface owned there. |
+| `GenerationJobExecution.cs` | open PRs #353/#361 (and others) | Worker failure-log shape is heavily claimed; this lane pins it instead of editing it. |
+| `OperationalObservability.cs`, `OperationalFailureClassification.cs` (+ tests) | open PRs #258, #515/#533 | Redaction infrastructure owned there. |
+| `MusicLyricsPreflightPanel.tsx` (+ test), `LyricsSectionEditor.tsx` | `#708` UI, open PR #772 | Explicitly excluded by the task; the panel keeps its own local mapping. |
+| `musicStudioState.ts` (+ test) | open PRs #572/#573/#847 | Studio job state owned there. |
+| `MusicReferenceEligibility*`, `MusicReferenceAssetAuthorization*`, `MusicReferenceVideoAudioExtraction*`, `MusicReferenceAudioValidationRegressionTests.cs` | open PRs #730/#773/#774/#776/#805/#815 and the reference isolation task | The reference isolation worker is explicitly excluded. |
+| `musicGuidedSongDraft.ts`, `musicReferenceAudioState.ts`, `musicReferenceVideoState.ts` | unclaimed | Read as evidence for how identifiers are formed; unchanged, because the correct boundary is where the failure payload is built. |
+
+## Guardrails honoured
+
+No production secret or customer data was read, moved, or emitted. No charging
+path, cost gate, or paid provider was enabled or called: `MusicGeneration:Enabled`
+remains `false` in `appsettings.json` and `appsettings.Production.json`, every
+scenario uses the injected deterministic local provider, and sung lyrics still
+fail closed for every provider key. Nothing was merged, deployed or force
+pushed, and independent security review is not bypassed — this branch is a PR
+for review like any other.
+
+## Checks this slice is expected to pass
+
+All seven hosted checks on a PR based at `main`: Deployment smoke helper
+contracts, Frontend checks, API integration tests, Browser E2E, Autopilot
+next-wave gate, Production container smoke, and Release evidence and safety
+contract. Targeted local equivalents: the mapper test file, the full web unit
+suite, `tsc --noEmit`, `eslint`, and the new C# test class.
