@@ -6,7 +6,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useAuth } from "@/components/AuthProvider";
 import { useLocale } from "@/components/LocaleProvider";
 import { api, type GenerationJob } from "@/lib/api";
-import { canCancelGenerationJob, isTerminalJob, mergeGenerationJob } from "@/lib/generationJobsState";
+import { canCancelGenerationJob, isJobReadableInWorkspace, isTerminalJob, mergeGenerationJob, selectActiveGenerationJob } from "@/lib/generationJobsState";
 import { nextGenerationJobPollDelay } from "@/lib/generationJobsPolling";
 
 type Translate = (key: string, variables?: Record<string, string>) => string;
@@ -97,6 +97,9 @@ export function GenerationJobList({ jobs, activeJobId, t, onSelect }: Generation
 export function GenerationJobsView() {
   const { workspace } = useAuth();
   const { t } = useLocale();
+  // The session's personal workspace can be reassigned while this page stays mounted, so every
+  // read is fenced to the workspace id the view is currently bound to.
+  const workspaceId = workspace?.id ?? null;
   const [jobs, setJobs] = useState<GenerationJob[]>([]);
   const [current, setCurrent] = useState<GenerationJob | null>(null);
   const [loading, setLoading] = useState(true);
@@ -108,7 +111,7 @@ export function GenerationJobsView() {
   const [pollRetryGeneration, setPollRetryGeneration] = useState(0);
 
   const loadRecent = useCallback(async () => {
-    if (!workspace) {
+    if (!workspaceId) {
       requestGeneration.current += 1;
       setJobs([]);
       setCurrent(null);
@@ -116,7 +119,6 @@ export function GenerationJobsView() {
       return;
     }
     const request = ++requestGeneration.current;
-    const workspaceId = workspace.id;
     setLoading(true);
     setError("");
     setCanRetryLoad(false);
@@ -131,14 +133,17 @@ export function GenerationJobsView() {
     } finally {
       if (request === requestGeneration.current) setLoading(false);
     }
-  }, [t, workspace]);
+  }, [t, workspaceId]);
 
   // The protected page synchronizes its initial state with the server-side job list.
   // eslint-disable-next-line react-hooks/set-state-in-effect
   useEffect(() => { void loadRecent(); }, [loadRecent]);
 
+  // A job selected before the reassignment stays in `current`, so polling is driven by the fenced
+  // selection: the view never re-reads or re-arms a record from a workspace it no longer serves.
+  const selectedJob = current && isJobReadableInWorkspace(current, workspaceId) ? current : null;
+
   useEffect(() => {
-    const selectedJob = current;
     const pollDelay = nextGenerationJobPollDelay(selectedJob);
     if (!selectedJob || pollDelay === null) return;
     let active = true;
@@ -147,8 +152,9 @@ export function GenerationJobsView() {
       try {
         const next = await api.getGenerationJob(jobId);
         if (!active) return;
+        if (!isJobReadableInWorkspace(next, workspaceId)) return;
         setCurrent(next);
-        setJobs((previous) => mergeGenerationJob({ jobs: previous, selectedJobId: next.id, error: "" }, next).jobs);
+        setJobs((previous) => mergeGenerationJob({ jobs: previous, selectedJobId: next.id, error: "" }, next, workspaceId).jobs);
       } catch (caught) {
         if (active) {
           setError(caught instanceof Error ? caught.message : t("jobs.pollError"));
@@ -158,9 +164,10 @@ export function GenerationJobsView() {
     };
     const timer = window.setTimeout(() => { void poll(); }, pollDelay);
     return () => { active = false; window.clearTimeout(timer); };
-  }, [current, pollRetryGeneration, t]);
+  }, [selectedJob, pollRetryGeneration, t, workspaceId]);
 
   function selectJob(job: GenerationJob) {
+    if (!isJobReadableInWorkspace(job, workspaceId)) return;
     selectionGeneration.current += 1;
     setCurrent(job);
     setError("");
@@ -168,7 +175,7 @@ export function GenerationJobsView() {
   }
 
   function retryLoad() {
-    if (current && !isTerminalJob(current)) {
+    if (selectedJob && !isTerminalJob(selectedJob)) {
       setPollRetryGeneration((value) => value + 1);
       setCanRetryLoad(false);
       setError("");
@@ -178,18 +185,17 @@ export function GenerationJobsView() {
   }
 
   async function createTestJob() {
-    if (!workspace) return;
+    if (!workspaceId) return;
     const request = ++requestGeneration.current;
     const selection = selectionGeneration.current;
-    const workspaceId = workspace.id;
     setWorking(true);
     setError("");
     setCanRetryLoad(false);
     try {
       const job = await api.createGenerationJob(workspaceId, JSON.stringify({ purpose: "foundation-check" }), t("jobs.testTitle"));
       if (request !== requestGeneration.current) return;
-      setJobs((previous) => mergeGenerationJob({ jobs: previous, selectedJobId: job.id, error: "" }, job).jobs);
-      if (selection === selectionGeneration.current) setCurrent(job);
+      setJobs((previous) => mergeGenerationJob({ jobs: previous, selectedJobId: job.id, error: "" }, job, workspaceId).jobs);
+      if (selection === selectionGeneration.current && isJobReadableInWorkspace(job, workspaceId)) setCurrent(job);
     } catch (caught) {
       if (request !== requestGeneration.current) return;
       setError(caught instanceof Error ? caught.message : t("jobs.createError"));
@@ -199,6 +205,7 @@ export function GenerationJobsView() {
   }
 
   async function cancelJob(job: GenerationJob) {
+    if (!isJobReadableInWorkspace(job, workspaceId)) return;
     const request = ++requestGeneration.current;
     const selection = selectionGeneration.current;
     setWorking(true);
@@ -208,8 +215,8 @@ export function GenerationJobsView() {
       await api.cancelGenerationJob(job.id);
       const next = await api.getGenerationJob(job.id);
       if (request !== requestGeneration.current) return;
-      setJobs((previous) => mergeGenerationJob({ jobs: previous, selectedJobId: next.id, error: "" }, next).jobs);
-      if (selection === selectionGeneration.current) setCurrent(next);
+      setJobs((previous) => mergeGenerationJob({ jobs: previous, selectedJobId: next.id, error: "" }, next, workspaceId).jobs);
+      if (selection === selectionGeneration.current && isJobReadableInWorkspace(next, workspaceId)) setCurrent(next);
     } catch (caught) {
       if (request !== requestGeneration.current) return;
       setError(caught instanceof Error ? caught.message : t("jobs.cancelError"));
@@ -218,7 +225,7 @@ export function GenerationJobsView() {
     }
   }
 
-  const activeJob = current ?? jobs[0] ?? null;
+  const activeJob = selectActiveGenerationJob({ current, jobs, activeWorkspaceId: workspaceId });
   const canCancel = canCancelGenerationJob(activeJob);
 
   return <div className="account-page generation-jobs-page">
