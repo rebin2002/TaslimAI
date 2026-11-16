@@ -25,9 +25,9 @@
  *    #775, #778, #784 or #801, and nothing imports it from MovieStudioView.
  */
 
+import { movieMakeoverCopy, movieMakeoverDirection, localizedMovieMakeoverBlocker, localizedMovieMakeoverGap, localizedMovieMakeoverSourcePendingCopy, type MovieMakeoverLocale } from "./movieVideoMakeoverLocale";
 import {
   countSelectableMovieVideoMakeoverSources,
-  movieVideoMakeoverSourcePendingCopy,
   type MovieVideoMakeoverSourceEntry,
 } from "@/lib/movieVideoMakeoverSourceCatalog";
 
@@ -37,6 +37,7 @@ export type MovieVideoMakeoverSourcePanelProps = {
   readonly mode: string | null;
   readonly onAttach: (assetId: string) => void;
   readonly onDetach: () => void;
+  readonly locale?: MovieMakeoverLocale;
 };
 
 export type MovieVideoMakeoverSourceRow = {
@@ -65,7 +66,9 @@ export function movieVideoMakeoverSourcePanelModel(
   entries: readonly MovieVideoMakeoverSourceEntry[],
   selectedAssetId: string | null,
   mode: string | null,
+  locale: MovieMakeoverLocale = "en",
 ): MovieVideoMakeoverSourcePanelModel {
+  const c = movieMakeoverCopy(locale);
   const rows: MovieVideoMakeoverSourceRow[] = entries.map((entry) => {
     const attached = entry.assetId !== "" && entry.assetId === selectedAssetId;
     return {
@@ -73,8 +76,8 @@ export function movieVideoMakeoverSourcePanelModel(
       label: entry.label,
       attached,
       attachable: entry.selectable,
-      reasons: entry.blockers.map((blocker) => blocker.message),
-      pendingFacts: entry.gaps.map((gap) => gap.message),
+      reasons: entry.blockers.map((blocker) => localizedMovieMakeoverBlocker(blocker.code, blocker.message, locale)),
+      pendingFacts: entry.gaps.map((gap) => localizedMovieMakeoverGap(gap.code, gap.message, locale)),
     };
   });
 
@@ -83,15 +86,14 @@ export function movieVideoMakeoverSourcePanelModel(
 
   let notice: string;
   if (entries.length === 0) {
-    notice = "No clips to list. Finish a short-form Movie render, or upload a video asset, then reopen this picker.";
+    notice = c.sourceNoClips;
   } else if (selectableCount === 0) {
-    notice = "None of these clips can be a makeover source yet. Each row says what is missing.";
+    notice = c.sourceNoneEligible;
   } else {
-    notice = String(selectableCount) + " of " + String(entries.length)
-      + " clip" + (entries.length === 1 ? "" : "s") + " can be attached as a source.";
+    notice = c.sourceCount(selectableCount, entries.length);
   }
 
-  const copy = movieVideoMakeoverSourcePendingCopy(attachedEntry, mode);
+  const copy = localizedMovieMakeoverSourcePendingCopy(attachedEntry, mode, locale);
   return { rows, notice, headline: copy.headline, details: copy.details, attachedEntry };
 }
 
@@ -101,22 +103,24 @@ export function MovieVideoMakeoverSourcePanel({
   mode,
   onAttach,
   onDetach,
+  locale = "en",
 }: MovieVideoMakeoverSourcePanelProps) {
-  const model = movieVideoMakeoverSourcePanelModel(entries, selectedAssetId, mode);
+  const model = movieVideoMakeoverSourcePanelModel(entries, selectedAssetId, mode, locale);
+  const c = movieMakeoverCopy(locale);
 
   return (
-    <section className="movie-makeover-source-panel" aria-label="Makeover source video">
+    <section className="movie-makeover-source-panel" dir={movieMakeoverDirection(locale)} aria-label={c.sourceRegion}>
       <header className="movie-makeover-source-header">
-        <h3>Source video</h3>
+        <h3>{c.source}</h3>
         <p className="movie-makeover-source-notice" role="note">{model.notice}</p>
         <p className="movie-makeover-source-scope" role="note">
-          {"Picking a source only edits the draft. Upload from this panel is not wired, and attaching a clip starts no job and reserves no credit."}
+          {c.sourceScope}
         </p>
       </header>
 
       {model.rows.length === 0 ? (
         <p className="movie-makeover-source-empty">
-          Nothing to show yet. A source has to be a finished video asset in this workspace.
+          {c.sourceEmpty}
         </p>
       ) : (
         <ul className="movie-makeover-source-list">
@@ -139,13 +143,13 @@ export function MovieVideoMakeoverSourcePanel({
               )}
               {row.attachable && !row.attached && (
                 <button type="button" onClick={() => onAttach(row.assetId)}>
-                  Attach as source
+                  {c.attach}
                 </button>
               )}
               {row.attached && (
                 <span className="movie-makeover-source-attached">
-                  Attached
-                  <button type="button" onClick={onDetach}>Detach</button>
+                  {c.attached}
+                  <button type="button" onClick={onDetach}>{c.detach}</button>
                 </span>
               )}
             </li>

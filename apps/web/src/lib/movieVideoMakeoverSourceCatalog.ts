@@ -462,8 +462,24 @@ export function describeMovieVideoMakeoverProjectSources(
   if (clips.length === 0) {
     return [];
   }
+  // Same-tab workspace switches can leave a previously loaded Movie project in
+  // memory while the next workspace's records load. Hide its *entire* catalogue,
+  // including private clip names and status, rather than merely marking each
+  // row unattachable after it has already been rendered.
+  const activeWorkspaceId = cleanText(context.workspaceId, MOVIE_VIDEO_MAKEOVER_INPUT_LIMITS.maxWorkspaceIdLength);
+  const projectWorkspaceId = cleanText(project?.workspaceId, MOVIE_VIDEO_MAKEOVER_INPUT_LIMITS.maxWorkspaceIdLength);
+  if (activeWorkspaceId !== null && projectWorkspaceId !== activeWorkspaceId) {
+    return [];
+  }
+
   const byAssetId = new Map<string, MovieVideoMakeoverAssetSource>();
   for (const asset of assets) {
+    // Also refuse an asset list retained from another workspace. Falling back
+    // to the project clip ID is safer than showing a foreign asset's title.
+    if (activeWorkspaceId !== null
+      && cleanText(asset.workspaceId, MOVIE_VIDEO_MAKEOVER_INPUT_LIMITS.maxWorkspaceIdLength) !== activeWorkspaceId) {
+      continue;
+    }
     if (!byAssetId.has(asset.id)) {
       byAssetId.set(asset.id, asset);
     }

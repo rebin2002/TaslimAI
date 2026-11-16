@@ -24,6 +24,7 @@
  *    like the rest of this repo's component tests (no DOM shim needed).
  */
 
+import { movieMakeoverCopy, movieMakeoverDirection, type MovieMakeoverLocale } from "./movieVideoMakeoverLocale";
 import {
   admitMovieVideoMakeoverDraft,
   createMovieVideoMakeoverDraft,
@@ -44,9 +45,20 @@ import {
 export type MovieVideoMakeoverInputPanelProps = {
   readonly selection: MovieVideoMakeoverSelection;
   readonly onChange: (nextSelection: MovieVideoMakeoverSelection) => void;
+  /** Suppress the demo-only source selector when a verified source panel is mounted. */
+  readonly showPlaceholderSourceControl?: boolean;
+  readonly locale?: MovieMakeoverLocale;
 };
 
-export function MovieVideoMakeoverInputPanel({ selection, onChange }: MovieVideoMakeoverInputPanelProps) {
+export function MovieVideoMakeoverInputPanel({ selection, onChange, showPlaceholderSourceControl = true, locale = "en" }: MovieVideoMakeoverInputPanelProps) {
+  const c = movieMakeoverCopy(locale);
+  const modeLabel = (mode: string, fallback: string): string => {
+    if (locale === "en") return fallback;
+    if (mode === "studio-swap") return c.modeStudio;
+    if (mode === "relight") return c.modeRelight;
+    if (mode === "restyle") return c.modeRestyle;
+    return c.modeWardrobe;
+  };
   const admission: MovieVideoMakeoverAdmission = admitMovieVideoMakeoverDraft(
     createMovieVideoMakeoverDraft(buildMovieVideoMakeoverDraftInput(selection)),
   );
@@ -73,16 +85,16 @@ export function MovieVideoMakeoverInputPanel({ selection, onChange }: MovieVideo
   };
 
   return (
-    <section className="movie-makeover-input-panel" aria-label="AI Video Makeover inputs">
+    <section className="movie-makeover-input-panel" dir={movieMakeoverDirection(locale)} aria-label={c.inputRegion}>
       <header className="movie-makeover-input-header">
-        <h3>AI Video Makeover</h3>
+        <h3>{c.title}</h3>
         <p className="movie-makeover-wiring-notice" role="note">
-          {"Draft input only. No provider is wired: estimate and start controls stay disabled and no credit is reserved."}
+          {c.draftNotice}
         </p>
       </header>
 
-      <fieldset className="movie-makeover-modes" aria-label="Makeover mode">
-        <legend>Mode</legend>
+      <fieldset className="movie-makeover-modes" aria-label={c.modeRegion}>
+        <legend>{c.mode}</legend>
         {MOVIE_VIDEO_MAKEOVER_UI_MODE_CHOICES.map((choice) => (
           <label key={choice.value} className={choice.supported ? "movie-makeover-mode" : "movie-makeover-mode movie-makeover-mode-future"}>
             <input
@@ -92,10 +104,10 @@ export function MovieVideoMakeoverInputPanel({ selection, onChange }: MovieVideo
               checked={selection.mode === choice.value}
               onChange={() => setField("mode", choice.value)}
             />
-            <span>{choice.label}</span>
+            <span>{modeLabel(choice.value, choice.label)}</span>
             {!choice.supported && (
-              <span className="movie-makeover-future-badge" aria-label="Support status">
-                {choice.availabilityLabel}
+              <span className="movie-makeover-future-badge" aria-label={c.supportStatus}>
+                {locale === "en" ? choice.availabilityLabel : c.future}
               </span>
             )}
           </label>
@@ -107,32 +119,34 @@ export function MovieVideoMakeoverInputPanel({ selection, onChange }: MovieVideo
         )}
       </fieldset>
 
-      <div className="movie-makeover-source" aria-label="Source video">
-        <span className="movie-makeover-source-label">Source video</span>
+      {showPlaceholderSourceControl ? (
+      <div className="movie-makeover-source" aria-label={c.source}>
+        <span className="movie-makeover-source-label">{c.source}</span>
         {selection.sourceAssetId === null ? (
           <button
             type="button"
             onClick={() => setField("sourceAssetId", "workspace-clip-001")}
           >
-            Choose an uploaded clip
+            {c.chooseClip}
           </button>
         ) : (
           <span className="movie-makeover-source-selected">
-            Selected clip: {selection.sourceAssetId}
+            {c.selectedClip}: {selection.sourceAssetId}
             <button type="button" onClick={() => setField("sourceAssetId", null)}>
-              Remove
+              {c.remove}
             </button>
           </span>
         )}
         {blockedField("source.assetId") && (
           <p className="movie-makeover-field-error" role="alert">
-            Attach the source video to makeover.
+            {c.attachSource}
           </p>
         )}
       </div>
+      ) : null}
 
-      <fieldset className="movie-makeover-presets" aria-label="Preset">
-        <legend>Preset</legend>
+      <fieldset className="movie-makeover-presets" aria-label={c.preset}>
+        <legend>{c.preset}</legend>
         {MOVIE_VIDEO_MAKEOVER_UI_PRESET_IDS.map((presetId) => (
           <label key={presetId} className="movie-makeover-preset">
             <input
@@ -153,7 +167,7 @@ export function MovieVideoMakeoverInputPanel({ selection, onChange }: MovieVideo
       </fieldset>
 
       <label className="movie-makeover-prompt">
-        Optional prompt
+        {c.prompt}
         <textarea
           value={selection.prompt}
           onChange={(event) => setField("prompt", event.target.value)}
@@ -162,14 +176,14 @@ export function MovieVideoMakeoverInputPanel({ selection, onChange }: MovieVideo
         />
       </label>
 
-      <fieldset className="movie-makeover-capabilities" aria-label="Capability evidence">
-        <legend>Verified capabilities</legend>
+      <fieldset className="movie-makeover-capabilities" aria-label={c.capability}>
+        <legend>{c.capability}</legend>
         <p className="movie-makeover-capability-note">
-          Required for this mode:{" "}
+          {c.requiredForMode}{" "}
           {requiredFeatures.length === 0
-            ? "none until a supported mode is selected"
+            ? c.none
             : requiredFeatures.map((feature) => MOVIE_VIDEO_MAKEOVER_UI_FEATURE_LABELS[feature]).join(", ")}
-          . A feature counts only when documented by the provider and confirmed by a tested capability.
+          . {c.capabilityRule}
         </p>
         {requiredFeatures.map((feature) => {
           const row = selection.capabilities.find((capability) => capability.feature === feature);
@@ -186,7 +200,7 @@ export function MovieVideoMakeoverInputPanel({ selection, onChange }: MovieVideo
                 <span>{MOVIE_VIDEO_MAKEOVER_UI_FEATURE_LABELS[feature]}</span>
               </label>
               <label className="movie-makeover-capability-evidence">
-                Evidence
+                {c.evidence}
                 <select
                   value={evidence}
                   onChange={(event) =>
@@ -207,15 +221,15 @@ export function MovieVideoMakeoverInputPanel({ selection, onChange }: MovieVideo
         })}
       </fieldset>
 
-      <fieldset className="movie-makeover-preservation" aria-label="Preservation and consent">
-        <legend>Preservation and consent</legend>
+      <fieldset className="movie-makeover-preservation" aria-label={c.preservation}>
+        <legend>{c.preservation}</legend>
         <label>
           <input
             type="checkbox"
             checked={selection.preserveSubjectIdentity}
             onChange={(event) => setField("preserveSubjectIdentity", event.target.checked)}
           />
-          <span>Preserve subject identity (never swap faces)</span>
+          <span>{c.preserveIdentity}</span>
         </label>
         <label>
           <input
@@ -223,7 +237,7 @@ export function MovieVideoMakeoverInputPanel({ selection, onChange }: MovieVideo
             checked={selection.preserveOriginalAudio}
             onChange={(event) => setField("preserveOriginalAudio", event.target.checked)}
           />
-          <span>Preserve original audio</span>
+          <span>{c.preserveAudio}</span>
         </label>
         <label>
           <input
@@ -231,7 +245,7 @@ export function MovieVideoMakeoverInputPanel({ selection, onChange }: MovieVideo
             checked={selection.creatorApproved}
             onChange={(event) => setField("creatorApproved", event.target.checked)}
           />
-          <span>Creator explicitly approves this makeover draft</span>
+          <span>{c.creatorApproval}</span>
         </label>
       </fieldset>
 
@@ -245,11 +259,11 @@ export function MovieVideoMakeoverInputPanel({ selection, onChange }: MovieVideo
           ))}
         </ul>
         <div className="movie-makeover-actions">
-          <button type="button" disabled title="Not wired yet">
+          <button type="button" disabled title={c.notWired}>
             {status.estimateButtonEnabledWording}
           </button>
-          <button type="button" disabled title="Not wired yet">
-            Start makeover
+          <button type="button" disabled title={c.notWired}>
+            {c.start}
           </button>
         </div>
         <p className="movie-makeover-safety-line">

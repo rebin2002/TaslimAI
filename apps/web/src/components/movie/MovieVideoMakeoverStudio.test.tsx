@@ -1,8 +1,10 @@
 import { renderToStaticMarkup } from "react-dom/server";
+import { movieMakeoverCopy } from "./movieVideoMakeoverLocale";
 import { describe, expect, it } from "vitest";
 import {
   MovieVideoMakeoverStudio,
   reduceMovieVideoMakeoverStudioSource,
+  reconcileMovieVideoMakeoverStudioSelection,
   type MovieVideoMakeoverStudioProps,
 } from "./MovieVideoMakeoverStudio";
 import {
@@ -119,9 +121,111 @@ const inertHandlers: Pick<MovieVideoMakeoverStudioProps, "onChange"> = {
   },
 };
 
-function render(props: Pick<MovieVideoMakeoverStudioProps, "project" | "assets" | "principalId" | "workspaceId" | "selection">): string {
-  return renderToStaticMarkup(<MovieVideoMakeoverStudio {...props} {...inertHandlers} />);
+function render(props: Pick<MovieVideoMakeoverStudioProps, "project" | "assets" | "principalId" | "workspaceId" | "selection"> & Pick<MovieVideoMakeoverStudioProps, "comparison" | "comparisonBinding"> & Partial<Pick<MovieVideoMakeoverStudioProps, "sourceReadBinding" | "draftReadBinding" | "locale">>): string {
+  const {
+    sourceReadBinding = { principalId: PRINCIPAL, workspaceId: WORKSPACE },
+    draftReadBinding = { principalId: PRINCIPAL, workspaceId: WORKSPACE },
+    ...rest
+  } = props;
+  return renderToStaticMarkup(
+    <MovieVideoMakeoverStudio
+      {...rest}
+      sourceReadBinding={sourceReadBinding}
+      draftReadBinding={draftReadBinding}
+      {...inertHandlers}
+    />,
+  );
 }
+
+describe("Movie Makeover locale-safe provider-free composition", () => {
+  for (const locale of ["ar", "ku"] as const) {
+    it(`renders ${locale} RTL controls without enabling a provider or exposing cross-account drafts`, () => {
+      const markup = render({
+        project: project(),
+        assets: assets(),
+        principalId: PRINCIPAL,
+        workspaceId: WORKSPACE,
+        selection: settledDraftParts(),
+        comparison: null,
+        comparisonBinding: null,
+        locale,
+      });
+      expect(markup).toContain('dir="rtl"');
+      expect(markup).toContain(locale === "ar" ? "تحسين الفيديو بالذكاء الاصطناعي" : "جوانکردنی ڤیدیۆ بە زیرەکی دەستکرد");
+      expect(markup).toContain(locale === "ar" ? "إرفاق كمصدر" : "زیادکردن وەک سەرچاوە");
+      expect(markup).toContain(locale === "ar" ? "لم يتم ربط مزود الخدمة" : "هیچ دابینکەرێک پەیوەست نەکراوە");
+      expect(markup).toContain("launchPermitted: false");
+      expect(markup).toContain("billable: false");
+      expect(markup).not.toContain('title="Not wired yet"');
+    });
+  }
+
+  it("keeps localized comparison labels when its route supplies default English overrides", () => {
+    const selection = reduceMovieVideoMakeoverStudioSource(
+      settledDraftParts(), "asset_take_01", catalogue(),
+    );
+    for (const locale of ["ar", "ku"] as const) {
+      const copy = movieMakeoverCopy(locale);
+      const markup = render({
+        project: project(),
+        assets: assets(),
+        principalId: PRINCIPAL,
+        workspaceId: WORKSPACE,
+        selection,
+        locale,
+        comparisonBinding: {
+          principalId: PRINCIPAL,
+          workspaceId: WORKSPACE,
+          sourceAssetId: "asset_take_01",
+        },
+        comparison: {
+          beforeSource: { url: "/api/test-asset/video" },
+          afterSource: null,
+          viewMode: "split",
+          splitPercent: 50,
+          labels: {
+            region: "ENGLISH ROUTE COMPARISON",
+            modeSplit: "ENGLISH ROUTE SPLIT",
+            afterUnavailable: "ENGLISH ROUTE NO RESULT",
+          },
+          onSplitPercentChange: () => {},
+          onViewModeChange: () => {},
+        },
+      });
+      expect(markup).toContain(copy.region);
+      expect(markup).toContain(copy.split);
+      expect(markup).toContain(copy.afterUnavailable);
+      expect(markup).not.toContain("ENGLISH ROUTE COMPARISON");
+      expect(markup).not.toContain("ENGLISH ROUTE SPLIT");
+      expect(markup).not.toContain("ENGLISH ROUTE NO RESULT");
+      expect(markup).toContain('dir="rtl"');
+    }
+  });
+
+  it("translates the honest unavailable result without replacing it with the source clip", () => {
+    const markup = render({
+      project: project(),
+      assets: assets(),
+      principalId: PRINCIPAL,
+      workspaceId: WORKSPACE,
+      selection: reduceMovieVideoMakeoverStudioSource(settledDraftParts(), "asset_take_01", catalogue()),
+      comparisonBinding: { principalId: PRINCIPAL, workspaceId: WORKSPACE, sourceAssetId: "asset_take_01" },
+      comparison: {
+        beforeSource: { url: "/api/test-asset/video" },
+        afterSource: null,
+        viewMode: "split",
+        splitPercent: 50,
+        onSplitPercentChange: () => { throw new Error("render cannot move splitter"); },
+        onViewModeChange: () => { throw new Error("render cannot change view"); },
+      },
+      locale: "ku",
+    });
+    expect(markup).toContain("پێشبینینی ئەنجام هێشتا بەردەست نییە");
+    expect(markup).toContain('dir="rtl"');
+    expect(markup).toContain("/api/test-asset/video");
+    expect(markup).not.toContain('aria-label="ئەنجامی جوانکردن"');
+  });
+});
 
 describe("studio: what the real Movie read models can and cannot say", () => {
   it("builds one row per clip in project order", () => {
@@ -174,6 +278,147 @@ describe("studio: what the real Movie read models can and cannot say", () => {
     const orphan = describeMovieVideoMakeoverProjectSources(absent, assets(), {})[0];
     expect(orphan.gaps.map((gap) => gap.code)).toContain("size_unknown");
     expect(orphan.blockers.map((blocker) => blocker.code)).toContain("source_asset_not_video");
+  });
+
+  it("shows no private source names if the current principal or workspace is not resolved", () => {
+    const staleSelection = reduceMovieVideoMakeoverStudioSource(
+      settledDraftParts(), "asset_take_01", catalogue(),
+    );
+    for (const scope of [
+      { principalId: null, workspaceId: WORKSPACE },
+      { principalId: PRINCIPAL, workspaceId: null },
+      { principalId: "  ", workspaceId: WORKSPACE },
+      { principalId: PRINCIPAL, workspaceId: "" },
+    ]) {
+      const markup = render({
+        project: project(),
+        assets: assets(),
+        ...scope,
+        selection: staleSelection,
+      });
+      expect(markup).not.toContain("Interview room take 01");
+      expect(markup).not.toContain("Reel take 02");
+      expect(markup).toContain("No source attached");
+      expect(markup).not.toContain('data-attached="true"');
+    }
+  });
+
+  it("fails closed when cached clip/asset snapshots belong to another principal in the same workspace", () => {
+    const selected = reduceMovieVideoMakeoverStudioSource(
+      settledDraftParts(), "asset_take_01", catalogue(),
+    );
+    const previousRead = { principalId: PRINCIPAL, workspaceId: WORKSPACE };
+    // Account B joins the same workspace. A's old in-memory project and Assets
+    // cannot be repurposed as B's authoritative read merely because workspace matches.
+    for (const readBinding of [previousRead, null, { ...previousRead, workspaceId: "old_workspace" }]) {
+      const markup = render({
+        project: project(),
+        assets: assets(),
+        principalId: "principal_creator_B",
+        workspaceId: WORKSPACE,
+        sourceReadBinding: readBinding,
+        selection: selected,
+      });
+      expect(markup).not.toContain("Interview room take 01");
+      expect(markup).not.toContain("Reel take 02");
+      expect(markup).toContain("No source attached");
+      expect(markup).not.toContain('data-attached="true"');
+      expect(markup).toContain('data-pending-source-facts="0"');
+    }
+    // Correctly-bound fresh synthetic source snapshots remain renderable.
+    const freshMarkup = render({
+      project: project(), assets: assets(),
+      principalId: "principal_creator_B", workspaceId: WORKSPACE,
+      sourceReadBinding: { principalId: "principal_creator_B", workspaceId: WORKSPACE },
+      draftReadBinding: { principalId: "principal_creator_B", workspaceId: WORKSPACE },
+      selection: createEmptyMovieVideoMakeoverSelection(),
+    });
+    expect(freshMarkup).toContain("Interview room take 01");
+  });
+
+  it("never renders a previous account's private makeover prompt after a fresh source fetch", () => {
+    const previousDraft = {
+      ...createEmptyMovieVideoMakeoverSelection(),
+      prompt: "PRIVATE CUSTOMER STORYBOARD FOR ACCOUNT A",
+      approvalReference: "PRIVATE-CONSENT-RECORD-A",
+      creatorApproved: true,
+    };
+    const freshSourceBinding = { principalId: "principal_creator_B", workspaceId: WORKSPACE };
+    for (const draftReadBinding of [
+      { principalId: PRINCIPAL, workspaceId: WORKSPACE }, // Account A's cached draft
+      { principalId: "principal_creator_B", workspaceId: "old_workspace" },
+      null, // No proof the draft was re-fetched
+    ]) {
+      const markup = render({
+        project: project(),
+        assets: assets(),
+        principalId: "principal_creator_B",
+        workspaceId: WORKSPACE,
+        sourceReadBinding: freshSourceBinding,
+        draftReadBinding,
+        selection: previousDraft,
+      });
+      expect(markup).not.toContain("PRIVATE CUSTOMER STORYBOARD FOR ACCOUNT A");
+      expect(markup).not.toContain("PRIVATE-CONSENT-RECORD-A");
+      expect(markup).not.toContain("Interview room take 01");
+      expect(markup).not.toContain("<textarea");
+      expect(markup).not.toContain("<button");
+      expect(markup).toContain("No source attached");
+      expect(markup).toContain('data-pending-source-facts="0"');
+    }
+    const correctlyScoped = render({
+      project: project(), assets: assets(),
+      principalId: "principal_creator_B", workspaceId: WORKSPACE,
+      sourceReadBinding: freshSourceBinding, draftReadBinding: freshSourceBinding,
+      selection: previousDraft,
+    });
+    // This only proves the component honors matching read provenance; the
+    // route owner must obtain both bindings at their respective fetch completions.
+    expect(correctlyScoped).toContain("PRIVATE CUSTOMER STORYBOARD FOR ACCOUNT A");
+  });
+
+  it("does not display an old project's private clips after an authenticated workspace switch", () => {
+    const foreignProject = project({ workspaceId: "other_workspace" });
+    const entries = describeMovieVideoMakeoverProjectSources(
+      foreignProject, assets(), { principalId: PRINCIPAL, workspaceId: WORKSPACE },
+    );
+    expect(entries).toEqual([]);
+    const staleSelection = reduceMovieVideoMakeoverStudioSource(
+      settledDraftParts(), "asset_take_01", catalogue(),
+    );
+    const markup = render({
+      project: foreignProject,
+      assets: assets(),
+      principalId: PRINCIPAL,
+      workspaceId: WORKSPACE,
+      selection: staleSelection,
+    });
+    expect(markup).not.toContain("Interview room take 01");
+    expect(markup).not.toContain("Reel take 02");
+    expect(markup).toContain("No source attached");
+    expect(markup).not.toContain('data-attached="true"');
+  });
+
+  it("hides a stale other-workspace asset's title even when the project itself is current", () => {
+    const foreignName = "OTHER WORKSPACE PRIVATE ASSET NAME";
+    const staleAssets = assets().map((asset) => asset.id === "asset_take_01"
+      ? { ...asset, workspaceId: "other_workspace", name: foreignName }
+      : asset);
+    const entries = describeMovieVideoMakeoverProjectSources(
+      project(), staleAssets, { principalId: PRINCIPAL, workspaceId: WORKSPACE },
+    );
+    expect(entries[0].label).toBe("clip_1");
+    expect(entries[0].selectable).toBe(false);
+    expect(entries[0].blockers.map((blocker) => blocker.code)).toContain("source_asset_not_video");
+    const markup = render({
+      project: project(),
+      assets: staleAssets,
+      principalId: PRINCIPAL,
+      workspaceId: WORKSPACE,
+      selection: createEmptyMovieVideoMakeoverSelection(),
+    });
+    expect(markup).not.toContain(foreignName);
+    expect(markup).toContain("clip_1");
   });
 
   it("ignores an absent project and duplicate asset rows", () => {
@@ -242,6 +487,74 @@ describe("studio: attaching a source is a draft edit and nothing more", () => {
     expect(result.previewPermitted).toBe(true);
   });
 
+  it("refreshes same-asset metadata and clears revoked privacy facts without mutating the caller", () => {
+    const selected = {
+      ...reduceMovieVideoMakeoverStudioSource(settledDraftParts(), "asset_take_01", catalogue()),
+      sourceOwnerPrincipalId: PRINCIPAL,
+      sourceVisibilityPrivate: true,
+      sourceRetentionVerified: true,
+      preserveOriginalAudio: true,
+    };
+    const changed = catalogue().map((entry) => entry.assetId === "asset_take_01"
+      ? {
+          ...entry,
+          source: {
+            ...entry.source,
+            durationSeconds: 17,
+            sizeBytes: 61_000_000,
+            ownerPrincipalId: null,
+            visibility: null,
+            retentionPolicyVerified: null,
+            audioPresent: null,
+          },
+        }
+      : entry);
+    const refreshed = reconcileMovieVideoMakeoverStudioSelection(selected, changed);
+    expect(refreshed.sourceAssetId).toBe("asset_take_01");
+    expect(refreshed.sourceDurationSeconds).toBe(17);
+    expect(refreshed.sourceSizeBytes).toBe(61_000_000);
+    expect(refreshed.sourceOwnerPrincipalId).toBeNull();
+    expect(refreshed.sourceVisibilityPrivate).toBe(false);
+    expect(refreshed.sourceRetentionVerified).toBe(false);
+    expect(refreshed.preserveOriginalAudio).toBe(false);
+    expect(refreshed.mode).toBe(selected.mode);
+    expect(refreshed.presetId).toBe(selected.presetId);
+    expect(selected.sourceDurationSeconds).toBe(12);
+    expect(selected.sourceOwnerPrincipalId).toBe(PRINCIPAL);
+    expect(selected.preserveOriginalAudio).toBe(true);
+    expect(admission(refreshed).launchPermitted).toBe(false);
+  });
+
+  it("immediately masks a missing or revoked source without mutating the caller's selection", () => {
+    const selected = reduceMovieVideoMakeoverStudioSource(settledDraftParts(), "asset_take_01", catalogue());
+    const missing = reconcileMovieVideoMakeoverStudioSelection(selected, []);
+    expect(missing.sourceAssetId).toBeNull();
+    expect(missing.sourceSizeBytes).toBeNull();
+    expect(missing.sourceDurationSeconds).toBeNull();
+    expect(admission(missing).blockedReasons.map((reason) => reason.code)).toContain("source_missing");
+    expect(selected.sourceAssetId).toBe("asset_take_01");
+
+    const revoked = catalogue().map((entry) => entry.assetId === "asset_take_01"
+      ? { ...entry, selectable: false }
+      : entry);
+    expect(reconcileMovieVideoMakeoverStudioSelection(selected, revoked).sourceAssetId).toBeNull();
+    expect(reconcileMovieVideoMakeoverStudioSelection(selected, catalogue())).toBe(selected);
+  });
+
+  it("shows no attached source if the active project loses or revokes its clip", () => {
+    const selected = reduceMovieVideoMakeoverStudioSource(settledDraftParts(), "asset_take_01", catalogue());
+    const markup = render({
+      project: project({ clips: [] }),
+      assets: assets(),
+      principalId: PRINCIPAL,
+      workspaceId: WORKSPACE,
+      selection: selected,
+    });
+    expect(markup).toContain("No source attached");
+    expect(markup).not.toContain("Attached, but");
+    expect(markup).toContain("source_missing");
+  });
+
   it("detaching removes the source and returns the draft to its blocking state", () => {
     const attached = reduceMovieVideoMakeoverStudioSource(settledDraftParts(), "asset_take_01", catalogue());
     const detached = reduceMovieVideoMakeoverStudioSource(attached, null, catalogue());
@@ -300,10 +613,9 @@ describe("studio: markup composes the source step with the #784 panel", () => {
       selection: settledDraftParts(),
     });
     const labels = buttonLabels(markup);
-    // Exactly two enabled controls exist in this composition, and both are draft
-    // edits: this slice's "Attach as source" and #784's pre-existing placeholder
-    // source button. Every action control stays disabled, and a draft with no
-    // source attached keeps #784's blocked wording rather than an estimate wording.
+    // Only the real catalogue's "Attach as source" is enabled. The demo-only
+    // placeholder selector is suppressed, and estimate/start stay disabled.
+    // A draft without a source still shows the existing blocked wording.
     expect(labels.filter((label) => label === "Attach as source")).toHaveLength(1);
     expect(markup).toContain('disabled=""');
     expect(markup).toContain('title="Not wired yet"');
@@ -314,7 +626,74 @@ describe("studio: markup composes the source step with the #784 panel", () => {
       .split("<button")
       .slice(1)
       .filter((fragment) => !fragment.slice(0, fragment.indexOf(">")).includes("disabled"));
-    expect(enabled.length).toBe(2);
+    expect(enabled.length).toBe(1);
+    expect(markup).not.toContain("Choose an uploaded clip");
+  });
+
+  it("renders an authorized before preview without inventing an after result", () => {
+    const markup = render({
+      project: project(),
+      assets: assets(),
+      principalId: PRINCIPAL,
+      workspaceId: WORKSPACE,
+      selection: reduceMovieVideoMakeoverStudioSource(settledDraftParts(), "asset_take_01", catalogue()),
+      comparisonBinding: { principalId: PRINCIPAL, workspaceId: WORKSPACE, sourceAssetId: "asset_take_01" },
+      comparison: {
+        beforeSource: { url: "blob:https://studio.taslim.test/00000000-0000-4000-8000-0000000000b4" },
+        afterSource: null,
+        viewMode: "split",
+        splitPercent: 50,
+        dir: "rtl",
+        onSplitPercentChange: () => { throw new Error("static render must not emit split updates"); },
+        onViewModeChange: () => { throw new Error("static render must not emit mode updates"); },
+      },
+    });
+    expect(markup).toContain("movie-makeover-comparison-panel");
+    expect(markup).toContain("Makeover result preview is not available yet");
+    expect(markup).toContain("blob:https://studio.taslim.test/");
+    expect(markup).toContain('dir="rtl"');
+    expect(markup).toContain("launchPermitted: false");
+    expect(markup).not.toContain('aria-label="Makeover result"');
+  });
+
+  it("never renders a previously authorized preview after an identity, workspace or clip switch", () => {
+    const authorizedSource = reduceMovieVideoMakeoverStudioSource(settledDraftParts(), "asset_take_01", catalogue());
+    const privateUrl = "blob:https://studio.taslim.test/00000000-0000-4000-8000-0000000000b4";
+    const comparison = {
+      beforeSource: { url: privateUrl }, afterSource: null, viewMode: "split" as const,
+      splitPercent: 50, onSplitPercentChange: () => {}, onViewModeChange: () => {},
+    };
+    const safe = {
+      project: project(), assets: assets(), principalId: PRINCIPAL,
+      workspaceId: WORKSPACE, selection: authorizedSource, comparison,
+    };
+    const binding = { principalId: PRINCIPAL, workspaceId: WORKSPACE, sourceAssetId: "asset_take_01" };
+    expect(render({ ...safe, comparisonBinding: binding })).toContain(privateUrl);
+    for (const changed of [
+      { comparisonBinding: undefined },
+      { comparisonBinding: { ...binding, principalId: "different_creator" } },
+      { comparisonBinding: { ...binding, workspaceId: "different_workspace" } },
+      { comparisonBinding: { ...binding, sourceAssetId: "asset_take_02" } },
+      { principalId: "different_creator", comparisonBinding: binding },
+      { workspaceId: "different_workspace", comparisonBinding: binding },
+      { project: project({ clips: [] }), comparisonBinding: binding },
+      { selection: createEmptyMovieVideoMakeoverSelection(), comparisonBinding: binding },
+    ]) {
+      const html = render({ ...safe, ...changed });
+      expect(html).not.toContain("movie-makeover-comparison-panel");
+      expect(html).not.toContain(privateUrl);
+    }
+  });
+
+  it("does not expose comparison controls before a route supplies authorized sources", () => {
+    const markup = render({
+      project: project(),
+      assets: assets(),
+      principalId: PRINCIPAL,
+      workspaceId: WORKSPACE,
+      selection: settledDraftParts(),
+    });
+    expect(markup).not.toContain("movie-makeover-comparison-panel");
   });
 
   it("says there is nothing to pick when the project has no clips", () => {
