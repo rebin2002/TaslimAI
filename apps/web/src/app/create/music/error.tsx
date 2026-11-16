@@ -16,7 +16,7 @@ export function MusicStudioRecoveryView({
   panelRef?: RefObject<HTMLElement | null>;
 }>) {
   return (
-    <main className="placeholder-page">
+    <div className="placeholder-page">
       <section
         ref={panelRef}
         className="placeholder-panel"
@@ -37,7 +37,7 @@ export function MusicStudioRecoveryView({
           <Link className="secondary-button" href="/assets">{t("error.openAssets")}</Link>
         </div>
       </section>
-    </main>
+    </div>
   );
 }
 
