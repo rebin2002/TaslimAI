@@ -46,9 +46,17 @@ export function AssetsView({ initialAssetId, initialProjectId, initialSearch, in
   const [filtersOpen, setFiltersOpen] = useState(false);
   const deepLinkGeneration = useRef(0);
   const selectionGeneration = useRef(0);
+  // Identity of the listing request that currently owns the mounted view. The
+  // view stays mounted while the active workspace changes, and filters, pages
+  // and archive/save refreshes can put several list requests on the wire at the
+  // same time. A response that is no longer the newest request - including one
+  // that belongs to a workspace the user already left - must not render, must
+  // not surface its error, and must not release the loading flag.
+  const loadGeneration = useRef(0);
 
   const load = useCallback(async () => {
     if (!workspace) return;
+    const request = ++loadGeneration.current;
     setLoading(true); setError("");
     try {
       const [assets, activeProjects, archivedProjects] = await Promise.all([
@@ -56,15 +64,20 @@ export function AssetsView({ initialAssetId, initialProjectId, initialSearch, in
         api.listProjects(workspace.id, "Active"),
         api.listProjects(workspace.id, "Archived"),
       ]);
+      if (request !== loadGeneration.current) return;
       setResult(assets);
       setProjects([...activeProjects, ...archivedProjects]);
       setSelected((current) => current ? assets.items.find((item) => item.id === current.id) ?? current : current);
     } catch (caught) {
+      if (request !== loadGeneration.current) return;
       setError(caught instanceof Error ? caught.message : t("assets.loadError"));
-    } finally { setLoading(false); }
+    } finally { if (request === loadGeneration.current) setLoading(false); }
   }, [category, page, projectId, search, sort, status, t, workspace]);
 
-  useEffect(() => { const timer = window.setTimeout(() => void load(), 250); return () => window.clearTimeout(timer); }, [load]);
+  useEffect(() => {
+    const timer = window.setTimeout(() => void load(), 250);
+    return () => { window.clearTimeout(timer); loadGeneration.current += 1; };
+  }, [load]);
 
   useEffect(() => {
     const request = ++deepLinkGeneration.current;
