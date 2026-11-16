@@ -236,6 +236,57 @@ test.describe("basic accessibility smoke", () => {
     expect(traffic.apiCalls.every((call) => call.startsWith("GET "))).toBe(true);
   });
 
+  test("locks preference edits and step navigation while completion is in flight", async ({ page }) => {
+    const traffic = await interceptOnboardingApi(page, { allowCompletion: true });
+    let resumeCompletion!: () => void;
+    const heldCompletion = new Promise<void>((resolve) => { resumeCompletion = resolve; });
+    let markCompletionArrived!: () => void;
+    const completionArrived = new Promise<void>((resolve) => { markCompletionArrived = resolve; });
+
+    // Run this route before the shared synthetic API handler. The request is
+    // deliberately held to verify the real pending-save UI, then handed off.
+    await page.route("**/api/auth/onboarding/complete", async (route) => {
+      markCompletionArrived();
+      await heldCompletion;
+      await route.fallback();
+    });
+    await page.goto("/projects");
+    const dialog = page.getByRole("dialog");
+    await expect(dialog).toBeVisible();
+    await dialog.locator(".onboarding-skip").click();
+    await completionArrived;
+
+    await expect(dialog.locator("input[data-dialog-autofocus]")).toBeDisabled();
+    await expect(dialog.locator(".onboarding-fields select").first()).toBeDisabled();
+    await expect(dialog.locator(".onboarding-fields select").nth(1)).toBeDisabled();
+    await expect(dialog.locator(".onboarding-actions .primary-button")).toBeDisabled();
+
+    resumeCompletion();
+    await expect(dialog).toBeHidden();
+    expect(traffic.completionRequests).toHaveLength(1);
+    expect(traffic.unexpectedApiCalls).toEqual([]);
+    expect(traffic.externalRequests).toEqual([]);
+  });
+
+  test("rapid onboarding completion is single-flight and sends no duplicate writes", async ({ page }) => {
+    const traffic = await interceptOnboardingApi(page, { allowCompletion: true });
+    await page.goto("/projects");
+    const dialog = page.getByRole("dialog");
+    await expect(dialog).toBeVisible();
+    await dialog.locator(".onboarding-skip").evaluate((element) => {
+      const button = element as HTMLButtonElement;
+      // Consecutive DOM events in one synchronous task represent rapid clicks
+      // before the save operation has returned.
+      button.click();
+      button.click();
+    });
+    await expect(dialog).toBeHidden();
+    expect(traffic.completionRequests).toHaveLength(1);
+    expect(traffic.completionRequests[0].csrfToken).toBe("issue-109-synthetic-csrf");
+    expect(traffic.unexpectedApiCalls).toEqual([]);
+    expect(traffic.externalRequests).toEqual([]);
+  });
+
   const completionProfiles: Array<{ locale: Locale; lang: string; dir: string }> = [
     { locale: "en", lang: "en", dir: "ltr" },
     { locale: "ar", lang: "ar", dir: "rtl" },
