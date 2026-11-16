@@ -11,7 +11,7 @@ import { useLocale } from "@/components/LocaleProvider";
 import { StudioChooser } from "@/components/StudioChooser";
 import { api, type ActivityItem, type Asset, type Conversation, type Project } from "@/lib/api";
 import { buildHomeRecentItems, hasInFlightActivity, type HomeRecentItem } from "@/lib/homeDashboardState";
-import { createHomeCreationSubmissionGate, resolveHomeCreationPrompt } from "@/lib/homeCreation";
+import { createHomeCreationSubmissionGate, createLatestHomeDashboardReadGate, resolveHomeCreationPrompt } from "@/lib/homeCreation";
 
 const promptChips = [
   { labelKey: "home.promptCampaign" },
@@ -61,6 +61,7 @@ function HomeDashboard() {
     submissionGate.current = gate;
     return () => gate.cancel();
   }, []);
+  const dashboardReadGate = useRef(createLatestHomeDashboardReadGate());
   const [dashboard, setDashboard] = useState<DashboardData | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState("");
@@ -68,7 +69,10 @@ function HomeDashboard() {
 
   const loadDashboard = useCallback(async () => {
     if (!workspace) return;
+    const isCurrentRead = dashboardReadGate.current.begin();
     setLoading(true);
+    // Never display an older dashboard snapshot as fresh while refetching.
+    setDashboard(null);
     try {
       const [projects, conversations, activityResult, assetsResult] = await Promise.all([
         api.listProjects(workspace.id, "Active"),
@@ -76,18 +80,22 @@ function HomeDashboard() {
         api.listActivity(workspace.id, 1, 12),
         api.listAssets(workspace.id, { status: "Active", page: 1, pageSize: 12 }),
       ]);
+      if (!isCurrentRead()) return;
       setDashboard({ projects, conversations, activity: activityResult.items, assets: assetsResult.items });
       setLoadError("");
     } catch (caught) {
-      setLoadError(caught instanceof Error ? caught.message : t("home.loadError"));
+      if (isCurrentRead()) setLoadError(caught instanceof Error ? caught.message : t("home.loadError"));
     } finally {
-      setLoading(false);
+      if (isCurrentRead()) setLoading(false);
     }
   }, [t, workspace]);
 
   // Fetch workspace-scoped records after authentication state is available.
   // eslint-disable-next-line react-hooks/set-state-in-effect
-  useEffect(() => { void loadDashboard(); }, [loadDashboard]);
+  useEffect(() => {
+    void loadDashboard();
+    return () => dashboardReadGate.current.cancel();
+  }, [loadDashboard]);
   const recentItems = useMemo(() => dashboard ? buildHomeRecentItems(dashboard, 4) : [], [dashboard]);
   const hasWorkingGeneration = hasInFlightActivity(dashboard?.activity ?? []);
   const projects = dashboard?.projects ?? [];
