@@ -32,7 +32,20 @@ assert manifest["productionSafetyDefaults"]["persistentStorageProvider"] == "S3C
 for key in ("source", "buildInputs", "migrations", "baseImages", "productionSafetyDefaults"):
     assert manifest[key] == second[key], key
 
-serialized = Path(sys.argv[1]).read_text(encoding="utf-8").lower()
+def without_artifact_paths(value):
+    if isinstance(value, dict):
+        return {
+            key: without_artifact_paths(item)
+            for key, item in value.items()
+            if key not in {"path", "latestFile", "dockerfile"}
+        }
+    if isinstance(value, list):
+        return [without_artifact_paths(item) for item in value]
+    return value
+
+# Paths may legitimately contain domain terms such as PasswordReset; scan all
+# manifest metadata and values while excluding only artifact-identification fields.
+serialized = json.dumps(without_artifact_paths(manifest), sort_keys=True).lower()
 for forbidden in ("password", "secretkey", "accesskey", "apikey", "connectionstrings"):
     assert forbidden not in serialized, forbidden
 PY
