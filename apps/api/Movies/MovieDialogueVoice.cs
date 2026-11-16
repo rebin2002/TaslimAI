@@ -320,7 +320,9 @@ public sealed class MovieDialogueVoiceGenerationJobHandler(
     private void ValidateOutput(MovieDialogueVoiceProviderResult output)
     {
         var maximum = Math.Min(10 * 1_048_576, Math.Max(1, settings.MaxOutputBytes));
+        var maximumDuration = Math.Max(1, settings.MaxDurationMilliseconds);
         if (output.Content.Length <= 0 || output.Content.Length > maximum || output.DurationMilliseconds <= 0
+            || output.DurationMilliseconds > maximumDuration
             || string.IsNullOrWhiteSpace(output.ContentType) || !output.ContentType.StartsWith("audio/", StringComparison.OrdinalIgnoreCase)
             || string.IsNullOrWhiteSpace(output.Format) || output.Format.Length > 12)
             throw new MovieDialogueVoiceOutputInvalidException();
