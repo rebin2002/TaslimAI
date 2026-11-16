@@ -209,12 +209,17 @@ public sealed class MovieStudioClipIdempotencyCollisionTests : IClassFixture<Mov
             MovieOperationalFixtures.SendWithCsrfAsync(client, HttpMethod.Post, path, new { title = "Different title on the same key" }, null, key));
         var bodies = await Task.WhenAll(responses.Select(response => response.Content.ReadAsStringAsync()));
 
-        var statuses = responses.Select(response => response.StatusCode).OrderBy(status => (int)status).ToArray();
-        Assert.Equal(new[] { HttpStatusCode.Accepted, HttpStatusCode.BadRequest }, statuses);
-        var acceptedIndex = Array.IndexOf(statuses, HttpStatusCode.Accepted);
-        var rejectedIndex = 1 - acceptedIndex;
-        var accepted = JsonSerializer.Deserialize<MovieStudioGenerationResponse>(bodies[acceptedIndex], new JsonSerializerOptions(JsonSerializerDefaults.Web))!;
-        using var rejection = JsonDocument.Parse(bodies[rejectedIndex]);
+        // Either request can win the claim, so the outcome is asserted by role rather than
+        // by send order: exactly one accepted generation and exactly one key conflict.
+        var acceptedPositions = Enumerable.Range(0, responses.Length)
+            .Where(index => responses[index].StatusCode == HttpStatusCode.Accepted).ToArray();
+        var rejectedPositions = Enumerable.Range(0, responses.Length)
+            .Where(index => responses[index].StatusCode == HttpStatusCode.BadRequest).ToArray();
+        Assert.Single(acceptedPositions);
+        Assert.Single(rejectedPositions);
+        var accepted = JsonSerializer.Deserialize<MovieStudioGenerationResponse>(
+            bodies[acceptedPositions[0]], new JsonSerializerOptions(JsonSerializerDefaults.Web))!;
+        using var rejection = JsonDocument.Parse(bodies[rejectedPositions[0]]);
         Assert.Equal("IDEMPOTENCY_KEY_REUSED", rejection.RootElement.GetProperty("error").GetProperty("code").GetString());
 
         // The rejected request had already persisted its own speculative clip before it
