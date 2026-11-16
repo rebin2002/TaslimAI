@@ -46,6 +46,22 @@ function IdentityScopedMovieTeamWorkspace({ project }: { project: MovieProject }
   // server-authorized permission/review snapshot when it resolves last.
   const loadRevision = useRef(0);
   const mounted = useRef(false);
+  // React state can lag a rapid double click; guard all four server writes
+  // synchronously so a review/comment cannot be submitted twice.
+  const mutationInFlight = useRef(false);
+
+  const beginMutation = () => {
+    if (mutationInFlight.current || !mounted.current) return false;
+    mutationInFlight.current = true;
+    setBusy(true);
+    loadRevision.current += 1; // Invalidate earlier permission reads.
+    return true;
+  };
+
+  const endMutation = () => {
+    mutationInFlight.current = false;
+    if (mounted.current) setBusy(false);
+  };
 
   const load = useCallback(async () => {
     if (!mounted.current) return;
@@ -80,10 +96,7 @@ function IdentityScopedMovieTeamWorkspace({ project }: { project: MovieProject }
   }, [load]);
 
   async function submitComment() {
-    if (commentBody.trim().length === 0) return;
-    setBusy(true);
-    // Any earlier authorization read is invalid after a mutation begins.
-    loadRevision.current += 1;
+    if (commentBody.trim().length === 0 || !canComment || !beginMutation()) return;
     setError("");
     setMessage("");
     try {
@@ -99,14 +112,12 @@ function IdentityScopedMovieTeamWorkspace({ project }: { project: MovieProject }
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "The note could not be saved.");
     } finally {
-      setBusy(false);
+      endMutation();
     }
   }
 
   async function resolve(commentId: string) {
-    setBusy(true);
-    // Any earlier authorization read is invalid after a mutation begins.
-    loadRevision.current += 1;
+    if (!canComment || !beginMutation()) return;
     setError("");
     try {
       setCollaboration(await api.resolveMovieComment(project.id, commentId));
@@ -114,15 +125,12 @@ function IdentityScopedMovieTeamWorkspace({ project }: { project: MovieProject }
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "The note could not be resolved.");
     } finally {
-      setBusy(false);
+      endMutation();
     }
   }
 
   async function requestReview() {
-    if (!user || !reviewerUserId) return;
-    setBusy(true);
-    // Any earlier authorization read is invalid after a mutation begins.
-    loadRevision.current += 1;
+    if (!user || !canRequestReviews || !reviewerOptions.some((member) => member.userId === reviewerUserId) || !beginMutation()) return;
     setError("");
     setMessage("");
     try {
@@ -141,14 +149,13 @@ function IdentityScopedMovieTeamWorkspace({ project }: { project: MovieProject }
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "The review request could not be saved.");
     } finally {
-      setBusy(false);
+      endMutation();
     }
   }
 
   async function decideReview(reviewId: string, status: "Approved" | "ChangesRequested" | "Rejected") {
-    setBusy(true);
-    // Any earlier authorization read is invalid after a mutation begins.
-    loadRevision.current += 1;
+    const review = collaboration?.reviews.find((item) => item.id === reviewId);
+    if (!review || !canDecide(review) || !beginMutation()) return;
     setError("");
     setMessage("");
     try {
@@ -159,7 +166,7 @@ function IdentityScopedMovieTeamWorkspace({ project }: { project: MovieProject }
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "The review decision could not be saved.");
     } finally {
-      setBusy(false);
+      endMutation();
     }
   }
 
