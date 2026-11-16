@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { describeCreditBalance, scopedBillingAccount } from "./billingCreditBalance";
+import { describeCreditBalance, formatBillingDate, scopedBillingAccount } from "./billingCreditBalance";
 import type { BillingCredits } from "./api";
 
 const viewSource = readFileSync(new URL("../components/BillingView.tsx", import.meta.url), "utf8");
@@ -105,6 +105,18 @@ describe("credit balance truth", () => {
     expect(balance.purchasedRemaining).toBe(500);
     expect(balance.adjustmentBalance).toBe(-400);
     expect(balance.totalRemaining).toBe(400);
+  });
+
+  it("fails visibly and safely for invalid billing period, renewal and transaction dates", () => {
+    const formatter = new Intl.DateTimeFormat("en-US", {
+      timeZone: "UTC", year: "numeric", month: "short", day: "numeric",
+    });
+    expect(formatBillingDate("2026-11-16T00:00:00Z", formatter)).toBe("Nov 16, 2026");
+    for (const invalid of ["", "not-a-date", "2026-99-99", "275760-09-14T00:00:00Z", null, undefined]) {
+      expect(formatBillingDate(invalid, formatter)).toBe("—");
+    }
+    expect(viewSource).toContain("formatBillingDate(value, dateFormatter)");
+    expect(viewSource).not.toContain("dateFormatter.format(new Date(value))");
   });
 
   it("normalizes unavailable and malformed fields without rendering NaN", () => {
