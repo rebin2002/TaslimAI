@@ -55,7 +55,6 @@ const newlyServerGatedRoutes = [
   { path: "/activity" },
   { path: "/notifications" },
   { path: "/assets" },
-  { path: "/account" },
   { path: "/account/usage" },
   { path: "/account/memory" },
   { path: "/account/generation-jobs" },
