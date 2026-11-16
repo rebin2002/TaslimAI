@@ -17,7 +17,8 @@ export type ProjectListPageFetcher = (page: number, pageSize: number) => Promise
  * between requests when a project is edited or archived mid-pagination, and a
  * duplicate row would render two cards for one project. The page count is
  * capped so a server that ignores its own page-size clamp cannot drive an
- * unbounded request loop.
+ * unbounded request loop. Reaching the cap without a short page is an error,
+ * not proof that all projects were retrieved: never publish partial counts.
  */
 export async function collectAllProjectPages(fetchPage: ProjectListPageFetcher): Promise<Project[]> {
   const pageSize = ProjectListPageSize;
@@ -32,5 +33,7 @@ export async function collectAllProjectPages(fetchPage: ProjectListPageFetcher):
     }
     if (items.length < pageSize) return collected;
   }
-  return collected;
+  // Every bounded page was full. The server may contain more projects;
+  // silently returning the prefix would advertise an inaccurate total.
+  throw new Error("Project list pagination limit reached before the final page.");
 }
