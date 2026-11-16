@@ -6,6 +6,7 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
+using Taslim.Api.Authorization;
 using Taslim.Api.Contracts;
 using Taslim.Api.Domain;
 using Taslim.Api.Generation;
@@ -23,7 +24,8 @@ public sealed class ResearchGenerationController(
     IGenerationJobService jobs,
     TaslimDbContext db,
     IOptions<ResearchGenerationOptions> options,
-    IUsageCostControl costControl) : ControllerBase
+    IUsageCostControl costControl,
+    WorkspaceAccessService access) : ControllerBase
 {
     [HttpPost("jobs")]
     [ValidateAntiForgeryToken]
@@ -36,11 +38,14 @@ public sealed class ResearchGenerationController(
                 return ApiResults.Error(this, StatusCodes.Status503ServiceUnavailable, "RESEARCH_STUDIO_UNAVAILABLE", "Research Studio is not available right now.");
             var input = ResearchGenerationContractMapper.ToInput(request);
             ResearchGenerationRequestValidator.Validate(input, options.Value);
+            var userId = GetUserId();
+            if (!await access.IsMemberAsync(userId, input.WorkspaceId, cancellationToken))
+                return Forbid();
             var estimate = ResearchGenerationCostEstimator.Estimate(options.Value);
             var preflight = await costControl.CheckPreflightAsync(input.WorkspaceId, UsageFeature.Research, estimate, cancellationToken);
             if (!preflight.Allowed)
                 return ApiResults.Error(this, StatusCodes.Status429TooManyRequests, preflight.RejectionCode ?? "COST_GUARDRAIL_REJECTED", preflight.RejectionMessage ?? "This operation exceeds a configured safety limit.");
-            var job = await jobs.CreateAsync(GetUserId(), new CreateGenerationJobRequest
+            var job = await jobs.CreateAsync(userId, new CreateGenerationJobRequest
             {
                 WorkspaceId = input.WorkspaceId,
                 ProjectId = input.ProjectId,
