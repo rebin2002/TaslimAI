@@ -181,8 +181,7 @@ public sealed class MovieWorldContinuityProjector(TaslimDbContext db)
                 (!sceneId.HasValue || item.MovieSceneId == sceneId) &&
                 (!shotId.HasValue || item.MovieShotId == null || item.MovieShotId == shotId));
         var usages = await usagesQuery
-            .OrderByDescending(item => shotId.HasValue && item.MovieShotId == shotId)
-            .ThenBy(item => item.MovieShotId.HasValue)
+            .OrderBy(item => item.MovieShotId.HasValue)
             .ThenBy(item => item.EntityType)
             .ThenBy(item => item.EntityId)
             .ThenBy(item => item.Id)

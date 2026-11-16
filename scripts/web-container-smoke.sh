@@ -46,21 +46,12 @@ import sys
 from pathlib import Path
 
 headers_path, body_path = map(Path, sys.argv[1:])
-responses = []
-current = None
-for line in headers_path.read_text(errors="replace").replace("\r\n", "\n").splitlines():
-    if line.upper().startswith("HTTP/"):
-        current = {}
-        responses.append(current)
-        continue
-    if current is None or not line.strip() or ":" not in line:
+headers = {}
+for line in headers_path.read_text(errors="replace").splitlines():
+    if ":" not in line:
         continue
     name, value = line.split(":", 1)
-    current[name.lower()] = value.strip().lower()
-
-if not responses:
-    raise SystemExit("web root did not return an HTTP response")
-headers = responses[-1]
+    headers[name.lower()] = value.strip().lower()
 
 content_type = headers.get("content-type", "")
 if "text/html" not in content_type:

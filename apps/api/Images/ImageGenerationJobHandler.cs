@@ -36,9 +36,6 @@ public sealed class ImageGenerationJobHandler(
             throw new ImageRequestValidationException(GenerationJobErrorCodes.ImageRequestInvalid, "The image request is invalid.");
         }
 
-        if (request.ReferenceFileId.HasValue)
-            throw new ImageRequestValidationException(GenerationJobErrorCodes.ImageReferenceNotSupported, "Reference images are not available for this image request.");
-
         var provider = providers.FirstOrDefault(item => string.Equals(item.Key, settings.ProviderKey, StringComparison.OrdinalIgnoreCase));
         if (provider is not IImageGenerationProviderReadiness { IsAvailable: true })
             throw new ImageProviderUnavailableException();

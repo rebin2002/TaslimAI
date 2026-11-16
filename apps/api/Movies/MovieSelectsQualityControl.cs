@@ -397,13 +397,7 @@ public sealed class MovieSelectsQualityControlService(
             remaining = next;
         }
 
-        // A positive coalescing gap is safe only for naturally adjacent source ranges.
-        // Once an explicit blocker split the source, preserve that boundary so blocked
-        // media can never be reintroduced into a recommended select.
-        var coalesceGap = blockingRanges.Count == 0
-            ? Math.Max(settings.CoalesceGapSeconds, 0m)
-            : 0m;
-        var coalesced = Coalesce(remaining, coalesceGap);
+        var coalesced = Coalesce(remaining, Math.Max(settings.CoalesceGapSeconds, 0m));
         var usable = new List<MovieSelectsQcRange>();
         foreach (var range in coalesced)
         {

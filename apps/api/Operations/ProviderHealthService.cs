@@ -193,23 +193,16 @@ public sealed class ProviderHealthService(
             .Concat(providerJobs.Where(item => item.Status == GenerationJobStatus.Succeeded).Select(item => item.CompletedAt ?? item.CreatedAt))
             .OrderByDescending(item => item)
             .FirstOrDefault();
-        var lastFailureAt = failedJobs.Select(item => item.FailedAt ?? item.CreatedAt)
-            .Concat(failedUsage.Select(item => item.CompletedAt ?? item.CreatedAt))
-            .OrderByDescending(item => item)
-            .Select(item => (DateTime?)item)
-            .FirstOrDefault();
         var lastFailure = failedJobs
             .OrderByDescending(item => item.FailedAt ?? item.CreatedAt)
             .FirstOrDefault();
         var hasLastSuccess = successCount > 0;
         var hasLastFailure = failureCount > 0;
-        var latestFailureIsNewer = hasLastFailure
-            && (!hasLastSuccess || lastFailureAt.GetValueOrDefault() > lastSuccessAt);
         var status = !definition.Enabled
             ? "disabled"
             : !definition.Configured
                 ? "unconfigured"
-                : latestFailureIsNewer
+                : hasLastFailure && !hasLastSuccess
                     ? "recent_operational_failure"
                     : hasLastSuccess
                         ? "operational"
@@ -234,7 +227,7 @@ public sealed class ProviderHealthService(
             providerUsage.Sum(item => item.EstimatedProviderCostUsd ?? 0m),
             providerUsage.Sum(item => item.ProviderCostUsd),
             hasLastSuccess ? lastSuccessAt : null,
-            hasLastFailure ? lastFailureAt : null,
+            hasLastFailure ? lastFailure?.FailedAt ?? lastFailure?.CreatedAt : null,
             hasLastFailure ? SanitizeErrorCode(lastFailure?.ErrorCode) : null,
             recentFailures);
     }

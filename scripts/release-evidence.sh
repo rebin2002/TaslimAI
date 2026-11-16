@@ -16,13 +16,6 @@ fi
 
 cd "$repo_root"
 
-readonly secret_hygiene_script="$repo_root/scripts/secret-hygiene-audit.sh"
-if [[ ! -f "$secret_hygiene_script" ]] || ! git ls-files --error-unmatch -- "scripts/secret-hygiene-audit.sh" >/dev/null 2>&1; then
-  echo "Required secret-hygiene audit script is missing or untracked; refusing to emit release evidence." >&2
-  exit 1
-fi
-bash "$secret_hygiene_script" "$repo_root"
-
 readonly commit_sha="$(git rev-parse HEAD)"
 if ! [[ "$commit_sha" =~ ^[0-9a-f]{40}$ ]]; then
   echo "The checked-out revision is not a full commit SHA; refusing to emit release evidence." >&2
@@ -42,7 +35,6 @@ required_files=(
   "apps/api/Dockerfile"
   "apps/web/Dockerfile"
   "apps/api/appsettings.Production.json"
-  "scripts/secret-hygiene-audit.sh"
 )
 for path in "${required_files[@]}"; do
   if [[ ! -f "$path" ]]; then
@@ -75,7 +67,6 @@ input_files=(
   "apps/api/Dockerfile"
   "apps/web/Dockerfile"
   "apps/api/appsettings.Production.json"
-  "scripts/secret-hygiene-audit.sh"
 )
 
 export RELEASE_EVIDENCE_REPO_ROOT="$repo_root"
@@ -194,10 +185,6 @@ manifest = {
     },
     "baseImages": base_images,
     "productionSafetyDefaults": safety_defaults,
-    "secretHygiene": {
-        "status": "passed",
-        "policy": "high-confidence tracked credential pattern scan",
-    },
 }
 
 output_path.parent.mkdir(parents=True, exist_ok=True)

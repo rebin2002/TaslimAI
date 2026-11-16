@@ -32,5 +32,6 @@ describe("AdminPage", () => {
     const html = renderToStaticMarkup(<AdminPage><p>Internal provider cost</p></AdminPage>);
     expect(html).toContain('role="status"');
     expect(html).toContain('aria-label="Checking administrator access"');
+    expect(html).not.toContain("Internal provider cost");
   });
 });

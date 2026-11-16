@@ -1,6 +1,6 @@
 "use client";
 
-import { FormEvent, useEffect, useState } from "react";
+import { FormEvent, useEffect, useRef, useState } from "react";
 import { Check, FileText } from "lucide-react";
 import { api, type Project, type ProjectInput } from "@/lib/api";
 import { useLocale } from "@/components/LocaleProvider";
@@ -12,20 +12,28 @@ export function ProjectContextEditor({ project, onSaved }: Readonly<{ project: P
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState("");
+  // Identity of the project that owns this mounted instance's draft, its save
+  // feedback, and any request still in flight. The view stays mounted while the
+  // route parameter changes, so a switch of project - and with it of workspace -
+  // has to drop the previous project's state rather than display, submit or
+  // confirm it as the new project's context.
+  const ownerRef = useRef(project.id);
 
-  /* eslint-disable react-hooks/set-state-in-effect */
   useEffect(() => {
+    if (ownerRef.current === project.id) return;
+    ownerRef.current = project.id;
     setInstructions(project.instructions ?? "");
     setContextNotes(project.contextNotes ?? "");
+    setSaving(false);
     setSaved(false);
     setError("");
     // Project identity intentionally controls the local draft boundary.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [project.id]);
-  /* eslint-enable react-hooks/set-state-in-effect */
 
   async function submit(event: FormEvent) {
     event.preventDefault();
+    const submittingProjectId = project.id;
     setSaving(true);
     setSaved(false);
     setError("");
@@ -37,13 +45,19 @@ export function ProjectContextEditor({ project, onSaved }: Readonly<{ project: P
       contextNotes: contextNotes || undefined,
     };
     try {
-      const updated = await api.updateProject(project.id, input);
+      const updated = await api.updateProject(submittingProjectId, input);
+      // A reply that lands after the view moved on belongs to the project that has
+      // just been left behind, so it is dropped instead of being written into the
+      // overview of the project now on screen.
+      if (ownerRef.current !== submittingProjectId) return;
       onSaved(updated);
       setSaved(true);
     } catch (caught) {
+      if (ownerRef.current !== submittingProjectId) return;
       setError(caught instanceof Error ? caught.message : t("projects.saveError"));
     } finally {
-      setSaving(false);
+      // The switch above already cleared the saving flag for the incoming project.
+      if (ownerRef.current === submittingProjectId) setSaving(false);
     }
   }
 

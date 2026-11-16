@@ -76,15 +76,7 @@ public sealed class StableAudioMusicGenerationProvider(
                 if (!result.IsSuccessStatusCode)
                     throw await MapFailureAsync(result);
 
-                try
-                {
-                    (output, contentType) = await ReadBoundedAudioAsync(result, timeout.Token);
-                }
-                catch (HttpRequestException exception)
-                {
-                    logger.LogWarning(exception, "Stable Audio result download failed.");
-                    throw new MusicProviderUnavailableException();
-                }
+                (output, contentType) = await ReadBoundedAudioAsync(result, timeout.Token);
                 break;
             }
 

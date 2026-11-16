@@ -167,7 +167,6 @@ public static class MovieWave3UpscaleEligibilityCompatibility
         MovieTakeStatuses.Ready,
         MovieTakeStatuses.ReviewRequired,
         MovieTakeStatuses.Approved,
-        MovieTakeStatuses.Selected,
     };
 
     public static MovieWave3UpscaleEligibilityDecision Evaluate(MovieTake take, MovieShot shot)

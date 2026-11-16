@@ -32,12 +32,6 @@ public sealed class GeneratedAssetPublisher(
     {
         var assetType = output.Asset?.AssetType.Trim().ToLowerInvariant();
         if (assetType is not null && !AssetTypes.Supported.Contains(assetType)) throw new InvalidOperationException("Generated asset type is not supported.");
-        // Research execution records and report assets are creator-private even
-        // when the request used a project. Keep the asset's project linkage for
-        // the asset-library policy, but do not let the generic project-file
-        // surface make the report's DOCX/PDF files workspace-shareable.
-        var privateResearchOutput = string.Equals(job.JobType, GenerationJobTypes.ResearchGenerate, StringComparison.OrdinalIgnoreCase);
-        var outputProjectId = privateResearchOutput ? null : job.ProjectId;
         var outputMetadata = GeneratedMediaSecurity.NormalizeMetadataJson(output.MetadataJson);
         var assetMetadata = GeneratedMediaSecurity.NormalizeMetadataJson(output.Asset?.MetadataJson);
         StoredFile? createdFile = null;
@@ -49,7 +43,7 @@ public sealed class GeneratedAssetPublisher(
             storageResult = await files.StoreGeneratedWithResultAsync(
                 job.WorkspaceId,
                 job.CreatedByUserId,
-                outputProjectId,
+                job.ProjectId,
                 output.FileArtifact.FileName,
                 output.FileArtifact.ContentType,
                 output.FileArtifact.Content,
@@ -64,7 +58,7 @@ public sealed class GeneratedAssetPublisher(
             storageResult = await files.StoreGeneratedStreamWithResultAsync(
                 job.WorkspaceId,
                 job.CreatedByUserId,
-                outputProjectId,
+                job.ProjectId,
                 output.StreamArtifact.FileName,
                 output.StreamArtifact.ContentType,
                 output.StreamArtifact.SizeBytes,
@@ -83,19 +77,11 @@ public sealed class GeneratedAssetPublisher(
                     && file.WorkspaceId == job.WorkspaceId
                     && file.Status == StoredFileStatus.Ready
                     && file.ConversationId == null
-                    && (privateResearchOutput
-                        ? file.ProjectId == null
-                        : !file.ProjectId.HasValue || file.ProjectId == job.ProjectId),
+                    && (!file.ProjectId.HasValue || file.ProjectId == job.ProjectId),
                 cancellationToken) ?? throw new InvalidOperationException("Generated output file is not available in the job scope.");
         }
         if (output.Asset is not null && (storedFile is null || storedFile.Status != StoredFileStatus.Ready))
             throw new InvalidOperationException("Generated assets require a completed private stored file.");
-        if (output.Asset is not null
-            && storageResult is { WasCreated: false }
-            && string.Equals(job.JobType, GenerationJobTypes.ImageGenerate, StringComparison.OrdinalIgnoreCase)
-            && storedFile is not null
-            && !await HasCommittedReferenceAsync(storedFile.Id, cancellationToken))
-            throw new InvalidOperationException("Generated image output cannot reuse an uncommitted private file.");
 
         try
         {
@@ -171,15 +157,6 @@ public sealed class GeneratedAssetPublisher(
         }
 
         return new PreparedGenerationOutput(jobOutput, asset, createdFile, provenance);
-    }
-
-    private async Task<bool> HasCommittedReferenceAsync(Guid storedFileId, CancellationToken cancellationToken)
-    {
-        if (await db.GenerationJobOutputs.AsNoTracking().AnyAsync(output => output.StoredFileId == storedFileId, cancellationToken))
-            return true;
-        if (await db.Assets.AsNoTracking().AnyAsync(asset => asset.StoredFileId == storedFileId, cancellationToken))
-            return true;
-        return await db.GeneratedMediaProvenance.AsNoTracking().AnyAsync(item => item.StoredFileId == storedFileId, cancellationToken);
     }
 
     public async Task DiscardAsync(PreparedGenerationOutput publication, CancellationToken cancellationToken = default)

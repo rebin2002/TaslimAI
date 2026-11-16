@@ -81,13 +81,12 @@ export function GlobalSearchView() {
 
   useEffect(() => {
     clearPendingSearch();
-    requestSequence.begin();
     pendingSearchTimer.current = window.setTimeout(() => {
       pendingSearchTimer.current = null;
       void runSearch(initialQuery);
     }, initialQuery.trim() ? 180 : 0);
     return clearPendingSearch;
-  }, [clearPendingSearch, initialQuery, requestSequence, runSearch]);
+  }, [clearPendingSearch, initialQuery, runSearch]);
 
   useEffect(() => {
     const handleShortcut = (event: KeyboardEvent) => {

@@ -23,9 +23,7 @@ public sealed class ActivityCenterService(TaslimDbContext db, WorkspaceAccessSer
 
         var page = ApiPagination.NormalizePage(filter.Page);
         var pageSize = ApiPagination.NormalizePageSize(filter.PageSize);
-        var query = VisibleToUser(
-            db.GenerationJobs.AsNoTracking().Where(job => job.WorkspaceId == filter.WorkspaceId),
-            userId);
+        var query = db.GenerationJobs.AsNoTracking().Where(job => job.WorkspaceId == filter.WorkspaceId);
         if (!string.IsNullOrWhiteSpace(filter.Status))
         {
             var status = filter.Status.Trim();
@@ -41,9 +39,8 @@ public sealed class ActivityCenterService(TaslimDbContext db, WorkspaceAccessSer
             query = query.Where(job => job.JobType == filter.JobType);
 
         var totalCount = await query.CountAsync(cancellationToken);
-        var unreadCount = await VisibleToUser(
-                db.GenerationJobs.AsNoTracking().Where(job => job.WorkspaceId == filter.WorkspaceId),
-                userId)
+        var unreadCount = await db.GenerationJobs.AsNoTracking()
+            .Where(job => job.WorkspaceId == filter.WorkspaceId)
             .Where(job => !db.ActivityReadStates.Any(read => read.UserId == userId && read.GenerationJobId == job.Id))
             .CountAsync(cancellationToken);
         var jobs = await query
@@ -71,9 +68,8 @@ public sealed class ActivityCenterService(TaslimDbContext db, WorkspaceAccessSer
     public async Task<int?> GetUnreadCountAsync(Guid userId, Guid workspaceId, CancellationToken cancellationToken = default)
     {
         if (!await access.IsMemberAsync(userId, workspaceId, cancellationToken)) return null;
-        return await VisibleToUser(
-                db.GenerationJobs.AsNoTracking().Where(job => job.WorkspaceId == workspaceId),
-                userId)
+        return await db.GenerationJobs.AsNoTracking()
+            .Where(job => job.WorkspaceId == workspaceId)
             .Where(job => !db.ActivityReadStates.Any(read => read.UserId == userId && read.GenerationJobId == job.Id))
             .CountAsync(cancellationToken);
     }
@@ -81,33 +77,13 @@ public sealed class ActivityCenterService(TaslimDbContext db, WorkspaceAccessSer
     public async Task<bool> MarkReadAsync(Guid userId, Guid jobId, Guid workspaceId, CancellationToken cancellationToken = default)
     {
         if (!await access.IsMemberAsync(userId, workspaceId, cancellationToken)) return false;
-        var jobExists = await VisibleToUser(
-                db.GenerationJobs.AsNoTracking().Where(job => job.Id == jobId && job.WorkspaceId == workspaceId),
-                userId)
-            .AnyAsync(cancellationToken);
+        var jobExists = await db.GenerationJobs.AsNoTracking().AnyAsync(job => job.Id == jobId && job.WorkspaceId == workspaceId, cancellationToken);
         if (!jobExists) return false;
         var alreadyRead = await db.ActivityReadStates.AnyAsync(read => read.UserId == userId && read.GenerationJobId == jobId, cancellationToken);
         if (!alreadyRead)
         {
-            var readState = new ActivityReadState { Id = Guid.NewGuid(), UserId = userId, GenerationJobId = jobId, ReadAt = DateTime.UtcNow };
-            db.ActivityReadStates.Add(readState);
-            try
-            {
-                await db.SaveChangesAsync(cancellationToken);
-            }
-            catch (DbUpdateException)
-            {
-                // The unique (UserId, GenerationJobId) index is the concurrency
-                // boundary. A concurrent request may have marked the same job
-                // read after the pre-check; treat that winner as an idempotent
-                // success while preserving unrelated persistence failures.
-                db.Entry(readState).State = EntityState.Detached;
-                if (await db.ActivityReadStates.AsNoTracking().AnyAsync(
-                        read => read.UserId == userId && read.GenerationJobId == jobId,
-                        cancellationToken))
-                    return true;
-                throw;
-            }
+            db.ActivityReadStates.Add(new ActivityReadState { Id = Guid.NewGuid(), UserId = userId, GenerationJobId = jobId, ReadAt = DateTime.UtcNow });
+            await db.SaveChangesAsync(cancellationToken);
         }
         return true;
     }
@@ -115,43 +91,15 @@ public sealed class ActivityCenterService(TaslimDbContext db, WorkspaceAccessSer
     public async Task<bool> MarkAllReadAsync(Guid userId, Guid workspaceId, CancellationToken cancellationToken = default)
     {
         if (!await access.IsMemberAsync(userId, workspaceId, cancellationToken)) return false;
-        var unreadJobIds = await VisibleToUser(
-                db.GenerationJobs.AsNoTracking().Where(job => job.WorkspaceId == workspaceId),
-                userId)
+        var unreadJobIds = await db.GenerationJobs.AsNoTracking()
+            .Where(job => job.WorkspaceId == workspaceId)
             .Where(job => !db.ActivityReadStates.Any(read => read.UserId == userId && read.GenerationJobId == job.Id))
             .Select(job => job.Id)
             .ToListAsync(cancellationToken);
         if (unreadJobIds.Count == 0) return true;
         var readAt = DateTime.UtcNow;
-        var readStates = unreadJobIds.Select(jobId => new ActivityReadState
-        {
-            Id = Guid.NewGuid(),
-            UserId = userId,
-            GenerationJobId = jobId,
-            ReadAt = readAt,
-        }).ToArray();
-        db.ActivityReadStates.AddRange(readStates);
-        try
-        {
-            await db.SaveChangesAsync(cancellationToken);
-        }
-        catch (DbUpdateException)
-        {
-            // As with a single read, a concurrent read-all may have won the
-            // unique-key race. Only convert the exception to success when all
-            // rows this request intended to create now exist; unrelated errors
-            // and partial writes remain failures.
-            foreach (var readState in readStates)
-                db.Entry(readState).State = EntityState.Detached;
-
-            var persistedCount = await db.ActivityReadStates.AsNoTracking()
-                .CountAsync(read => read.UserId == userId && unreadJobIds.Contains(read.GenerationJobId), cancellationToken);
-            if (persistedCount == unreadJobIds.Count) return true;
-            throw;
-        }
+        db.ActivityReadStates.AddRange(unreadJobIds.Select(jobId => new ActivityReadState { Id = Guid.NewGuid(), UserId = userId, GenerationJobId = jobId, ReadAt = readAt }));
+        await db.SaveChangesAsync(cancellationToken);
         return true;
     }
-
-    private static IQueryable<GenerationJob> VisibleToUser(IQueryable<GenerationJob> jobs, Guid userId) =>
-        jobs.Where(job => job.JobType != GenerationJobTypes.ResearchGenerate || job.CreatedByUserId == userId);
 }

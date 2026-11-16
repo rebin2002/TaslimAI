@@ -11,9 +11,5 @@ namespace Taslim.Api.Files;
 public static class StoredFileVisibility
 {
     public static Expression<Func<StoredFile, bool>> ForWorkspaceMember(Guid userId) =>
-        file => ((file.ProjectId.HasValue
-                && !file.ConversationId.HasValue
-                && file.Project != null
-                && file.Project.WorkspaceId == file.WorkspaceId)
-            || file.UserId == userId);
+        file => (file.ProjectId.HasValue && !file.ConversationId.HasValue) || file.UserId == userId;
 }

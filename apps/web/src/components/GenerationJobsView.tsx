@@ -23,10 +23,6 @@ export function clampGenerationProgress(progressPercent: number) {
   return Math.max(0, Math.min(100, progressPercent));
 }
 
-export function shouldResetGenerationJobSelection(previousWorkspaceId: string | null, nextWorkspaceId: string | null) {
-  return previousWorkspaceId !== nextWorkspaceId;
-}
-
 export function GenerationJobDetail({ job, t, canCancel, working, onCancel }: GenerationJobDetailProps) {
   const title = job.title ?? t("jobs.testTitle");
   const status = t(`jobs.status${job.status}`);
@@ -109,13 +105,11 @@ export function GenerationJobsView() {
   const [canRetryLoad, setCanRetryLoad] = useState(false);
   const requestGeneration = useRef(0);
   const selectionGeneration = useRef(0);
-  const loadedWorkspaceId = useRef<string | null>(null);
   const [pollRetryGeneration, setPollRetryGeneration] = useState(0);
 
   const loadRecent = useCallback(async () => {
     if (!workspace) {
       requestGeneration.current += 1;
-      loadedWorkspaceId.current = null;
       setJobs([]);
       setCurrent(null);
       setLoading(false);
@@ -123,12 +117,6 @@ export function GenerationJobsView() {
     }
     const request = ++requestGeneration.current;
     const workspaceId = workspace.id;
-    const workspaceChanged = shouldResetGenerationJobSelection(loadedWorkspaceId.current, workspaceId);
-    loadedWorkspaceId.current = workspaceId;
-    if (workspaceChanged) {
-      setCurrent(null);
-      setPollRetryGeneration(0);
-    }
     setLoading(true);
     setError("");
     setCanRetryLoad(false);
@@ -150,7 +138,7 @@ export function GenerationJobsView() {
   useEffect(() => { void loadRecent(); }, [loadRecent]);
 
   useEffect(() => {
-    const selectedJob = current?.workspaceId === workspace?.id ? current : null;
+    const selectedJob = current;
     const pollDelay = nextGenerationJobPollDelay(selectedJob);
     if (!selectedJob || pollDelay === null) return;
     let active = true;
@@ -170,7 +158,7 @@ export function GenerationJobsView() {
     };
     const timer = window.setTimeout(() => { void poll(); }, pollDelay);
     return () => { active = false; window.clearTimeout(timer); };
-  }, [current, pollRetryGeneration, t, workspace]);
+  }, [current, pollRetryGeneration, t]);
 
   function selectJob(job: GenerationJob) {
     selectionGeneration.current += 1;
@@ -230,7 +218,7 @@ export function GenerationJobsView() {
     }
   }
 
-  const activeJob = current?.workspaceId === workspace?.id ? current : jobs[0] ?? null;
+  const activeJob = current ?? jobs[0] ?? null;
   const canCancel = canCancelGenerationJob(activeJob);
 
   return <div className="account-page generation-jobs-page">

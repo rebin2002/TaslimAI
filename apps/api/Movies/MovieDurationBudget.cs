@@ -173,7 +173,7 @@ public static class MovieDurationBudgetValidator
                 }
 
                 var shots = scene.Shots ?? [];
-                if (!shots.Any(item => item is not null && !item.Archived))
+                if (shots.Count == 0)
                 {
                     sceneDiagnostics.Add(Error("shots_missing", $"{scenePath}.shots", "At least one active shot is required to verify a scene runtime."));
                     sceneIncomplete = true;

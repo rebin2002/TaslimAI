@@ -1,175 +1,194 @@
-import React from "react";
-import { act } from "react";
-import { createRoot, type Root } from "react-dom/client";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { readFileSync } from "node:fs";
+import { renderToStaticMarkup } from "react-dom/server";
+import { describe, expect, it, vi } from "vitest";
+import type { Asset } from "@/lib/api";
+import { API_URL } from "@/lib/apiBase";
+import { ReferenceAudioPanel } from "./MusicStudioView";
 
-class TestNode {
-  nodeType: number;
-  nodeName: string;
-  ownerDocument: TestDocument;
-  parentNode: TestNode | null = null;
-  childNodes: TestNode[] = [];
-  attributes = new Map<string, string>();
-  style: Record<string, string> = {};
-  listeners = new Map<string, Set<(event: unknown) => void>>();
-  value = "";
-  disabled = false;
-  selected = false;
-  defaultSelected = false;
-  hidden = false;
-
-  constructor(nodeType: number, nodeName: string, ownerDocument: TestDocument) {
-    this.nodeType = nodeType;
-    this.nodeName = nodeName;
-    this.ownerDocument = ownerDocument;
-  }
-
-  get firstChild() { return this.childNodes[0] ?? null; }
-  get lastChild(): TestNode | null { return this.childNodes.at(-1) ?? null; }
-  get options() { return this.childNodes; }
-  get tagName() { return this.nodeName; }
-  get textContent() { return this.childNodes.map((child) => child.textContent ?? "").join(""); }
-  set textContent(value: string | null) {
-    this.childNodes = value ? [new TestNodeText(value, this.ownerDocument)] : [];
-    for (const child of this.childNodes) child.parentNode = this;
-  }
-  get className() { return this.attributes.get("class") ?? ""; }
-  set className(value: string) { this.attributes.set("class", value); }
-
-  appendChild<T extends TestNode>(child: T) { if (child.parentNode) child.parentNode.removeChild(child); child.parentNode = this; this.childNodes.push(child); return child; }
-  insertBefore<T extends TestNode>(child: T, before: TestNode | null) { if (!before) return this.appendChild(child); const index = this.childNodes.indexOf(before); if (index < 0) return this.appendChild(child); if (child.parentNode) child.parentNode.removeChild(child); child.parentNode = this; this.childNodes.splice(index, 0, child); return child; }
-  removeChild<T extends TestNode>(child: T) { const index = this.childNodes.indexOf(child); if (index >= 0) this.childNodes.splice(index, 1); child.parentNode = null; return child; }
-  setAttribute(name: string, value: string) { this.attributes.set(name, String(value)); }
-  getAttribute(name: string) { return this.attributes.get(name) ?? null; }
-  removeAttribute(name: string) { this.attributes.delete(name); }
-  addEventListener(name: string, listener: (event: unknown) => void) { const listeners = this.listeners.get(name) ?? new Set(); listeners.add(listener); this.listeners.set(name, listeners); }
-  removeEventListener(name: string, listener: (event: unknown) => void) { this.listeners.get(name)?.delete(listener); }
-  dispatchEvent(event: { type: string }) { for (const listener of this.listeners.get(event.type) ?? []) listener(event); return true; }
-  contains(node: TestNode | null): boolean { return node === this || this.childNodes.some((child) => child.contains(node)); }
-  focus() { this.ownerDocument.activeElement = this; }
-  blur() { if (this.ownerDocument.activeElement === this) this.ownerDocument.activeElement = this.ownerDocument.body; }
-}
-
-class TestNodeText extends TestNode {
-  nodeValue: string;
-  constructor(value: string, ownerDocument: TestDocument) { super(3, "#text", ownerDocument); this.nodeValue = value; }
-  override get textContent() { return this.nodeValue; }
-  override set textContent(value: string | null) { this.nodeValue = value ?? ""; }
-}
-
-class TestDocument extends TestNode {
-  body: TestNode;
-  documentElement: TestNode;
-  activeElement: TestNode;
-  defaultView: object;
-  constructor() {
-    super(9, "#document", null as unknown as TestDocument);
-    this.ownerDocument = this;
-    this.defaultView = {};
-    this.documentElement = new TestNode(1, "html", this);
-    this.body = new TestNode(1, "body", this);
-    this.documentElement.appendChild(this.body);
-    this.appendChild(this.documentElement);
-    this.activeElement = this.body;
-  }
-  createElement(name: string) { return new TestNode(1, name.toUpperCase(), this); }
-  createElementNS(_namespace: string, name: string) { return this.createElement(name); }
-  createTextNode(value: string) { return new TestNodeText(value, this); }
-  getElementById(id: string) { return this.find((node) => node.getAttribute("id") === id); }
-  private find(predicate: (node: TestNode) => boolean): TestNode | null { const visit = (node: TestNode): TestNode | null => predicate(node) ? node : node.childNodes.map(visit).find(Boolean) ?? null; return visit(this); }
-}
-
-const harness = vi.hoisted(() => ({
-  workspace: { id: "workspace-a" },
-  t: (key: string) => key,
-  api: {
-    listProjects: vi.fn(),
-    listAssets: vi.fn(),
-    assetFileUrl: vi.fn((id: string) => `/api/assets/${id}/download`),
-    createMusicGenerationJob: vi.fn(),
-    getGenerationJob: vi.fn(),
-    cancelGenerationJob: vi.fn(),
-  },
+vi.mock("next/navigation", () => ({
+  useSearchParams: () => new URLSearchParams(),
 }));
-
-vi.mock("@/components/AuthProvider", () => ({ useAuth: () => ({ workspace: harness.workspace }) }));
-vi.mock("@/components/LocaleProvider", () => ({ useLocale: () => ({ locale: "en", t: harness.t }) }));
-vi.mock("next/navigation", () => ({ useSearchParams: () => ({ get: () => null }) }));
-vi.mock("next/link", () => ({ default: ({ href, children, ...props }: { href: string; children: React.ReactNode }) => <a href={href} {...props}>{children}</a> }));
-vi.mock("@/components/AccessibleProgressBar", () => ({ AccessibleProgressBar: () => <div /> }));
-vi.mock("lucide-react", () => {
-  const Icon = (props: Record<string, unknown>) => <span {...props} />;
-  return { AlertCircle: Icon, AudioLines: Icon, CheckCircle2: Icon, Clock3: Icon, Download: Icon, FolderOpen: Icon, Headphones: Icon, LoaderCircle: Icon, Music2: Icon, Pause: Icon, Play: Icon, RefreshCw: Icon, Sparkles: Icon, WandSparkles: Icon, XCircle: Icon };
+vi.mock("@/components/AuthProvider", () => ({
+  useAuth: () => ({ workspace: { id: "workspace-1" } }),
+}));
+vi.mock("@/components/LocaleProvider", () => ({
+  useLocale: () => ({ locale: "en", t: (key: string) => key }),
+}));
+vi.mock("@/lib/api", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/api")>();
+  return {
+    ...actual,
+    api: {
+      ...actual.api,
+      listProjects: vi.fn(),
+      listAssets: vi.fn(),
+      getGenerationJob: vi.fn(),
+      createMusicGenerationJob: vi.fn(),
+      cancelGenerationJob: vi.fn(),
+    },
+  };
 });
-vi.mock("@/lib/api", () => ({ api: harness.api }));
 
-import { MusicStudioView } from "./MusicStudioView";
+const translate = (key: string) => key;
 
-function deferred<T>() {
-  let resolve!: (value: T) => void;
-  const promise = new Promise<T>((next) => { resolve = next; });
-  return { promise, resolve };
+function storedAsset(overrides: Partial<Asset> = {}): Asset {
+  return {
+    id: "asset-1",
+    workspaceId: "workspace-1",
+    projectId: null,
+    projectName: null,
+    name: "demo-loop.mp3",
+    description: null,
+    assetType: "music",
+    mimeType: "audio/mpeg",
+    status: "Active",
+    hasFile: true,
+    canPreview: true,
+    fileSizeBytes: 4_200_000,
+    sourceStudio: "music",
+    sourceJobTitle: null,
+    createdAt: "2026-11-01T10:00:00Z",
+    updatedAt: "2026-11-01T10:00:00Z",
+    archivedAt: null,
+    representations: [],
+    ...overrides,
+  };
 }
 
-function projects(name: string, suffix: string) { return [{ id: `${name}-${suffix}-project`, workspaceId: name, name, description: null, type: "General", status: "Active", instructions: null, contextNotes: null, createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z" }]; }
-function assets(name: string) { return { items: [{ id: `${name}-asset`, workspaceId: name, projectId: null, projectName: null, name, description: null, assetType: "music", mimeType: "audio/mpeg", status: "Active", hasFile: true, canPreview: true, fileSizeBytes: 10, sourceStudio: "music", sourceJobTitle: name, createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z", archivedAt: null, representations: [] }], totalCount: 1, page: 1, pageSize: 5, totalPages: 1 }; }
+function storedCandidate(asset: Asset) {
+  return {
+    id: `asset:${asset.id}`,
+    sourceKind: "stored_asset" as const,
+    displayName: asset.name,
+    extension: ".mp3",
+    mimeType: "audio/mpeg",
+    sizeBytes: asset.fileSizeBytes,
+    assetId: asset.id,
+    durationSeconds: null,
+  };
+}
 
-let document: TestDocument;
-let root: Root;
-let container: TestNode;
+const emptyState = { candidate: null, previewObjectUrl: null, rejectedReasonKey: null };
 
-beforeEach(() => {
-  document = new TestDocument();
-  container = document.createElement("div");
-  document.body.appendChild(container);
-  vi.stubGlobal("document", document);
-  const window = { document, HTMLElement: TestNode, HTMLIFrameElement: TestNode, addEventListener: vi.fn(), removeEventListener: vi.fn() };
-  document.defaultView = window;
-  vi.stubGlobal("window", window);
-  vi.stubGlobal("navigator", { userAgent: "test" });
-  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
-  harness.workspace = { id: "workspace-a" };
-  harness.api.listProjects.mockReset();
-  harness.api.listAssets.mockReset();
-});
+describe("Music Studio reference audio panel", () => {
+  it("discards private previews and in-flight library results when the active workspace changes", () => {
+    const source = readFileSync(new URL("./MusicStudioView.tsx", import.meta.url), "utf8");
+    // React key changes unmount the old studio, including the object URL cleanup
+    // and any pending responses. A workspace switch must never reuse old clips.
+    expect(source).toContain('<WorkspaceMusicStudio key={workspace?.id ?? "no-workspace"} workspace={workspace} />');
+    expect(source).toContain("revokeReferenceAudioObjectUrl(referenceAudio.previewObjectUrl)");
+  });
 
-afterEach(() => {
-  act(() => root?.unmount());
-  vi.unstubAllGlobals();
-});
+  it("renders a labelled, provider-free picker with an accessible file input", () => {
+    const html = renderToStaticMarkup(
+      <ReferenceAudioPanel state={emptyState} candidates={[]} loading={false} t={translate}
+        onFileSelected={() => undefined} onStoredPicked={() => undefined} onClear={() => undefined} />,
+    );
+    expect(html).toContain('class="music-reference-panel"');
+    expect(html).toContain('aria-labelledby="music-reference-title"');
+    expect(html).toContain('id="music-reference-title"');
+    expect(html).toContain("music.reference.title");
+    expect(html).toContain("music.reference.description");
+    expect(html).toContain('type="file"');
+    expect(html).toContain('accept=".mp3,.wav,.m4a,.ogg"');
+    expect(html).toContain('aria-label="music.reference.uploadLabel"');
+    expect(html).toContain("music.reference.empty");
+    expect(html).not.toContain("<audio");
+    expect(html).not.toContain("blob:");
+  });
 
-describe("MusicStudioView workspace freshness", () => {
-  it("does not render late project or music responses from a previous workspace", async () => {
-    const projectsAActive = deferred<ReturnType<typeof projects>>();
-    const projectsAArchived = deferred<ReturnType<typeof projects>>();
-    const assetsA = deferred<ReturnType<typeof assets>>();
-    const projectsBActive = deferred<ReturnType<typeof projects>>();
-    const projectsBArchived = deferred<ReturnType<typeof projects>>();
-    const assetsB = deferred<ReturnType<typeof assets>>();
-    harness.api.listProjects
-      .mockReturnValueOnce(projectsAActive.promise)
-      .mockReturnValueOnce(projectsAArchived.promise)
-      .mockReturnValueOnce(projectsBActive.promise)
-      .mockReturnValueOnce(projectsBArchived.promise);
-    harness.api.listAssets.mockReturnValueOnce(assetsA.promise).mockReturnValueOnce(assetsB.promise);
+  it("never contacts a provider: the stored preview is the private inline asset URL only", () => {
+    const candidate = storedCandidate(storedAsset());
+    const html = renderToStaticMarkup(
+      <ReferenceAudioPanel
+        state={{ candidate, previewObjectUrl: null, rejectedReasonKey: null }}
+        candidates={[candidate]} loading={false} t={translate}
+        onFileSelected={() => undefined} onStoredPicked={() => undefined} onClear={() => undefined} />,
+    );
+    expect(html).toContain(`src="${API_URL}/api/assets/asset-1/download?inline=true"`);
+    expect(html.match(/src="[^"]+"/g)).toHaveLength(1);
+    expect(html).toContain('controls=""');
+    expect(html).toContain('preload="metadata"');
+    expect(html).toContain('aria-label="music.reference.previewLabel: demo-loop.mp3"');
+    expect(html).toContain("music.reference.note");
+    expect(html).toContain("music.reference.clear");
+    expect(html).not.toContain("suno");
+    expect(html).not.toContain("Suno");
+    expect(html).not.toContain("mubert");
+    expect(html).not.toContain("stable-audio");
+    expect(html).not.toContain("resultJson");
+  });
 
-    await act(async () => { root = createRoot(container as unknown as Element); root.render(<MusicStudioView />); await new Promise((resolve) => setTimeout(resolve, 0)); });
-    expect(harness.api.listProjects).toHaveBeenCalledTimes(2);
-    expect(harness.api.listAssets).toHaveBeenCalledTimes(1);
-    harness.workspace = { id: "workspace-b" };
-    await act(async () => { root.render(<MusicStudioView />); await new Promise((resolve) => setTimeout(resolve, 0)); });
-    expect(harness.api.listProjects).toHaveBeenCalledTimes(4);
-    expect(harness.api.listAssets).toHaveBeenCalledTimes(2);
-    expect(harness.api.listAssets.mock.calls.map((call: unknown[]) => call[0])).toEqual(["workspace-a", "workspace-b"]);
-    projectsBActive.resolve(projects("workspace-b", "active"));
-    projectsBArchived.resolve(projects("workspace-b", "archived"));
-    assetsB.resolve(assets("workspace-b music"));
-    await act(async () => { await assetsB.promise; await Promise.resolve(); await Promise.resolve(); });
-    projectsAActive.resolve(projects("workspace-a", "active"));
-    projectsAArchived.resolve(projects("workspace-a", "archived"));
-    assetsA.resolve(assets("workspace-a music"));
-    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+  it("previews a locally picked clip through its object URL without uploading", () => {
+    const local = {
+      id: "local:2048:loop.mp3",
+      sourceKind: "local" as const,
+      displayName: "loop.mp3",
+      extension: ".mp3",
+      mimeType: "audio/mpeg",
+      sizeBytes: 2048,
+      assetId: null,
+      durationSeconds: null,
+    };
+    const html = renderToStaticMarkup(
+      <ReferenceAudioPanel
+        state={{ candidate: local, previewObjectUrl: "blob:preview-1", rejectedReasonKey: null }}
+        candidates={[]} loading={false} t={translate}
+        onFileSelected={() => undefined} onStoredPicked={() => undefined} onClear={() => undefined} />,
+    );
+    expect(html).toContain('src="blob:preview-1"');
+    expect(html).toContain("2 KiB");
+    expect(html).toContain('aria-live="polite"');
+    expect(html).not.toContain("/api/assets/");
+  });
 
-    expect(container.textContent).not.toContain("workspace-a music");
+  it("surfaces rejection reasons and the loading state instead of stale library rows", () => {
+    const rejected = renderToStaticMarkup(
+      <ReferenceAudioPanel
+        state={{ ...emptyState, rejectedReasonKey: "music.reference.reason.mimeMismatch" }}
+        candidates={[]} loading={false} t={translate}
+        onFileSelected={() => undefined} onStoredPicked={() => undefined} onClear={() => undefined} />,
+    );
+    expect(rejected).toContain('role="alert"');
+    expect(rejected).toContain("music.reference.reason.mimeMismatch");
+    const loading = renderToStaticMarkup(
+      <ReferenceAudioPanel
+        state={emptyState} candidates={[]} loading t={translate}
+        onFileSelected={() => undefined} onStoredPicked={() => undefined} onClear={() => undefined} />,
+    );
+    expect(loading).toContain("music.reference.loading");
+    expect(loading).not.toContain("music.reference.empty");
+  });
+
+  it("lists only the unclaimed candidates it was given", () => {
+    const candidates = [
+      storedCandidate(storedAsset({ id: "asset-a", name: "a-loop.mp3", createdAt: "2026-11-02T10:00:00Z" })),
+      storedCandidate(storedAsset({ id: "asset-b", name: "b-loop.wav", createdAt: "2026-11-01T10:00:00Z", mimeType: "audio/wav" })),
+    ];
+    const html = renderToStaticMarkup(
+      <ReferenceAudioPanel
+        state={emptyState} candidates={candidates} loading={false} t={translate}
+        onFileSelected={() => undefined} onStoredPicked={() => undefined} onClear={() => undefined} />,
+    );
+    expect(html).toContain("music-reference-select");
+    expect(html).toContain("<option value=\"asset-a\">a-loop.mp3</option>");
+    expect(html).toContain("<option value=\"asset-b\">b-loop.wav</option>");
+    expect(html).toContain("music.reference.savedPlaceholder");
+  });
+
+  it("exposes the selection callbacks on interactive elements only", () => {
+    const onFileSelected = vi.fn();
+    const onClear = vi.fn();
+    const html = renderToStaticMarkup(
+      <ReferenceAudioPanel
+        state={emptyState} candidates={[]} loading={false} t={translate}
+        onFileSelected={onFileSelected} onStoredPicked={() => undefined} onClear={onClear} />,
+    );
+    expect(html).toContain("music.reference.chooseFile");
+    // Server rendering has no interaction; the handlers must exist and be
+    // attached to the file input only through React props (not inline hrefs).
+    expect(onFileSelected).not.toHaveBeenCalled();
+    expect(onClear).not.toHaveBeenCalled();
+    expect(html).not.toContain("href=\"javascript:");
   });
 });

@@ -200,29 +200,20 @@ public sealed class DirectorCreativeQualityPlanner(IDirectorCreativeCostEstimato
         };
         var estimate = Estimate(level, request, profile.OutputTokens);
         var constrained = false;
-        if (request.BudgetLimitUsd is decimal budgetLimit)
+        if (request.BudgetLimitUsd.HasValue && estimate.IsKnown && estimate.AmountUsd > request.BudgetLimitUsd.Value)
         {
-            if (!estimate.IsKnown || !estimate.AmountUsd.HasValue)
-                throw new DirectorValidationException("Budget-limited Director routing requires a known cost estimate.");
-            if (estimate.AmountUsd > budgetLimit)
+            for (var rank = DirectorQualityRouting.QualityRank(level) - 1; rank >= 0; rank--)
             {
-                var selectedAffordableTier = false;
-                for (var rank = DirectorQualityRouting.QualityRank(level) - 1; rank >= 0; rank--)
+                var candidate = DirectorQualityRouting.QualityAtRank(rank);
+                var candidateEstimate = Estimate(candidate, request, profile.OutputTokens);
+                if (!candidateEstimate.IsKnown || candidateEstimate.AmountUsd <= request.BudgetLimitUsd.Value)
                 {
-                    var candidate = DirectorQualityRouting.QualityAtRank(rank);
-                    var candidateEstimate = Estimate(candidate, request, profile.OutputTokens);
-                    if (candidateEstimate.IsKnown && candidateEstimate.AmountUsd.HasValue && candidateEstimate.AmountUsd <= budgetLimit)
-                    {
-                        level = candidate;
-                        estimate = candidateEstimate;
-                        constrained = true;
-                        selectedAffordableTier = true;
-                        reasons.Add("budget_limit_selected_lower_quality");
-                        break;
-                    }
+                    level = candidate;
+                    estimate = candidateEstimate;
+                    constrained = true;
+                    reasons.Add("budget_limit_selected_lower_quality");
+                    break;
                 }
-                if (!selectedAffordableTier)
-                    throw new DirectorValidationException("No Director quality tier has a verified cost within the requested budget.");
             }
         }
 

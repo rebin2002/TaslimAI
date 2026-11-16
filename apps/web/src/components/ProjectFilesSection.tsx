@@ -1,29 +1,11 @@
 "use client";
 
-import { FormEvent, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { FormEvent, useEffect, useRef, useState } from "react";
 import { FileText, Paperclip, Trash2, Upload } from "lucide-react";
 import { ApiError, api, type Project, type StoredFile } from "@/lib/api";
 import { useLocale } from "@/components/LocaleProvider";
 
 type ProjectFilesSectionProps = Readonly<{ project: Project }>;
-export type ProjectFileUploadScope = Readonly<{ workspaceId: string; projectId: string }>;
-type ProjectFileUploadGenerationRef = { current: number };
-type ProjectFileUploadToken = ProjectFileUploadScope & { generation: number };
-
-export function beginProjectFileUpload(ref: ProjectFileUploadGenerationRef, scope: ProjectFileUploadScope): ProjectFileUploadToken {
-  ref.current += 1;
-  return { ...scope, generation: ref.current };
-}
-
-export function isCurrentProjectFileUpload(
-  token: ProjectFileUploadToken,
-  ref: ProjectFileUploadGenerationRef,
-  activeScope: ProjectFileUploadScope,
-) {
-  return token.generation === ref.current
-    && token.workspaceId === activeScope.workspaceId
-    && token.projectId === activeScope.projectId;
-}
 
 const MAX_FILE_SIZE = 25 * 1024 * 1024;
 const ACCEPTED_EXTENSIONS = [".pdf", ".docx", ".txt", ".md", ".csv", ".xlsx", ".jpg", ".jpeg", ".png", ".webp"];
@@ -35,17 +17,11 @@ export function ProjectFilesSection({ project }: ProjectFilesSectionProps) {
   const [uploading, setUploading] = useState(false);
   const [error, setError] = useState("");
   const inputRef = useRef<HTMLInputElement>(null);
-  const uploadGenerationRef = useRef(0);
-  const activeProjectScopeRef = useRef<ProjectFileUploadScope>({ workspaceId: project.workspaceId, projectId: project.id });
-
-  useLayoutEffect(() => {
-    activeProjectScopeRef.current = { workspaceId: project.workspaceId, projectId: project.id };
-  }, [project.id, project.workspaceId]);
 
   useEffect(() => {
     let active = true;
     // eslint-disable-next-line react-hooks/set-state-in-effect
-    setLoading(true); setError(""); setUploading(false);
+    setLoading(true);
     void api.listFiles(project.workspaceId, project.id)
       .then(items => { if (active) setFiles(items); })
       .catch(() => { if (active) setError(t("projects.fileUploadError")); })
@@ -56,8 +32,6 @@ export function ProjectFilesSection({ project }: ProjectFilesSectionProps) {
   async function upload(event: FormEvent<HTMLInputElement>) {
     const selected = event.currentTarget.files;
     if (!selected?.length) return;
-    const uploadScope = activeProjectScopeRef.current;
-    const uploadToken = beginProjectFileUpload(uploadGenerationRef, uploadScope);
     setUploading(true);
     setError("");
     try {
@@ -67,16 +41,12 @@ export function ProjectFilesSection({ project }: ProjectFilesSectionProps) {
           throw new Error(t("projects.fileUploadError"));
         }
         const stored = await api.uploadFile(project.workspaceId, file, { projectId: project.id });
-        if (isCurrentProjectFileUpload(uploadToken, uploadGenerationRef, activeProjectScopeRef.current)) {
-          setFiles(current => [stored, ...current]);
-        }
+        setFiles(current => [stored, ...current]);
       }
     } catch (caught) {
-      if (isCurrentProjectFileUpload(uploadToken, uploadGenerationRef, activeProjectScopeRef.current)) {
-        setError(caught instanceof ApiError ? caught.message : t("projects.fileUploadError"));
-      }
+      setError(caught instanceof ApiError ? caught.message : t("projects.fileUploadError"));
     } finally {
-      if (isCurrentProjectFileUpload(uploadToken, uploadGenerationRef, activeProjectScopeRef.current)) setUploading(false);
+      setUploading(false);
       if (inputRef.current) inputRef.current.value = "";
     }
   }

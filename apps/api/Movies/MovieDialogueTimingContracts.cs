@@ -277,13 +277,14 @@ public static class MovieDialogueTimingRequestValidator
         var sequences = new HashSet<int>();
         var indexedCues = cues
             .Select((cue, index) => (Cue: cue, Index: index))
-            .OrderBy(item => item.Cue?.Sequence ?? int.MaxValue)
-            .ThenBy(item => item.Cue?.CueId ?? Guid.Empty)
+            .Where(item => item.Cue is not null)
+            .OrderBy(item => item.Cue!.Sequence)
+            .ThenBy(item => item.Cue!.CueId)
             .ToArray();
         MovieDialogueTimingCue? previous = null;
         foreach (var indexedCue in indexedCues)
         {
-            var cue = indexedCue.Cue;
+            var cue = indexedCue.Cue!;
             var field = $"{nameof(MovieDialogueTimingPlanningRequest.Cues)}[{indexedCue.Index}]";
             if (cue is null)
             {

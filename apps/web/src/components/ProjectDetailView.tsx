@@ -29,11 +29,6 @@ export function ProjectDetailView() {
   const [error, setError] = useState("");
   const [loadAttempt, setLoadAttempt] = useState(0);
   const overviewRequest = useRef<{ key: string; promise: Promise<ProjectOverview> } | null>(null);
-  const activeProjectId = useRef(params.projectId);
-
-  useEffect(() => {
-    activeProjectId.current = params.projectId;
-  }, [params.projectId]);
 
   useEffect(() => {
     let active = true;
@@ -55,8 +50,7 @@ export function ProjectDetailView() {
   }, [loadAttempt, params.projectId, t]);
 
   function replaceProject(project: Project) {
-    if (project.id !== activeProjectId.current) return;
-    setOverview((current) => current?.project.id === project.id ? { ...current, project } : current);
+    setOverview((current) => current ? { ...current, project } : current);
   }
 
   async function archive() {

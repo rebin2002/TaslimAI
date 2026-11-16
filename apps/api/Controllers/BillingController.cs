@@ -3,7 +3,6 @@ using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Taslim.Api.Authorization;
 using Taslim.Api.Billing;
-using Taslim.Api.Domain;
 
 namespace Taslim.Api.Controllers;
 
@@ -16,8 +15,7 @@ public sealed class BillingController(WorkspaceAccessService access, IBillingAcc
     public async Task<IActionResult> Get(Guid workspaceId, CancellationToken cancellationToken)
     {
         var userId = GetUserId();
-        var membership = await access.GetMembershipAsync(userId, workspaceId, cancellationToken);
-        if (membership is null || membership.Role is not (WorkspaceRole.Owner or WorkspaceRole.Admin)) return Forbid();
+        if (!await access.IsMemberAsync(userId, workspaceId, cancellationToken)) return Forbid();
         return Ok(await billing.GetAccountAsync(workspaceId, cancellationToken));
     }
 
