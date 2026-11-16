@@ -72,6 +72,13 @@ public sealed class DocumentRenderer : IDocumentRenderer
                 });
                 page.Footer().AlignCenter().Text(text => { text.Span("Taslim · "); text.CurrentPageNumber(); });
             });
+        }).WithMetadata(new DocumentMetadata
+        {
+            // The export's download name is derived from the requested title, so the PDF has to carry that same
+            // document identity inside it. Two different documents from one workspace could otherwise render
+            // byte-identical PDFs, and content-addressed generated-file storage then reuses the earlier file row
+            // for the later job - which drops the later asset's PDF representation and its download button.
+            Title = input.Title,
         }).GeneratePdf();
         return new RenderedDocument(AssetRepresentationTypes.Pdf, SafeFileName(input.Title, ".pdf"), "application/pdf", bytes);
     }
