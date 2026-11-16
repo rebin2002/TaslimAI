@@ -115,6 +115,16 @@ describe("credit balance truth", () => {
     expect(viewSource).toContain('t("billing.includedCredits", { count: formatCredits(balance.includedAllocation) })');
   });
 
+  it("keeps unwired billing mutation placeholders disabled regardless of API action flags", () => {
+    // Until a verified checkout/upgrade/cancel client is implemented, presenting
+    // a clickable button without an action is misleading and not release-ready.
+    for (const flag of ["checkoutAvailable", "upgradeAvailable", "downgradeAvailable", "cancelAvailable"]) {
+      expect(viewSource).not.toContain(`disabled={!account.actions.${flag}}`);
+    }
+    expect(viewSource.match(/<button[^>]*\\sdisabled>/g)).toHaveLength(4);
+    expect(viewSource).toContain("The billing action buttons have no mutation handlers yet.");
+  });
+
   it("does not derive a made-up debit from the gap between allocations and the headline", () => {
     expect(viewSource).toContain("describeCreditBalance");
     expect(viewSource).not.toContain("balance.usageRecorded");
