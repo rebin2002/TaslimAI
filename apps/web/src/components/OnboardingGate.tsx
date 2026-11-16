@@ -132,7 +132,8 @@ function OnboardingFlow({ user, openerRef }: Readonly<{ user: User; openerRef: R
         defaultGenerationLanguage,
         intent,
       });
-      setLanguagePack(preferredLanguage);
+      // AuthProvider applies the persisted server preference only after the
+      // onboarding request succeeds; never write a transient preview to storage.
       router.push(href);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : t("onboarding.saveError"));
@@ -159,7 +160,7 @@ function OnboardingFlow({ user, openerRef }: Readonly<{ user: User; openerRef: R
           <p className="onboarding-description">{t("onboarding.preferencesDescription")}</p>
           <div className="onboarding-fields">
             <label><span>{t("onboarding.displayName")}</span><input data-dialog-autofocus disabled={saving} value={displayName} maxLength={120} onChange={(event) => setDisplayName(event.target.value)} placeholder={t("onboarding.displayNamePlaceholder")} autoComplete="name" /></label>
-            <label><span><Globe2 size={15} /> {t("onboarding.interfaceLanguage")}</span><select disabled={saving} value={preferredLanguage} onChange={(event) => { const next = event.target.value; setPreferredLanguage(next); setLanguagePack(next); }}>{languagePackIds.map((item) => <option key={item} value={item}>{languagePackNames[item]}</option>)}</select></label>
+            <label><span><Globe2 size={15} /> {t("onboarding.interfaceLanguage")}</span><select disabled={saving} value={preferredLanguage} onChange={(event) => { const next = event.target.value; setPreferredLanguage(next); setLanguagePack(next, { persist: false, source: "user" }); }}>{languagePackIds.map((item) => <option key={item} value={item}>{languagePackNames[item]}</option>)}</select></label>
             <label><span><Languages size={15} /> {t("onboarding.generationLanguage")}</span><select disabled={saving} value={defaultGenerationLanguage} onChange={(event) => setDefaultGenerationLanguage(event.target.value as Locale)}>{locales.map((item) => <option key={item} value={item}>{localeNames[item]}</option>)}</select></label>
           </div>
           {preferredLanguage === "zh-CN" && <p className="onboarding-description" role="status">Simplified Chinese is in preview. Some onboarding and Movie Studio text remains in English.</p>}
