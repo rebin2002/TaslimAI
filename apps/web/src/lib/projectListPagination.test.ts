@@ -101,13 +101,23 @@ describe("collectAllProjectPages", () => {
 
   it("caps the walk when a server ignores its own page-size clamp", async () => {
     let calls = 0;
-    const collected = await collectAllProjectPages(async () => {
+    await expect(collectAllProjectPages(async () => {
       calls += 1;
-      // A misbehaving page that is always "full" must not loop forever.
+      // A misbehaving page that is always "full" must not loop forever,
+      // and the UI must not publish a truncated list as a real total.
       return pageOf(calls * 1000, ProjectListPageSize);
+    })).rejects.toThrow("Project list pagination limit reached before the final page.");
+    expect(calls).toBe(MaxProjectListPages);
+  });
+
+  it("accepts a short final page at the cap without truncation", async () => {
+    let calls = 0;
+    const collected = await collectAllProjectPages(async (page) => {
+      calls += 1;
+      return pageOf((page - 1) * ProjectListPageSize + 1, page === MaxProjectListPages ? 1 : ProjectListPageSize);
     });
     expect(calls).toBe(MaxProjectListPages);
-    expect(collected).toHaveLength(MaxProjectListPages * ProjectListPageSize);
+    expect(collected).toHaveLength((MaxProjectListPages - 1) * ProjectListPageSize + 1);
   });
 
   it("propagates transport failures to the caller instead of publishing partial pages", async () => {
