@@ -27,7 +27,7 @@ import { useLocale } from "@/components/LocaleProvider";
 import { useSearchParams } from "next/navigation";
 import { ApiError, api, type Asset, type GenerationJob, type ImageGenerationInput, type Project } from "@/lib/api";
 import { localizedImageErrorMessage } from "@/lib/imageStudioErrors";
-import { canCancelImageJob, clearImageActiveJobId, isRestorableImageJob, nextImagePollDelay, parseImageJobResult, persistImageActiveJobId, readImageActiveJobId, shouldClearImageJobAfterPollError, shouldPollImageJob, shouldResetImageWorkspaceState } from "@/lib/imageStudioState";
+import { canCancelImageJob, clearImageActiveJobId, isRestorableImageJob, mergeImageJobUpdate, nextImagePollDelay, nextImageRestoreDelay, parseImageJobResult, persistImageActiveJobId, readImageActiveJobId, shouldClearImageJobAfterPollError, shouldPollImageJob, shouldResetImageWorkspaceState, shouldRetryImageRestore } from "@/lib/imageStudioState";
 
 const styles = ["auto", "photorealistic", "product", "illustration", "3d", "minimal", "poster", "social_media"] as const;
 const aspects = ["square", "portrait", "landscape"] as const;
@@ -77,6 +77,39 @@ export function ImageFailureCanvas({ labels, working, onRetry }: Readonly<{ labe
   </div>;
 }
 
+export type ImageGeneratingCanvasLabels = Readonly<{
+  eyebrow: string;
+  title: string;
+  message: string;
+  progress: string;
+  cancel: string;
+}>;
+
+/**
+ * In-flight Image Studio state and its cancellation control.
+ *
+ * The cancel control follows the same busy-state contract as the failure canvas retry: it stays
+ * focusable and reports `aria-busy` while the request is in flight, because the `disabled`
+ * attribute removes the focused button from the accessibility tree and leaves a keyboard or screen
+ * reader user at the top of the document with no idea what happened to the control they pressed.
+ * The control keeps its name, since a cancellation that is being sent is never a new start.
+ * Activation is made idempotent by {@link ImageStudioContent.cancel}, which refuses a second
+ * request for a job that has already been asked to stop.
+ */
+export function ImageGeneratingCanvas({ labels, percent, canCancel, working, onCancel }: Readonly<{ labels: ImageGeneratingCanvasLabels; percent: number | null; canCancel: boolean; working: boolean; onCancel: () => void }>) {
+  return <div className="image-generating-canvas">
+    <div className="image-generating-spinner"><LoaderCircle size={26} aria-hidden="true" /></div>
+    <p className="image-canvas-eyebrow">{labels.eyebrow}</p>
+    <h2>{labels.title}</h2>
+    <p>{labels.message}</p>
+    <div className="image-progress-meta"><span>{labels.progress}</span><strong>{percent ?? 0}%</strong></div>
+    <AccessibleProgressBar className="image-progress-track" label={labels.progress} value={percent} />
+    {canCancel && <button className="image-cancel-button" type="button" onClick={onCancel} aria-disabled={working || undefined} aria-busy={working}>
+      <XCircle size={15} /> {labels.cancel}
+    </button>}
+  </div>;
+}
+
 export function ImageStudioView() {
   const { user, workspace } = useAuth();
   // Clear all private component state and in-flight timers across identity boundaries.
@@ -102,6 +135,10 @@ function ImageStudioContent() {
   const [projectId, setProjectId] = useState(() => searchParams.get("projectId") ?? "");
   const [current, setCurrent] = useState<GenerationJob | null>(null);
   const [pollRetry, setPollRetry] = useState(0);
+  // The poll loop must keep running whether or not the last frame changed anything: a rejected
+  // stale frame leaves the stored job untouched, and a loop that is rescheduled by that state
+  // change alone would stop polling a generation that is still running.
+  const [pollTick, setPollTick] = useState(0);
   const [sessionDenied, setSessionDenied] = useState(false);
   const sessionDeniedRef = useRef(false);
   const restoreJobId = useRef<string | null>(null);
@@ -168,6 +205,7 @@ function ImageStudioContent() {
     setLoadingRecent(true);
     setProjectId("");
     setPollRetry(0);
+    setPollTick(0);
     setWorking(false);
     setError("");
   }, [current, workspace?.id]);
@@ -179,33 +217,52 @@ function ImageStudioContent() {
     restoreJobId.current = storedJobId;
     const workspaceVersion = workspaceGeneration.current;
     let active = true;
-    void api.getGenerationJob(storedJobId).then((job) => {
-      if (!active || workspaceGeneration.current !== workspaceVersion || restoreJobId.current !== storedJobId) return;
-      if (!isRestorableImageJob(job, workspace.id)) {
-        clearImageActiveJobId(user.id, workspace.id);
-        restoreJobId.current = null;
-        return;
-      }
-      setCurrent(job);
-      setPollRetry(0);
-    }).catch((cause) => {
-      if (!active || workspaceGeneration.current !== workspaceVersion || restoreJobId.current !== storedJobId) return;
-      if (cause instanceof ApiError && shouldClearImageJobAfterPollError(cause.status)) {
-        clearImageActiveJobId(user.id, workspace.id);
-        restoreJobId.current = null;
-        if (cause.status === 401) {
-          sessionDeniedRef.current = true;
-          setSessionDenied(true);
-          setProjects([]);
-          setRecentAssets([]);
-          setSelectedAsset(null);
-          setLoadingProjects(false);
-          setLoadingRecent(false);
-          setError(localizedImageErrorMessage(cause.code, t, "image.pollError"));
+    let retryTimer = 0;
+
+    // The pointer names a generation that is normally still running server-side, so a failed read
+    // is not evidence that the job disappeared. It is retried inside the polling budget, the
+    // pointer is kept, and only an exhausted budget reports the missing progress. A single
+    // unretried read used to strand the user on an empty canvas that announced nothing about a
+    // job the workspace is still paying for.
+    const readStoredJob = (attempt: number) => {
+      void api.getGenerationJob(storedJobId).then((job) => {
+        if (!active || workspaceGeneration.current !== workspaceVersion || restoreJobId.current !== storedJobId) return;
+        if (!isRestorableImageJob(job, workspace.id)) {
+          clearImageActiveJobId(user.id, workspace.id);
+          restoreJobId.current = null;
+          return;
         }
-      }
-    });
-    return () => { active = false; };
+        setCurrent((previous) => mergeImageJobUpdate(previous, job));
+        setPollRetry(0);
+        setError("");
+      }).catch((cause: unknown) => {
+        if (!active || workspaceGeneration.current !== workspaceVersion || restoreJobId.current !== storedJobId) return;
+        const status = cause instanceof ApiError ? cause.status : null;
+        const code = cause instanceof ApiError ? cause.code : null;
+        if (shouldClearImageJobAfterPollError(status)) {
+          clearImageActiveJobId(user.id, workspace.id);
+          restoreJobId.current = null;
+          if (status === 401) {
+            sessionDeniedRef.current = true;
+            setSessionDenied(true);
+            setProjects([]);
+            setRecentAssets([]);
+            setSelectedAsset(null);
+            setLoadingProjects(false);
+            setLoadingRecent(false);
+            setError(localizedImageErrorMessage(code, t, "image.pollError"));
+          }
+          return;
+        }
+        if (!shouldRetryImageRestore(status, attempt)) {
+          setError(localizedImageErrorMessage(code, t, "image.pollError"));
+          return;
+        }
+        retryTimer = window.setTimeout(() => readStoredJob(attempt + 1), nextImageRestoreDelay(attempt));
+      });
+    };
+    readStoredJob(0);
+    return () => { active = false; window.clearTimeout(retryTimer); };
   }, [user?.id, workspace, current, t]);
 
   useEffect(() => {
@@ -218,9 +275,10 @@ function ImageStudioContent() {
       try {
         const next = await api.getGenerationJob(jobId);
         if (active && workspaceGeneration.current === workspaceVersion && current.id === jobId) {
-          setCurrent(next);
+          setCurrent((previous) => mergeImageJobUpdate(previous, next));
           setPollRetry(0);
           setError("");
+          setPollTick((tick) => tick + 1);
         }
       } catch (caught) {
         if (active && workspaceGeneration.current === workspaceVersion && current.id === jobId) {
@@ -248,7 +306,7 @@ function ImageStudioContent() {
       }
     }, nextImagePollDelay(current, pollRetry) ?? 650);
     return () => { active = false; window.clearTimeout(timer); };
-  }, [current, pollRetry, t, user?.id, workspace?.id]);
+  }, [current, pollRetry, pollTick, t, user?.id, workspace?.id]);
 
   async function startGeneration() {
     // The retry control stays focusable while busy, so activation can arrive again before the
@@ -279,7 +337,7 @@ function ImageStudioContent() {
       const job = await api.createImageGenerationJob(input);
       if (workspaceGeneration.current === requestWorkspaceVersion) {
         persistImageActiveJobId(user.id, workspace.id, job.id);
-        setCurrent(job);
+        setCurrent((previous) => mergeImageJobUpdate(previous, job));
       }
     } catch (caught) {
       if (workspaceGeneration.current === requestWorkspaceVersion) setError(localizedImageErrorMessage(caught instanceof ApiError ? caught.code : null, t, "image.createError"));
@@ -289,8 +347,13 @@ function ImageStudioContent() {
   }
 
   async function cancel() {
-    if (!user?.id || sessionDeniedRef.current || !current) return;
+    // The cancel control stays focusable while a request is in flight, so activation can arrive
+    // again before the first one settles. The job's own state decides whether a request is still
+    // meaningful: a job that already asked to stop must not be asked twice, and a job the worker
+    // has settled can no longer be cancelled at all.
+    if (working) return;
     const job = current;
+    if (!user?.id || sessionDeniedRef.current || !job || !canCancelImageJob(job)) return;
     const requestWorkspaceVersion = workspaceGeneration.current;
     setWorking(true);
     setError("");
@@ -298,7 +361,7 @@ function ImageStudioContent() {
       await api.cancelGenerationJob(job.id);
       const next = await api.getGenerationJob(job.id);
       if (workspaceGeneration.current === requestWorkspaceVersion) {
-        setCurrent((previous) => previous?.id === job.id ? next : previous);
+        setCurrent((previous) => previous?.id === job.id ? mergeImageJobUpdate(previous, next) : previous);
       }
     } catch (caught) {
       if (workspaceGeneration.current === requestWorkspaceVersion) setError(localizedImageErrorMessage(caught instanceof ApiError ? caught.code : null, t, "image.cancelError"));
@@ -390,7 +453,7 @@ function ImageStudioContent() {
 
       <main className="image-result-canvas" aria-live="polite">
         {!current && <div className="image-empty-canvas"><div className="image-canvas-orbit image-canvas-orbit-one" /><div className="image-canvas-orbit image-canvas-orbit-two" /><div className="image-canvas-core"><Sparkles size={25} /></div><p className="image-canvas-eyebrow">{t("image.canvasEmptyEyebrow")}</p><h2>{t("image.canvasEmptyTitle")}</h2><p>{t("image.canvasEmptyText")}</p><span className="image-canvas-hint">{t("image.canvasHint")}</span></div>}
-        {current && !isSuccess && !isFailure && <div className="image-generating-canvas"><div className="image-generating-spinner"><LoaderCircle size={26} aria-hidden="true" /></div><p className="image-canvas-eyebrow">{t("image.progressEyebrow")}</p><h2>{t(`jobs.status${current.status}`)}</h2><p>{t("image.progressText")}</p><div className="image-progress-meta"><span>{t("jobs.progress")}</span><strong>{current.progressPercent ?? 0}%</strong></div><AccessibleProgressBar className="image-progress-track" label={t("jobs.progress")} value={current.progressPercent} />{canCancelImageJob(current) && <button className="image-cancel-button" type="button" onClick={() => void cancel()} disabled={working}><XCircle size={15} /> {t("image.cancel")}</button>}</div>}
+        {current && !isSuccess && !isFailure && <ImageGeneratingCanvas labels={{ eyebrow: t("image.progressEyebrow"), title: t(`jobs.status${current.status}`), message: t("image.progressText"), progress: t("jobs.progress"), cancel: t("image.cancel") }} percent={current.progressPercent} canCancel={canCancelImageJob(current)} working={working} onCancel={() => void cancel()} />}
         {isFailure && <ImageFailureCanvas labels={{ eyebrow: t("image.failedEyebrow"), title: current?.status === "Cancelled" ? t("jobs.statusCancelled") : t("image.failedTitle"), message: failureMessage, retry: t("image.retry"), retrying: t("image.working") }} working={working} onRetry={() => void startGeneration()} />}
         {isSuccess && result && <div className="image-success-canvas"><div className="image-result-heading"><div><p className="image-canvas-eyebrow">{t("image.resultEyebrow")}</p><h2>{t("image.resultTitle")}</h2></div><span className="image-saved-badge"><Check size={14} /> {t("image.savedToAssets")}</span></div><div className={`image-result-frame is-${result.aspectRatio ?? "square"}`}><img crossOrigin="use-credentials" src={api.assetFileUrl(result.assetId!, true)} alt={description} /></div><div className="image-result-actions"><a className="image-result-action" href={api.assetFileUrl(result.assetId!)}><Download size={15} /> {t("image.download")}</a><Link className="image-result-action" href={`/assets?search=${encodeURIComponent(title || "Generated image")}`}><ImageIcon size={15} /> {t("image.openAssets")}</Link><button className="image-result-action is-primary" type="button" onClick={createAnother}><RefreshCw size={15} /> {t("image.createAnother")}</button></div></div>}
       </main>
