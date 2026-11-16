@@ -1,5 +1,6 @@
 import AxeBuilder from "@axe-core/playwright";
-import { expect, test, type Locator, type Page } from "@playwright/test";
+import type { Locator, Page } from "@playwright/test";
+import { expect, test } from "./fixtures";
 import { resolve } from "node:path";
 
 const stylesheetPath = resolve(__dirname, "../src/app/onboarding-billing-ui.css");
@@ -710,7 +711,17 @@ test.describe("issue #700 onboarding and billing layout", () => {
     expect.soft(csrfMockCount, "GET /api/auth/csrf must be intercepted with a synthetic token").toBeGreaterThanOrEqual(1);
     await expect.soft(appShellOpener, "a[href='/create'] must regain focus after Skip closes onboarding").toBeFocused();
 
+    // Synthetic client-side /api/auth/me replies are not an authenticated
+    // server session. The SSR-gated Create route must redirect to login.
     await appShellOpener.click();
+    await expect(page).toHaveURL(/\/login\?next=%2Fcreate$/);
+    expect.soft(traffic.externalRequests, "network requests outside the local app/test API must remain blocked").toEqual([]);
+    expect.soft(traffic.unexpectedApiCalls, "only explicitly mocked synthetic API routes may be contacted").toEqual([]);
+  });
+  test("authenticated beta Create chooser preserves the approved Health Care tile across widths", async ({ authenticatedPage: page }) => {
+    // The real E2E login supplies the server-session cookie required by /create.
+    // Validate the post-login chooser separately from the synthetic onboarding modal.
+    await page.goto("/create");
     await expect(page).toHaveURL(/\/create\/?$/);
     for (const width of [375, 768, 1440]) {
       await page.setViewportSize({ width, height: 900 });
@@ -740,7 +751,6 @@ test.describe("issue #700 onboarding and billing layout", () => {
     await expect(page.locator(".studio-category:has(a.studio-card[href='/create/social'])")).toBeHidden();
     await expect(page.locator(".studio-chooser-count")).toBeHidden();
     expect.soft(await page.locator("a.studio-chat-link[href='/chat']").count(), "a.studio-chat-link[href='/chat'] must advertise allowed Chat").toBe(1);
-    expect.soft(traffic.externalRequests, "network requests outside the local app/test API must remain blocked").toEqual([]);
-    expect.soft(traffic.unexpectedApiCalls, "only explicitly mocked synthetic API routes may be contacted").toEqual([]);
   });
+
 });
