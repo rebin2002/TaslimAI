@@ -23,6 +23,28 @@ public sealed class AiCostCalculatorSafetyTests
         Assert.Null(cost);
     }
 
+    [Theory]
+    [InlineData("InputPricePerMillion")]
+    [InlineData("CachedInputPricePerMillion")]
+    [InlineData("OutputPricePerMillion")]
+    public void Negative_catalog_rates_fail_closed_for_cost_and_pricing_snapshot(string rateKey)
+    {
+        var rates = new Dictionary<string, string?>
+        {
+            ["Ai:Models:invalid:ProviderKey"] = "synthetic",
+            ["Ai:Models:invalid:InputPricePerMillion"] = "2",
+            ["Ai:Models:invalid:CachedInputPricePerMillion"] = "1",
+            ["Ai:Models:invalid:OutputPricePerMillion"] = "3",
+        };
+        rates[$"Ai:Models:invalid:{rateKey}"] = "-1";
+        var calculator = new AiCostCalculator(new AiModelCatalog(
+            new ConfigurationBuilder().AddInMemoryCollection(rates).Build()));
+        var usage = new AiUsageMetadata("synthetic", "invalid", 1_000, 100, 100, null, null, 0, "completed", false);
+
+        Assert.Null(calculator.Calculate(usage));
+        Assert.Null(calculator.GetPricingSnapshot(usage));
+    }
+
     [Fact]
     public void Normal_catalog_pricing_still_returns_a_rounded_cost()
     {
