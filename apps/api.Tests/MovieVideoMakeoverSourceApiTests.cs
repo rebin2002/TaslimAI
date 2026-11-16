@@ -291,6 +291,48 @@ public sealed class MovieVideoMakeoverSourceApiTests : IClassFixture<GenerationJ
             deleted.GetProperty("pendingFacts").EnumerateArray().Select(item => item.GetString()));
     }
 
+    [Theory]
+    [InlineData(double.NaN)]
+    [InlineData(double.PositiveInfinity)]
+    [InlineData(double.NegativeInfinity)]
+    public void Nonfinite_persisted_video_duration_fails_closed_and_serializes_safely(double invalidDuration)
+    {
+        // Exercise the pure persisted-row evaluator: SQLite may normalize NaN
+        // to NULL before an HTTP test ever reaches the JSON serialization path.
+        var userId = Guid.NewGuid();
+        var workspaceId = Guid.NewGuid();
+        var movieProjectId = Guid.NewGuid();
+        var fileId = Guid.NewGuid();
+        var assetId = Guid.NewGuid();
+        var clip = new MovieClip
+        {
+            Id = Guid.NewGuid(), MovieProjectId = movieProjectId,
+            AssetId = assetId, StoredFileId = fileId,
+            Status = MovieClipStatuses.Ready, DurationSeconds = 12,
+        };
+        var asset = new Asset
+        {
+            Id = assetId, WorkspaceId = workspaceId, CreatedByUserId = userId,
+            StoredFileId = fileId, AssetType = AssetTypes.Video,
+            MimeType = "video/mp4", Status = AssetStatus.Active,
+        };
+        var file = new StoredFile
+        {
+            Id = fileId, WorkspaceId = workspaceId, UserId = userId,
+            ContentType = "video/mp4", Status = StoredFileStatus.Ready,
+            DurationSeconds = invalidDuration, Width = 1280, Height = 720,
+            SizeBytes = 1_500_000, RetainUntil = DateTime.UtcNow.AddDays(1),
+        };
+        var result = MovieVideoMakeoverSourceEvaluator.Evaluate(
+            clip, movieProjectId, asset, file, userId, DateTime.UtcNow);
+
+        Assert.False(result.AttachPermitted);
+        Assert.Null(result.DurationSeconds);
+        Assert.Contains(MovieVideoMakeoverSourceCodes.MetadataOutOfBounds, result.Blockers);
+        var json = JsonSerializer.Serialize(result);
+        Assert.Contains("\\\"durationSeconds\\\":null", json, StringComparison.OrdinalIgnoreCase);
+    }
+
     [Fact]
     public async Task Anonymous_request_is_rejected_without_reading_anything()
     {
