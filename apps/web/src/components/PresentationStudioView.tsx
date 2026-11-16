@@ -32,6 +32,9 @@ import {
   loadPresentationDraftState,
   isRestorablePresentationJob,
   isPresentationSourceReady,
+  markPresentationCancellationRequested,
+  resolvePresentationJobSnapshot,
+  isPresentationCancellationNoOp,
   nextPresentationPollDelay,
   parsePresentationJobResult,
   persistPresentationActiveJobId,
@@ -296,7 +299,7 @@ function IdentityScopedPresentationStudioView({ userId }: { userId: string }) {
         clearPresentationActiveJobId(userId, workspace.id);
         return;
       }
-      setCurrent(job);
+      setCurrent((previous) => resolvePresentationJobSnapshot(previous, job));
       setPollRetry(0);
     }).catch((cause) => {
       if (!active || sessionDeniedRef.current || workspaceGeneration.current !== workspaceVersion || restoreJobId.current !== storedJobId) return;
@@ -320,7 +323,7 @@ function IdentityScopedPresentationStudioView({ userId }: { userId: string }) {
       try {
         const next = await api.getGenerationJob(jobId);
         if (!active || sessionDeniedRef.current || workspaceGeneration.current !== workspaceVersion || current.id !== jobId) return;
-        setCurrent(next);
+        setCurrent((previous) => resolvePresentationJobSnapshot(previous, next));
         setPollRetry(0);
         setError("");
       } catch (cause) {
@@ -412,11 +415,25 @@ function IdentityScopedPresentationStudioView({ userId }: { userId: string }) {
     setError("");
     try {
       await api.cancelGenerationJob(jobId);
+      // The accepted cancellation is durable. Keep the UI on the cancelling path
+      // even if a poll that started before this request resolves afterwards.
+      setCurrent(markPresentationCancellationRequested);
       const next = await api.getGenerationJob(jobId);
       if (sessionDeniedRef.current || workspaceGeneration.current !== workspaceVersion || current.id !== jobId) return;
-      setCurrent(next);
+      setCurrent((previous) => resolvePresentationJobSnapshot(previous, next));
     } catch (cause) {
       if (cause instanceof ApiError && cause.status === 401 && !sessionDeniedRef.current) revokeSession();
+      else if (cause instanceof ApiError && isPresentationCancellationNoOp(cause.status, cause.code) && !sessionDeniedRef.current && workspaceGeneration.current === workspaceVersion && current.id === jobId) {
+        // The job settled before the cancellation was recorded, so cancelling it
+        // again is an idempotent no-op: adopt the authoritative state instead of
+        // reporting a failed cancellation for work that already finished.
+        try {
+          const next = await api.getGenerationJob(jobId);
+          if (!sessionDeniedRef.current && workspaceGeneration.current === workspaceVersion && current.id === jobId) setCurrent((previous) => resolvePresentationJobSnapshot(previous, next));
+        } catch {
+          setError(t("presentation.completedLoadError"));
+        }
+      }
       else if (!sessionDeniedRef.current && workspaceGeneration.current === workspaceVersion && current.id === jobId) setError(t("presentation.cancelError"));
     } finally {
       if (!sessionDeniedRef.current && workspaceGeneration.current === workspaceVersion) setWorking(false);
@@ -431,7 +448,7 @@ function IdentityScopedPresentationStudioView({ userId }: { userId: string }) {
     setError("");
     try {
       const next = await api.getGenerationJob(jobId);
-      if (!sessionDeniedRef.current && workspaceGeneration.current === workspaceVersion && current.id === jobId) setCurrent(next);
+      if (!sessionDeniedRef.current && workspaceGeneration.current === workspaceVersion && current.id === jobId) setCurrent((previous) => resolvePresentationJobSnapshot(previous, next));
     } catch (cause) {
       if (cause instanceof ApiError && cause.status === 401 && !sessionDeniedRef.current) revokeSession();
       else if (!sessionDeniedRef.current && workspaceGeneration.current === workspaceVersion && current.id === jobId) setError(t("presentation.completedLoadError"));

@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { GenerationJob } from "./api";
-import { clearPresentationActiveJobId, clearPresentationDraftState, displayPresentationProgress, emptyPresentationDraftState, hasPresentationExport, isPresentationSourceReady, isPresentationJob, isRestorablePresentationJob, loadPresentationDraftState, parsePresentationDraftState, parsePresentationJobResult, persistPresentationActiveJobId, persistPresentationDraftState, presentationActiveJobStorageKey, presentationDraftStorageKey, presentationStudioState, readPresentationActiveJobId, serializePresentationDraftState, shouldResetPresentationWorkspaceState } from "./presentationStudioState";
+import { canCancelPresentationJob, clearPresentationActiveJobId, clearPresentationDraftState, displayPresentationProgress, emptyPresentationDraftState, hasPresentationExport, isPresentationCancellationNoOp, isPresentationJob, isPresentationSourceReady, isRestorablePresentationJob, loadPresentationDraftState, markPresentationCancellationRequested, parsePresentationDraftState, parsePresentationJobResult, persistPresentationActiveJobId, persistPresentationDraftState, presentationActiveJobStorageKey, presentationDraftStorageKey, presentationStudioState, readPresentationActiveJobId, resolvePresentationJobSnapshot, serializePresentationDraftState, shouldResetPresentationWorkspaceState } from "./presentationStudioState";
 
 const job = (status: GenerationJob["status"], resultJson: string | null = null, progressPercent = 70): GenerationJob => ({ id: "job-1", workspaceId: "workspace-1", projectId: null, jobType: "presentation.generate", status, title: "Deck", progressPercent, resultJson, errorCode: null, errorMessage: null, cancellationRequested: false, createdAt: "2026-01-01", queuedAt: null, startedAt: null, completedAt: null, failedAt: null, cancelledAt: null, outputs: [] });
 afterEach(() => vi.unstubAllGlobals());
@@ -94,5 +94,63 @@ describe("presentationStudioState", () => {
     expect(loadPresentationDraftState("user-a", "workspace-a", browserStorage)).toEqual(emptyPresentationDraftState());
     expect(loadPresentationDraftState("user-b", "workspace-a", browserStorage).title).toBe("Private B");
     expect(loadPresentationDraftState("user-a", "workspace-b", browserStorage).title).toBe("Other");
+  });
+  describe("cancellation against generated-file publication", () => {
+    const publishedJson = '{"assetId":"asset-1","representations":[{"id":"pptx-1","type":"pptx","fileName":"deck.pptx","contentType":"application/vnd.openxmlformats-officedocument.presentationml.presentation"}]}';
+
+    it("never lets a pre-cancellation snapshot undo a terminal job", () => {
+      const cancelled = markPresentationCancellationRequested(job("Cancelled"));
+      const staleRunning = job("Running");
+      const stalePublished = job("Succeeded", publishedJson);
+
+      expect(resolvePresentationJobSnapshot(cancelled, staleRunning)).toBe(cancelled);
+      expect(resolvePresentationJobSnapshot(cancelled, stalePublished)).toBe(cancelled);
+      expect(presentationStudioState(resolvePresentationJobSnapshot(cancelled, stalePublished), parsePresentationJobResult(stalePublished))).toBe("cancelled");
+      // The first committed terminal outcome wins: the server never re-opens a job.
+      expect(resolvePresentationJobSnapshot(stalePublished, cancelled)).toBe(stalePublished);
+    });
+
+    it("refreshes fields when the server repeats the same terminal status", () => {
+      const degraded = job("Succeeded", "not-json");
+      const repaired = job("Succeeded", publishedJson);
+      const merged = resolvePresentationJobSnapshot(degraded, repaired);
+
+      expect(merged).toBe(repaired);
+      expect(presentationStudioState(merged, parsePresentationJobResult(merged))).toBe("succeeded");
+    });
+
+    it("keeps an accepted cancellation sticky until the job settles", () => {
+      const cancelling = markPresentationCancellationRequested(job("Running"));
+      const staleRunning = job("Running");
+
+      expect(cancelling?.cancellationRequested).toBe(true);
+      expect(canCancelPresentationJob(cancelling)).toBe(false);
+      expect(resolvePresentationJobSnapshot(cancelling, staleRunning)).toEqual({ ...staleRunning, cancellationRequested: true });
+      expect(resolvePresentationJobSnapshot(cancelling, job("Cancelled"))?.status).toBe("Cancelled");
+      expect(markPresentationCancellationRequested(cancelling)).toBe(cancelling);
+      expect(markPresentationCancellationRequested(null)).toBeNull();
+    });
+
+    it("is idempotent for repeated snapshots and never merges across jobs", () => {
+      const running = job("Running");
+      const cancelling = { ...running, cancellationRequested: true };
+      const once = resolvePresentationJobSnapshot(cancelling, running);
+
+      expect(resolvePresentationJobSnapshot(once, running)).toEqual(once);
+      expect(resolvePresentationJobSnapshot(once, once)).toBe(once);
+      expect(resolvePresentationJobSnapshot(running, running)).toBe(running);
+      const otherJob = { ...job("Pending"), id: "job-2" };
+      expect(resolvePresentationJobSnapshot(cancelling, otherJob)).toBe(otherJob);
+      expect(resolvePresentationJobSnapshot(cancelling, null)).toBe(cancelling);
+      expect(resolvePresentationJobSnapshot(null, otherJob)).toBe(otherJob);
+    });
+
+    it("treats a cancellation that raced completion as a no-op rather than a failure", () => {
+      expect(isPresentationCancellationNoOp(409, "JOB_NOT_CANCELLABLE")).toBe(true);
+      expect(isPresentationCancellationNoOp(409)).toBe(true);
+      expect(isPresentationCancellationNoOp(409, "PRESENTATION_LOCKED")).toBe(false);
+      expect(isPresentationCancellationNoOp(404, "JOB_NOT_FOUND")).toBe(false);
+      expect(isPresentationCancellationNoOp(500)).toBe(false);
+    });
   });
 });
