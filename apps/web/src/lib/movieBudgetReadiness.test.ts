@@ -53,4 +53,51 @@ describe("movie budget and readiness planning", () => {
     expect(model.blockers[0].key).toBe("shots-missing");
     expect(model.warningRequired).toBe(false);
   });
+
+  it("refuses a path comparison when recorded spend nets below zero", () => {
+    const model = buildMovieBudgetReadiness({ project, workspace: workspace(), selectedTier: "Master", cost: cost({ recordedProviderCostUsd: -12, estimatedRemainingProviderCostUsd: 5 }) });
+    expect(model.estimate.state).toBe("unavailable");
+    expect(model.estimate.optimizedAmount).toBeNull();
+    expect(model.estimate.naiveAmount).toBeNull();
+    expect(model.estimate.savingsAmount).toBeNull();
+    expect(model.estimate.savingsPercent).toBeNull();
+    expect(JSON.stringify(model)).not.toMatch(/provider|model|prompt/i);
+  });
+
+  it("refuses a path comparison when the spend figures sum outside the finite range", () => {
+    const model = buildMovieBudgetReadiness({ project, workspace: workspace(), selectedTier: "Upgrade", cost: cost({ recordedProviderCostUsd: Number.MAX_VALUE, estimatedRemainingProviderCostUsd: Number.MAX_VALUE }) });
+    expect(model.estimate.state).toBe("unavailable");
+    expect(model.estimate.optimizedAmount).toBeNull();
+    expect(model.estimate.naiveAmount).toBeNull();
+  });
+
+  it("never hands the panel a negative, signed-zero or non-finite money figure", () => {
+    const samples = [
+      cost({ recordedProviderCostUsd: -0.004, estimatedRemainingProviderCostUsd: 0.001 }),
+      cost({ recordedProviderCostUsd: 0, estimatedRemainingProviderCostUsd: -3 }),
+      cost({ recordedProviderCostUsd: Number.NaN, estimatedRemainingProviderCostUsd: 4 }),
+      cost({ recordedProviderCostUsd: -12, estimatedRemainingProviderCostUsd: 5 }),
+    ];
+    for (const selectedTier of ["Draft", "Upgrade", "Master"] as const) {
+      for (const sample of samples) {
+        const estimate = buildMovieBudgetReadiness({ project, workspace: workspace(), selectedTier, cost: sample }).estimate;
+        for (const value of [estimate.optimizedAmount, estimate.naiveAmount, estimate.savingsAmount, estimate.savingsPercent]) {
+          if (value === null) continue;
+          expect(Number.isFinite(value)).toBe(true);
+          expect(Object.is(value, -0)).toBe(false);
+          expect(value).toBeGreaterThanOrEqual(0);
+        }
+      }
+    }
+  });
+
+  it("keeps a genuine zero-spend plan known instead of failing it closed", () => {
+    const model = buildMovieBudgetReadiness({ project, workspace: workspace(), selectedTier: "Master", cost: cost({ recordedProviderCostUsd: 0, estimatedRemainingProviderCostUsd: 0 }) });
+    expect(model.estimate.state).toBe("known");
+    expect(model.estimate.optimizedAmount).toBe(0);
+    expect(model.estimate.naiveAmount).toBe(0);
+    expect(model.estimate.savingsAmount).toBe(0);
+    expect(model.estimate.savingsPercent).toBe(0);
+    expect(formatMovieBudgetAmount(model.estimate.optimizedAmount, model.estimate.currency)).toBe("USD 0.00");
+  });
 });

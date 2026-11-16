@@ -113,42 +113,63 @@ function buildBlockers(workspace: ProductionWorkspaceModel, selectedTier: MovieR
 }
 
 function buildEstimate(workspace: ProductionWorkspaceModel, selectedTier: MovieResolutionTier, cost?: MovieOverviewCost | null): MovieBudgetEstimate {
+  const unavailable = (detail: string): MovieBudgetEstimate => ({
+    state: "unavailable",
+    currency: cost?.currency || "USD",
+    optimizedAmount: null,
+    naiveAmount: null,
+    savingsAmount: null,
+    savingsPercent: null,
+    detail,
+  });
+
   const recorded = cost?.recordedProviderCostUsd ?? null;
   const remaining = cost?.estimatedRemainingProviderCostUsd ?? null;
   const base = cost?.isKnown && (recorded !== null || remaining !== null) ? (recorded ?? 0) + (remaining ?? 0) : null;
   if (base === null) {
-    return {
-      state: "unavailable",
-      currency: cost?.currency || "USD",
-      optimizedAmount: null,
-      naiveAmount: null,
-      savingsAmount: null,
-      savingsPercent: null,
-      detail: "A vetted planning estimate is not available yet. Unknown is kept as unknown; no zero-cost assumption is shown.",
-    };
+    return unavailable("A vetted planning estimate is not available yet. Unknown is kept as unknown; no zero-cost assumption is shown.");
+  }
+  // A net figure below zero, or outside the finite range, is a data-integrity signal rather than a budget:
+  // the recorded sum is net of refunds and reversals. Scaling it would price the regenerate-everything path
+  // below the optimized path and report a zero planning difference instead of declining to compare.
+  if (!Number.isFinite(base) || base < 0) {
+    return unavailable("The recorded spend for this project is not a usable planning figure, so no comparison is shown. Unknown is kept as unknown.");
   }
 
-  const shotComplexity = Math.min(0.35, workspace.counts.shots * 0.025);
-  const openDecisionPenalty = Math.min(0.3, (workspace.counts.blocked + workspace.counts.needsReview) * 0.08);
+  const shotComplexity = Math.min(0.35, Math.max(0, workspace.counts.shots) * 0.025);
+  const openDecisionPenalty = Math.min(0.3, Math.max(0, workspace.counts.blocked) * 0.08 + Math.max(0, workspace.counts.needsReview) * 0.08);
   const naiveMultiplier = 1.45 + shotComplexity + openDecisionPenalty;
   const optimizedAmount = round(base * tierFactors[selectedTier]);
-  const naiveAmount = round(optimizedAmount * naiveMultiplier);
-  const savingsAmount = round(Math.max(0, naiveAmount - optimizedAmount));
+  const naiveAmount = optimizedAmount === null ? null : round(optimizedAmount * naiveMultiplier);
+  const savingsAmount = optimizedAmount === null || naiveAmount === null ? null : round(Math.max(0, naiveAmount - optimizedAmount));
+  if (optimizedAmount === null || naiveAmount === null || savingsAmount === null) {
+    return unavailable("The planning figures for this finish level cannot be compared safely. Unknown is kept as unknown; no zero-cost assumption is shown.");
+  }
   return {
     state: "known",
     currency: cost?.currency || "USD",
     optimizedAmount,
     naiveAmount,
     savingsAmount,
-    savingsPercent: naiveAmount > 0 ? Math.round((savingsAmount / naiveAmount) * 100) : 0,
+    savingsPercent: naiveAmount > 0 ? Math.min(100, Math.max(0, Math.round((savingsAmount / naiveAmount) * 100))) : 0,
     detail: "Planning comparison based on persisted project work. It is not a customer price, reservation, or charge.",
   };
 }
 
-function round(value: number) {
-  return Math.round(value * 100) / 100;
+/**
+ * Rounds a money figure to two decimals, or returns null when the value is not a usable amount.
+ * Math.round yields signed zero for a sub-cent negative value, so zero is returned explicitly.
+ */
+function round(value: number): number | null {
+  if (!Number.isFinite(value)) return null;
+  const cents = Math.round(value * 100);
+  return cents === 0 ? 0 : cents / 100;
 }
 
 export function formatMovieBudgetAmount(amount: number | null, currency = "USD") {
-  return amount === null ? "Estimate pending" : `${currency} ${amount.toFixed(2)}`;
+  // The display step refuses to render a value it cannot present as money, rather than emitting a
+  // signed, negative or NaN amount into the panel.
+  if (amount === null || !Number.isFinite(amount) || amount < 0) return "Estimate pending";
+  const cents = Math.round(amount * 100);
+  return `${currency} ${(cents === 0 ? 0 : cents / 100).toFixed(2)}`;
 }
