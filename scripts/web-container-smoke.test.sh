@@ -31,13 +31,17 @@ while (($#)); do
         *) shift ;;
     esac
 done
-printf 'HTTP/1.1 200 OK\r\ncontent-type: text/html; charset=utf-8\r\nx-content-type-options: nosniff\r\nx-frame-options: DENY\r\n\r\n' > "$headers"
+if [[ "${SMOKE_REDIRECT:-0}" == "1" ]]; then
+    printf 'HTTP/1.1 301 Moved Permanently\r\ncontent-type: text/html\r\nx-content-type-options: nosniff\r\nx-frame-options: DENY\r\nlocation: /final\r\n\r\nHTTP/1.1 200 OK\r\n\r\n' > "$headers"
+else
+    printf 'HTTP/1.1 200 OK\r\ncontent-type: text/html; charset=utf-8\r\nx-content-type-options: nosniff\r\nx-frame-options: DENY\r\n\r\n' > "$headers"
+fi
 printf '<!doctype html><html><head><title>Taslim.ai</title></head><body>Taslim</body></html>\n' > "$body"
 printf '200'
 STUB
 cat > "$bin_dir/sleep" <<'STUB'
 #!/usr/bin/env bash
-exit 0
+exec /usr/bin/sleep "$1"
 STUB
 chmod +x "$bin_dir/docker" "$bin_dir/curl" "$bin_dir/sleep"
 
@@ -62,5 +66,25 @@ assert_log_contains '--env PORT=3000'
 assert_log_contains '--env HOSTNAME=0.0.0.0'
 assert_log_contains 'http://127.0.0.1:3000/'
 assert_log_contains 'docker rm --force web-container-smoke-test'
+
+redirect_output="$tmp_dir/redirect-output.log"
+set +e
+PATH="$bin_dir:$PATH" \
+SMOKE_COMMAND_LOG="$log_file" \
+SMOKE_REDIRECT=1 \
+CONTAINER_NAME=web-container-smoke-redirect-test \
+bash "$root/scripts/web-container-smoke.sh" taslim-web:test 3000 1 >"$redirect_output" 2>&1
+redirect_status=$?
+set -e
+if (( redirect_status == 0 )); then
+    echo 'Expected redirect response with missing terminal headers to fail.' >&2
+    cat "$redirect_output" >&2
+    exit 1
+fi
+grep -F 'web root did not return an HTML content type' "$redirect_output" >/dev/null || {
+    echo 'Expected terminal-response header validation failure was not observed.' >&2
+    cat "$redirect_output" >&2
+    exit 1
+}
 
 echo 'web-container-smoke script test passed.'
