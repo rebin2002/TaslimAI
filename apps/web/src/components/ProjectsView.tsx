@@ -63,8 +63,13 @@ export function ProjectsView() {
   }, [status, t, workspace]);
 
   // Loading remote projects after the workspace or tab changes is an external synchronization.
-  // eslint-disable-next-line react-hooks/set-state-in-effect
-  useEffect(() => { void load(); }, [load]);
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    void load();
+    // A multi-page walk outlives a fast navigation; stop paying for results
+    // no component instance will publish.
+    return () => { projectLoadRef.current?.abort(); };
+  }, [load]);
 
   async function create(input: ProjectInput) {
     if (!workspace) return;
