@@ -207,3 +207,82 @@ test("Home does not upload or send an old account's files after pending create a
   expect(messages).toBe(0);
   await expect(page).toHaveURL(/\/$/);
 });
+
+/**
+ * Logging out during an already-started upload cannot retroactively revoke
+ * that request. But it MUST stop every later attachment before its request is
+ * created, even when the first upload resolves after another user signs in.
+ */
+test("Home never starts a second private attachment upload after logout", async ({ authenticatedPage: page }) => {
+  const conversationId = "00000000-0000-4000-8000-000000000825";
+  const fileId = "00000000-0000-4000-8000-000000000826";
+  let resolveUploadStarted: () => void = () => {};
+  let releaseFirstUpload: () => void = () => {};
+  const uploadStarted = new Promise<void>((resolve) => { resolveUploadStarted = resolve; });
+  const firstUploadBlocked = new Promise<void>((resolve) => { releaseFirstUpload = resolve; });
+  let uploads = 0;
+  let messages = 0;
+
+  await page.route("**/api/workspaces/*/conversations", async (route: Route) => {
+    if (route.request().method() !== "POST") return route.continue();
+    await route.fulfill({
+      status: 200, contentType: "application/json",
+      body: JSON.stringify({
+        id: conversationId, workspaceId: "test-workspace", projectId: null,
+        title: "Synthetic multi-file draft", status: "Active",
+        createdAt: new Date(0).toISOString(), updatedAt: new Date(0).toISOString(), lastMessageAt: null,
+      }),
+    });
+  });
+  await page.route("**/api/workspaces/*/files", async (route: Route) => {
+    if (route.request().method() !== "POST") return route.continue();
+    uploads += 1;
+    if (uploads === 1) {
+      resolveUploadStarted();
+      await firstUploadBlocked;
+    }
+    try {
+      await route.fulfill({
+        status: 200, contentType: "application/json",
+        body: JSON.stringify({ id: fileId, status: "Ready", originalFileName: "synthetic-one.txt" }),
+      });
+    } catch { /* the original page may cancel its prior-account upload */ }
+  });
+  await page.route("**/api/conversations/*/messages", async (route: Route) => {
+    if (route.request().method() !== "POST") return route.continue();
+    messages += 1;
+    await route.fulfill({ status: 200, contentType: "application/json", body: "{}" });
+  });
+
+  await page.goto("/");
+  const composer = page.locator(".home-composer");
+  await expect(composer).toBeVisible();
+  await composer.locator('input[type="file"]').setInputFiles([
+    { name: "synthetic-one.txt", mimeType: "text/plain", buffer: Buffer.from("synthetic test content one") },
+    { name: "synthetic-two.txt", mimeType: "text/plain", buffer: Buffer.from("synthetic test content two") },
+  ]);
+  await expect(composer).toContainText("synthetic-two.txt");
+  await composer.locator(".home-composer-submit").click();
+  await uploadStarted;
+  expect(uploads).toBe(1);
+  expect(messages).toBe(0);
+
+  try {
+    await logoutInUi(page);
+    await registerInUi(page, {
+      displayName: "E2E Post-upload Account",
+      email: `e2e+home-upload-switch-${randomUUID()}@example.test`,
+      password: E2E_PASSWORD,
+    });
+  } finally {
+    releaseFirstUpload();
+  }
+  await page.goto("/");
+  await expect(composer).toBeVisible();
+  await expect(composer).not.toContainText("synthetic-one.txt");
+  await expect(composer).not.toContainText("synthetic-two.txt");
+  await page.waitForTimeout(350);
+  expect(uploads, "only the pre-logout first file may have started").toBe(1);
+  expect(messages, "no old-principal message may be sent").toBe(0);
+  await expect(page).toHaveURL(/\/$/);
+});
