@@ -15,6 +15,7 @@ public static class MovieVideoMakeoverPreviewAdmissionCodes
     public const string Admitted = "admitted";
     public const string ProjectNotFound = "project_not_found";
     public const string PrincipalNotWorkspaceMember = "principal_not_workspace_member";
+    public const string PrincipalNotProjectViewer = "principal_not_project_viewer";
     public const string SourceAssetMissing = "source_asset_missing";
     public const string ResultAssetMissing = "result_asset_missing";
     public const string AssetCrossWorkspace = "asset_cross_workspace";
@@ -149,7 +150,8 @@ public interface IMovieVideoMakeoverPreviewAdmissionService
 
 public sealed class MovieVideoMakeoverPreviewAdmissionService(
     TaslimDbContext db,
-    WorkspaceAccessService access) : IMovieVideoMakeoverPreviewAdmissionService
+    WorkspaceAccessService access,
+    MovieCollaborationAccess collaboration) : IMovieVideoMakeoverPreviewAdmissionService
 {
     public async Task<MovieVideoMakeoverPreviewAdmissionDecision> EvaluateAsync(
         Guid userId,
@@ -169,7 +171,18 @@ public sealed class MovieVideoMakeoverPreviewAdmissionService(
                 null,
                 null);
 
+        // Deny without querying either asset when the caller lacks workspace and
+        // Movie-project View access; workspace membership alone is not sufficient.
         var isMember = await access.IsMemberAsync(userId, project.WorkspaceId, cancellationToken);
+        if (!isMember)
+            return MovieVideoMakeoverPreviewAdmissionEvaluator.Evaluate(project, false, null, null, null);
+        if (!await collaboration.HasPermissionAsync(userId, movieProjectId, MoviePermissions.View, cancellationToken))
+            return new MovieVideoMakeoverPreviewAdmissionDecision(
+                false,
+                MovieVideoMakeoverPreviewAdmissionCodes.PrincipalNotProjectViewer,
+                "Movie project View permission is required to open this preview.",
+                project.Id, null, null);
+
         var sourceAsset = await db.Assets.AsNoTracking()
             .FirstOrDefaultAsync(item => item.Id == sourceAssetId, cancellationToken);
         var resultAsset = await db.Assets.AsNoTracking()
