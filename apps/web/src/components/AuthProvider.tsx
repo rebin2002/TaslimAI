@@ -67,7 +67,10 @@ export function AuthProvider({ children }: Readonly<{ children: React.ReactNode 
   }, [getLocaleSource, session?.user, setLanguagePack]);
   useEffect(() => {
     const userId = session?.user.id;
-    if (!userId || sessionLanguagePackInitialized.current !== userId) return;
+    // The first-login picker is a preview until the server accepts onboarding.
+    // Persisting it here would override the saved account profile after reload
+    // even when completion fails or the user abandons the flow.
+    if (!userId || sessionLanguagePackInitialized.current !== userId || session?.user.onboardingCompletedAt === null) return;
     try {
       writeStoredLanguagePack(window.localStorage, accountLanguagePackStorageKey(userId), languagePackId);
       window.localStorage.removeItem(anonymousLanguagePackStorageKey);
@@ -75,7 +78,7 @@ export function AuthProvider({ children }: Readonly<{ children: React.ReactNode 
     } catch {
       // Storage can be unavailable; the selected pack remains active in memory.
     }
-  }, [languagePackId, session?.user.id]);
+  }, [languagePackId, session?.user.id, session?.user.onboardingCompletedAt]);
 
   const signIn = useCallback(async (input: LoginInput, redirectTo?: string) => {
     const request = ++authRequestGeneration.current;
