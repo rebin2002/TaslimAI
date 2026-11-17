@@ -241,11 +241,173 @@ public sealed class AutopilotExternalEventAcknowledgementTests : IClassFixture<A
         finally { Environment.SetEnvironmentVariable(SecretVariable, previous); }
     }
 
+    // Deterministic signed-event idempotency over the real HTTP receiver: a
+    // replayed event id carrying different signed content must never be
+    // reinterpreted as history. The conflict acknowledgement has to bind the
+    // caller's trimmed external event id to the existing durable row's internal
+    // id (same mapping contract as accepted/duplicate) so the sender can
+    // verify idempotency without parsing its own headers back. No wake, no
+    // provider call, no second row.
+    [Fact]
+    public async Task Payload_conflict_ack_binds_external_id_to_the_existing_durable_row()
+    {
+        var previous = Environment.GetEnvironmentVariable(SecretVariable);
+        Environment.SetEnvironmentVariable(SecretVariable, Secret);
+        try
+        {
+            using var isolatedFactory = new AutopilotAcknowledgementFactory();
+            using var client = isolatedFactory.CreateClient();
+            using (var setupScope = isolatedFactory.Services.CreateScope())
+                setupScope.ServiceProvider.GetRequiredService<TaslimDbContext>().Database.EnsureCreated();
+
+            var externalId = $"evt-conflict-ack-{Guid.NewGuid():N}";
+            var originalPayload = Payload(externalId);
+            using var firstRequest = Request(externalId, originalPayload);
+            using var first = await client.SendAsync(firstRequest);
+            Assert.Equal(HttpStatusCode.Accepted, first.StatusCode);
+            using var accepted = JsonDocument.Parse(await first.Content.ReadAsStringAsync());
+            Assert.True(Guid.TryParse(accepted.RootElement.GetProperty("eventId").GetString(), out var internalId));
+
+            var mutatedPayload = MutatedPayloadForSameReceiptId(externalId);
+            Assert.NotEqual(originalPayload, mutatedPayload);
+            using var conflictRequest = Request(externalId, mutatedPayload);
+            using var conflict = await client.SendAsync(conflictRequest);
+            Assert.Equal(HttpStatusCode.Conflict, conflict.StatusCode);
+            using var body = JsonDocument.Parse(await conflict.Content.ReadAsStringAsync());
+            Assert.Equal("payload_conflict", body.RootElement.GetProperty("status").GetString());
+            Assert.Equal(externalId, body.RootElement.GetProperty("externalEventId").GetString());
+            Assert.Equal(internalId.ToString(), body.RootElement.GetProperty("eventId").GetString());
+            Assert.Equal("idempotency_key_payload_conflict", body.RootElement.GetProperty("reason").GetString());
+
+            // The rejected replay must not be acknowledged as a success outcome.
+            Assert.NotEqual("accepted", body.RootElement.GetProperty("status").GetString());
+            Assert.NotEqual("duplicate", body.RootElement.GetProperty("status").GetString());
+
+            Assert.Equal(0, isolatedFactory.ProviderProbe.ProviderCalls);
+            using var scope = isolatedFactory.Services.CreateScope();
+            var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            var stored = Assert.Single(await db.AutopilotEvents.AsNoTracking().Where(item =>
+                item.SourceSystem == ManusBridgeWaveLaunchProvider.Key && item.ExternalEventId == externalId).ToListAsync());
+            Assert.Equal(internalId, stored.Id);
+            Assert.Equal(originalPayload, stored.SignalJson);
+            Assert.Equal(AutopilotEventStatuses.Queued, stored.Status);
+            Assert.Empty(await db.AutopilotWaveLaunchTasks.AsNoTracking().ToListAsync());
+        }
+        finally { Environment.SetEnvironmentVariable(SecretVariable, previous); }
+    }
+
+    // Deterministic immutable-base-SHA conflict over the same receiver: the
+    // safety-stop row is durable, and its acknowledgement must carry the same
+    // external-to-internal identity binding. A concurrent duplicate must map
+    // to the identical durable row without creating a second one.
+    [Fact]
+    public async Task Sha_conflict_ack_binds_external_id_and_repeated_conflict_is_idempotent()
+    {
+        var previous = Environment.GetEnvironmentVariable(SecretVariable);
+        Environment.SetEnvironmentVariable(SecretVariable, Secret);
+        try
+        {
+            using var isolatedFactory = new AutopilotAcknowledgementFactory();
+            using var client = isolatedFactory.CreateClient();
+            const string runBaseSha = "1111111111111111111111111111111111111111";
+            const string signalBaseSha = "2222222222222222222222222222222222222222";
+            using (var setupScope = isolatedFactory.Services.CreateScope())
+            {
+                var setupDb = setupScope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+                setupDb.Database.EnsureCreated();
+                setupDb.AutopilotRuns.Add(new AutopilotRun
+                {
+                    Id = Guid.NewGuid(),
+                    WaveKey = "wave-ack-contract",
+                    RunKey = "run-wave-ack-contract",
+                    State = AutopilotRunStates.AwaitingEvents,
+                    BaseSha = runBaseSha,
+                    CandidateSha = string.Empty,
+                    Branch = "feature/synthetic-ack-contract",
+                    CreatedAt = DateTime.UtcNow,
+                    UpdatedAt = DateTime.UtcNow,
+                    ConcurrencyToken = Guid.NewGuid(),
+                });
+                await setupDb.SaveChangesAsync();
+            }
+
+            var externalId = $"evt-sha-conflict-{Guid.NewGuid():N}";
+            var payload = PayloadWithBaseSha(externalId, signalBaseSha);
+            using var firstRequest = Request(externalId, payload);
+            using var first = await client.SendAsync(firstRequest);
+            Assert.Equal(HttpStatusCode.Conflict, first.StatusCode);
+            using var body = JsonDocument.Parse(await first.Content.ReadAsStringAsync());
+            Assert.Equal("sha_conflict", body.RootElement.GetProperty("status").GetString());
+            Assert.Equal(externalId, body.RootElement.GetProperty("externalEventId").GetString());
+            Assert.True(Guid.TryParse(body.RootElement.GetProperty("eventId").GetString(), out var rejectedId));
+            Assert.Equal("immutable_base_sha_conflict", body.RootElement.GetProperty("reason").GetString());
+
+            using var scope = isolatedFactory.Services.CreateScope();
+            var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            var stored = Assert.Single(await db.AutopilotEvents.AsNoTracking().Where(item =>
+                item.SourceSystem == ManusBridgeWaveLaunchProvider.Key && item.ExternalEventId == externalId).ToListAsync());
+            Assert.Equal(rejectedId, stored.Id);
+            Assert.Equal(AutopilotEventStatuses.RejectedInvalid, stored.Status);
+            Assert.True(stored.SignatureVerified);
+
+            // Re-sending the identical signed event maps onto the recorded
+            // conflict row through the idempotency key: duplicate acknowledgement,
+            // identical binding, and still exactly one durable row.
+            using var replayRequest = Request(externalId, payload);
+            using var replay = await client.SendAsync(replayRequest);
+            Assert.Equal(HttpStatusCode.OK, replay.StatusCode);
+            using var replayBody = JsonDocument.Parse(await replay.Content.ReadAsStringAsync());
+            Assert.Equal("duplicate", replayBody.RootElement.GetProperty("status").GetString());
+            Assert.Equal(externalId, replayBody.RootElement.GetProperty("externalEventId").GetString());
+            Assert.Equal(rejectedId.ToString(), replayBody.RootElement.GetProperty("eventId").GetString());
+            Assert.Equal(1, await db.AutopilotEvents.CountAsync(item => item.ExternalEventId == externalId));
+            Assert.Equal(0, isolatedFactory.ProviderProbe.ProviderCalls);
+        }
+        finally { Environment.SetEnvironmentVariable(SecretVariable, previous); }
+    }
+
     private static string Payload(string? receiptId) => JsonSerializer.Serialize(new
     {
         waveKey = "wave-ack-contract",
         taskId = "logical-ack-task",
         outcome = "succeeded",
+        evidence = JsonSerializer.Serialize(new
+        {
+            kind = "taslim.manus.task_detail_terminal_receipt.v1",
+            task_id = "ABCDEFGHIJKLMNOPQRSTUV",
+            agent_status = "stopped",
+            stop_reason = "finish",
+            has_running_background_jobs = false,
+            event_id = receiptId
+        })
+    });
+
+    // Same receipt-bound identity as Payload but a different logical task, so a
+    // replayed signed event id with changed content deterministically reaches
+    // the intake's idempotency-key conflict path instead of being rejected at
+    // the receipt-binding preflight.
+    private static string MutatedPayloadForSameReceiptId(string? receiptId) => JsonSerializer.Serialize(new
+    {
+        waveKey = "wave-ack-contract",
+        taskId = "logical-ack-task-mutated",
+        outcome = "succeeded",
+        evidence = JsonSerializer.Serialize(new
+        {
+            kind = "taslim.manus.task_detail_terminal_receipt.v1",
+            task_id = "ABCDEFGHIJKLMNOPQRSTUV",
+            agent_status = "stopped",
+            stop_reason = "finish",
+            has_running_background_jobs = false,
+            event_id = receiptId
+        })
+    });
+
+    private static string PayloadWithBaseSha(string? receiptId, string baseSha) => JsonSerializer.Serialize(new
+    {
+        waveKey = "wave-ack-contract",
+        taskId = "logical-ack-task",
+        outcome = "succeeded",
+        baseSha,
         evidence = JsonSerializer.Serialize(new
         {
             kind = "taslim.manus.task_detail_terminal_receipt.v1",

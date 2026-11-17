@@ -41,6 +41,7 @@ public sealed class AutopilotIntakeController(
     [EnableRateLimiting(RateLimiting.Generation)]
     [ProducesResponseType(StatusCodes.Status202Accepted)]
     [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(StatusCodes.Status409Conflict)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
     [ProducesResponseType(StatusCodes.Status413RequestEntityTooLarge)]
     [ProducesResponseType(StatusCodes.Status503ServiceUnavailable)]
@@ -239,6 +240,13 @@ public sealed class AutopilotIntakeController(
         {
             AutopilotIntakeOutcomes.Accepted => Accepted(new { status = result.Outcome, eventId = result.EventId, externalEventId = externalEventId.Trim() }),
             AutopilotIntakeOutcomes.Duplicate => Ok(new { status = result.Outcome, eventId = result.EventId, externalEventId = externalEventId.Trim(), reason = result.Reason }),
+            // Reused signed-event identity with a different payload and durable-SHA
+            // conflicts are deterministic, non-retryable outcomes bound to an
+            // existing durable row. Acknowledge them with the same external-to-
+            // internal identity binding as accepted/duplicate (HTTP 409) so the
+            // sender can map its signed event idempotently; never wake dispatch.
+            AutopilotIntakeOutcomes.PayloadConflict => Conflict(new { status = result.Outcome, eventId = result.EventId, externalEventId = externalEventId.Trim(), reason = result.Reason }),
+            AutopilotIntakeOutcomes.ShaConflict => Conflict(new { status = result.Outcome, eventId = result.EventId, externalEventId = externalEventId.Trim(), reason = result.Reason }),
             AutopilotIntakeOutcomes.RejectedUnsigned => Unauthorized(new { error = new { code = "AUTOPILOT_EVENT_UNAUTHENTICATED", message = "The event could not be authenticated." } }),
             AutopilotIntakeOutcomes.FenceUnavailable => ApiResults.Error(this, StatusCodes.Status503ServiceUnavailable,
                 "AUTOPILOT_EVENT_RETRY", "The event was not accepted; retry the same event ID and payload."),
