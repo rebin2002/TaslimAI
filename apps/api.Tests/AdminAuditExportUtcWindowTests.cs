@@ -168,7 +168,7 @@ public sealed class AdminAuditExportUtcWindowTests : IClassFixture<TaslimApiFact
     }
 
     [Fact]
-    public async Task Dashboard_echoes_the_utc_normalized_window_and_exports_timestamp_ordered_audit_rows()
+    public async Task Dashboard_normalizes_metric_window_and_keeps_global_recent_admin_actions_ordered()
     {
         var marker = $"utc-window-{Guid.NewGuid():N}";
         var actorUserId = Guid.NewGuid();
@@ -200,10 +200,8 @@ public sealed class AdminAuditExportUtcWindowTests : IClassFixture<TaslimApiFact
 
         var dashboard = await service.GetDashboardAsync(filter);
 
-        // The exported window must be the UTC-normalized bounds: before the
-        // fix the offset-bearing clock value was reinterpreted as UTC,
-        // drifting the echoed range and ordering the exported audit rows
-        // against boundaries that no longer matched the requested instants.
+        // The selected historical-metrics window must be UTC-normalized;
+        // recent operational actions are a separately labeled, global feed.
         Assert.Equal(HostLocal(UtcFrom).ToUniversalTime().Date, dashboard.Range.FromUtc);
         Assert.Equal(HostLocal(UtcTo).ToUniversalTime().Date.AddDays(1), dashboard.Range.ToUtc);
 
@@ -214,6 +212,8 @@ public sealed class AdminAuditExportUtcWindowTests : IClassFixture<TaslimApiFact
             "Admin audit export rows must be ordered newest-first by their UTC timestamp.");
 
         var exportedIds = dashboard.RecentAdminActions.Select(item => item.Id).ToArray();
+        // An action newer than the chosen metrics window must still appear in
+        // the "recent operational actions" feed; this is intentional.
         Assert.Contains(outsideFuture.Id, exportedIds);
         var futureIndex = Array.IndexOf(exportedIds, outsideFuture.Id);
         var futureCreatedAt = createdAt[futureIndex];
