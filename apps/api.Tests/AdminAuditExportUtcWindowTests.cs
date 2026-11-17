@@ -115,6 +115,58 @@ public sealed class AdminAuditExportUtcWindowTests : IClassFixture<TaslimApiFact
         Assert.Equal(utcFromDay.AddDays(2), longTo);
     }
 
+    // Host-independent worked examples: an offset-bearing bound value is fed
+    // through the same local-kind shape MVC binding produces, and the window
+    // is asserted against the exact UTC calendar days of the instants, not
+    // the wall clock carried by the original offset.
+    private static DateTime Bound(DateTimeOffset value) =>
+        DateTime.SpecifyKind(value.UtcDateTime, DateTimeKind.Utc).ToLocalTime();
+
+    [Fact]
+    public void Asia_baghdad_offset_bounds_normalize_to_the_utc_calendar_days()
+    {
+        // Asia/Baghdad is UTC+03:00 year-round (no DST).
+        var baghdad = TimeSpan.FromHours(3);
+
+        // "fromUtc=2026-11-16T01:30:00+03:00" in Baghdad is the UTC instant
+        // 2026-11-15T22:30:00Z: the export must open on 2026-11-15, the UTC
+        // day of the instant, NOT on 2026-11-16, the Baghdad wall-clock day
+        // the old SpecifyKind shortcut kept as if it were UTC.
+        var from = new DateTimeOffset(2026, 11, 16, 1, 30, 0, baghdad);
+        Assert.Equal(new DateTime(2026, 11, 15, 22, 30, 0, DateTimeKind.Utc), from.UtcDateTime);
+
+        // "toUtc=2026-11-17T00:30:00+03:00" is the UTC instant
+        // 2026-11-16T21:30:00Z: the inclusive end day rolls to 2026-11-17,
+        // matching the UTC calendar of the instant.
+        var to = new DateTimeOffset(2026, 11, 17, 0, 30, 0, baghdad);
+        Assert.Equal(new DateTime(2026, 11, 16, 21, 30, 0, DateTimeKind.Utc), to.UtcDateTime);
+
+        var (fromUtc, toUtc) = Normalize(Bound(from), Bound(to));
+        Assert.Equal(new DateTime(2026, 11, 15, 0, 0, 0, DateTimeKind.Utc), fromUtc);
+        Assert.Equal(new DateTime(2026, 11, 17, 0, 0, 0, DateTimeKind.Utc), toUtc);
+        // The Baghdad wall-clock day (16) differs from the UTC opening day (15).
+        Assert.NotEqual(from.Date, fromUtc);
+    }
+
+    [Fact]
+    public void Z_suffixed_utc_bounds_pass_through_to_the_same_utc_days()
+    {
+        // The console sends Z-suffixed bounds: "fromUtc=2026-11-15T21:00:00Z"
+        // and "toUtc=2026-11-16T15:00:00Z". Whether they arrive as UTC-kind
+        // values or in the local-kind binding shape, the window must be
+        // 2026-11-15 .. 2026-11-17 (whole UTC days, inclusive end rolled over).
+        var from = new DateTimeOffset(2026, 11, 15, 21, 0, 0, TimeSpan.Zero);
+        var to = new DateTimeOffset(2026, 11, 16, 15, 0, 0, TimeSpan.Zero);
+
+        var (directFrom, directTo) = Normalize(from.UtcDateTime, to.UtcDateTime);
+        Assert.Equal(new DateTime(2026, 11, 15, 0, 0, 0, DateTimeKind.Utc), directFrom);
+        Assert.Equal(new DateTime(2026, 11, 17, 0, 0, 0, DateTimeKind.Utc), directTo);
+
+        var (boundFrom, boundTo) = Normalize(Bound(from), Bound(to));
+        Assert.Equal(directFrom, boundFrom);
+        Assert.Equal(directTo, boundTo);
+    }
+
     [Fact]
     public async Task Dashboard_echoes_the_utc_normalized_window_and_exports_timestamp_ordered_audit_rows()
     {
