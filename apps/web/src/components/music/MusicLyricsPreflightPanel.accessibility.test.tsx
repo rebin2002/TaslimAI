@@ -218,7 +218,7 @@ function rightsMissingInput(): MusicLyricsPreflightInput {
 }
 
 let document: TestDocument;
-let root: Root;
+let root: Root | undefined;
 let container: TestNode;
 
 beforeEach(() => {
@@ -243,13 +243,19 @@ beforeEach(() => {
 
 afterEach(() => {
   act(() => root?.unmount());
+  root = undefined;
   vi.unstubAllGlobals();
 });
 
+// A case that mounts several drafts in turn must reuse the mounted root:
+// calling createRoot() again on a container React already owns is unsupported
+// and warns, so the first tree would leak into the second one's assertions.
 function mount(element: React.ReactElement) {
-  act(() => {
+  if (root === undefined) {
     root = createRoot(container as unknown as Element);
-    root.render(element);
+  }
+  act(() => {
+    root?.render(element);
   });
 }
 
