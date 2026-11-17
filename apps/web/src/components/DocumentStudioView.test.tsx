@@ -1,6 +1,7 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
-import { DocumentPreviewTable, DocumentProgressMeter, DocumentStudioView } from "./DocumentStudioView";
+import { DocumentPreviewTable } from "./DocumentPreviewTable";
+import { DocumentProgressMeter, DocumentStudioView } from "./DocumentStudioView";
 
 vi.mock("next/navigation", () => ({
   useSearchParams: () => new URLSearchParams(),
