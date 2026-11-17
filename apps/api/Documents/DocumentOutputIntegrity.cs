@@ -74,7 +74,12 @@ public static class DocumentOutputIntegrityValidator
             var relationships = RequireRoot(ParseRequiredXml(archive, "_rels/.rels"), "Relationships", RelationshipsNamespace, "_rels/.rels");
             var hasMainDocumentRelationship = relationships.Elements(XName.Get("Relationship", RelationshipsNamespace)).Any(item =>
                 string.Equals(item.Attribute("Type")?.Value, OfficeDocumentRelationshipType, StringComparison.Ordinal)
-                && IsMainDocumentTarget(item.Attribute("Target")?.Value));
+                && IsMainDocumentTarget(item.Attribute("Target")?.Value)
+                // OPC package relationships must target an internal part. An
+                // external relationship with the same Target text is not a
+                // link to word/document.xml in this DOCX archive.
+                && (item.Attribute("TargetMode") is null
+                    || string.Equals(item.Attribute("TargetMode")?.Value, "Internal", StringComparison.Ordinal)));
             if (!hasMainDocumentRelationship)
                 throw new DocumentOutputIntegrityException("The DOCX package has no relationship to its main document part.");
             var hasMainDocumentContentType = contentTypes.Elements(XName.Get("Override", ContentTypesNamespace)).Any(item =>
