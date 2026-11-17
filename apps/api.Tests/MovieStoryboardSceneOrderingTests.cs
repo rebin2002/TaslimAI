@@ -30,15 +30,20 @@ namespace Taslim.Api.Tests;
 /// same method are naturally scoped by their non-nullable parents; the scene case must be
 /// scoped to its project explicitly, preserving the same ordinal-scope invariant.
 ///
-/// Non-duplication evidence (checked 2026-11-17 against all 200 open PR changed-file lists):
-/// no open PR touches <c>apps/api/Movies/MovieV2Service.cs</c>, this file's path, or the
-/// storyboard scene-order routes. <c>MovieSceneReorderLongFormTimelineTests.cs</c> (open,
-/// issue #685 slice) reorders scenes attached to real sequences inside one project and asserts
-/// timeline totals in the same context; it cannot see the cross-project ordinal leak and is
-/// untouched here. <c>MovieStudioV2Tests.cs</c> reorders an ACT only; untouched.
+/// Non-duplication evidence (re-checked 2026-11-17 against the changed-file lists of all 510
+/// open PRs, not the earlier 200-PR sample): this file's path is created by no other open PR,
+/// and <c>apps/api/Movies/MovieV2Service.cs</c> is co-touched only by the stale #270 lane
+/// (<c>fix/movie-finalization-compare-and-set-20261007</c>, last activity 2026-10-07, no
+/// non-terminal runs), whose hunks land in <c>SelectTakeAsync</c> and a trailing exception
+/// record — disjoint from the <c>ReorderAsync</c> "scene" case edited here.
+/// <c>MovieSceneReorderLongFormTimelineTests.cs</c> (open, issue #685 slice) reorders scenes
+/// attached to real sequences inside one project and asserts timeline totals in the same
+/// context; it cannot see the cross-project ordinal leak and is untouched here (it still passes
+/// with this change). <c>MovieStudioV2Tests.cs</c> reorders an ACT only; untouched.
 /// <c>fix/movie-audio-window-ordering-boundary</c> (#760) is timeline audio ordering, a
-/// different subsystem; untouched. This lane deliberately stays out of the video-clip
-/// permission and dialogue-subtitle lanes.
+/// different subsystem; untouched. The concurrently active Movie lane #965 owns
+/// <c>MovieStudioController.cs</c> and clip-edit authorization; nothing here touches it, and
+/// this lane deliberately stays out of the video-clip permission and dialogue-subtitle work.
 ///
 /// Synthetic and provider-free: in-memory SQLite, two synthetic projects in separate personal
 /// workspaces. No `IMovieVideoProvider`, no cost reservation, no generation job, no billing,
