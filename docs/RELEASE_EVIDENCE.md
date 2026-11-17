@@ -14,7 +14,7 @@ The manifest binds a candidate to:
 - the base-image references used by the deployable Dockerfiles; and
 - the production safety defaults that must remain true: migrations enabled, persistent S3-compatible storage selected, customer charging disabled, and OpenAI activation disabled.
 
-The manifest contains no connection strings, credentials, API keys, access tokens, or customer data. The script rejects a workflow when `GITHUB_SHA` does not match the checked-out commit, required release inputs are missing or untracked, the migration chain is absent, or a protected production default is unsafe.
+The manifest contains no connection strings, credentials, API keys, access tokens, or customer data. The script rejects a workflow when `GITHUB_SHA` does not match the checked-out commit, required release inputs are missing or untracked, any release input or migration file drifts from the recorded commit (dirty, staged, deleted, or untracked), the migration chain is absent, or a protected production default is unsafe. This keeps every fingerprint in the manifest reproducible from the production SHA it is attributed to.
 
 ## Rollback use
 

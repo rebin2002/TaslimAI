@@ -61,6 +61,23 @@ if [[ -z "$migration_latest" ]]; then
   exit 1
 fi
 
+# Production SHA provenance assertion: every fingerprint emitted below is
+# attributed to $commit_sha, so the release inputs being hashed must match
+# that exact commit. A dirty, staged, deleted, or untracked release input
+# would otherwise produce evidence that no production SHA can reproduce, and
+# an untracked migration file can even hijack the chain head used to judge
+# whether a rollback is database-safe. Any drift from HEAD fails closed.
+provenance_drift="$(
+  git status --porcelain=v1 --untracked-files=all -- \
+    "${required_files[@]}" \
+    "apps/api/Persistence/Migrations"
+)"
+if [[ -n "$provenance_drift" ]]; then
+  echo "Release inputs drift from the recorded commit $commit_sha; refusing to emit release evidence." >&2
+  sed 's/^/Drift: /' <<<"$provenance_drift" >&2
+  exit 1
+fi
+
 input_files=(
   "package-lock.json"
   "apps/api/Taslim.Api.csproj"
