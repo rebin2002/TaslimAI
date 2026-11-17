@@ -72,12 +72,18 @@ test.describe("authenticated SSR route cache isolation", () => {
     // and must fetch a fresh document with zero traces of A's session.
     const beta = makeUser(BETA_MARKER);
     await registerInUi(page, beta);
+    // Positive isolation control: prove the second session can load its own
+    // private data. Without this, an empty/broken list would pass the test
+    // merely by hiding Session A's marker.
+    await apiJson(page.request, "POST", `/api/workspaces/${await personalWorkspaceId(page)}/conversations`, {
+      title: BETA_MARKER,
+    });
     const betaChat = await page.goto("/chat");
     expect(betaChat).not.toBeNull();
     expect(betaChat!.status()).toBe(200);
     expect(betaChat!.headers()["cache-control"] ?? "").toMatch(/no-store/);
     expect(betaChat!.headers()["cache-control"] ?? "").not.toMatch(/s-maxage/);
-    await expect(page.getByText(BETA_MARKER)).toHaveCount(0);
+    await expect(page.getByText(BETA_MARKER)).toBeVisible();
     await expect(page.getByText(ALPHA_MARKER)).toHaveCount(0);
     await expect(page.getByText(alpha.displayName)).toHaveCount(0);
   });
