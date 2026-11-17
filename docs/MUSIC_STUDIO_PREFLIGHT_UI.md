@@ -82,6 +82,29 @@ edit. This slice therefore adds no server gate, does not touch the validator,
 and does not merge or supersede #773 or #813. Anyone landing #709 should land
 #813 with it and then #773 as the regression lock, in that order.
 
+## Accessibility and keyboard semantics
+
+The panel is a preview, but it owns one decision control, so its keyboard
+semantics are part of the contract rather than decoration.
+
+| Surface | Semantics | Why |
+| --- | --- | --- |
+| Handoff control | `aria-disabled="true"` while blocked, and the attribute is absent when clean | A natively `disabled` button leaves the sequential focus order, so a keyboard-only user could not reach the preview's primary action at all and could never learn which rule withheld the draft. |
+| Activation while blocked | calls `onBlocked` with the full result, and never `onHandoff` | Fail-closed stays fail-closed. While the control was natively disabled React dispatched no click, so the documented `onBlocked` callback was unreachable code and keyboard activation did nothing, silently. |
+| Ready/blocked sentence | `role="status"`, `aria-live="polite"`, addressed by id | It is the only prose that explains the gate. The control carries `aria-describedby` for it, so the reason is heard on focus, before activation, and again when the draft flips. |
+| Blocking-issue list | the live region holds only the list, never its `Blocking issues` heading | A heading inside a live region is re-read on every keystroke, which buries the violation that actually changed. |
+| Region ids | `useId()` per instance | `aria-labelledby` and `aria-describedby` resolve document-wide. One shared literal id named every panel after the first heading and pointed every control at the first status sentence, so a second preview was labelled with the wrong draft's state. |
+
+None of this echoes authored lyric text into an announced region: the live
+regions carry issue codes, counts and state prose only, which keeps the
+no-content-leak property the rendering tests already pin.
+
+`apps/web/src/components/music/MusicLyricsPreflightPanel.accessibility.test.tsx`
+pins the five rows above against a mounted panel, using the dependency-free
+test-only DOM shim style already used by `ProjectContextEditor.test.tsx`, so
+keyboard activation and live-region structure are asserted rather than inferred
+from a markup string. No test dependency and no package manifest changed.
+
 ## Capability posture
 
 Nothing here enables singing. `MusicGenerationCapabilityCatalog.ForProvider`
@@ -99,13 +122,22 @@ structurally by scanning its own source.
 
 ## Ownership boundaries respected
 
-Audited file-by-file against all 483 open PRs before this branch was cut. The
-slice touches exactly four paths, none claimed by any open PR:
+Audited file-by-file against every open PR before each branch was cut (483 at
+the original slice, 523 at the accessibility follow-up). These paths are not
+claimed by any open PR:
 
 - `apps/web/src/components/music/MusicLyricsPreflightPanel.tsx` (new)
 - `apps/web/src/components/music/MusicLyricsPreflightPanel.test.tsx` (new)
+- `apps/web/src/components/music/MusicLyricsPreflightPanel.accessibility.test.tsx`
+  (new, accessibility follow-up)
 - `apps/api.Tests/MusicLyricsDraftContractMirrorTests.cs` (new)
 - `docs/MUSIC_STUDIO_PREFLIGHT_UI.md` (this file)
+
+The accessibility follow-up changes only the panel and its own new test file.
+`dir` and `lang` semantics stay exactly as the merged direction fix (#758)
+published them, and the mirrored vocabulary in `musicLyricsDraftPayload.ts` is
+untouched: no rule, limit or dialect behaviour changed, so the contract mirror
+and the server-side lanes are unaffected.
 
 Deliberately untouched, with their owners:
 

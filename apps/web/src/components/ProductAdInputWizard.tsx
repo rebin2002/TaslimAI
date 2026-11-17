@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useId, useState, type ChangeEvent, type FormEvent } from "react";
-import { applyProductAdDraftEdit, blankProductAdDraft, buildProductAdDraftRestoredNotice, clearProductAdDraft, hasProductAdDraftContent, persistProductAdDraft, productAdDraftStorageKey, restoreProductAdDraft, type ProductAdDraftAsset, type ProductAdDraftPrincipal, type ProductAdDraftState } from "@/lib/productAdDraftState";
+import { applyProductAdDraftEdit, blankProductAdDraft, buildProductAdDraftRestoredNotice, clearProductAdDraft, hasProductAdDraftContent, persistProductAdDraft, productAdDraftStorageKey, productAdPendingAssetNoticeKind, restoreProductAdDraft, type ProductAdAttachedAssets, type ProductAdDraftAsset, type ProductAdDraftAssetNoticeKind, type ProductAdDraftPrincipal, type ProductAdDraftState } from "@/lib/productAdDraftState";
 import { localeDirection, localeTag, type Locale } from "@/lib/i18n";
 import styles from "./ProductAdInputWizard.module.css";
 
@@ -190,6 +190,26 @@ export function buildProductAdPreviewAnnouncement(
   return "";
 }
 
+/**
+ * The ids that describe one product-ad upload control, in reading order.
+ *
+ * `aria-invalid` alone tells a screen reader that a picked file is wrong without
+ * saying why, and an expired draft upload leaves the required control empty with
+ * no hint that the file the user chose earlier is gone. Both facts belong to the
+ * control, so each is referenced only while its element is actually rendered -
+ * a described-by list that points at a missing id is worse than a shorter one.
+ */
+export function productAdFileDescriptionIds(
+  id: string,
+  field: "photo" | "logo",
+  flags: Readonly<{ noticeKind: ProductAdDraftAssetNoticeKind; error: boolean }> = { noticeKind: "none", error: false },
+): string {
+  const ids = [`${id}-${field}-help`];
+  const noticeRelevant = field === "photo" ? flags.noticeKind !== "none" : flags.noticeKind === "photoLogo";
+  if (noticeRelevant) ids.push(`${id}-draft-notice`);
+  if (flags.error) ids.push(`${id}-${field}-error`);
+  return ids.join(" ");
+}
 export function ProductAdInputWizard({ locale = "en", principal = null }: Readonly<{ locale?: Locale; principal?: ProductAdDraftPrincipal | null }>) {
   const id = useId();
   const copy = copyByLocale[locale];
@@ -325,19 +345,57 @@ export function ProductAdInputWizard({ locale = "en", principal = null }: Readon
     setPreviewStatus("ready");
   }
 
+  // A reload keeps the stored names but never the image bytes, so "attached"
+  // means "picked again in this session" and drives both the notice wording and
+  // which upload control the notice belongs to.
+  const masked = shouldMaskProductAdDraft(key, hydratedKey);
+  const attachedAssets: ProductAdAttachedAssets = { productPhoto: productPhoto !== null, brandLogo: brandLogo !== null };
+  const pendingAssetKind = productAdPendingAssetNoticeKind(restoredDraft, attachedAssets);
+  // The outgoing scope's restored draft may still be in state while a new scope is
+  // being hydrated, so the shared region is mounted silent during the mask. It is
+  // the same paragraph the post-commit restore fills, which is the only way its
+  // text is a change to an existing live region rather than inserted content.
+  const draftNotice = masked ? "" : buildProductAdDraftRestoredNotice(restoredDraft, locale, attachedAssets);
+
+  // The header is identical on both sides of the mask so React keeps this exact
+  // <p> mounted across the scope change: assistive technology announces a text
+  // change in a live region it already owns, not a region born holding its text.
+  const wizardHeader = (
+    <header className={styles.header}>
+      <p className={styles.eyebrow}>{copy.eyebrow}</p>
+      <h1 id={`${id}-title`}>{copy.title}</h1>
+      <p className={styles.intro}>{copy.intro}</p>
+      {/*
+       * The region is mounted empty on the first commit and filled only when the
+       * session-restored draft arrives. A live region that is inserted together
+       * with its text is not announced, so the conditional form of this paragraph
+       * silently swallowed the "the photo is gone, pick it again" instruction from
+       * exactly the users who cannot see the header it sat in. The masked commit
+       * below renders this same header for the same reason.
+       */}
+      <p id={`${id}-draft-notice`} className={styles.draftNotice} role="status" aria-live="polite" aria-atomic="true">{draftNotice}</p>
+    </header>
+  );
+
   // Guard transitions *to* anonymous as well as between authenticated scopes.
   // Until the post-commit reset completes, never render the prior account draft.
-  if (shouldMaskProductAdDraft(key, hydratedKey)) return <p role="status">Restoring saved product-ad draft…</p>;
+  // Only the static header and its empty region survive the mask, so no outgoing
+  // scope's product name, brand-logo descriptor or preview can be read from them;
+  // the mask stays an early return of its own tree because the user-flow contract
+  // test pins that exact form.
+  if (shouldMaskProductAdDraft(key, hydratedKey)) return (
+    <section className={styles.shell} lang={localeTag(locale)} dir={localeDirection(locale)} aria-labelledby={`${id}-title`}>
+      <div className={styles.formPanel}>
+        {wizardHeader}
+        <p role="status">Restoring saved product-ad draft…</p>
+      </div>
+    </section>
+  );
 
   return (
     <section className={styles.shell} lang={localeTag(locale)} dir={localeDirection(locale)} aria-labelledby={`${id}-title`}>
       <div className={styles.formPanel}>
-        <header className={styles.header}>
-          <p className={styles.eyebrow}>{copy.eyebrow}</p>
-          <h1 id={`${id}-title`}>{copy.title}</h1>
-          <p className={styles.intro}>{copy.intro}</p>
-          {restoredDraft && <p role="status" aria-live="polite">{buildProductAdDraftRestoredNotice(restoredDraft, locale)}</p>}
-        </header>
+        {wizardHeader}
 
         <form className={styles.form} onSubmit={createPreview}>
           <label className={styles.field} htmlFor={`${id}-product-name`}>
@@ -377,14 +435,14 @@ export function ProductAdInputWizard({ locale = "en", principal = null }: Readon
               className={styles.fileInput}
               type="file"
               accept="image/jpeg,image/png,image/webp"
-              aria-describedby={`${id}-photo-help`}
+              aria-describedby={productAdFileDescriptionIds(id, "photo", { noticeKind: pendingAssetKind, error: photoError.length > 0 })}
               aria-invalid={photoError ? true : undefined}
               required
               onChange={updateProductPhoto}
             />
             <small id={`${id}-photo-help`} className={styles.helpText}>{copy.photoHelp}</small>
             {productPhoto && <small className={styles.fileName} dir="auto">{productPhoto.name}</small>}
-            {photoError && <small className={styles.errorText} role="alert">{photoError}</small>}
+            {photoError && <small id={`${id}-photo-error`} className={styles.errorText} role="alert">{photoError}</small>}
           </div>
 
           <div className={styles.field}>
@@ -394,13 +452,13 @@ export function ProductAdInputWizard({ locale = "en", principal = null }: Readon
               className={styles.fileInput}
               type="file"
               accept="image/jpeg,image/png,image/webp"
-              aria-describedby={`${id}-logo-help`}
+              aria-describedby={productAdFileDescriptionIds(id, "logo", { noticeKind: pendingAssetKind, error: logoError.length > 0 })}
               aria-invalid={logoError ? true : undefined}
               onChange={updateBrandLogo}
             />
             <small id={`${id}-logo-help`} className={styles.helpText}>{copy.logoHelp}</small>
             {brandLogo && <small className={styles.fileName} dir="auto">{brandLogo.name}</small>}
-            {logoError && <small className={styles.errorText} role="alert">{logoError}</small>}
+            {logoError && <small id={`${id}-logo-error`} className={styles.errorText} role="alert">{logoError}</small>}
           </div>
 
           <div className={styles.outputFields}>
