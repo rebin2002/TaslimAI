@@ -20,3 +20,8 @@ export function startHomeDashboardRequest(sequence: number, workspaceId: string)
 export function isHomeDashboardRequestCurrent(token: HomeDashboardRequestToken, currentSequence: number, activeWorkspaceId: string | null): boolean {
   return token.sequence === currentSequence && token.workspaceId === activeWorkspaceId;
 }
+
+/** Render-time privacy fence: effects may not run until after the first paint. */
+export function currentHomeDashboard<T extends { workspaceId: string }>(snapshot: T | null, mountedWorkspaceId: string | null): T | null {
+  return mountedWorkspaceId && snapshot?.workspaceId === mountedWorkspaceId ? snapshot : null;
+}
