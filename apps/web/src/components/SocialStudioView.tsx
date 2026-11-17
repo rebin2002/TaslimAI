@@ -125,6 +125,10 @@ export function SocialStudioView() {
   const [copyState, setCopyState] = useState("");
   const restoreJobId = useRef<string | null>(null);
   const workspaceIdRef = useRef<string | null>(workspaceId);
+  // Counts session replacements. A workspace id cannot identify a session: leaving a workspace and
+  // returning to it reuses the same id, so requests started by the replaced session would still
+  // match an id comparison. Every identity change advances this counter.
+  const sessionGeneration = useRef(0);
   const initializedDraftWorkspace = useRef<string | null>(null);
   const skipNextDraftSave = useRef(false);
   const inputsRequest = useRef(0);
@@ -162,6 +166,7 @@ export function SocialStudioView() {
     const previousWorkspaceId = workspaceIdRef.current;
     workspaceIdRef.current = workspaceId;
     if (previousWorkspaceId === workspaceId) return;
+    sessionGeneration.current += 1;
     restoreJobId.current = null;
     setCurrent(null);
     setProjects([]);
@@ -312,11 +317,17 @@ export function SocialStudioView() {
     const cancelWorkspaceId = workspaceIdRef.current;
     if (!current || !cancelWorkspaceId || !isSocialJobForWorkspace(current, cancelWorkspaceId) || !canCancelSocialJob(current)) return;
     const jobId = current.id;
+    // The cancellation belongs to the session that issued it, and every write below settles after
+    // awaits. A superseded session may not release the busy lock, report an error, or install a job
+    // frame in the session that replaced it: releasing the lock re-enables generation while the new
+    // session is still submitting, and an older frame rewinds the status that session is showing.
+    const cancelSession = sessionGeneration.current;
+    const settledInIssuingSession = () => workspaceIdRef.current === cancelWorkspaceId && sessionGeneration.current === cancelSession;
     setWorking(true); setError("");
     try {
       await api.cancelGenerationJob(jobId);
       const next = await api.getGenerationJob(jobId);
-      if (workspaceIdRef.current !== cancelWorkspaceId) return;
+      if (!settledInIssuingSession()) return;
       if (!isSocialJobForWorkspace(next, cancelWorkspaceId)) {
         clearSocialActiveJobId(cancelWorkspaceId);
         setCurrent(null);
@@ -324,7 +335,7 @@ export function SocialStudioView() {
         return;
       }
       setCurrent(next);
-    } catch { if (workspaceIdRef.current === cancelWorkspaceId) setError(t("social.cancelError")); } finally { setWorking(false); }
+    } catch { if (settledInIssuingSession()) setError(t("social.cancelError")); } finally { if (settledInIssuingSession()) setWorking(false); }
   }
   async function copyPost(post: SocialPost) {
     try { await navigator.clipboard.writeText(formatSocialPostForCopy(post)); setCopyState(String(post.order)); window.setTimeout(() => setCopyState(""), 1800); }
