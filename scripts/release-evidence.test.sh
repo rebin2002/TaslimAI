@@ -9,11 +9,59 @@ readonly temp_dir="$(mktemp -d)"
 # HEAD. The EXIT trap restores them so a failed assertion can never leave the
 # CI checkout dirty for the manifest-generation step that runs afterwards.
 readonly tampered_input="$repo_root/apps/web/Dockerfile"
+readonly api_input="$repo_root/apps/api/Dockerfile"
 readonly migrations_dir="apps/api/Persistence/Migrations"
 readonly synthetic_migration="$repo_root/$migrations_dir/99991231000000_SyntheticProvenance.cs"
+# A migration file that an ignore rule hides from `git status` must still be
+# refused, so one case plants it behind a rule in the exclude file. The rule is
+# a real pattern rather than a commented line, because a line whose first
+# character is `#` is a comment in exclude-file syntax and would ignore
+# nothing; it is also self-identifying, so the restore can strip exactly it.
+readonly exclude_pattern='*_ProvenanceFixture.cs'
+readonly hidden_migration="$repo_root/$migrations_dir/99991231000001_ProvenanceFixture.cs"
+exclude_path="$(git -C "$repo_root" rev-parse --git-path info/exclude)"
+case "$exclude_path" in
+  /*) ;;
+  *) exclude_path="$repo_root/$exclude_path" ;;
+esac
+if [[ ! -e "$exclude_path" ]]; then
+  echo "The exclude file the ignored-migration fixture needs is not writable: $exclude_path" >&2
+  exit 1
+fi
 restore_provenance_state() {
-  git -C "$repo_root" checkout -- apps/web/Dockerfile "$migrations_dir" 2>/dev/null || true
-  rm -f "$synthetic_migration"
+  # Index flags are cleared before anything is checked out, because while
+  # assume-unchanged or skip-worktree is set `git checkout` refuses to put the
+  # bytes back, and a leftover flag would poison every later step of the job.
+  # Each flag gets its own call: `update-index` takes a single mark flag, and
+  # passing the migration directory as a pathspec aborts the whole call with
+  # "Unable to mark file" instead of clearing the files that were listed.
+  git -C "$repo_root" update-index --no-assume-unchanged -- \
+    apps/web/Dockerfile apps/api/Dockerfile >/dev/null 2>&1 || true
+  git -C "$repo_root" update-index --no-skip-worktree -- \
+    apps/web/Dockerfile apps/api/Dockerfile >/dev/null 2>&1 || true
+  if [[ -f "$exclude_path" ]] && grep -qxF "$exclude_pattern" "$exclude_path"; then
+    grep -vxF "$exclude_pattern" "$exclude_path" > "$exclude_path.stripped"
+    mv "$exclude_path.stripped" "$exclude_path"
+  fi
+  git -C "$repo_root" checkout -- apps/web/Dockerfile apps/api/Dockerfile "$migrations_dir" 2>/dev/null || true
+  rm -f "$synthetic_migration" "$hidden_migration"
+  # A restore that silently failed would leave the tampered bytes on disk for
+  # the next assertion to mistake for the commit's own content, and would let
+  # the manifest-generation step of the same job inherit a dirty checkout.
+  # Refuse loudly instead; the gate itself also fails closed on drift, so a
+  # broken restore can never turn into a false green.
+  local provenance_path
+  for provenance_path in apps/web/Dockerfile apps/api/Dockerfile; do
+    if [[ "$(git -C "$repo_root" hash-object --no-filters -- "$provenance_path")" \
+      != "$(git -C "$repo_root" rev-parse -q --verify "HEAD:$provenance_path")" ]]; then
+      echo "release-evidence fixture restore left $provenance_path drifted from HEAD." >&2
+      exit 1
+    fi
+  done
+  if [[ -n "$(git -C "$repo_root" ls-files -v -- apps/web/Dockerfile apps/api/Dockerfile | grep -E '^[a-z]|^S' )" ]]; then
+    echo "release-evidence fixture restore left an index flag set." >&2
+    exit 1
+  fi
 }
 trap 'rm -rf "$temp_dir"; restore_provenance_state' EXIT
 
@@ -95,7 +143,69 @@ grep -q 'drift from the recorded commit' "$temp_dir/deleted-migration.err" || {
 restore_provenance_state
 
 # No drifted run may leave a manifest behind.
-for refused in dirty-input untracked-migration deleted-migration; do
+
+# An ignore rule must not hide a release input from the assertion. `find` still
+# enumerates the file, and its bytes are still what the manifest would hash, so
+# an excluded migration has to fail closed even though `git status` is silent.
+printf '%s\n' "$exclude_pattern" >> "$exclude_path"
+printf '%s\n' '// ignored synthetic provenance probe' > "$hidden_migration"
+if ! git -C "$repo_root" check-ignore -q -- "$migrations_dir/99991231000001_ProvenanceFixture.cs"; then
+  echo "The ignored-migration fixture must actually be excluded by the ignore rule." >&2
+  exit 1
+fi
+if [[ -n "$(git -C "$repo_root" status --porcelain --untracked-files=all -- "$migrations_dir")" ]]; then
+  echo "The ignored-migration fixture must be invisible to git status to prove the assertion." >&2
+  exit 1
+fi
+if GITHUB_SHA="$commit_sha" bash "$script" "$temp_dir/ignored-migration.json" >"$temp_dir/ignored-migration.err" 2>&1; then
+  echo "A migration file hidden by an ignore rule must still fail closed." >&2
+  exit 1
+fi
+grep -q 'ProvenanceFixture' "$temp_dir/ignored-migration.err" || {
+  echo "The ignored-migration refusal must name the drifting file." >&2
+  exit 1
+}
+restore_provenance_state
+
+# assume-unchanged suppresses a content edit from `git status` while leaving
+# the tampered bytes on disk for the manifest to hash and attribute to a commit
+# that never held them.
+git -C "$repo_root" update-index --assume-unchanged -- apps/web/Dockerfile
+printf '%s\n' '# tampered under assume-unchanged' >> "$tampered_input"
+if [[ -n "$(git -C "$repo_root" status --porcelain --untracked-files=all -- apps/web/Dockerfile)" ]]; then
+  echo "The assume-unchanged fixture must be invisible to git status to prove the assertion." >&2
+  exit 1
+fi
+if GITHUB_SHA="$commit_sha" bash "$script" "$temp_dir/assume-unchanged.json" >"$temp_dir/assume-unchanged.err" 2>&1; then
+  echo "A release input tampered under assume-unchanged must fail closed." >&2
+  exit 1
+fi
+grep -q 'apps/web/Dockerfile' "$temp_dir/assume-unchanged.err" || {
+  echo "The assume-unchanged refusal must name the drifting input." >&2
+  exit 1
+}
+restore_provenance_state
+
+# skip-worktree hides the same class of drift through a different index flag,
+# on a second required input, so the assertion is not proven per-path.
+git -C "$repo_root" update-index --skip-worktree -- apps/api/Dockerfile
+printf '%s\n' '# tampered under skip-worktree' >> "$api_input"
+if [[ -n "$(git -C "$repo_root" status --porcelain --untracked-files=all -- apps/api/Dockerfile)" ]]; then
+  echo "The skip-worktree fixture must be invisible to git status to prove the assertion." >&2
+  exit 1
+fi
+if GITHUB_SHA="$commit_sha" bash "$script" "$temp_dir/skip-worktree.json" >"$temp_dir/skip-worktree.err" 2>&1; then
+  echo "A release input tampered under skip-worktree must fail closed." >&2
+  exit 1
+fi
+grep -q 'apps/api/Dockerfile' "$temp_dir/skip-worktree.err" || {
+  echo "The skip-worktree refusal must name the drifting input." >&2
+  exit 1
+}
+restore_provenance_state
+
+# No drifted run may leave a manifest behind.
+for refused in dirty-input untracked-migration deleted-migration ignored-migration assume-unchanged skip-worktree; do
   if [[ -e "$temp_dir/$refused.json" ]]; then
     echo "A refused run must not emit a manifest: $refused" >&2
     exit 1

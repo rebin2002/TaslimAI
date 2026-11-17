@@ -14,7 +14,9 @@ The manifest binds a candidate to:
 - the base-image references used by the deployable Dockerfiles; and
 - the production safety defaults that must remain true: migrations enabled, persistent S3-compatible storage selected, customer charging disabled, and OpenAI activation disabled.
 
-The manifest contains no connection strings, credentials, API keys, access tokens, or customer data. The script rejects a workflow when `GITHUB_SHA` does not match the checked-out commit, required release inputs are missing or untracked, any release input or migration file drifts from the recorded commit (dirty, staged, deleted, or untracked), the migration chain is absent, or a protected production default is unsafe. This keeps every fingerprint in the manifest reproducible from the production SHA it is attributed to.
+The manifest contains no connection strings, credentials, API keys, access tokens, or customer data. The script rejects a workflow when `GITHUB_SHA` does not match the checked-out commit, required release inputs are missing or untracked, any release input or migration file drifts from the recorded commit, the migration chain is absent, or a protected production default is unsafe. This keeps every fingerprint in the manifest reproducible from the production SHA it is attributed to.
+
+The provenance assertion compares the recorded commit's blobs with the bytes present in the checkout, hashed exactly the way the manifest hashes them, so drift fails closed whether it is a dirty, staged, deleted, or untracked file; a file whose content edit an `assume-unchanged` or `skip-worktree` index flag hides from `git status`; or a migration file that an ignore rule keeps out of `git status` entirely. A mode-only change is still refused through the porcelain view the assertion also reports.
 
 ## Rollback use
 
