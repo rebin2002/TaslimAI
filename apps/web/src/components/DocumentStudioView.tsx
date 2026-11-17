@@ -113,6 +113,9 @@ export function DocumentStudioView() {
   const activeAssetId = useRef<string | null>(null);
   const observedWorkspaceId = useRef<string | null>(workspace?.id ?? null);
   const observedUserId = useRef<string | null>(user?.id ?? null);
+  // A React state snapshot (not a ref read during render) fences stale fields until
+  // the user+workspace transition effect has cleared them atomically.
+  const [renderOwner, setRenderOwner] = useState(() => ({ userId: user?.id ?? null, workspaceId: workspace?.id ?? null }));
   const workspaceGeneration = useRef(0);
   // The workspace whose unsaved brief is already represented by the mounted
   // compose fields. Drafts are read once per workspace and mirrored on change.
@@ -167,6 +170,7 @@ export function DocumentStudioView() {
     const previousUserId = observedUserId.current;
     observedWorkspaceId.current = nextWorkspaceId;
     observedUserId.current = nextUserId;
+    setRenderOwner({ userId: nextUserId, workspaceId: nextWorkspaceId });
     workspaceGeneration.current += 1;
     restoreJobId.current = null;
     activeJobId.current = null;
@@ -455,7 +459,7 @@ export function DocumentStudioView() {
 
   // An account/workspace transition may render before its state-reset effect.
   // Never expose the previous principal's brief in that intermediate render.
-  if (!user || !workspace || observedUserId.current !== user.id || observedWorkspaceId.current !== workspace.id) {
+  if (!user || !workspace || renderOwner.userId !== user.id || renderOwner.workspaceId !== workspace.id) {
     return <div className="document-studio-page"><p role="status" aria-live="polite">{t("document.loadingSources")}</p></div>;
   }
 
