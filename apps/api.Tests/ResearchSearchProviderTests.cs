@@ -35,7 +35,10 @@ public sealed class ResearchSearchProviderTests
         Assert.Equal(2, result.Sources.Count);
         Assert.Equal("https://example.gov/iraq-appliances", result.Sources[0].Url);
         Assert.Contains("citationStartIndex", result.Sources[0].MetadataJson, StringComparison.Ordinal);
+        Assert.Equal("The Iraq market shows current appliance tr", result.Sources[0].Snippet);
+        Assert.Null(result.Sources[1].Snippet);
         Assert.Single(result.Evidence);
+        Assert.Equal(result.Sources[0].Snippet, result.Evidence[0].Excerpt);
     }
 
     [Fact]
