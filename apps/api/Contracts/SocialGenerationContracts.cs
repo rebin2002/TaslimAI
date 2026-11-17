@@ -159,7 +159,11 @@ public static class SocialDraftValidator
         foreach (var post in draft.Posts)
         {
             if (post is null || post.Hashtags is null || post.AssetRefs is null || post.Order != expectedOrder++ || string.IsNullOrWhiteSpace(post.Hook) || post.Hook.Length > options.MaxHookCharacters || string.IsNullOrWhiteSpace(post.Body) || post.Body.Length > options.MaxPostCharacters || post.CallToAction?.Length > options.MaxCallToActionCharacters || post.AltText?.Length > options.MaxAltTextCharacters || post.VisualDirection?.Length > options.MaxVisualDirectionCharacters || post.Hashtags.Count > options.MaxHashtags || post.AssetRefs.Count > options.MaxAssetRefs) throw new SocialOutputValidationException();
-            if (post.Hashtags.Any(tag => string.IsNullOrWhiteSpace(tag) || tag.Length > options.MaxHashtagCharacters || tag.Contains(' ') || !tag.StartsWith('#'))) throw new SocialOutputValidationException();
+            // A canonical hashtag must carry the '#' sigil, at least one non-'#' body
+            // character, and no whitespace of any kind. Tabs and newlines previously
+            // survived this gate and corrupted the joined rendering of the draft;
+            // bare "#" or "##" produced degenerate empty tags in saved output.
+            if (post.Hashtags.Any(tag => string.IsNullOrWhiteSpace(tag) || tag.Length > options.MaxHashtagCharacters || !tag.StartsWith('#') || tag.Length < 2 || tag.All(character => character == '#') || tag.Any(char.IsWhiteSpace))) throw new SocialOutputValidationException();
             if (post.AssetRefs.Any(reference => string.IsNullOrWhiteSpace(reference) || reference.Length > options.MaxAssetRefCharacters)) throw new SocialOutputValidationException();
             foreach (var text in AllText(draft.Title, post)) if (text.Contains('<') || text.Contains('>')) throw new SocialOutputValidationException();
         }
