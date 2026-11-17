@@ -128,12 +128,14 @@ public sealed class AutopilotConsoleService(TaslimDbContext db)
 
         return (await query
             .OrderByDescending(item => item.CreatedAt)
+            .ThenByDescending(item => item.Id)
             .Take(Math.Clamp(limit, 1, 500))
             .ToListAsync(cancellationToken))
         .Select(item => new AutopilotAuditDto(
-            item.Id, item.Action, item.Outcome, item.Reason, item.WaveKey, item.TaskId,
-            item.TaskState, item.RunState, item.Attempt, item.Branch, item.BaseSha,
-            item.CandidateSha, item.DryRun, item.CreatedAt))
+            item.Id, item.ActorUserId, item.Action, item.TargetType, item.TargetId,
+            item.Outcome, item.Reason, item.StatusDetail, item.RequestId, item.WaveKey,
+            item.TaskId, item.TaskState, item.RunState, item.Attempt, item.Branch,
+            item.BaseSha, item.CandidateSha, item.DryRun, item.CreatedAt))
         .ToList();
     }
 
