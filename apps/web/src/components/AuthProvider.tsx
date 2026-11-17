@@ -56,10 +56,22 @@ export function AuthProvider({ children }: Readonly<{ children: React.ReactNode 
     }
     if (sessionLanguagePackInitialized.current !== user.id) {
       sessionLanguagePackInitialized.current = user.id;
-      let savedLanguagePack = readStoredLanguagePack(window.localStorage, accountLanguagePackStorageKey(user.id));
-      if (!savedLanguagePack) savedLanguagePack = readStoredLocale(window.localStorage, accountLocaleStorageKey(user.id));
-      const preferredLanguagePack = defaultLanguagePackRegistry.has(user.preferredLanguage) ? user.preferredLanguage : "en";
+      // Browser storage may be unavailable in privacy-restricted contexts.
+      // Never let a denied localStorage getter abort authenticated session adoption.
+      let savedLanguagePack: string | null = null;
+      let deviceLocaleSelection: string | null = null;
+      let storageReadable = true;
       const localeSource = getLocaleSource();
+      try {
+        const storage = window.localStorage;
+        savedLanguagePack = readStoredLanguagePack(storage, accountLanguagePackStorageKey(user.id))
+          ?? readStoredLocale(storage, accountLocaleStorageKey(user.id));
+        if (localeSource === "anonymous-storage") deviceLocaleSelection = readStoredLocale(storage);
+      } catch {
+        storageReadable = false;
+        // The server profile is the fallback if the browser denies storage.
+      }
+      const preferredLanguagePack = defaultLanguagePackRegistry.has(user.preferredLanguage) ? user.preferredLanguage : "en";
       // `LocaleProvider` ranks the legacy `taslim-locale` device key above the pack
       // bootstrap key because every lane persists an explicit in-browser selection
       // through it - the Arabic and Sorani right-to-left journeys included. While the
@@ -67,9 +79,9 @@ export function AuthProvider({ children }: Readonly<{ children: React.ReactNode 
       // profile default: adopting the account value instead would flip those readers
       // back to English, and copying it into the account key would strand them on the
       // first language they picked, so a later switch through the same key is ignored.
-      const deviceLocaleSelection = localeSource === "anonymous-storage" ? readStoredLocale(window.localStorage) : null;
-      const deviceSelectionIsSovereign = Boolean(deviceLocaleSelection) && !savedLanguagePack;
-      if (!deviceSelectionIsSovereign && localeSource !== "user" && (localeSource !== "anonymous-storage" || savedLanguagePack)) {
+      const deviceSelectionIsSovereign = storageReadable && Boolean(deviceLocaleSelection) && !savedLanguagePack;
+      if (!deviceSelectionIsSovereign && localeSource !== "user"
+        && (!storageReadable || localeSource !== "anonymous-storage" || savedLanguagePack)) {
         setLanguagePack(savedLanguagePack ?? preferredLanguagePack, { persist: false, source: "account" });
       }
     }
