@@ -163,7 +163,7 @@ function OnboardingFlow({ user, openerRef }: Readonly<{ user: User; openerRef: R
             <label><span><Globe2 size={15} /> {t("onboarding.interfaceLanguage")}</span><select disabled={saving} value={preferredLanguage} onChange={(event) => { const next = event.target.value; setPreferredLanguage(next); setLanguagePack(next, { persist: false, source: "user" }); }}>{languagePackIds.map((item) => <option key={item} value={item}>{languagePackNames[item]}</option>)}</select></label>
             <label><span><Languages size={15} /> {t("onboarding.generationLanguage")}</span><select disabled={saving} value={defaultGenerationLanguage} onChange={(event) => setDefaultGenerationLanguage(event.target.value as Locale)}>{locales.map((item) => <option key={item} value={item}>{localeNames[item]}</option>)}</select></label>
           </div>
-          {preferredLanguage === "zh-CN" && <p className="onboarding-description" role="status">Simplified Chinese is in preview. Some onboarding and Movie Studio text remains in English.</p>}
+          {preferredLanguage === "zh-CN" && <p className="onboarding-description" role="status">{t("onboarding.zhPreviewNote")}</p>}
           <footer className="onboarding-actions"><span>{t("onboarding.preferencesHint")}</span><button type="button" className="primary-button" disabled={saving} onClick={() => setStep("tour")}><span>{t("onboarding.continue")}</span><NextIcon size={16} /></button></footer>
         </div>}
 
