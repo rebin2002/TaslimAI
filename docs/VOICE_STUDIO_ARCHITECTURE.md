@@ -24,7 +24,7 @@ The Voice controller checks workspace membership, optional project ownership, an
 2. Refuse safely when Voice Studio is disabled or the configured adapter is unavailable.
 3. Select an adapter by the internal configured provider key.
 4. Validate the returned bytes as bounded `audio/*` content with a supported output format.
-5. Build `VoiceOutputMetadata` and a private `GeneratedFileArtifact`.
+5. Resolve the container's registered media profile, then build `VoiceOutputMetadata` and a private `GeneratedFileArtifact`.
 6. Publish the file and an `audio` Asset through `GeneratedAssetPublisher`.
 7. Complete or fail the shared usage transaction.
 
@@ -35,6 +35,8 @@ Cancellation uses the existing cooperative Generation Job cancellation flow. Exp
 Generated audio is stored through `FileProcessingService.StoreGeneratedAsync`, which uses the configured local or S3-compatible private storage implementation. The database stores only the private storage key and file metadata. The Asset points to the Stored File and to the source Generation Job.
 
 The media type that is persisted is the container profile registered in `GeneratedMediaSecurity`, never a free-form provider header, so the stored file record, the Asset media type, the saved output metadata, and the download response always describe the same media. Output that declares a profile its container does not carry is refused before any byte reaches private storage. A WebM container therefore saves audio-only speech as `audio/webm`, the profile both speech providers emit and the profile the Generation Job quality gate already recognizes, while movie output keeps declaring the same container as `video/webm`.
+
+The handler resolves that profile from the container whose name it is about to give the download file, through `VoiceGenerationValues.SpeechContainers`, and treats the provider's `Content-Type` only as confirmation that the response carries the requested container's audio essence. Providers agree on the container but not always on what to call it - RFC 7845 registers `audio/opus` for the Opus stream that lives in the Ogg container this product calls `audio/ogg`, and the voice adapters already accept the `audio/mp3` and `audio/x-wav` spellings while forwarding the raw header - so a different spelling of the same container saves under the registered profile instead of clearing the quality gate and then being refused by the storage boundary after the synthesis was billed. Header decoration (casing, surrounding whitespace, `;`-parameters) never reaches the record, and a header that names a different container fails `VoiceOutputInvalidException` at the gate, before any artifact or asset is built. `VoiceOutputDownloadMediaTypeIntegrityTests` pins the alias cases, the decoration cases, the cross-container refusals, and the agreement between the advertised container set and the registered profiles.
 
 The existing `GET /api/assets/{id}/download` endpoint remains the authorization boundary. The endpoint now permits authenticated inline delivery for `audio/*` content in addition to images. The Voice Studio player uses `?inline=true`; the download action uses the normal attachment response. Both paths require the authenticated session and workspace-level asset authorization.
 
