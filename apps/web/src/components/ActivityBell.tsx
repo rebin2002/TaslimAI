@@ -10,7 +10,7 @@ import { useLocale } from "@/components/LocaleProvider";
 import { api, type NotificationItem, type NotificationList } from "@/lib/api";
 import { isNotificationRequestCurrent, startNotificationRequest } from "@/lib/notificationRequest";
 import { applyAllNotificationsRead, applyNotificationRead } from "@/lib/notificationReadState";
-import { resolveNotificationBadgeCount, resolveNotificationUnreadCount } from "@/lib/notificationUnreadState";
+import { resolveNotificationBadgeCount, resolveNotificationUnreadCount, resolveNotificationUnreadCountAfterPollFailure } from "@/lib/notificationUnreadState";
 
 const notificationLabels = {
   "generation.completed": "notification.generationCompleted",
@@ -65,9 +65,12 @@ export function useNotificationUnreadCount() {
       try {
         const next = await api.getNotificationUnreadCount(workspaceId);
         if (active && isNotificationRequestCurrent(request, requestSequence.current, workspaceId)) applyUnreadCount(next.unreadCount);
-      } catch {
-        // A transient poll failure must not hide a previously observed unread badge.
-        if (active && isNotificationRequestCurrent(request, requestSequence.current, workspaceId)) applyUnreadCount(null);
+      } catch (error) {
+        // A transient poll failure must not hide a previously observed unread badge,
+        // but a definitive 401/403 ends inbox access for this principal: the badge
+        // then fails closed instead of pinning a membership-scoped read-receipt
+        // count for a workspace it can no longer read.
+        if (active && isNotificationRequestCurrent(request, requestSequence.current, workspaceId)) applyUnreadCount(resolveNotificationUnreadCountAfterPollFailure(unreadCountRef.current, error));
       }
     };
     window.addEventListener(notificationUnreadEvent, onUnreadCount);
@@ -193,10 +196,15 @@ export function NotificationBell({ unreadCount }: Readonly<{ unreadCount: number
   }
 
   async function openNotification(item: NotificationItem, event: React.MouseEvent<HTMLAnchorElement>) {
-    setOpen(false);
-    if (item.isRead) return;
+    if (item.isRead) {
+      setOpen(false);
+      return;
+    }
     event.preventDefault();
-    if (await markRead(item)) router.push(item.destination);
+    if (await markRead(item)) {
+      setOpen(false);
+      router.push(item.destination);
+    }
   }
 
   async function markAllRead() {
