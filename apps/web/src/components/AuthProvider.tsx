@@ -4,9 +4,9 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useRef, use
 import { useRouter } from "next/navigation";
 import { api, type AuthResponse, type LoginInput, type OnboardingInput, type ProfileInput, type RegisterInput, type User } from "@/lib/api";
 import { useLocale } from "@/components/LocaleProvider";
-import { accountLocaleStorageKey, anonymousLocaleStorageKey, readStoredLocale } from "@/lib/localePersistence";
+import { accountLocaleStorageKey, anonymousLocaleStorageKey, readStoredLocale, writeStoredLocale } from "@/lib/localePersistence";
 import { accountLanguagePackStorageKey, anonymousLanguagePackStorageKey, readStoredLanguagePack, writeStoredLanguagePack } from "@/lib/languagePackPersistence";
-import { defaultLanguagePackRegistry } from "@/lib/languagePackRegistry";
+import { defaultLanguagePackRegistry, legacyLocaleForLanguagePack } from "@/lib/languagePackRegistry";
 
 type AuthContextValue = {
   user: User | null;
@@ -21,6 +21,18 @@ type AuthContextValue = {
 };
 
 const AuthContext = createContext<AuthContextValue | null>(null);
+
+// #992 compatibility: the pack key represents every installed language, while
+// the legacy account key must still record explicit EN/AR/Sorani choices.
+function saveExplicitAccountLanguagePack(storage: Storage, userId: string, packId: string) {
+  writeStoredLanguagePack(storage, accountLanguagePackStorageKey(userId), packId);
+  const legacy = legacyLocaleForLanguagePack(packId);
+  if (legacy === packId) {
+    writeStoredLocale(storage, accountLocaleStorageKey(userId), legacy);
+  } else {
+    storage.removeItem(accountLocaleStorageKey(userId));
+  }
+}
 
 export function AuthProvider({ children }: Readonly<{ children: React.ReactNode }>) {
   const [session, setSession] = useState<AuthResponse | null>(null);
@@ -96,7 +108,7 @@ export function AuthProvider({ children }: Readonly<{ children: React.ReactNode 
       // Only an explicit selector choice is local account preference.
       // Server-profile adoption or anonymous bootstrap must never overwrite it.
       if (getLocaleSource() === "user") {
-        writeStoredLanguagePack(window.localStorage, accountLanguagePackStorageKey(userId), languagePackId);
+        saveExplicitAccountLanguagePack(window.localStorage, userId, languagePackId);
       }
       // Keep the bootstrap while it is the reader's own authority - nothing is saved on
       // the account to outrank it and it is the value being displayed. Clearing it there
@@ -106,7 +118,13 @@ export function AuthProvider({ children }: Readonly<{ children: React.ReactNode 
         ?? readStoredLocale(window.localStorage, accountLocaleStorageKey(userId));
       const deviceBootstrap = readStoredLocale(window.localStorage) ?? readStoredLanguagePack(window.localStorage, anonymousLanguagePackStorageKey);
       const deviceIsAuthority = getLocaleSource() === "anonymous-storage" && deviceBootstrap === languagePackId && !savedAccountChoice;
-      if (!deviceIsAuthority) {
+      if (deviceIsAuthority) {
+        // The unsaved device choice survives reload via the pack key, while
+        // consuming the legacy device key as the #992 account flow requires.
+        // A later legacy-key selection still wins on the next document load.
+        writeStoredLanguagePack(window.localStorage, anonymousLanguagePackStorageKey, languagePackId);
+        window.localStorage.removeItem(anonymousLocaleStorageKey);
+      } else {
         window.localStorage.removeItem(anonymousLanguagePackStorageKey);
         window.localStorage.removeItem(anonymousLocaleStorageKey);
       }
@@ -158,7 +176,7 @@ export function AuthProvider({ children }: Readonly<{ children: React.ReactNode 
       setLanguagePack(input.preferredLanguage, { persist: false, source: "account" });
       // A successful profile save is an explicit account preference.
       try {
-        writeStoredLanguagePack(window.localStorage, accountLanguagePackStorageKey(next.user.id), input.preferredLanguage);
+        saveExplicitAccountLanguagePack(window.localStorage, next.user.id, input.preferredLanguage);
       } catch {
         // The saved server preference and in-memory choice remain authoritative.
       }
@@ -180,7 +198,7 @@ export function AuthProvider({ children }: Readonly<{ children: React.ReactNode 
       // `taslim-locale`.
       if (selectionWasMade) {
         try {
-          writeStoredLanguagePack(window.localStorage, accountLanguagePackStorageKey(next.user.id), input.preferredLanguage);
+          saveExplicitAccountLanguagePack(window.localStorage, next.user.id, input.preferredLanguage);
         } catch {
           // Keep the accepted server value even without browser storage.
         }
