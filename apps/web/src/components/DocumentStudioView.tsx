@@ -21,20 +21,21 @@ import {
 import { useAuth } from "@/components/AuthProvider";
 import { useLocale } from "@/components/LocaleProvider";
 import { ApiError, api, type Asset, type GenerationJob, type Project, type StoredFile } from "@/lib/api";
+import { DocumentReaderBlock } from "./DocumentReaderBlock";
 import {
   canCancelDocumentJob,
   clearDocumentActiveJobId,
   displayDocumentProgress,
   documentPresentationState,
-  isDocumentJobUnavailableError,
   isDocumentSourceReady,
+  isDocumentJobUnavailableError,
   isRestorableDocumentJob,
   nextDocumentPollDelay,
   parseDocumentJobResult,
   persistDocumentActiveJobId,
-  readDocumentActiveJobId,
   retainDocumentWorkspaceProjectId,
   retainDocumentWorkspaceFileIds,
+  readDocumentActiveJobId,
   shouldResetDocumentWorkspaceState,
   shouldPollDocumentJob,
 } from "@/lib/documentStudioState";
@@ -79,13 +80,6 @@ export function DocumentProgressMeter({ progress, label, announcement }: Documen
     </div>
   </>;
 }
-type DocumentPreviewTableProps = Readonly<{
-  rows: ReadonlyArray<{ cells: ReadonlyArray<string> }>;
-  label: string;
-}>;
-export function DocumentPreviewTable({ rows, label }: DocumentPreviewTableProps) {
-  return <div className="document-preview-table" role="table" aria-label={label}>{rows.map((row, rowIndex) => <div className="document-preview-row" key={rowIndex} role="row">{row.cells.map((cell, cellIndex) => <span key={`${rowIndex}-${cellIndex}`} role="cell">{cell}</span>)}</div>)}</div>;
-}
 export function DocumentStudioView() {
   const { workspace } = useAuth();
   const { locale, t } = useLocale();
@@ -126,6 +120,7 @@ export function DocumentStudioView() {
   // still closes over the pre-hydration fields and would otherwise store (or
   // clear) a brief the restored draft has not reached yet.
   const draftJustHydrated = useRef(false);
+
 
   const loadSources = useCallback(async () => {
     if (!workspace) return;
@@ -489,7 +484,7 @@ export function DocumentStudioView() {
         <header className="document-reader-heading"><p className="section-eyebrow">{t("document.resultEyebrow")}</p><h2 id="document-reader-title">{resultTitle}</h2><p>{t("document.previewHint")}</p></header>
         {result.summary && <p className="document-reader-summary">{result.summary}</p>}
         <div className="document-reader-rule" />
-        {result.sections?.length ? <div className="document-reader-sections">{result.sections.map((section, sectionIndex) => <section className="document-reader-section" key={`${section.heading}-${sectionIndex}`}><h3><span>{String(sectionIndex + 1).padStart(2, "0")}</span>{section.heading}</h3>{section.blocks.map((block, index) => <div className="document-reader-block" key={`${section.heading}-${index}`}>{block.text && <p>{block.text}</p>}{block.items?.length ? <ul>{block.items.map((item) => <li key={item}>{item}</li>)}</ul> : null}{block.rows?.length ? <DocumentPreviewTable rows={block.rows} label={t("document.preview")} /> : null}</div>)}</section>)}</div> : <p className="document-empty-copy">{t("document.resultSummaryUnavailable")}</p>}
+        {result.sections?.length ? <div className="document-reader-sections">{result.sections.map((section, sectionIndex) => <section className="document-reader-section" key={`${section.heading}-${sectionIndex}`}><h3><span>{String(sectionIndex + 1).padStart(2, "0")}</span>{section.heading}</h3>{section.blocks.map((block, index) => <div className="document-reader-block" key={`${section.heading}-${index}`}><DocumentReaderBlock block={block} previewLabel={t("document.preview")} /></div>)}</section>)}</div> : <p className="document-empty-copy">{t("document.resultSummaryUnavailable")}</p>}
       </article>
       <aside className="document-inspector" aria-labelledby="document-inspector-title">
         <div className="document-inspector-header"><div className="document-inspector-icon"><FileText size={17} /></div><div><p className="document-card-kicker">{t("document.readingView")}</p><h2 id="document-inspector-title">{t("document.documentLabel")}</h2></div></div>
