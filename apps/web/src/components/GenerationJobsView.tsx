@@ -6,7 +6,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useAuth } from "@/components/AuthProvider";
 import { useLocale } from "@/components/LocaleProvider";
 import { api, type GenerationJob } from "@/lib/api";
-import { canCancelGenerationJob, describeGenerationJobsSurface, isCurrentGenerationJobsAlert, isJobReadableInWorkspace, isTerminalJob, mergeGenerationJobIntoRead, readGenerationJobs, resolveGenerationJobsDetail, type GenerationJobsAlert, type GenerationJobsRead, type GenerationJobsSelection } from "@/lib/generationJobsState";
+import { canCancelGenerationJob, describeGenerationJobsSurface, isCurrentGenerationJobsAlert, isCurrentGenerationJobsWork, isJobReadableInWorkspace, isTerminalJob, mergeGenerationJobIntoRead, readGenerationJobs, resolveGenerationJobsDetail, type GenerationJobsAlert, type GenerationJobsRead, type GenerationJobsSelection, type GenerationJobsWork } from "@/lib/generationJobsState";
 import { nextGenerationJobPollDelay } from "@/lib/generationJobsPolling";
 
 type Translate = (key: string, variables?: Record<string, string>) => string;
@@ -105,11 +105,14 @@ export function GenerationJobsView() {
   const [selection, setSelection] = useState<GenerationJobsSelection | null>(null);
   const [alert, setAlert] = useState<GenerationJobsAlert | null>(null);
   const [loading, setLoading] = useState(true);
-  const [working, setWorking] = useState(false);
+  const [workingRequest, setWorkingRequest] = useState<GenerationJobsWork | null>(null);
   const [attemptEpoch, setAttemptEpoch] = useState(0);
   const requestGeneration = useRef(0);
   const selectionGeneration = useRef(0);
   const [pollRetryGeneration, setPollRetryGeneration] = useState(0);
+  // Derive busy synchronously: the old workspace must not keep new controls disabled
+  // while a superseded create/cancel promise is still settling.
+  const working = isCurrentGenerationJobsWork(workingRequest, workspaceId, requestGeneration.current);
   const loadRecent = useCallback(async () => {
     if (!workspaceId) {
       // No workspace to read: retire the held read and everything built from it.
@@ -184,7 +187,7 @@ export function GenerationJobsView() {
     if (!workspaceId) return;
     const request = ++requestGeneration.current;
     const selection = selectionGeneration.current;
-    setWorking(true);
+    setWorkingRequest({ workspaceId, request });
     setAlert(null);
     try {
       const job = await api.createGenerationJob(workspaceId, JSON.stringify({ purpose: "foundation-check" }), t("jobs.testTitle"));
@@ -195,7 +198,8 @@ export function GenerationJobsView() {
       if (request !== requestGeneration.current) return;
       setAlert({ workspaceId, epoch: attemptEpoch, message: caught instanceof Error ? caught.message : t("jobs.createError"), retryable: false });
     } finally {
-      if (request === requestGeneration.current) setWorking(false);
+      // Retire only this action; a newer workspace's pending request owns its own indicator.
+      setWorkingRequest((previous) => previous?.request === request && previous.workspaceId === workspaceId ? null : previous);
     }
   }
   async function cancelJob(job: GenerationJob) {
@@ -204,7 +208,7 @@ export function GenerationJobsView() {
     if (!workspaceId || !isJobReadableInWorkspace(job, workspaceId)) return;
     const request = ++requestGeneration.current;
     const selection = selectionGeneration.current;
-    setWorking(true);
+    setWorkingRequest({ workspaceId, request });
     setAlert(null);
     try {
       await api.cancelGenerationJob(job.id);
@@ -216,7 +220,8 @@ export function GenerationJobsView() {
       if (request !== requestGeneration.current) return;
       setAlert({ workspaceId, epoch: attemptEpoch, message: caught instanceof Error ? caught.message : t("jobs.cancelError"), retryable: false });
     } finally {
-      if (request === requestGeneration.current) setWorking(false);
+      // Retire only this action; a newer workspace's pending request owns its own indicator.
+      setWorkingRequest((previous) => previous?.request === request && previous.workspaceId === workspaceId ? null : previous);
     }
   }
   // Everything the page can say is derived from that one read, in the same render as the
