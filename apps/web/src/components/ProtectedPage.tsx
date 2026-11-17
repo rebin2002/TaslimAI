@@ -22,7 +22,15 @@ export function protectedPageHasHydratedSession(user: unknown): boolean {
   // A session counts as hydrated only once the auth provider has resolved a
   // real user from the post-login cookie; a signed-out session stays
   // indistinguishable from "not yet hydrated" and never opens the content.
-  return user !== null && user !== undefined;
+  // A malformed payload - anything the server could not have produced as a
+  // resolved session, such as a truthy object without a usable identity -
+  // must deny just like an absent one. The stable id check mirrors the
+  // identity contract the server-side requireAuthenticatedPage probe already
+  // enforces, so a misrouted or malformed upstream response cannot open the
+  // client gate either.
+  if (typeof user !== "object" || user === null) return false;
+  const id = (user as { id?: unknown }).id;
+  return typeof id === "string" && id.trim().length > 0;
 }
 
 export function shouldArmBootstrapWatchdog(loading: boolean, hasHydratedSession: boolean): boolean {
@@ -43,8 +51,11 @@ export function ProtectedPage({ children }: Readonly<{ children: React.ReactNode
   const hasHydratedSession = protectedPageHasHydratedSession(user);
 
   useEffect(() => {
-    if (!loading && !user) router.replace(protectedPageLoginPath(pathname, window.location.search));
-  }, [loading, pathname, router, user]);
+    // A settled absence *or a malformed payload* is a settled absence of a
+    // session: both return the visitor to /login rather than holding the
+    // protected shell open.
+    if (!loading && !hasHydratedSession) router.replace(protectedPageLoginPath(pathname, window.location.search));
+  }, [hasHydratedSession, loading, pathname, router]);
 
   useEffect(() => {
     if (!shouldArmBootstrapWatchdog(loading, hasHydratedSession)) return;
@@ -59,7 +70,8 @@ export function ProtectedPage({ children }: Readonly<{ children: React.ReactNode
 
   // The hydrated session wins over the bootstrap flag so protected content,
   // including the first-run onboarding flow, stays mounted after login even
-  // when a superseded session read left `loading` unresolved.
-  if (!user) return <div className="loading-state" role="status" aria-live="polite" aria-busy="true"><span className="loading-spinner" aria-hidden="true" /></div>;
+  // when a superseded session read left `loading` unresolved. The gate opens
+  // only on the hardened predicate, never on a truthy-but-malformed session.
+  if (!hasHydratedSession) return <div className="loading-state" role="status" aria-live="polite" aria-busy="true"><span className="loading-spinner" aria-hidden="true" /></div>;
   return <>{children}</>;
 }

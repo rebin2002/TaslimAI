@@ -141,11 +141,45 @@ describe("protected page loading boundary", () => {
       expect(gate.protectedPageHasHydratedSession(hydratedUser)).toBe(true);
     });
 
+    it("denies a malformed session payload instead of trusting any non-null value", async () => {
+      // Security contract: a missing, expired, malformed, or unhydrated
+      // session must deny - never allow. A truthy-but-malformed payload (a
+      // misrouted proxy body, a placeholder object, a non-string id) is not
+      // proof of a resolved session, so it must read as unhydrated and hold
+      // the bootstrap gate shut, exactly like a signed-out state.
+      const gate = await import("./ProtectedPage") as typeof import("./ProtectedPage");
+      for (const malformed of [
+        {}, // object without the stable identity field
+        { id: "" }, // empty id
+        { id: "   " }, // whitespace-only id
+        { id: 123 }, // non-string id
+        { id: null }, // null id
+        "session-token", // primitive masquerading as a session
+        42,
+        true,
+        [],
+      ]) {
+        expect(gate.protectedPageHasHydratedSession(malformed)).toBe(false);
+      }
+      expect(gate.protectedPageHasHydratedSession({ id: " user-1 " })).toBe(true);
+    });
+
+    it("holds the bootstrap gate for a malformed session, loading or settled", () => {
+      // The render gate must consult the hardened predicate, not the raw
+      // truthiness of `user`, so malformed payloads never mount protected
+      // children.
+      for (const loading of [true, false]) {
+        const html = renderGate({ email: "owner@example.test" }, loading);
+        expect(html).toContain("loading-state");
+        expect(html).not.toContain("projects-view");
+      }
+    });
+
     it("wires the component render and watchdog through the session-aware gate", () => {
       // The render guard must defer to the hydrated session rather than to
       // the bootstrap flag, and the watchdog must consult the same
       // session-aware predicate.
-      expect(protectedPageSource).toContain("if (!user) return");
+      expect(protectedPageSource).toContain("if (!hasHydratedSession) return");
       expect(protectedPageSource).toContain("shouldArmBootstrapWatchdog(loading, hasHydratedSession)");
     });
   });
