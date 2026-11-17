@@ -40,7 +40,42 @@ public sealed class DocumentOutputIntegrityTests
         var missing = RewriteArchive(RenderValidDocx(), "word/document.xml");
         var missingException = Assert.Throws<DocumentOutputIntegrityException>(() => DocumentOutputIntegrityValidator.Validate(missing));
         Assert.Contains("missing required part", missingException.Message, StringComparison.Ordinal);
+
+        var missingRelationship = RewriteArchiveEntry(RenderValidDocx(), "_rels/.rels", "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\" />");
+        var relationshipException = Assert.Throws<DocumentOutputIntegrityException>(() => DocumentOutputIntegrityValidator.Validate(missingRelationship));
+        Assert.Contains("relationship to its main document part", relationshipException.Message, StringComparison.Ordinal);
     }
+    [Theory]
+    [InlineData("External")]
+    [InlineData("external")]
+    [InlineData("Unsupported")]
+    public void Validator_rejects_external_or_unsupported_root_relationship_target_modes(string targetMode)
+    {
+        // Keep the actual document part and its content-type override intact.
+        // Only the package-root office-document relationship is invalid.
+        var relationships = "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">"
+            + "<Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument\""
+            + $" Target=\"word/document.xml\" TargetMode=\"{targetMode}\" />"
+            + "</Relationships>";
+        var malformed = RewriteArchiveEntry(RenderValidDocx(), "_rels/.rels", relationships);
+
+        var failure = Assert.Throws<DocumentOutputIntegrityException>(
+            () => DocumentOutputIntegrityValidator.Validate(malformed));
+        Assert.Contains("relationship to its main document part", failure.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Validator_accepts_explicit_internal_root_relationship_target_mode()
+    {
+        var relationships = "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">"
+            + "<Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument\""
+            + " Target=\"word/document.xml\" TargetMode=\"Internal\" />"
+            + "</Relationships>";
+        var valid = RewriteArchiveEntry(RenderValidDocx(), "_rels/.rels", relationships);
+
+        DocumentOutputIntegrityValidator.Validate(valid);
+    }
+
     [Fact]
     public void Validator_rejects_truncated_or_page_less_pdf()
     {
@@ -84,6 +119,29 @@ public sealed class DocumentOutputIntegrityTests
                 if (entry.FullName == partToOmit) continue;
                 var destination = output.CreateEntry(entry.FullName);
                 using var destinationStream = destination.Open();
+                using var sourceEntryStream = entry.Open();
+                sourceEntryStream.CopyTo(destinationStream);
+            }
+        }
+        return rendered with { Content = outputStream.ToArray() };
+    }
+    private static RenderedDocument RewriteArchiveEntry(RenderedDocument rendered, string partToReplace, string replacement)
+    {
+        using var sourceStream = new MemoryStream(rendered.Content.ToArray());
+        using var source = new ZipArchive(sourceStream, ZipArchiveMode.Read);
+        using var outputStream = new MemoryStream();
+        using (var output = new ZipArchive(outputStream, ZipArchiveMode.Create, leaveOpen: true))
+        {
+            foreach (var entry in source.Entries)
+            {
+                var destination = output.CreateEntry(entry.FullName);
+                using var destinationStream = destination.Open();
+                if (entry.FullName == partToReplace)
+                {
+                    var replacementBytes = Encoding.UTF8.GetBytes(replacement);
+                    destinationStream.Write(replacementBytes);
+                    continue;
+                }
                 using var sourceEntryStream = entry.Open();
                 sourceEntryStream.CopyTo(destinationStream);
             }
