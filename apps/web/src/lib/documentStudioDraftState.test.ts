@@ -35,6 +35,8 @@ function memoryStorage(entries: [string, string][] = []) {
   };
 }
 
+const userId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+const otherUserId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
 const workspaceId = "11111111-1111-4111-8111-111111111111";
 const otherWorkspaceId = "22222222-2222-4222-8222-222222222222";
 
@@ -48,20 +50,30 @@ const draft = (overrides: Partial<DocumentDraftState> = {}): DocumentDraftState 
 describe("Document Studio unsaved draft state", () => {
   it("round-trips a composed brief through the workspace-scoped store", () => {
     const storage = memoryStorage();
-    persistDocumentDraftState(workspaceId, draft(), storage);
+    persistDocumentDraftState(userId, workspaceId, draft(), storage);
 
-    expect([...storage.values]).toEqual([[documentDraftStorageKey(workspaceId), expect.any(String)]] as never);
-    expect(readDocumentDraftState(workspaceId, storage)).toEqual(draft());
+    expect([...storage.values]).toEqual([[documentDraftStorageKey(userId, workspaceId), expect.any(String)]] as never);
+    expect(readDocumentDraftState(userId, workspaceId, storage)).toEqual(draft());
   });
 
   it("reads back defaults without touching another workspace's draft", () => {
     const storage = memoryStorage();
-    persistDocumentDraftState(workspaceId, draft(), storage);
+    persistDocumentDraftState(userId, workspaceId, draft(), storage);
 
-    expect(readDocumentDraftState(otherWorkspaceId, storage)).toEqual(emptyDocumentDraftState());
-    clearDocumentDraftState(workspaceId, storage);
-    expect(readDocumentDraftState(workspaceId, storage)).toEqual(emptyDocumentDraftState());
+    expect(readDocumentDraftState(userId, otherWorkspaceId, storage)).toEqual(emptyDocumentDraftState());
+    clearDocumentDraftState(userId, workspaceId, storage);
+    expect(readDocumentDraftState(userId, workspaceId, storage)).toEqual(emptyDocumentDraftState());
     expect(storage.values.size).toBe(0);
+  });
+
+  it("never replays or overwrites a shared workspace draft across signed-in users", () => {
+    const storage = memoryStorage();
+    persistDocumentDraftState(userId, workspaceId, draft(), storage);
+    expect(readDocumentDraftState(otherUserId, workspaceId, storage)).toEqual(emptyDocumentDraftState());
+    persistDocumentDraftState(otherUserId, workspaceId, draft({ prompt: "Second user private brief" }), storage);
+    expect(readDocumentDraftState(userId, workspaceId, storage).prompt).toBe(draft().prompt);
+    expect(readDocumentDraftState(otherUserId, workspaceId, storage).prompt).toBe("Second user private brief");
+    expect(storage.values.size).toBe(2);
   });
 
   it("keeps an untouched brief out of storage", () => {
@@ -70,7 +82,7 @@ describe("Document Studio unsaved draft state", () => {
     expect(isDocumentDraftEmpty(draft({ prompt: "", title: "", outputFormat: "pdf" }))).toBe(false);
 
     const storage = memoryStorage();
-    persistDocumentDraftState(workspaceId, emptyDocumentDraftState(), storage);
+    persistDocumentDraftState(userId, workspaceId, emptyDocumentDraftState(), storage);
     expect(storage.values.size).toBe(0);
   });
 
@@ -88,9 +100,9 @@ describe("Document Studio unsaved draft state", () => {
       tone: "persuasive",
       includeTableOfContents: false,
     });
-    persistDocumentDraftState(workspaceId, composed, storage);
+    persistDocumentDraftState(userId, workspaceId, composed, storage);
 
-    expect(readDocumentDraftState(workspaceId, storage)).toEqual(composed);
+    expect(readDocumentDraftState(userId, workspaceId, storage)).toEqual(composed);
   });
 
   it("fails closed on a stored value that is not a readable draft", () => {
@@ -102,10 +114,10 @@ describe("Document Studio unsaved draft state", () => {
   });
 
   it("drops the stored value it could not restore instead of replaying it", () => {
-    const storage = memoryStorage([[documentDraftStorageKey(workspaceId), "{not-json"]]);
+    const storage = memoryStorage([[documentDraftStorageKey(userId, workspaceId), "{not-json"]]);
 
-    expect(readDocumentDraftState(workspaceId, storage)).toEqual(emptyDocumentDraftState());
-    expect(storage.values.has(documentDraftStorageKey(workspaceId))).toBe(false);
+    expect(readDocumentDraftState(userId, workspaceId, storage)).toEqual(emptyDocumentDraftState());
+    expect(storage.values.has(documentDraftStorageKey(userId, workspaceId))).toBe(false);
   });
 
   it("bounds restored text and selections to what the editor can hold", () => {
@@ -129,33 +141,35 @@ describe("Document Studio unsaved draft state", () => {
   it("carries the draft across a remount through one shared session store", () => {
     const storage = memoryStorage();
     // Tab away: the mounted editor mirrors its brief into the store.
-    persistDocumentDraftState(workspaceId, draft(), storage);
+    persistDocumentDraftState(userId, workspaceId, draft(), storage);
     // Tab back: a freshly mounted editor reads the same store.
-    const restored = readDocumentDraftState(workspaceId, storage);
+    const restored = readDocumentDraftState(userId, workspaceId, storage);
 
     expect(restored.prompt).toBe("A launch brief for the retail pilot.");
     expect(serializeDocumentDraftState(restored)).toBe(serializeDocumentDraftState(draft()));
   });
 
   it("stays usable when browser storage is unavailable", () => {
-    expect(readDocumentDraftState(workspaceId, undefined)).toEqual(emptyDocumentDraftState());
-    expect(() => persistDocumentDraftState(workspaceId, draft(), undefined)).not.toThrow();
-    expect(() => clearDocumentDraftState(workspaceId, undefined)).not.toThrow();
+    expect(readDocumentDraftState(userId, workspaceId, undefined)).toEqual(emptyDocumentDraftState());
+    expect(() => persistDocumentDraftState(userId, workspaceId, draft(), undefined)).not.toThrow();
+    expect(() => clearDocumentDraftState(userId, workspaceId, undefined)).not.toThrow();
 
     const throwing = {
       getItem() { throw new Error("SecurityError"); },
       setItem() { throw new Error("QuotaExceededError"); },
       removeItem() { throw new Error("SecurityError"); },
     };
-    expect(readDocumentDraftState(workspaceId, throwing)).toEqual(emptyDocumentDraftState());
-    expect(() => persistDocumentDraftState(workspaceId, draft(), throwing)).not.toThrow();
-    expect(() => clearDocumentDraftState(workspaceId, throwing)).not.toThrow();
+    expect(readDocumentDraftState(userId, workspaceId, throwing)).toEqual(emptyDocumentDraftState());
+    expect(() => persistDocumentDraftState(userId, workspaceId, draft(), throwing)).not.toThrow();
+    expect(() => clearDocumentDraftState(userId, workspaceId, throwing)).not.toThrow();
   });
 
   it("refuses to store a draft without a workspace to own it", () => {
     const storage = memoryStorage();
-    persistDocumentDraftState("", draft(), storage);
+    persistDocumentDraftState("", workspaceId, draft(), storage);
+    persistDocumentDraftState(userId, "", draft(), storage);
     expect(storage.values.size).toBe(0);
-    expect(readDocumentDraftState("", storage)).toEqual(emptyDocumentDraftState());
+    expect(readDocumentDraftState("", workspaceId, storage)).toEqual(emptyDocumentDraftState());
+    expect(readDocumentDraftState(userId, "", storage)).toEqual(emptyDocumentDraftState());
   });
 });

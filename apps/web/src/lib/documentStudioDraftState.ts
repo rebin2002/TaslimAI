@@ -12,7 +12,7 @@
  * for the document editor, split into its own module so the draft lifecycle can
  * be read and tested apart from the job-lifecycle helpers.
  *
- * The draft is browser-local and keyed by the workspace that owns it - the same
+ * The draft is browser-local and keyed by the authenticated user and workspace that own it - the same
  * boundary as the active generation job in `documentStudioState.ts` - so one
  * workspace's private brief is never replayed into another. Reading is
  * fail-closed: a stored value that is not a readable draft restores defaults,
@@ -61,8 +61,8 @@ export function emptyDocumentDraftState(): DocumentDraftState {
   };
 }
 
-export function documentDraftStorageKey(workspaceId: string) {
-  return `${draftStoragePrefix}${encodeURIComponent(workspaceId)}`;
+export function documentDraftStorageKey(userId: string, workspaceId: string) {
+  return `${draftStoragePrefix}${encodeURIComponent(userId)}:${encodeURIComponent(workspaceId)}`;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -135,10 +135,10 @@ function browserSessionStorage(): StorageLike | undefined {
   }
 }
 
-export function readDocumentDraftState(workspaceId: string, storage: StorageLike | undefined = browserSessionStorage()): DocumentDraftState {
-  if (!storage || !workspaceId.trim()) return emptyDocumentDraftState();
+export function readDocumentDraftState(userId: string, workspaceId: string, storage: StorageLike | undefined = browserSessionStorage()): DocumentDraftState {
+  if (!storage || !userId.trim() || !workspaceId.trim()) return emptyDocumentDraftState();
   try {
-    const key = documentDraftStorageKey(workspaceId);
+    const key = documentDraftStorageKey(userId, workspaceId);
     const raw = storage.getItem(key);
     if (raw === null) return emptyDocumentDraftState();
     const draft = parseDocumentDraftState(raw);
@@ -152,23 +152,23 @@ export function readDocumentDraftState(workspaceId: string, storage: StorageLike
   }
 }
 
-export function persistDocumentDraftState(workspaceId: string, state: DocumentDraftState, storage: StorageLike | undefined = browserSessionStorage()): void {
-  if (!storage || !workspaceId.trim()) return;
+export function persistDocumentDraftState(userId: string, workspaceId: string, state: DocumentDraftState, storage: StorageLike | undefined = browserSessionStorage()): void {
+  if (!storage || !userId.trim() || !workspaceId.trim()) return;
   try {
     if (isDocumentDraftEmpty(state)) {
-      storage.removeItem(documentDraftStorageKey(workspaceId));
+      storage.removeItem(documentDraftStorageKey(userId, workspaceId));
       return;
     }
-    storage.setItem(documentDraftStorageKey(workspaceId), serializeDocumentDraftState(state));
+    storage.setItem(documentDraftStorageKey(userId, workspaceId), serializeDocumentDraftState(state));
   } catch {
     // Storage may be unavailable or full; the in-memory brief stays usable.
   }
 }
 
-export function clearDocumentDraftState(workspaceId: string, storage: StorageLike | undefined = browserSessionStorage()): void {
-  if (!storage || !workspaceId.trim()) return;
+export function clearDocumentDraftState(userId: string, workspaceId: string, storage: StorageLike | undefined = browserSessionStorage()): void {
+  if (!storage || !userId.trim() || !workspaceId.trim()) return;
   try {
-    storage.removeItem(documentDraftStorageKey(workspaceId));
+    storage.removeItem(documentDraftStorageKey(userId, workspaceId));
   } catch {
     // Clearing is best effort.
   }

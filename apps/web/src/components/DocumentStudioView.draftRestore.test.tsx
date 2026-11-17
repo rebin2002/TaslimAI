@@ -134,7 +134,7 @@ class TestDocument extends TestNode {
 }
 
 const harness = vi.hoisted(() => ({
-  auth: { workspace: null as { id: string } | null },
+  auth: { user: { id: "user-a" }, workspace: null as { id: string } | null },
   api: {
     listProjects: vi.fn(),
     listFiles: vi.fn(),
@@ -146,7 +146,7 @@ const harness = vi.hoisted(() => ({
   },
   searchParams: new URLSearchParams(),
 }));
-vi.mock("@/components/AuthProvider", () => ({ useAuth: () => ({ workspace: harness.auth.workspace }) }));
+vi.mock("@/components/AuthProvider", () => ({ useAuth: () => ({ user: harness.auth.user, workspace: harness.auth.workspace }) }));
 vi.mock("@/components/LocaleProvider", () => ({ useLocale: () => ({ locale: "en", t: (key: string) => key }) }));
 vi.mock("@/lib/api", () => ({
   ApiError: class ApiError extends Error {
@@ -282,6 +282,7 @@ describe("Document Studio unsaved draft across a tab switch", () => {
   beforeEach(() => {
     stored.clear();
     harness.auth.workspace = null;
+    harness.auth.user = { id: "user-a" };
     harness.api.listProjects.mockReset().mockResolvedValue([]);
     harness.api.listFiles.mockReset().mockResolvedValue([]);
     harness.api.listAssets.mockReset().mockResolvedValue({ items: [] });
@@ -360,24 +361,44 @@ describe("Document Studio unsaved draft across a tab switch", () => {
     // Same browser, different workspace: the draft belongs to workspace A only.
     await switchTabAwayAndBack(workspaceB);
     expect(elementById("document-brief").value).toBe("");
-    expect(stored.has(documentDraftStorageKey(workspaceB.id))).toBe(false);
+    expect(stored.has(documentDraftStorageKey(harness.auth.user.id, workspaceB.id))).toBe(false);
 
     await switchTabAwayAndBack(workspaceA);
     expect(elementById("document-brief").value).toBe(briefText);
   });
 
+  it("does not expose a prior signed-in account draft in the same workspace", async () => {
+    await mountStudio(workspaceA);
+    await type(elementById("document-brief"), briefText);
+    harness.auth.user = { id: "user-b" };
+    await switchTabAwayAndBack(workspaceA);
+    expect(elementById("document-brief").value).toBe("");
+    await type(elementById("document-brief"), "Second account only");
+    harness.auth.user = { id: "user-a" };
+    await switchTabAwayAndBack(workspaceA);
+    expect(elementById("document-brief").value).toBe(briefText);
+  });
+
+  it("fences an account switch on the already-mounted editor", async () => {
+    await mountStudio(workspaceA);
+    await type(elementById("document-brief"), briefText);
+    harness.auth.user = { id: "user-b" };
+    await act(async () => { root!.render(<DocumentStudioView />); await drain(); });
+    expect(elementById("document-brief").value).toBe("");
+  });
+
   it("starts from a blank brief when nothing was left unsent", async () => {
     await mountStudio(workspaceA);
     expect(elementById("document-brief").value).toBe("");
-    expect(stored.has(documentDraftStorageKey(workspaceA.id))).toBe(false);
+    expect(stored.has(documentDraftStorageKey(harness.auth.user.id, workspaceA.id))).toBe(false);
   });
 
   it("discards a stored brief that is not a readable draft", async () => {
-    stored.set(documentDraftStorageKey(workspaceA.id), "{not-json");
+    stored.set(documentDraftStorageKey(harness.auth.user.id, workspaceA.id), "{not-json");
 
     await mountStudio(workspaceA);
 
     expect(elementById("document-brief").value).toBe("");
-    expect(stored.has(documentDraftStorageKey(workspaceA.id))).toBe(false);
+    expect(stored.has(documentDraftStorageKey(harness.auth.user.id, workspaceA.id))).toBe(false);
   });
 });
