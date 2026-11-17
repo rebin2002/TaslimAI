@@ -81,7 +81,8 @@ function AccountProfileForm() {
 
   function updateDraft(patch: Partial<AccountProfileDraft>) {
     profileEditRevision.current += 1;
-    setProfileState("idle");
+    // Keep the in-flight save gate closed until its response settles.
+    setProfileState((state) => state === "saving" ? "saving" : "idle");
     setDraft((local) => ({ ...local, ...patch }));
   }
   const [currentPassword, setCurrentPassword] = useState("");
