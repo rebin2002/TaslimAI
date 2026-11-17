@@ -101,4 +101,34 @@ test.describe("authentication and onboarding", () => {
     await expect(page.locator("html")).toHaveAttribute("lang", "ar");
     await expect(page.locator("html")).toHaveAttribute("dir", "rtl");
   });
+  for (const { locale, documentLang } of [
+    { locale: "ar", documentLang: "ar" },
+    { locale: "ku", documentLang: "ckb" },
+  ]) {
+    test(`persists a real new account's ${documentLang} onboarding choice across reload and reauthentication`, async ({ page, testUser }) => {
+      // This uses the real registration, CSRF and onboarding API, unlike the
+      // provider-free page.route doubles in accessibility.spec.ts.
+      await registerInUi(page, testUser, false);
+      const onboarding = page.getByRole("dialog");
+      await expect(onboarding).toBeVisible();
+      await onboarding.locator(".onboarding-fields select").first().selectOption(locale);
+      await expect(page.locator("html")).toHaveAttribute("lang", documentLang);
+      await expect(page.locator("html")).toHaveAttribute("dir", "rtl");
+
+      await onboarding.locator(".onboarding-skip").click();
+      await expect(onboarding).toBeHidden();
+      await expect(page).toHaveURL(/\/projects/);
+      await page.reload();
+      await expect(page.getByRole("dialog")).toHaveCount(0);
+      await expect(page.locator("html")).toHaveAttribute("lang", documentLang);
+      await expect(page.locator("html")).toHaveAttribute("dir", "rtl");
+
+      await logoutInUi(page);
+      await loginInUi(page, testUser);
+      await expect(page.getByRole("dialog")).toHaveCount(0);
+      await expect(page.locator("html")).toHaveAttribute("lang", documentLang);
+      await expect(page.locator("html")).toHaveAttribute("dir", "rtl");
+    });
+  }
+
 });
