@@ -2,7 +2,7 @@
 import { localeTag, type Locale } from "@/lib/i18n";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ArrowRight, ArrowUpRight, FolderKanban, LibraryBig, LoaderCircle, MessageSquare, Sparkles } from "lucide-react";
 import { ProtectedPage } from "@/components/ProtectedPage";
 import { HomeComposer } from "@/components/HomeComposer";
@@ -11,6 +11,7 @@ import { useLocale } from "@/components/LocaleProvider";
 import { StudioChooser } from "@/components/StudioChooser";
 import { api, type ActivityItem, type Asset, type Conversation, type Project } from "@/lib/api";
 import { buildHomeRecentItems, hasInFlightActivity, type HomeRecentItem } from "@/lib/homeDashboardState";
+import { isHomeDashboardRequestCurrent, startHomeDashboardRequest } from "@/lib/homeDashboardRequest";
 
 const promptChips = [
   { labelKey: "home.promptCampaign" },
@@ -40,29 +41,59 @@ function HomeDashboard() {
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState("");
   const [askError, setAskError] = useState("");
+  // Only the newest load for the workspace that is actually mounted may
+  // publish: a dashboard started for a workspace the user has left, or for a
+  // component that has unmounted, must not replace the one now on screen.
+  const dashboardRequestSequence = useRef(0);
+  const activeWorkspaceId = useRef(workspace?.id ?? null);
+  if (activeWorkspaceId.current !== (workspace?.id ?? null)) activeWorkspaceId.current = workspace?.id ?? null;
 
   const loadDashboard = useCallback(async () => {
     if (!workspace) return;
+    const workspaceId = workspace.id;
+    const request = startHomeDashboardRequest(dashboardRequestSequence.current, workspaceId);
+    dashboardRequestSequence.current = request.sequence;
     setLoading(true);
     try {
       const [projects, conversations, activityResult, assetsResult] = await Promise.all([
-        api.listProjects(workspace.id, "Active"),
-        api.listConversations(workspace.id),
-        api.listActivity(workspace.id, 1, 12),
-        api.listAssets(workspace.id, { status: "Active", page: 1, pageSize: 12 }),
+        api.listProjects(workspaceId, "Active"),
+        api.listConversations(workspaceId),
+        api.listActivity(workspaceId, 1, 12),
+        api.listAssets(workspaceId, { status: "Active", page: 1, pageSize: 12 }),
       ]);
+      if (!isHomeDashboardRequestCurrent(request, dashboardRequestSequence.current, activeWorkspaceId.current)) return;
       setDashboard({ projects, conversations, activity: activityResult.items, assets: assetsResult.items });
       setLoadError("");
     } catch (caught) {
-      setLoadError(caught instanceof Error ? caught.message : t("home.loadError"));
+      // A retired load cannot raise an alert over the mounted workspace.
+      if (isHomeDashboardRequestCurrent(request, dashboardRequestSequence.current, activeWorkspaceId.current)) {
+        setLoadError(caught instanceof Error ? caught.message : t("home.loadError"));
+      }
     } finally {
-      setLoading(false);
+      if (isHomeDashboardRequestCurrent(request, dashboardRequestSequence.current, activeWorkspaceId.current)) setLoading(false);
     }
   }, [t, workspace]);
 
+  // Leaving a workspace retires its dashboard records at once: its private
+  // project names and activity badges must not stay on screen while the next
+  // workspace loads. Keyed on the id, so a same-workspace reload keeps its rows.
+  useEffect(() => {
+    dashboardRequestSequence.current += 1;
+    /* eslint-disable react-hooks/set-state-in-effect */
+    setDashboard(null);
+    setLoadError("");
+    /* eslint-enable react-hooks/set-state-in-effect */
+  }, [workspace?.id]);
+
   // Fetch workspace-scoped records after authentication state is available.
-  // eslint-disable-next-line react-hooks/set-state-in-effect
-  useEffect(() => { void loadDashboard(); }, [loadDashboard]);
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    void loadDashboard();
+    // A multi-request load outlives a fast navigation; stop paying for results
+    // no component instance will publish.
+    return () => { dashboardRequestSequence.current += 1; };
+  }, [loadDashboard]);
+
   const recentItems = useMemo(() => dashboard ? buildHomeRecentItems(dashboard, 4) : [], [dashboard]);
   const hasWorkingGeneration = hasInFlightActivity(dashboard?.activity ?? []);
   const projects = dashboard?.projects ?? [];
