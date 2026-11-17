@@ -88,39 +88,20 @@ public sealed class DocumentOutputIntegrityTests
         Assert.Contains("page object", pageLessException.Message, StringComparison.Ordinal);
     }
 
-    /// <summary>
-    /// A DOCX can hold every required part and every correct content type while its
-    /// OPC root relationships never address the main document part. Word refuses such
-    /// a file, so publishing it as an Asset would ship an unopenable document.
-    /// </summary>
-    [Fact]
-    public void Validator_rejects_package_without_a_main_document_relationship()
-    {
-        var stripped = RewriteArchiveEntry(RenderValidDocx(), "_rels/.rels",
-            """<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"/>""");
-
-        var exception = Assert.Throws<DocumentOutputIntegrityException>(() => DocumentOutputIntegrityValidator.Validate(stripped));
-
-        Assert.Contains("no relationship to its main document part", exception.Message, StringComparison.Ordinal);
-    }
-
     [Fact]
     public void Validator_rejects_main_document_relationship_pointing_at_another_part()
     {
+        // A DOCX can hold every required part and every correct content type while its
+        // OPC root relationship addresses a different part. Word refuses such a file,
+        // so publishing it as an Asset would ship an unopenable document. The
+        // empty-relationship case and the renderer's positive case are already covered
+        // by the tests above (merged with #273).
         var misdirected = RewriteArchiveEntry(RenderValidDocx(), "_rels/.rels",
             """<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/fallback.xml"/></Relationships>""");
 
         var exception = Assert.Throws<DocumentOutputIntegrityException>(() => DocumentOutputIntegrityValidator.Validate(misdirected));
 
         Assert.Contains("no relationship to its main document part", exception.Message, StringComparison.Ordinal);
-    }
-
-    [Fact]
-    public void Renderer_output_keeps_the_main_document_relationship_the_validator_requires()
-    {
-        // Guards the positive side of the new rule: the real renderer emits the
-        // relationship, so the check cannot silently reject every generated document.
-        DocumentOutputIntegrityValidator.Validate(RenderValidDocx());
     }
 
     private static RenderedDocument RenderValidDocx()
@@ -209,28 +190,5 @@ public sealed class DocumentOutputIntegrityTests
         var index = bytes.AsSpan().LastIndexOf(Encoding.ASCII.GetBytes(value));
         Assert.True(index >= 0);
         return bytes[..index];
-    }
-    private static RenderedDocument RewriteArchiveEntry(RenderedDocument rendered, string partName, string replacementContent)
-    {
-        using var sourceStream = new MemoryStream(rendered.Content.ToArray());
-        using var source = new ZipArchive(sourceStream, ZipArchiveMode.Read);
-        using var outputStream = new MemoryStream();
-        using (var output = new ZipArchive(outputStream, ZipArchiveMode.Create, leaveOpen: true))
-        {
-            foreach (var entry in source.Entries)
-            {
-                var destination = output.CreateEntry(entry.FullName);
-                using var destinationStream = destination.Open();
-                if (entry.FullName == partName)
-                {
-                    var replacementBytes = Encoding.UTF8.GetBytes(replacementContent);
-                    destinationStream.Write(replacementBytes, 0, replacementBytes.Length);
-                    continue;
-                }
-                using var sourceEntryStream = entry.Open();
-                sourceEntryStream.CopyTo(destinationStream);
-            }
-        }
-        return rendered with { Content = outputStream.ToArray() };
     }
 }
