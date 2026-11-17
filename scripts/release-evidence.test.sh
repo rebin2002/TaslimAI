@@ -87,6 +87,39 @@ restore_provenance_state() {
 }
 trap 'rm -rf "$temp_dir"; restore_provenance_state' EXIT
 
+# Launch a second invocation with user-owned unsaved Dockerfile changes.
+# It must refuse BEFORE its cleanup trap can destroy those changes.
+printf '%s\n' '# user-owned dirty Dockerfile data' >> "$tampered_input"
+if bash "$repo_root/scripts/release-evidence.test.sh" > "$temp_dir/dirty-preflight.log" 2>&1; then
+  echo "The fixture suite must refuse to overwrite a dirty Dockerfile." >&2
+  exit 1
+fi
+grep -q 'local changes were preserved' "$temp_dir/dirty-preflight.log" || {
+  echo "The dirty-checkout refusal must be explicit." >&2
+  exit 1
+}
+grep -q 'user-owned dirty Dockerfile data' "$tampered_input" || {
+  echo "The dirty-checkout refusal erased the existing Dockerfile changes." >&2
+  exit 1
+}
+restore_provenance_state
+
+# A pre-existing operator exclude rule is not our fixture to delete.
+printf '%s\n' "$exclude_pattern" >> "$exclude_path"
+if bash "$repo_root/scripts/release-evidence.test.sh" > "$temp_dir/exclude-preflight.log" 2>&1; then
+  echo "The fixture suite must refuse to overwrite an existing exclude rule." >&2
+  exit 1
+fi
+grep -q 'pre-existing synthetic exclusion rule' "$temp_dir/exclude-preflight.log" || {
+  echo "The pre-existing exclude-rule refusal must be explicit." >&2
+  exit 1
+}
+grep -qxF "$exclude_pattern" "$exclude_path" || {
+  echo "The exclude-rule refusal erased the operator's existing rule." >&2
+  exit 1
+}
+restore_provenance_state
+
 output="$temp_dir/release-evidence.json"
 commit_sha="$(git -C "$repo_root" rev-parse HEAD)"
 GITHUB_SHA="$commit_sha" bash "$script" "$output"
