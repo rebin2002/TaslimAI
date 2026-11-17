@@ -24,6 +24,7 @@ import {
 import { useAuth } from "@/components/AuthProvider";
 import { localeNames, locales, useLocale } from "@/components/LocaleProvider";
 import { api, type PasswordPolicy } from "@/lib/api";
+import { profileAvatarInitial } from "@/lib/profileAvatar";
 import {
   accountProfileDraftFromUser,
   accountProfileDraftsMatch,
@@ -104,7 +105,7 @@ function AccountProfileForm() {
   }, []);
 
   const createdDate = user?.createdAt ? new Intl.DateTimeFormat(localeTag(locale), { dateStyle: "medium" }).format(new Date(user.createdAt)) : "—";
-  const initials = user?.displayName.trim().slice(0, 1).toUpperCase() || "T";
+  const initials = profileAvatarInitial(user, locale);
 
   async function saveProfile(event: FormEvent) {
     event.preventDefault();
