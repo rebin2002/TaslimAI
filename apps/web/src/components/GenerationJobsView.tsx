@@ -110,13 +110,17 @@ export function GenerationJobsView() {
   const requestGeneration = useRef(0);
   const selectionGeneration = useRef(0);
   const [pollRetryGeneration, setPollRetryGeneration] = useState(0);
+  // Mirror the request generation in state for render-time busy checks: React refs
+  // must not be read during render, and a workspace change invalidates stale work.
+  const [liveRequestGeneration, setLiveRequestGeneration] = useState(0);
   // Derive busy synchronously: the old workspace must not keep new controls disabled
   // while a superseded create/cancel promise is still settling.
-  const working = isCurrentGenerationJobsWork(workingRequest, workspaceId, requestGeneration.current);
+  const working = isCurrentGenerationJobsWork(workingRequest, workspaceId, liveRequestGeneration);
   const loadRecent = useCallback(async () => {
     if (!workspaceId) {
       // No workspace to read: retire the held read and everything built from it.
       requestGeneration.current += 1;
+      setLiveRequestGeneration(requestGeneration.current);
       setAttemptEpoch(requestGeneration.current);
       setRead(null);
       setSelection(null);
@@ -125,6 +129,7 @@ export function GenerationJobsView() {
       return;
     }
     const request = ++requestGeneration.current;
+    setLiveRequestGeneration(request);
     setAttemptEpoch(request);
     setLoading(true);
     setAlert(null);
@@ -186,6 +191,7 @@ export function GenerationJobsView() {
   async function createTestJob() {
     if (!workspaceId) return;
     const request = ++requestGeneration.current;
+    setLiveRequestGeneration(request);
     const selection = selectionGeneration.current;
     setWorkingRequest({ workspaceId, request });
     setAlert(null);
@@ -207,6 +213,7 @@ export function GenerationJobsView() {
     // read this job could belong to.
     if (!workspaceId || !isJobReadableInWorkspace(job, workspaceId)) return;
     const request = ++requestGeneration.current;
+    setLiveRequestGeneration(request);
     const selection = selectionGeneration.current;
     setWorkingRequest({ workspaceId, request });
     setAlert(null);
