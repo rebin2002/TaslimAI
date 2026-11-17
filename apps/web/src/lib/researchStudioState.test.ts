@@ -4,6 +4,9 @@ import { clearResearchActiveJobId, displayResearchProgress, isCurrentResearchJob
 
 const job = (status: GenerationJob["status"], resultJson: string | null = null, progressPercent = 70): GenerationJob => ({ id: "job-1", workspaceId: "workspace-1", projectId: null, jobType: "research.generate", status, title: "Research", progressPercent, resultJson, errorCode: null, errorMessage: null, cancellationRequested: false, createdAt: "2026-01-01", queuedAt: null, startedAt: null, completedAt: null, failedAt: null, cancelledAt: null, outputs: [] });
 const source = (citationId: string, title = "Official source"): ResearchSource => ({ citationId, title, domain: "example.gov", url: "https://example.gov/source", publisher: null, publishedAt: null, retrievedAt: "2026-01-01T00:00:00Z", sourceType: "web", snippet: null, searchQuery: null, rank: 1, isSelected: true });
+const webSource = (citationId: string, url: string, title = "Official source"): ResearchSource => ({ ...source(citationId, title), url });
+const uploadedSource = (citationId: string, title: string): ResearchSource => ({ ...source(citationId, title), url: null, domain: "uploaded file", sourceType: "uploaded" });
+const report = (sources: ResearchSource[], citationIds: string[]) => JSON.stringify({ assetId: "asset-1", researchType: "research", title: "Report", sources, keyFindings: [{ type: "key_finding", text: "A finding", citationIds }], sections: [{ heading: "Evidence", blocks: [{ type: "paragraph", text: "Evidence", citationIds }] }] });
 afterEach(() => vi.unstubAllGlobals());
 
 describe("researchStudioState", () => {
@@ -47,5 +50,93 @@ describe("researchStudioState", () => {
     expect(readResearchActiveJobId("workspace-2")).toBeNull();
     clearResearchActiveJobId("workspace-1");
     expect(readResearchActiveJobId("workspace-1")).toBeNull();
+  });
+
+  describe("citation source deduplication and stable numbering", () => {
+    it("collapses two citation ids that resolve to the same page into one numbered source", () => {
+      const result = parseResearchJobResult(job("Succeeded", report([
+        webSource("S1", "https://example.gov/report", "Ministry report"),
+        webSource("S2", "https://example.gov/report", "Ministry report (duplicate)"),
+      ], ["S1", "S2"])));
+      expect(result?.sources?.map((item) => item.citationId)).toEqual(["S1"]);
+      expect(result?.sourceCount).toBe(1);
+      expect(result?.keyFindings?.[0].citationIds).toEqual(["S1"]);
+      expect(result?.sections?.[0].blocks[0].citationIds).toEqual(["S1"]);
+    });
+
+    it("treats an in-page anchor as the same cited page", () => {
+      const result = parseResearchJobResult(job("Succeeded", report([
+        webSource("S1", "https://example.gov/report#section-2", "Anchored view"),
+        webSource("S9", "https://example.gov/report", "Full report"),
+      ], ["S9"])));
+      expect(result?.sources?.map((item) => item.citationId)).toEqual(["S1"]);
+      expect(result?.sourceCount).toBe(1);
+      expect(result?.keyFindings?.[0].citationIds).toEqual(["S1"]);
+    });
+
+    it("keeps distinct query locators as separate cited pages", () => {
+      const result = parseResearchJobResult(job("Succeeded", report([
+        webSource("S1", "https://example.gov/search?q=solar"),
+        webSource("S2", "https://example.gov/search?q=wind"),
+      ], ["S1", "S2"])));
+      expect(result?.sources?.map((item) => item.citationId)).toEqual(["S1", "S2"]);
+      expect(result?.sourceCount).toBe(2);
+    });
+
+    it("never collapses uploaded sources because they carry no locator", () => {
+      const result = parseResearchJobResult(job("Succeeded", report([
+        uploadedSource("S1", "budget.xlsx"),
+        uploadedSource("S2", "minutes.pdf"),
+      ], ["S1", "S2"])));
+      expect(result?.sources?.map((item) => item.citationId)).toEqual(["S1", "S2"]);
+      expect(result?.sourceCount).toBe(2);
+      expect(result?.keyFindings?.[0].citationIds).toEqual(["S1", "S2"]);
+    });
+
+    it("numbers the cited source list in ascending citation order whatever the payload order", () => {
+      const result = parseResearchJobResult(job("Succeeded", report([
+        webSource("S2", "https://example.gov/b"),
+        webSource("S10", "https://example.gov/j"),
+        webSource("S1", "https://example.gov/a"),
+        webSource("S3", "https://example.gov/c"),
+      ], ["S1", "S2", "S3", "S10"])));
+      expect(result?.sources?.map((item) => item.citationId)).toEqual(["S1", "S2", "S3", "S10"]);
+    });
+
+    it("renumbers the surviving citation to the lowest citation id of the collapsed page", () => {
+      const result = parseResearchJobResult(job("Succeeded", report([
+        webSource("S7", "https://example.gov/report"),
+        webSource("S3", "https://example.gov/report"),
+      ], ["S7"])));
+      expect(result?.sources?.map((item) => item.citationId)).toEqual(["S3"]);
+      expect(result?.keyFindings?.[0].citationIds).toEqual(["S3"]);
+    });
+
+    it("collapses the same cited page surfaced through persisted source details", () => {
+      const result = parseResearchJobResult(job("Succeeded", report([
+        webSource("S1", "https://example.gov/report", "Embedded"),
+        webSource("S4", "https://example.gov/report", "Embedded duplicate"),
+      ], ["S1", "S4"])));
+      const merged = mergeResearchSources(result, [
+        webSource("S1", "https://example.gov/report", "Persisted"),
+        webSource("S4", "https://example.gov/report", "Persisted duplicate"),
+      ]);
+      expect(merged?.sources?.map((item) => item.citationId)).toEqual(["S1"]);
+      expect(merged?.sourceCount).toBe(1);
+      expect(merged?.keyFindings?.[0].citationIds).toEqual(["S1"]);
+    });
+
+    it("keeps citation markers pointing at a rendered source after a detail merge reorders rows", () => {
+      const result = parseResearchJobResult(job("Succeeded", report([
+        webSource("S2", "https://example.gov/b", "Second"),
+        webSource("S1", "https://example.gov/a", "First"),
+      ], ["S1", "S2"])));
+      const merged = mergeResearchSources(result, [
+        webSource("S1", "https://example.gov/a", "First detail"),
+        webSource("S2", "https://example.gov/b", "Second detail"),
+      ]);
+      expect(merged?.sources?.map((item) => item.citationId)).toEqual(["S1", "S2"]);
+      expect(merged?.keyFindings?.[0].citationIds).toEqual(["S1", "S2"]);
+    });
   });
 });
