@@ -19,7 +19,7 @@ import {
   readDocumentDraftState,
   serializeDocumentDraftState,
   type DocumentDraftState,
-} from "./documentStudioState";
+} from "./documentStudioDraftState";
 
 function memoryStorage(entries: [string, string][] = []) {
   const values = new Map<string, string>(entries);

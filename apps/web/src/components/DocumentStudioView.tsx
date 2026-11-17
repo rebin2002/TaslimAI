@@ -26,22 +26,24 @@ import {
   clearDocumentActiveJobId,
   displayDocumentProgress,
   documentPresentationState,
-  type DocumentDraftState,
-  isDocumentDraftEmpty,
   isDocumentJobUnavailableError,
   isDocumentSourceReady,
   isRestorableDocumentJob,
   nextDocumentPollDelay,
   parseDocumentJobResult,
   persistDocumentActiveJobId,
-  persistDocumentDraftState,
   readDocumentActiveJobId,
-  readDocumentDraftState,
   retainDocumentWorkspaceProjectId,
   retainDocumentWorkspaceFileIds,
   shouldResetDocumentWorkspaceState,
   shouldPollDocumentJob,
 } from "@/lib/documentStudioState";
+import {
+  type DocumentDraftState,
+  isDocumentDraftEmpty,
+  persistDocumentDraftState,
+  readDocumentDraftState,
+} from "@/lib/documentStudioDraftState";
 
 const extensions = [".pdf", ".docx", ".txt", ".md", ".csv", ".xlsx"];
 type DocumentType = "auto" | "report" | "proposal" | "business_letter" | "company_profile" | "meeting_minutes" | "article" | "general";

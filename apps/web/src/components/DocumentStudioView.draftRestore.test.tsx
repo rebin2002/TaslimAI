@@ -200,7 +200,7 @@ vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
 
 const { createRoot } = await import("react-dom/client");
 const { DocumentStudioView } = await import("@/components/DocumentStudioView");
-const { documentDraftStorageKey } = await import("@/lib/documentStudioState");
+const { documentDraftStorageKey } = await import("@/lib/documentStudioDraftState");
 
 const workspaceA = { id: "workspace-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" };
 const workspaceB = { id: "workspace-bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb" };
