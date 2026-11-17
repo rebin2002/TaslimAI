@@ -11,6 +11,14 @@ function job(overrides: Partial<GenerationJob> = {}): GenerationJob {
 }
 
 describe("generation job UI state", () => {
+  it("does not treat an unknown server status as an active cancellable job", () => {
+    const unknownStatus = "PausedByProvider" as GenerationJob["status"];
+    const unknown = job({ status: unknownStatus });
+
+    expect(isTerminalJob(unknown)).toBe(true);
+    expect(canCancelGenerationJob(unknown)).toBe(false);
+  });
+
   it("merges create and polling updates while keeping the selected job", () => {
     let state: GenerationJobsState = { jobs: [], selectedJobId: null, error: "" };
     state = mergeGenerationJob(state, job());
