@@ -205,20 +205,49 @@ public sealed class AutopilotOrchestrator(
                     && !terminalEventStatuses.Contains(item.Status), cancellationToken);
             if (hasPendingEvent) continue;
 
-            await AdvanceRunAsync(run, context, recovered: true, cancellationToken);
-            if (run.ReconciliationCount >= maxRunReconciliations)
+            // Recovery re-drives the same run row the event path writes, so it must
+            // hold the same exclusive wave lease: without it, a watchdog pass and a
+            // completion event applied by any controller instance can rewrite one run
+            // state machine concurrently, which is exactly what the fencing lease (and
+            // its documented single-writer contract) exists to prevent. A contended
+            // wave is left untouched for the next pass and spends no recovery budget.
+            var lease = await locks.AcquireAsync(EfAutopilotLockService.WaveResource(run.WaveKey), "autopilot-watchdog", cancellationToken);
+            if (!lease.IsAcquired)
             {
-                // Budget spent: the run stays where a human can see it, and the stop is
-                // surfaced once instead of the watchdog re-driving it on every pass.
                 Record(context, AutopilotAuditFactory.Create(
-                    AutopilotAuditActions.WatchdogReconciled,
-                    AutopilotAuditOutcomes.Failed,
-                    reason: "watchdog_reconciliation_exhausted",
-                    statusDetail: $"run_reconciliations:{run.ReconciliationCount}",
+                    AutopilotAuditActions.LockContended,
+                    AutopilotAuditOutcomes.Contended,
+                    reason: "watchdog_wave_lease_contended",
                     waveKey: run.WaveKey,
                     runState: run.State,
                     targetId: run.Id,
                     dryRun: settings.DryRun));
+                context.EventsSkipped++;
+                await FlushAsync(context, cancellationToken);
+                continue;
+            }
+
+            try
+            {
+                await AdvanceRunAsync(run, context, recovered: true, cancellationToken);
+                if (run.ReconciliationCount >= maxRunReconciliations)
+                {
+                    // Budget spent: the run stays where a human can see it, and the stop is
+                    // surfaced once instead of the watchdog re-driving it on every pass.
+                    Record(context, AutopilotAuditFactory.Create(
+                        AutopilotAuditActions.WatchdogReconciled,
+                        AutopilotAuditOutcomes.Failed,
+                        reason: "watchdog_reconciliation_exhausted",
+                        statusDetail: $"run_reconciliations:{run.ReconciliationCount}",
+                        waveKey: run.WaveKey,
+                        runState: run.State,
+                        targetId: run.Id,
+                        dryRun: settings.DryRun));
+                }
+            }
+            finally
+            {
+                await locks.ReleaseAsync(lease, CancellationToken.None);
             }
 
             await FlushAsync(context, cancellationToken);
@@ -360,7 +389,11 @@ public sealed class AutopilotOrchestrator(
             return false;
         }
 
-        var lockHandle = await locks.AcquireAsync(EfAutopilotLockService.WaveResource(signal.WaveKey!), "autopilot-controller", cancellationToken);
+        // The run row is keyed by the trimmed wave key (see ApplySignalAsync), so the
+        // exclusive lease must cover that same trimmed resource. Leasing the raw signal
+        // spelling lets two paddings of one wave - and the watchdog, which only ever
+        // sees the trimmed run key - hold different leases while writing the same run.
+        var lockHandle = await locks.AcquireAsync(EfAutopilotLockService.WaveResource(signal.WaveKey!.Trim()), "autopilot-controller", cancellationToken);
         if (!lockHandle.IsAcquired)
         {
             intakeEvent.Status = AutopilotEventStatuses.Queued;
