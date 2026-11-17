@@ -24,10 +24,26 @@ export function safeGenerationCostPreview(preview: GenerationCostPreview | null 
   };
 }
 
+/**
+ * The API quotes an estimate already rounded to the eight-decimal scale the
+ * usage ledger stores, so a genuine per-request cost is routinely below a
+ * cent. Rendering that quote at two decimals would show "USD 0.00" for a paid
+ * generation and round "USD 1.005" down to "USD 1.00", telling the user a
+ * different figure than the one the preflight threshold was evaluated on.
+ * Keep the quoted precision and only trim trailing zeros beyond the cents.
+ */
+const ledgerScaleDecimals = 8;
+const centsDecimals = 2;
+
+function formatQuotedAmount(amountUsd: number, currency: string) {
+  const [whole, fraction = ""] = amountUsd.toFixed(ledgerScaleDecimals).split(".");
+  return `${currency} ${whole}.${fraction.replace(/0+$/, "").padEnd(centsDecimals, "0")}`;
+}
+
 export function generationEstimateLabel(preview: GenerationCostPreview | null | undefined, unknownLabel = "Estimate unavailable") {
   const safe = safeGenerationCostPreview(preview);
   if (!safe || !safe.estimatedProviderCostKnown || safe.estimatedProviderCostUsd === null) return unknownLabel;
-  return `${safe.currency} ${safe.estimatedProviderCostUsd.toFixed(2)}`;
+  return formatQuotedAmount(safe.estimatedProviderCostUsd, safe.currency);
 }
 
 export function requiresGenerationConfirmation(preview: GenerationCostPreview | null | undefined) {
