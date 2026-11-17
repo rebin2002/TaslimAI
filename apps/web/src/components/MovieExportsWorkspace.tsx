@@ -337,7 +337,9 @@ export function MovieExportsWorkspace({ project }: { project: MovieProject }) {
   );
 }
 
-function ExportCard({
+// Rendered once per persisted assembly record. Exported so the state legibility
+// of a single queue card can be asserted without a live project or provider.
+export function ExportCard({
   assembly,
   locale,
 }: {
