@@ -171,6 +171,23 @@ public sealed class DocumentPdfMissingGlyphExportTests
     }
 
     [Fact]
+    public void Sorani_document_pdf_export_preserves_title_identity_with_missing_glyphs()
+    {
+        // Kurdish Sorani uses additional Arabic-script letters that must not be rejected by
+        // an English-oriented font fallback or turn a valid bilingual export into a failed job.
+        // The PDF reader's extracted RTL glyph order is not a stable language-quality assertion;
+        // pin the parseable file and exact Unicode /Title identity instead.
+        var title = $"ڕاپۆرتی بازاڕی هەولێر {Rocket}";
+        var draft = Draft(title, "پوختەی دۆخی بازاڕ.", $"پلان {Arrow} پێداچوونەوە {Check}.");
+
+        var rendered = Renderer.RenderPdf(draft, Input(title, "ku"), Options);
+
+        var (text, metadataTitle) = AssertValidReadablePdf(rendered);
+        Assert.Equal(title, metadataTitle);
+        Assert.Contains("Taslim", text, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Title_identity_still_separates_exports_whose_titles_differ_only_by_an_out_of_coverage_glyph()
     {
         // Content-addressed generated-file storage reuses an earlier file row for byte-identical
