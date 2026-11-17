@@ -14,6 +14,12 @@ import { api, type Asset, type GenerationJob, type MusicGenerationInput, type Pr
 import { findMediaJobArtifact, mediaJobArtifactDownloadState } from "@/lib/mediaJobArtifactState";
 import { canCancelMusicJob, isMusicProviderUnavailable, parseMusicJobResult } from "@/lib/musicStudioState";
 import {
+  decideMusicStudioSubmit,
+  musicStudioPreflightCopy,
+  type MusicStudioBriefDraft,
+  type MusicStudioSubmitDecision,
+} from "@/lib/musicStudioPreflight";
+import {
   REFERENCE_AUDIO_ACCEPT,
   clearReferenceAudioSelection,
   formatReferenceAudioSize,
@@ -154,28 +160,66 @@ type ReferenceAudioPanelProps = {
 // the browser from this panel.
 export function ReferenceAudioPanel({ state, candidates, loading, t, onFileSelected, onStoredPicked, onClear }: ReferenceAudioPanelProps) {
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const chooseButtonRef = useRef<HTMLButtonElement>(null);
   const selected = state.candidate;
   const previewUrl = selected ? (selected.sourceKind === "local" ? state.previewObjectUrl : referenceAudioPreviewUrl(selected, api.assetFileUrl)) : null;
   const storedId = selected?.sourceKind === "stored_asset" ? selected.assetId ?? "" : "";
+  function handleClear() {
+    onClear();
+    // The clear button unmounts with the selection block. The chooser button
+    // survives the state update, so focus moves there instead of dropping to
+    // <body> and leaving the keyboard user at the top of the page.
+    chooseButtonRef.current?.focus();
+  }
   return <section className="music-reference-panel" aria-labelledby="music-reference-title">
     <div className="music-reference-heading"><div><p className="music-overline">{t("music.reference.eyebrow")}</p><h3 id="music-reference-title">{t("music.reference.title")}</h3></div><Info size={18} aria-hidden="true" /></div>
     <p className="music-reference-description">{t("music.reference.description")}</p>
     <div className="music-reference-picker">
       <input ref={fileInputRef} className="music-reference-input" type="file" accept={REFERENCE_AUDIO_ACCEPT} onChange={onFileSelected} aria-label={t("music.reference.uploadLabel")} />
-      <button type="button" className="music-action-button" onClick={() => fileInputRef.current?.click()}>{t("music.reference.chooseFile")}</button>
+      <button type="button" ref={chooseButtonRef} className="music-action-button" onClick={() => fileInputRef.current?.click()}>{t("music.reference.chooseFile")}</button>
       <span>{t("music.reference.fileHint")}</span>
     </div>
-    {loading ? <p className="music-reference-muted">{t("music.reference.loading")}</p> : candidates.length > 0 ? <label className="music-choice-field music-reference-select"><span>{t("music.reference.savedLabel")}</span><select value={storedId} onChange={(event) => {
+    {/* One persistent status paragraph: the private library query resolves
+        while this panel is already on screen, so the loading -> empty swap
+        lands in the same live region and is announced instead of silently
+        swapping two different paragraphs. */}
+    <p className="music-reference-muted music-reference-status" role="status">{loading ? t("music.reference.loading") : candidates.length === 0 ? t("music.reference.empty") : ""}</p>
+    {!loading && candidates.length > 0 ? <label className="music-choice-field music-reference-select"><span>{t("music.reference.savedLabel")}</span><select value={storedId} onChange={(event) => {
       const picked = event.target.value ? candidates.find((candidate) => candidate.assetId === event.target.value) : null;
       if (picked) onStoredPicked(picked);
-    }}><option value="">{t("music.reference.savedPlaceholder")}</option>{candidates.map((candidate) => <option key={candidate.id} value={candidate.assetId ?? ""}>{candidate.displayName}</option>)}</select></label> : <p className="music-reference-muted">{t("music.reference.empty")}</p>}
+    }}><option value="">{t("music.reference.savedPlaceholder")}</option>{candidates.map((candidate) => <option key={candidate.id} value={candidate.assetId ?? ""}>{candidate.displayName}</option>)}</select></label> : null}
     {state.rejectedReasonKey ? <p className="music-reference-error" role="alert">{t(state.rejectedReasonKey)}</p> : null}
-    {selected ? <div className="music-reference-selected" aria-live="polite">
-      <div className="music-reference-file"><MusicArtwork /><div><strong>{selected.displayName}</strong><span>{formatReferenceAudioSize(selected.sizeBytes) ?? t("music.reference.metadataUnavailable")}</span></div><button type="button" className="music-reference-clear" onClick={onClear}>{t("music.reference.clear")}</button></div>
-      {previewUrl ? <audio className="music-reference-audio" controls preload="metadata" src={previewUrl} aria-label={`${t("music.reference.previewLabel")}: ${selected.displayName}`} /> : <p className="music-reference-muted">{t("music.reference.previewUnavailable")}</p>}
-      <p className="music-reference-note">{t("music.reference.note")}</p>
-    </div> : null}
+    <div className="music-reference-live" aria-live="polite">
+      {selected ? <div className="music-reference-selected">
+        <div className="music-reference-file"><MusicArtwork /><div><strong>{selected.displayName}</strong><span>{formatReferenceAudioSize(selected.sizeBytes) ?? t("music.reference.metadataUnavailable")}</span></div><button type="button" className="music-reference-clear" onClick={handleClear}>{t("music.reference.clear")}</button></div>
+        {previewUrl ? <audio className="music-reference-audio" controls preload="metadata" src={previewUrl} aria-label={`${t("music.reference.previewLabel")}: ${selected.displayName}`} /> : <p className="music-reference-muted">{t("music.reference.previewUnavailable")}</p>}
+        <p className="music-reference-note">{t("music.reference.note")}</p>
+      </div> : null}
+    </div>
   </section>;
+}
+
+type MusicGenerationActionProps = Readonly<{
+  decision: MusicStudioSubmitDecision;
+  working: boolean;
+  noticeId: string;
+  t: (key: string) => string;
+}>;
+
+// The studio's only route to a generation request, rendered from the preflight
+// decision so the copy that pauses creation and the state of the action cannot
+// disagree. While the pause is what blocks the brief the button says so: a dead
+// control with no announced reason is a dead end for keyboard and screen-reader
+// users, and the notice is the only place that reason lives.
+export function MusicGenerationAction({ decision, working, noticeId, t }: MusicGenerationActionProps) {
+  return <button
+    className={decision.reasonKey ? "music-generate-button is-paused" : "music-generate-button"}
+    type="submit"
+    disabled={!decision.permitted}
+    aria-disabled={!decision.permitted || undefined}
+    aria-describedby={decision.reasonKey ? noticeId : undefined}
+    title={decision.reasonKey ? t(decision.reasonKey) : undefined}
+  ><Sparkles size={17} /> {working ? t("music.working") : t("music.generate")} <span aria-hidden="true">↗</span></button>;
 }
 
 function RecentMusicLibrary({ assets, loading, error, locale, t }: { assets: Asset[]; loading: boolean; error: string; locale: string; t: (key: string, values?: Record<string, string>) => string }) {
@@ -330,23 +374,34 @@ function WorkspaceMusicStudio({ workspace }: { workspace: ReturnType<typeof useA
     applyReferenceAudioResult(clearReferenceAudioSelection(referenceAudio));
   }
 
+  const workspaceId = workspace?.id ?? "";
+  // One decision drives the disabled action, the reason announced on it and the
+  // submit guard below, so the affordance can never again promise a request the
+  // published preflight copy says will not run.
+  const submitDraft: MusicStudioBriefDraft = {
+    workspaceReady: workspaceId !== "",
+    submitting: working,
+    referenceSelected: referenceAudio.candidate !== null,
+    description,
+    purpose,
+  };
+  const submitDecision = decideMusicStudioSubmit(submitDraft);
+  const preflightCopy = musicStudioPreflightCopy();
+
   async function generate(event: React.FormEvent) {
     event.preventDefault();
-    if (!workspace || description.trim().length < 3 || purpose.trim().length < 3) {
-      setError(t("music.required"));
-      return;
-    }
-    // The reference audio path is selection and preview only for now: the job
-    // contract has no reference field yet, so never let a selection imply that
-    // it will reach a (possibly paid) provider call.
-    if (referenceAudio.candidate) {
-      setError(t("music.reference.note"));
+    // Paused creation outranks the brief itself: nothing leaves the browser, so
+    // no private description is posted to a route that can only refuse it and no
+    // request can reach a provider. The same guard covers implicit submission
+    // from a text field, where the disabled button would not have helped.
+    if (!submitDecision.permitted) {
+      if (submitDecision.messageKey) setError(t(submitDecision.messageKey));
       return;
     }
     setWorking(true);
     setError("");
     const input: MusicGenerationInput = {
-      workspaceId: workspace.id,
+      workspaceId,
       projectId: projectId || null,
       description: description.trim(),
       purpose: purpose.trim(),
@@ -399,11 +454,13 @@ function WorkspaceMusicStudio({ workspace }: { workspace: ReturnType<typeof useA
 
   return <div className="music-studio-page">
     <section className="music-studio-hero">
-      <div className="music-studio-hero-copy"><div className="music-live-mark"><span /> {t("music.providerStatus")}</div><p className="music-overline">{t("music.eyebrow")}</p><h1>{t("music.title")}</h1><p className="music-studio-subtitle">{t("music.subtitle")}</p></div>
+      <div className="music-studio-hero-copy">{preflightCopy ? <div className="music-live-mark"><span /> {t(preflightCopy.eyebrowKey)}</div> : null}<p className="music-overline">{t("music.eyebrow")}</p><h1>{t("music.title")}</h1><p className="music-studio-subtitle">{t("music.subtitle")}</p></div>
       <MusicArtwork large />
     </section>
 
-    <div className="music-studio-notice"><WandSparkles size={17} /><p><strong>{t("music.providerUnavailableTitle")}</strong> {t("music.providerUnavailableText")}</p></div>
+    {/* The preflight notice is the reason the primary action is inert, so it is
+         referenced by the button rather than sitting next to it as decoration. */}
+    {preflightCopy ? <div id="music-preflight-note" className="music-studio-notice" role="status"><WandSparkles size={17} aria-hidden="true" /><p><strong>{t(preflightCopy.titleKey)}</strong> {t(preflightCopy.textKey)}</p></div> : null}
 
     {!current ? <form className="music-studio-workspace" onSubmit={(event) => void generate(event)}>
       <section className="music-create-panel">
@@ -419,7 +476,7 @@ function WorkspaceMusicStudio({ workspace }: { workspace: ReturnType<typeof useA
         <details className="music-optional-controls"><summary>{t("music.moreOptions")}</summary><div className="music-optional-grid"><label className="music-choice-field"><span>{t("music.language")}</span><select value={language} onChange={(event) => setLanguage(event.target.value)}>{languages.map((value) => <option key={value} value={value}>{t(`music.language.${value}`)}</option>)}</select></label><label className="music-choice-field"><span>{t("music.project")}</span><select value={projectId} onChange={(event) => setProjectId(event.target.value)} disabled={loadingProjects}><option value="">{t("music.noProject")}</option>{projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}</select></label><label className="music-choice-field"><span>{t("music.titleLabel")}</span><input value={title} onChange={(event) => setTitle(event.target.value)} maxLength={160} placeholder={t("music.titlePlaceholder")} /></label><label className="music-primary-field music-field-wide"><span>{t("music.additionalInstructions")}</span><textarea className="is-short" value={additionalInstructions} onChange={(event) => setAdditionalInstructions(event.target.value)} maxLength={2000} placeholder={t("music.additionalInstructionsPlaceholder")} /></label></div></details>
         <ReferenceAudioPanel state={referenceAudio} candidates={referenceCandidates} loading={loadingReferenceLibrary} t={t} onFileSelected={handleReferenceFilePicked} onStoredPicked={handleReferenceStoredPicked} onClear={handleReferenceAudioClear} />
         {error && <div className="music-inline-error"><XCircle size={15} /> {error}</div>}
-        <button className="music-generate-button" type="submit" disabled={working || referenceAudio.candidate !== null || description.trim().length < 3 || purpose.trim().length < 3}><Sparkles size={17} /> {working ? t("music.working") : t("music.generate")} <span aria-hidden="true">↗</span></button>
+        <MusicGenerationAction decision={submitDecision} working={working} noticeId="music-preflight-note" t={t} />
       </section>
       <aside className="music-side-panel"><div className="music-side-icon"><Headphones size={20} /></div><p className="music-overline">{t("music.guidanceTitle")}</p><h2>{t("music.guidanceText")}</h2><ol><li>{t("music.guidanceOne")}</li><li>{t("music.guidanceTwo")}</li><li>{t("music.guidanceThree")}</li></ol><div className="music-side-footer"><Clock3 size={14} /> {t("music.safetyNote")}</div></aside>
     </form> : isSuccess && result?.assetId ? <section className="music-result-panel" aria-live="polite">
