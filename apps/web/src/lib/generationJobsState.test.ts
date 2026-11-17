@@ -11,6 +11,7 @@ import {
   readGenerationJobs,
   resolveGenerationJobsDetail,
   safeGenerationJobDisplay,
+  isCurrentGenerationJobsWork,
   type GenerationJobsAlert,
   type GenerationJobsRead,
   type GenerationJobsSelection,
@@ -169,5 +170,24 @@ describe("generation history surface claims", () => {
   });
   it("claims an empty history when the session has no workspace to read", () => {
     expect(describeGenerationJobsSurface({ activeWorkspaceId: null, read: read("workspace-a", 3, [oldRowish()]), attemptEpoch: 4, loading: false, alert: null })).toBe("empty");
+  });
+});
+
+// Starting a create/cancel action in workspace A must never leave workspace B
+// disabled if A's network response loses its generation fence on re-assignment.
+describe("generation history mutation busy-state fencing", () => {
+  const pending = { workspaceId: "workspace-a", request: 12 };
+  it("is busy only for the issuing workspace and exact request", () => {
+    expect(isCurrentGenerationJobsWork(pending, "workspace-a", 12)).toBe(true);
+    expect(isCurrentGenerationJobsWork(pending, "workspace-b", 12)).toBe(false);
+    expect(isCurrentGenerationJobsWork(pending, null, 12)).toBe(false);
+    expect(isCurrentGenerationJobsWork(pending, "workspace-a", 13)).toBe(false);
+    expect(isCurrentGenerationJobsWork(null, "workspace-a", 12)).toBe(false);
+  });
+  it("does not resurrect a stale pending action after switching away and back", () => {
+    // A -> B -> A retires attempt 12 even when the old promise has not settled.
+    expect(isCurrentGenerationJobsWork(pending, "workspace-b", 13)).toBe(false);
+    expect(isCurrentGenerationJobsWork(pending, "workspace-a", 14)).toBe(false);
+    expect(isCurrentGenerationJobsWork({ workspaceId: "workspace-a", request: 14 }, "workspace-a", 14)).toBe(true);
   });
 });
