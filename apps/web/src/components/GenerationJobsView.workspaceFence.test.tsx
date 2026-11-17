@@ -391,3 +391,88 @@ describe("generation history workspace isolation in the rendered page", () => {
     expect(findByClass(container, "generation-empty").map((node) => node.textContent)).toContain("jobs.empty");
   });
 });
+// A workspace id proves that a record belongs to the workspace being read. It cannot prove that the
+// record is what that workspace reports now: the session can leave a workspace, read another one,
+// and come back, and the page then holds a perfectly-scoped set of rows from a read it has already
+// superseded. The view therefore renders from one read tagged with the workspace and the list
+// attempt that produced it, and derives the inspected job from that read instead of remembering a
+// job record of its own.
+describe("generation history read freshness in the rendered page", () => {
+  it("does not repaint the previous read's detail panel when the session returns to a workspace", async () => {
+    await mountView(workspaceA);
+    await settleList(0, [makeJob()]);
+    await selectRow("Alpha workspace job");
+    expect(findByClass(container, "generation-job-detail")).toHaveLength(1);
+    expect(renderedText()).toContain("alpha-only");
+    await switchWorkspace(workspaceB);
+    await settleList(1, [makeJob({ id: "job-b1", workspaceId: "workspace-b", title: "Beta workspace job", resultJson: '{"note":"beta-only"}' })]);
+    expect(renderedTitles()).toEqual(["Beta workspace job"]);
+    // Back to A. Its own newest list request is still in flight, and the only Alpha-shaped value the
+    // view holds came from the read taken before the detour, so the detail panel must stay closed
+    // rather than repaint a record the current read cannot vouch for.
+    await switchWorkspace(workspaceA);
+    expect(listRequests).toHaveLength(3);
+    expect(findByClass(container, "generation-job-detail")).toHaveLength(0);
+    expect(findByClass(container, "generation-cancel-button")).toHaveLength(0);
+    expect(renderedText()).not.toContain("alpha-only");
+    expect(renderedText()).not.toContain("beta-only");
+    expect(renderedText()).not.toContain("Alpha workspace job");
+    // The fresh page then decides what is rendered.
+    await settleList(2, [makeJob({ progressPercent: 70, resultJson: '{"note":"alpha-refreshed"}' })]);
+    expect(findByClass(container, "generation-job-detail")).toHaveLength(1);
+    expect(renderedText()).toContain("alpha-refreshed");
+    expect(renderedText()).not.toContain("alpha-only");
+  });
+  it("keeps the detail panel describing the same row the history list shows for that job", async () => {
+    await mountView(workspaceA);
+    await settleList(0, [makeJob({ progressPercent: 30, resultJson: '{"note":"thirty"}' })]);
+    await selectRow("Alpha workspace job");
+    await runTimers();
+    expect(detailRequests).toHaveLength(1);
+    // The poll answer and the row are one record: the panel follows the read, not a copy of it.
+    await settleDetail(0, makeJob({ progressPercent: 55, resultJson: '{"note":"fifty-five"}' }));
+    expect(renderedText()).toContain("fifty-five");
+    expect(renderedText()).not.toContain("thirty");
+    // A newer page of the same workspace supersedes the polled record as well.
+    await switchWorkspace(workspaceB);
+    await settleList(1, []);
+    await switchWorkspace(workspaceA);
+    await settleList(2, [makeJob({ status: "Succeeded", progressPercent: 100, resultJson: '{"note":"final"}' })]);
+    expect(renderedText()).toContain("final");
+    expect(renderedText()).not.toContain("fifty-five");
+  });
+  it("retires a superseded poll answer together with the read that armed it", async () => {
+    await mountView(workspaceA);
+    await settleList(0, [makeJob()]);
+    await selectRow("Alpha workspace job");
+    await runTimers();
+    expect(detailRequests).toHaveLength(1);
+    await switchWorkspace(workspaceB);
+    // The answer describes workspace A, which the page no longer reads.
+    await settleDetail(0, makeJob({ progressPercent: 95, resultJson: '{"note":"alpha-late"}' }));
+    expect(renderedText()).not.toContain("alpha-late");
+    expect(findByClass(container, "generation-job-detail")).toHaveLength(0);
+    await settleList(1, [makeJob({ id: "job-b1", workspaceId: "workspace-b", title: "Beta workspace job" })]);
+    expect(renderedTitles()).toEqual(["Beta workspace job"]);
+  });
+  it("does not raise a retired read's failure alert over the workspace being read now", async () => {
+    await mountView(workspaceA);
+    await failList(0, "Alpha history failed");
+    expect(renderedText()).toContain("Alpha history failed");
+    expect(findByClass(container, "generation-retry-button")).toHaveLength(1);
+    await switchWorkspace(workspaceB);
+    expect(renderedText()).not.toContain("Alpha history failed");
+    // The panel now waits on B's own read instead of speaking about A.
+    expect(findByClass(container, "generation-empty").map((node) => node.textContent)).toContain("jobs.loading");
+    expect(findByClass(container, "generation-retry-button")).toHaveLength(0);
+  });
+  it("settles the empty-history claim only after the workspace being read has been read", async () => {
+    await mountView(workspaceA);
+    await settleList(0, [makeJob()]);
+    await switchWorkspace(workspaceB);
+    await settleList(1, []);
+    // B was read and answered with no rows, so an empty history is now a true statement about B.
+    expect(findByClass(container, "generation-empty").map((node) => node.textContent)).toContain("jobs.empty");
+    expect(renderedText()).not.toContain("Alpha workspace job");
+  });
+});
