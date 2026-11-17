@@ -3,7 +3,6 @@ set -Eeuo pipefail
 
 readonly repo_root="$(git rev-parse --show-toplevel)"
 readonly script="$repo_root/scripts/release-evidence.sh"
-readonly temp_dir="$(mktemp -d)"
 
 # Release-input fixtures the provenance cases below deliberately drift from
 # HEAD. The EXIT trap restores them so a failed assertion can never leave the
@@ -28,6 +27,29 @@ if [[ ! -e "$exclude_path" ]]; then
   echo "The exclude file the ignored-migration fixture needs is not writable: $exclude_path" >&2
   exit 1
 fi
+# These fixtures rewrite and check out tracked release inputs, clear index
+# flags, and temporarily edit info/exclude. Refuse to run if any of that would
+# overwrite an operator's existing local work. Perform this BEFORE installing
+# the cleanup trap: the trap itself resets the fixture paths to HEAD.
+if [[ -n "$(git -C "$repo_root" status --porcelain=v1 --untracked-files=all -- \
+  apps/web/Dockerfile apps/api/Dockerfile "$migrations_dir")" ]]; then
+  echo "Release-evidence tests require clean Dockerfiles and migrations; local changes were preserved." >&2
+  exit 1
+fi
+if git -C "$repo_root" ls-files -v -- apps/web/Dockerfile apps/api/Dockerfile | grep -Eq '^[a-z]|^S'; then
+  echo "Release-evidence tests refuse pre-existing assume-unchanged/skip-worktree flags." >&2
+  exit 1
+fi
+if grep -qxF "$exclude_pattern" "$exclude_path"; then
+  echo "Release-evidence tests refuse a pre-existing synthetic exclusion rule." >&2
+  exit 1
+fi
+if [[ -e "$synthetic_migration" || -L "$synthetic_migration" || -e "$hidden_migration" || -L "$hidden_migration" ]]; then
+  echo "Release-evidence tests refuse pre-existing synthetic migration fixture paths." >&2
+  exit 1
+fi
+
+readonly temp_dir="$(mktemp -d)"
 restore_provenance_state() {
   # Index flags are cleared before anything is checked out, because while
   # assume-unchanged or skip-worktree is set `git checkout` refuses to put the
