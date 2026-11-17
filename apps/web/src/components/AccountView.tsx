@@ -2,7 +2,7 @@
 import { localeTag } from "@/lib/i18n";
 
 import Link from "next/link";
-import { FormEvent, useEffect, useMemo, useState } from "react";
+import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import {
   BarChart3,
   Brain,
@@ -62,6 +62,9 @@ function AccountProfileForm() {
   const [syncedSnapshot, setSyncedSnapshot] = useState<AccountProfileDraft>(serverSnapshot);
   const [profileState, setProfileState] = useState<SaveState>("idle");
   const [profileError, setProfileError] = useState("");
+  // A successful response acknowledges only the draft that was submitted.
+  // Edits typed while the request was in flight are still unsaved.
+  const profileEditRevision = useRef(0);
 
   // Server snapshots arrive from profile save responses and session
   // refreshes while this form is open. Fields the user has not touched
@@ -77,6 +80,8 @@ function AccountProfileForm() {
   }
 
   function updateDraft(patch: Partial<AccountProfileDraft>) {
+    profileEditRevision.current += 1;
+    setProfileState("idle");
     setDraft((local) => ({ ...local, ...patch }));
   }
   const [currentPassword, setCurrentPassword] = useState("");
@@ -103,11 +108,13 @@ function AccountProfileForm() {
   async function saveProfile(event: FormEvent) {
     event.preventDefault();
     const canonicalDraft = canonicalizeAccountProfileDraft(draft);
+    const submittedRevision = profileEditRevision.current;
     setProfileState("saving");
     setProfileError("");
     try {
       await updateProfile(canonicalDraft);
-      setProfileState("saved");
+      // Do not announce "Saved" if newer, unsent edits were made meanwhile.
+      setProfileState(profileEditRevision.current === submittedRevision ? "saved" : "idle");
     } catch (caught) {
       setProfileState("idle");
       setProfileError(caught instanceof Error ? caught.message : t("account.saveError"));
