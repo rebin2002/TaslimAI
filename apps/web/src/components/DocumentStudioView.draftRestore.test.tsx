@@ -268,7 +268,6 @@ async function choose(select: TestNode, value: string) {
     await drain();
   });
 }
-/** The option a controlled select currently marks as chosen. */
 /** Submits the compose form, the way the Generate button does. */
 async function submitBrief() {
   const form = findByClass(testContainer, "document-brief-card")[0];
