@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { GenerationJob } from "./api";
-import { canCancelPresentationJob, clearPresentationActiveJobId, clearPresentationDraftState, displayPresentationProgress, emptyPresentationDraftState, hasPresentationExport, isPresentationCancellationNoOp, isPresentationJob, isPresentationSourceReady, isRestorablePresentationJob, loadPresentationDraftState, markPresentationCancellationRequested, parsePresentationDraftState, parsePresentationJobResult, persistPresentationActiveJobId, persistPresentationDraftState, presentationActiveJobStorageKey, presentationDraftStorageKey, presentationStudioState, readPresentationActiveJobId, resolvePresentationJobSnapshot, serializePresentationDraftState, shouldResetPresentationWorkspaceState } from "./presentationStudioState";
+import { canCancelPresentationJob, clearPresentationActiveJobId, clearPresentationDraftState, displayPresentationProgress, emptyPresentationDraftState, hasPresentationExport, isPresentationCancellationNoOp, isPresentationJob, isPresentationSourceReady, isRestorablePresentationJob, loadPresentationDraftState, markPresentationCancellationRequested, markPresentationCancellationRequestedForJob, parsePresentationDraftState, parsePresentationJobResult, persistPresentationActiveJobId, persistPresentationDraftState, presentationActiveJobStorageKey, presentationDraftStorageKey, presentationStudioState, readPresentationActiveJobId, resolvePresentationJobSnapshot, serializePresentationDraftState, shouldResetPresentationWorkspaceState } from "./presentationStudioState";
 
 const job = (status: GenerationJob["status"], resultJson: string | null = null, progressPercent = 70): GenerationJob => ({ id: "job-1", workspaceId: "workspace-1", projectId: null, jobType: "presentation.generate", status, title: "Deck", progressPercent, resultJson, errorCode: null, errorMessage: null, cancellationRequested: false, createdAt: "2026-01-01", queuedAt: null, startedAt: null, completedAt: null, failedAt: null, cancelledAt: null, outputs: [] });
 afterEach(() => vi.unstubAllGlobals());
@@ -129,6 +129,25 @@ describe("presentationStudioState", () => {
       expect(resolvePresentationJobSnapshot(cancelling, job("Cancelled"))?.status).toBe("Cancelled");
       expect(markPresentationCancellationRequested(cancelling)).toBe(cancelling);
       expect(markPresentationCancellationRequested(null)).toBeNull();
+    });
+
+    it("binds an accepted cancellation to the job that issued it", () => {
+      const markIssuedCancellation = markPresentationCancellationRequestedForJob("job-1");
+      const running = job("Running");
+      const otherSessionJob = { ...job("Running"), id: "job-2" };
+
+      // The issuing job keeps the sticky cancellation and loses its cancel control.
+      expect(markIssuedCancellation(running)?.cancellationRequested).toBe(true);
+      expect(canCancelPresentationJob(markIssuedCancellation(running))).toBe(false);
+      // A different job now occupying the same state slot is left untouched, so the
+      // user can still cancel the generation they actually started.
+      expect(markIssuedCancellation(otherSessionJob)).toBe(otherSessionJob);
+      expect(canCancelPresentationJob(otherSessionJob)).toBe(true);
+      expect(resolvePresentationJobSnapshot(markIssuedCancellation(otherSessionJob), running)).toBe(running);
+      // A settled job is never re-opened by a late cancellation, and no job is null-safe.
+      const published = job("Succeeded", publishedJson);
+      expect(markIssuedCancellation(published)).toBe(published);
+      expect(markIssuedCancellation(null)).toBeNull();
     });
 
     it("is idempotent for repeated snapshots and never merges across jobs", () => {

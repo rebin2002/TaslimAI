@@ -166,6 +166,21 @@ export function markPresentationCancellationRequested(current: GenerationJob | n
   return { ...current, cancellationRequested: true };
 }
 
+// A cancellation belongs to the job that issued it. The marker runs against the
+// live state rather than the snapshot captured before the request, so an accepted
+// cancellation must never mark a different job as cancelling. A cancel request
+// that settles after the state slot changed hands - the job was cleared by a
+// 403/404 poll and a new brief started, or a second submission installed its own
+// job - would otherwise strand that other job with a sticky cancellation nobody
+// asked for: hiding its cancel control, so a separately chargeable generation can
+// no longer be stopped, and keeping the monotonic snapshot merge in the
+// cancelling path. Server job ids are unique, so binding on the id keeps the
+// accepted cancellation on its own job.
+export function markPresentationCancellationRequestedForJob(jobId: string) {
+  return (current: GenerationJob | null): GenerationJob | null =>
+    (current && current.id === jobId ? markPresentationCancellationRequested(current) : current);
+}
+
 // Cancelling a job that already settled is an idempotent no-op, not a failed
 // cancellation: the caller adopts the authoritative job state instead.
 export function isPresentationCancellationNoOp(status: number, code?: string | null) {

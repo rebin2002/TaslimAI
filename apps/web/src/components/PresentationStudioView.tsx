@@ -39,7 +39,7 @@ import {
   loadPresentationDraftState,
   isRestorablePresentationJob,
   isPresentationSourceReady,
-  markPresentationCancellationRequested,
+  markPresentationCancellationRequestedForJob,
   resolvePresentationJobSnapshot,
   isPresentationCancellationNoOp,
   nextPresentationPollDelay,
@@ -426,7 +426,9 @@ function IdentityScopedPresentationStudioView({ userId }: { userId: string }) {
       await api.cancelGenerationJob(jobId);
       // The accepted cancellation is durable. Keep the UI on the cancelling path
       // even if a poll that started before this request resolves afterwards.
-      setCurrent(markPresentationCancellationRequested);
+      // Bound to the job that issued it: a new brief can already own this state
+      // when the request settles, and must not be stranded as cancelling.
+      setCurrent(markPresentationCancellationRequestedForJob(jobId));
       const next = await api.getGenerationJob(jobId);
       if (sessionDeniedRef.current || workspaceGeneration.current !== workspaceVersion || current.id !== jobId) return;
       setCurrent((previous) => resolvePresentationJobSnapshot(previous, next));
