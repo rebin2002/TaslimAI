@@ -83,6 +83,33 @@ public sealed class ChatMessagePaginationTests : IClassFixture<TaslimApiFactory>
         Assert.Equal([1L, 2L, 3L, 4L], messages.Select(message => message.Sequence));
     }
 
+    [Fact]
+    public async Task Replay_with_missing_assistant_never_uses_a_later_turns_answer()
+    {
+        using var client = factory.CreateClient();
+        var auth = await Register(client, "Missing Pair Owner");
+        var conversation = await CreateConversation(client, auth.PersonalWorkspace.Id);
+        var requestId = Guid.NewGuid().ToString("N");
+        var first = await ReadResponse(await SendMessage(client, conversation.Id, "First answer", requestId));
+        await ReadResponse(await SendMessage(client, conversation.Id, "Later answer", Guid.NewGuid().ToString("N")));
+
+        // Model a missing/malformed paired assistant without dropping another turn or touching
+        // the provider. A broader Sequence > predicate incorrectly borrows the next turn's
+        // completed assistant row and represents it as the response to the first request.
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            var paired = await db.ChatMessages.SingleAsync(message => message.Id == first.AssistantMessage.Id);
+            paired.Role = Taslim.Api.Domain.ChatMessageRole.User;
+            await db.SaveChangesAsync();
+        }
+
+        var replay = await SendMessage(client, conversation.Id, "First answer", requestId);
+        Assert.Equal(HttpStatusCode.Conflict, replay.StatusCode);
+        var payload = await replay.Content.ReadAsStringAsync();
+        Assert.Contains("MESSAGE_IN_PROGRESS", payload);
+    }
+
     private async Task MakePairShareOneTimestamp(Guid userMessageId, Guid assistantMessageId)
     {
         using var scope = factory.Services.CreateScope();
