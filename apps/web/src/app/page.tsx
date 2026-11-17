@@ -11,7 +11,7 @@ import { useLocale } from "@/components/LocaleProvider";
 import { StudioChooser } from "@/components/StudioChooser";
 import { api, type ActivityItem, type Asset, type Conversation, type Project } from "@/lib/api";
 import { buildHomeRecentItems, hasInFlightActivity, type HomeRecentItem } from "@/lib/homeDashboardState";
-import { currentHomeDashboard, isHomeDashboardRequestCurrent, startHomeDashboardRequest } from "@/lib/homeDashboardRequest";
+import { currentHomeDashboard, currentHomeProjectSelection, isHomeDashboardRequestCurrent, startHomeDashboardRequest } from "@/lib/homeDashboardRequest";
 
 const promptChips = [
   { labelKey: "home.promptCampaign" },
@@ -104,7 +104,7 @@ function HomeDashboard() {
   const projects = visibleDashboard?.projects ?? [];
   // A project selected before the workspace switch must never be sent to the new
   // workspace merely because its controlled select still carries the old id.
-  const visibleProjectId = projects.some((project) => project.id === projectId) ? projectId : "";
+  const visibleProjectId = currentHomeProjectSelection(projectId, projects);
 
   async function askTaslim() {
     const prompt = idea.trim();
