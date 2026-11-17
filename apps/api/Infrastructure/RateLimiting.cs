@@ -9,6 +9,7 @@ public static class RateLimiting
 {
     public const string Authentication = "authentication";
     public const string Health = "health";
+    public const string HealthLiveness = "health-live";
     public const string Chat = "chat-generation";
     public const string Generation = "generation-creation";
     public const string Upload = "uploads";
@@ -39,6 +40,7 @@ public static class RateLimiting
             {
                 Authentication => 4,
                 Health => 2,
+                HealthLiveness => 4,
                 Chat => 2,
                 Generation => 4,
                 Upload => 2,
@@ -70,12 +72,54 @@ public static class RateLimiting
                 AutoReplenishment = true,
             }));
 
-        options.AddPolicy(Health, httpContext => RateLimitPartition.GetFixedWindowLimiter(
-            Partition("health", httpContext),
-            _ => new FixedWindowRateLimiterOptions
+        // Liveness and readiness deliberately do NOT share one bucket. At the
+        // repository's documented smoke cadence (scripts/api-health-smoke.sh:
+        // one liveness and one readiness probe every two seconds) a single
+        // monitoring client behind one proxy peer source IP produces 60 health
+        // requests per minute. Under the original combined 30/minute bucket the
+        // 31st probe — a perfectly alive liveness check — was rejected as 429,
+        // masking real process health. Liveness is a cheap in-memory response,
+        // so it gets its own finite budget at twice the documented sustained
+        // smoke rate: ordinary container plus orchestrator traffic stays
+        // trustworthy, while anonymous flooding of the liveness aliases is
+        // still bounded. Readiness keeps the expensive 30/minute,
+        // 2-concurrency bound because each probe touches database and storage,
+        // and the two lanes use separate concurrency partitions so slow
+        // readiness calls cannot exhaust the liveness concurrency budget.
+        // Partitions key on the connection RemoteIpAddress like every other
+        // anonymous policy; arbitrary forwarded client IP headers are never
+        // trusted, so same-peer monitors intentionally share a bucket and the
+        // budgets must survive that.
+        // A token bucket is used deliberately: .NET 8's fixed-window limiter
+        // subdivides a budget into internal sub-windows, so the nominal
+        // per-minute allowance is not the behavior an ordinary monitor sees —
+        // the exact false-429 class this lane removes. Here the stated
+        // sustained rate IS the real rate: one source can average 60 probes a
+        // minute across both liveness aliases (double the documented smoke
+        // cadence) with a bounded 60-request burst and no unbounded queueing.
+        options.AddPolicy(HealthLiveness, httpContext => RateLimitPartition.GetTokenBucketLimiter(
+            Partition("health-live", httpContext),
+            _ => new TokenBucketRateLimiterOptions
             {
-                PermitLimit = 30,
-                Window = TimeSpan.FromMinutes(1),
+                TokenLimit = 60,
+                TokensPerPeriod = 60,
+                ReplenishmentPeriod = TimeSpan.FromMinutes(1),
+                QueueLimit = 0,
+                AutoReplenishment = true,
+            }));
+
+        // Same segmentation caveat as above. The sustained allowance stays
+        // exactly the documented 30 probes per minute — the expensive check is
+        // not relaxed — but the bucket carries a 60-request ceiling so a
+        // monitor's ordinary cadence is never disguised as overload. Abuse
+        // still hits a finite bound at the same per-minute rate.
+        options.AddPolicy(Health, httpContext => RateLimitPartition.GetTokenBucketLimiter(
+            Partition("health", httpContext),
+            _ => new TokenBucketRateLimiterOptions
+            {
+                TokenLimit = 60,
+                TokensPerPeriod = 30,
+                ReplenishmentPeriod = TimeSpan.FromMinutes(1),
                 QueueLimit = 0,
                 AutoReplenishment = true,
             }));
