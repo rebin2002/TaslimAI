@@ -20,13 +20,16 @@ import {
   movieDeliveryStatusLabel,
   movieDeliveryText,
 } from "@/lib/movieDeliveryI18n";
+import {
+  isMovieExportTerminalStatus,
+  movieExportCardState,
+  movieExportProgressPercent,
+} from "@/lib/movieExportDeliveryState";
 
 const profiles = [
   { id: "hd-1080p", label: "HD 1080p", detailKey: "fastDelivery" as const },
   { id: "uhd-4k", label: "UHD 4K", detailKey: "masterDelivery" as const },
 ];
-
-const terminalStatuses = new Set(["Ready", "Failed", "Cancelled"]);
 
 /**
  * The terminal step of the customer workflow: turn the approved, selected takes
@@ -91,7 +94,7 @@ export function MovieExportsWorkspace({ project }: { project: MovieProject }) {
 
   // Poll only while a real assembly is still being produced.
   useEffect(() => {
-    if (!latest || terminalStatuses.has(latest.status)) return;
+    if (!latest || isMovieExportTerminalStatus(latest.status)) return;
     const timer = setInterval(() => {
       void api
         .getMovieFinalAssembly(latest.id)
@@ -350,15 +353,19 @@ export function ExportCard({
     key: Parameters<typeof movieDeliveryText>[1],
     variables?: Record<string, string | number>,
   ) => movieDeliveryText(locale, key, variables);
-  const tone =
-    assembly.status === "Ready"
-      ? "is-ready"
-      : assembly.status === "Failed"
-        ? "is-failed"
-        : "is-pending";
+  const card = movieExportCardState(assembly.status);
+  const percent = movieExportProgressPercent(assembly.progressPercent);
+  const StatusIcon =
+    card.icon === "ready"
+      ? CheckCircle2
+      : card.icon === "cancelled"
+        ? X
+        : card.icon === "failed"
+          ? AlertTriangle
+          : Clock3;
   return (
     <article
-      className={`movie-exports-card ${tone}`}
+      className={`movie-exports-card ${card.tone}`}
       aria-label={`${text("assemblyStatus", { status: movieDeliveryStatusLabel(locale, assembly.status) })}`}
     >
       <header className="movie-exports-card-header">
@@ -382,22 +389,23 @@ export function ExportCard({
             {movieDeliveryCaptionModeLabel(locale, assembly.captionsMode)}
           </p>
         </div>
-        <span className={`movie-exports-status ${tone}`}>
-          {assembly.status === "Ready" ? (
-            <CheckCircle2 size={12} />
-          ) : (
-            <Clock3 size={12} />
-          )}
+        <span className={`movie-exports-status ${card.tone}`}>
+          <StatusIcon size={12} />
           {movieDeliveryStatusLabel(locale, assembly.status)}
         </span>
       </header>
       <div
         className="movie-exports-progress"
         aria-label={text("assemblyProgress")}
+        role="progressbar"
+        aria-valuemin={0}
+        aria-valuemax={100}
+        aria-valuenow={percent}
+        aria-valuetext={`${percent}%`}
       >
         <div
           style={{
-            width: `${Math.max(0, Math.min(100, assembly.progressPercent))}%`,
+            width: `${percent}%`,
           }}
         />
       </div>
@@ -440,11 +448,7 @@ export function ExportCard({
             <Download size={13} /> {text("downloadMaster")}
           </a>
         ) : (
-          <span>
-            {assembly.status === "Failed"
-              ? text("failedOutput")
-              : text("stillProducing")}
-          </span>
+          <span>{text(card.hintKey)}</span>
         )}
       </footer>
     </article>
