@@ -63,6 +63,8 @@ function render(overrides: { downloadError?: string; working?: boolean } = {}) {
   return renderToStaticMarkup(
     <ResearchResultView
       result={RESULT}
+      sourcesLoadStatus="ready"
+      onRetrySources={vi.fn()}
       working={overrides.working ?? false}
       downloadError={overrides.downloadError ?? ""}
       onDownload={vi.fn()}

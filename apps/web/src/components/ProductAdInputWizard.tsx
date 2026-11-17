@@ -345,32 +345,57 @@ export function ProductAdInputWizard({ locale = "en", principal = null }: Readon
     setPreviewStatus("ready");
   }
 
-  // Guard transitions *to* anonymous as well as between authenticated scopes.
-  // Until the post-commit reset completes, never render the prior account draft.
-  if (shouldMaskProductAdDraft(key, hydratedKey)) return <p role="status">Restoring saved product-ad draft…</p>;
   // A reload keeps the stored names but never the image bytes, so "attached"
   // means "picked again in this session" and drives both the notice wording and
   // which upload control the notice belongs to.
+  const masked = shouldMaskProductAdDraft(key, hydratedKey);
   const attachedAssets: ProductAdAttachedAssets = { productPhoto: productPhoto !== null, brandLogo: brandLogo !== null };
   const pendingAssetKind = productAdPendingAssetNoticeKind(restoredDraft, attachedAssets);
-  const draftNotice = buildProductAdDraftRestoredNotice(restoredDraft, locale, attachedAssets);
+  // The outgoing scope's restored draft may still be in state while a new scope is
+  // being hydrated, so the shared region is mounted silent during the mask. It is
+  // the same paragraph the post-commit restore fills, which is the only way its
+  // text is a change to an existing live region rather than inserted content.
+  const draftNotice = masked ? "" : buildProductAdDraftRestoredNotice(restoredDraft, locale, attachedAssets);
+
+  // The header is identical on both sides of the mask so React keeps this exact
+  // <p> mounted across the scope change: assistive technology announces a text
+  // change in a live region it already owns, not a region born holding its text.
+  const wizardHeader = (
+    <header className={styles.header}>
+      <p className={styles.eyebrow}>{copy.eyebrow}</p>
+      <h1 id={`${id}-title`}>{copy.title}</h1>
+      <p className={styles.intro}>{copy.intro}</p>
+      {/*
+       * The region is mounted empty on the first commit and filled only when the
+       * session-restored draft arrives. A live region that is inserted together
+       * with its text is not announced, so the conditional form of this paragraph
+       * silently swallowed the "the photo is gone, pick it again" instruction from
+       * exactly the users who cannot see the header it sat in. The masked commit
+       * below renders this same header for the same reason.
+       */}
+      <p id={`${id}-draft-notice`} className={styles.draftNotice} role="status" aria-live="polite" aria-atomic="true">{draftNotice}</p>
+    </header>
+  );
+
+  // Guard transitions *to* anonymous as well as between authenticated scopes.
+  // Until the post-commit reset completes, never render the prior account draft.
+  // Only the static header and its empty region survive the mask, so no outgoing
+  // scope's product name, brand-logo descriptor or preview can be read from them;
+  // the mask stays an early return of its own tree because the user-flow contract
+  // test pins that exact form.
+  if (shouldMaskProductAdDraft(key, hydratedKey)) return (
+    <section className={styles.shell} lang={localeTag(locale)} dir={localeDirection(locale)} aria-labelledby={`${id}-title`}>
+      <div className={styles.formPanel}>
+        {wizardHeader}
+        <p role="status">Restoring saved product-ad draft…</p>
+      </div>
+    </section>
+  );
 
   return (
     <section className={styles.shell} lang={localeTag(locale)} dir={localeDirection(locale)} aria-labelledby={`${id}-title`}>
       <div className={styles.formPanel}>
-        <header className={styles.header}>
-          <p className={styles.eyebrow}>{copy.eyebrow}</p>
-          <h1 id={`${id}-title`}>{copy.title}</h1>
-          <p className={styles.intro}>{copy.intro}</p>
-          {/*
-           * The region is mounted empty on the first commit and filled only when the
-           * session-restored draft arrives. A live region that is inserted together
-           * with its text is not announced, so the conditional form of this paragraph
-           * silently swallowed the "the photo is gone, pick it again" instruction from
-           * exactly the users who cannot see the header it sat in.
-           */}
-          <p id={`${id}-draft-notice`} className={styles.draftNotice} role="status" aria-live="polite" aria-atomic="true">{draftNotice}</p>
-        </header>
+        {wizardHeader}
 
         <form className={styles.form} onSubmit={createPreview}>
           <label className={styles.field} htmlFor={`${id}-product-name`}>
