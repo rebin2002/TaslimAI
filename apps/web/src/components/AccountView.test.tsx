@@ -37,6 +37,12 @@ describe("account profile form lost-update boundary", () => {
     expect(accountViewSource).toContain("canonicalizeAccountProfileDraft(draft)");
   });
 
+  it("never announces a completed save for edits made after submit", () => {
+    expect(accountViewSource).toContain("const submittedRevision = profileEditRevision.current");
+    expect(accountViewSource).toContain("profileEditRevision.current += 1");
+    expect(accountViewSource).toContain('profileEditRevision.current === submittedRevision ? "saved" : "idle"');
+  });
+
   it("keeps the save button gated while a request is in flight", () => {
     expect(accountViewSource).toContain('disabled={profileState === "saving"}');
   });
