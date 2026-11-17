@@ -53,6 +53,20 @@ export type GenerationJobsAlert = {
   message: string;
   retryable: boolean;
 };
+
+// A mutation may settle after the page has switched workspaces. Its pending
+// indicator belongs only to the workspace/request that issued it; otherwise
+// the next workspace keeps its Create/Cancel controls disabled indefinitely.
+export type GenerationJobsWork = { workspaceId: string; request: number };
+export function isCurrentGenerationJobsWork(
+  work: GenerationJobsWork | null,
+  activeWorkspaceId: string | null,
+  requestGeneration: number,
+) {
+  return work !== null && activeWorkspaceId !== null
+    && work.workspaceId === activeWorkspaceId && work.request === requestGeneration;
+}
+
 export function isCurrentGenerationJobsRead(read: GenerationJobsRead | null, activeWorkspaceId: string | null, attemptEpoch: number) {
   return Boolean(activeWorkspaceId) && read !== null && read.workspaceId === activeWorkspaceId && read.epoch === attemptEpoch;
 }
