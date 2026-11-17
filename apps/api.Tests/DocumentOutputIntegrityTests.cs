@@ -45,6 +45,37 @@ public sealed class DocumentOutputIntegrityTests
         var relationshipException = Assert.Throws<DocumentOutputIntegrityException>(() => DocumentOutputIntegrityValidator.Validate(missingRelationship));
         Assert.Contains("relationship to its main document part", relationshipException.Message, StringComparison.Ordinal);
     }
+    [Theory]
+    [InlineData("External")]
+    [InlineData("external")]
+    [InlineData("Unsupported")]
+    public void Validator_rejects_external_or_unsupported_root_relationship_target_modes(string targetMode)
+    {
+        // Keep the actual document part and its content-type override intact.
+        // Only the package-root office-document relationship is invalid.
+        var relationships = "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">"
+            + "<Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument\""
+            + $" Target=\"word/document.xml\" TargetMode=\"{targetMode}\" />"
+            + "</Relationships>";
+        var malformed = RewriteArchiveEntry(RenderValidDocx(), "_rels/.rels", relationships);
+
+        var failure = Assert.Throws<DocumentOutputIntegrityException>(
+            () => DocumentOutputIntegrityValidator.Validate(malformed));
+        Assert.Contains("relationship to its main document part", failure.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Validator_accepts_explicit_internal_root_relationship_target_mode()
+    {
+        var relationships = "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">"
+            + "<Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument\""
+            + " Target=\"word/document.xml\" TargetMode=\"Internal\" />"
+            + "</Relationships>";
+        var valid = RewriteArchiveEntry(RenderValidDocx(), "_rels/.rels", relationships);
+
+        DocumentOutputIntegrityValidator.Validate(valid);
+    }
+
     [Fact]
     public void Validator_rejects_truncated_or_page_less_pdf()
     {
