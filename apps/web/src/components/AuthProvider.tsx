@@ -60,7 +60,7 @@ export function AuthProvider({ children }: Readonly<{ children: React.ReactNode 
       if (!savedLanguagePack) savedLanguagePack = readStoredLocale(window.localStorage, accountLocaleStorageKey(user.id));
       const preferredLanguagePack = defaultLanguagePackRegistry.has(user.preferredLanguage) ? user.preferredLanguage : "en";
       const localeSource = getLocaleSource();
-      if (localeSource !== "user" && localeSource !== "anonymous-storage") {
+      if (localeSource !== "user" && (localeSource !== "anonymous-storage" || savedLanguagePack)) {
         setLanguagePack(savedLanguagePack ?? preferredLanguagePack, { persist: false, source: "account" });
       }
     }
@@ -72,13 +72,17 @@ export function AuthProvider({ children }: Readonly<{ children: React.ReactNode 
     // even when completion fails or the user abandons the flow.
     if (!userId || sessionLanguagePackInitialized.current !== userId || session?.user.onboardingCompletedAt === null) return;
     try {
-      writeStoredLanguagePack(window.localStorage, accountLanguagePackStorageKey(userId), languagePackId);
+      // Only an explicit selector choice is local account preference.
+      // Server-profile adoption or anonymous bootstrap must never overwrite it.
+      if (getLocaleSource() === "user") {
+        writeStoredLanguagePack(window.localStorage, accountLanguagePackStorageKey(userId), languagePackId);
+      }
       window.localStorage.removeItem(anonymousLanguagePackStorageKey);
       window.localStorage.removeItem(anonymousLocaleStorageKey);
     } catch {
       // Storage can be unavailable; the selected pack remains active in memory.
     }
-  }, [languagePackId, session?.user.id, session?.user.onboardingCompletedAt]);
+  }, [getLocaleSource, languagePackId, session?.user.id, session?.user.onboardingCompletedAt]);
 
   const signIn = useCallback(async (input: LoginInput, redirectTo?: string) => {
     const request = ++authRequestGeneration.current;
@@ -121,6 +125,12 @@ export function AuthProvider({ children }: Readonly<{ children: React.ReactNode 
     // document language, or direction.
     if (defaultLanguagePackRegistry.has(input.preferredLanguage)) {
       setLanguagePack(input.preferredLanguage, { persist: false, source: "account" });
+      // A successful profile save is an explicit account preference.
+      try {
+        writeStoredLanguagePack(window.localStorage, accountLanguagePackStorageKey(next.user.id), input.preferredLanguage);
+      } catch {
+        // The saved server preference and in-memory choice remain authoritative.
+      }
     }
   }, [setLanguagePack]);
 
@@ -129,6 +139,12 @@ export function AuthProvider({ children }: Readonly<{ children: React.ReactNode 
     setSession(next);
     if (defaultLanguagePackRegistry.has(input.preferredLanguage)) {
       setLanguagePack(input.preferredLanguage, { persist: false, source: "account" });
+      // First-login selection becomes durable only after onboarding succeeds.
+      try {
+        writeStoredLanguagePack(window.localStorage, accountLanguagePackStorageKey(next.user.id), input.preferredLanguage);
+      } catch {
+        // Keep the accepted server value even without browser storage.
+      }
     }
   }, [setLanguagePack]);
 
