@@ -447,6 +447,29 @@ export function productAdDraftAssetNoticeKind(state: ProductAdDraftState): Produ
   if (state.productPhoto) return "photoOnly";
   return "none";
 }
+/**
+ * Which picked images the browser can no longer hand back.
+ *
+ * A draft stores descriptors only, so a reload expires the images themselves:
+ * the names survive, the bytes do not. Once the user picks a live file for a
+ * slot that slot stops being expired, even though the stored descriptor is
+ * still there, and the wizard must stop instructing the user to re-attach it.
+ * The brand logo is optional, so an expired logo sitting behind a re-attached
+ * photo never blocks the retry.
+ */
+export type ProductAdAttachedAssets = Readonly<{ productPhoto: boolean; brandLogo: boolean }>;
+const noAttachedAssets: ProductAdAttachedAssets = { productPhoto: false, brandLogo: false };
+export function productAdPendingAssetNoticeKind(
+  state: ProductAdDraftState | null | undefined,
+  attached: ProductAdAttachedAssets = noAttachedAssets,
+): ProductAdDraftAssetNoticeKind {
+  if (!state) return "none";
+  const photoPending = state.productPhoto !== null && !attached.productPhoto;
+  const logoPending = state.brandLogo !== null && !attached.brandLogo;
+  if (photoPending && logoPending) return "photoLogo";
+  if (photoPending) return "photoOnly";
+  return "none";
+}
 
 type ProductAdDraftCopy = {
   restored: (productName: string) => string;
@@ -477,21 +500,32 @@ const copyByLocale: Record<(typeof locales)[number], ProductAdDraftCopy> = {
  * Tells the truth about a reload: the wizard stores descriptors only, so the chosen
  * images are named back to the user but must be selected again. A caller must not
  * render a restored draft as if the files themselves came back.
+ *
+ * `attached` describes what the user has picked again since the reload, so the
+ * sentence retires itself once the expired upload has been retried. The pending
+ * instruction is the actionable half of the notice, so it survives even when the
+ * draft carries no product name to greet the user with: a photo-only draft still
+ * leaves the required upload empty, and a screen reader must be able to say so.
  */
 export function buildProductAdDraftRestoredNotice(
-  state: ProductAdDraftState,
+  state: ProductAdDraftState | null | undefined,
   locale: Locale = "en",
+  attached: ProductAdAttachedAssets = noAttachedAssets,
 ): string {
+  if (!state) return "";
   const copy = copyByLocale[locale];
   const productName = state.productName.trim();
-  if (!productName) return "";
-  const head = copy.restored(productName);
-  switch (productAdDraftAssetNoticeKind(state)) {
-    case "photoLogo":
-      return `${head} ${copy.reattachPhotoAndLogo}`;
-    case "photoOnly":
-      return `${head} ${copy.reattachPhoto}`;
-    case "none":
-      return head;
-  }
+  const head = productName ? copy.restored(productName) : "";
+  const tail = (() => {
+    switch (productAdPendingAssetNoticeKind(state, attached)) {
+      case "photoLogo":
+        return copy.reattachPhotoAndLogo;
+      case "photoOnly":
+        return copy.reattachPhoto;
+      case "none":
+        return "";
+    }
+  })();
+  if (!head) return tail;
+  return tail ? `${head} ${tail}` : head;
 }
