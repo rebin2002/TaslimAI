@@ -35,7 +35,16 @@ export function safeGenerationCostPreview(preview: GenerationCostPreview | null 
 const ledgerScaleDecimals = 8;
 const centsDecimals = 2;
 
+/**
+ * `toFixed` leaves fixed-point notation at 1e21 and above, so a quote that far
+ * outside the ledger's range would render as "USD 1e+21.00" — a malformed money
+ * figure rather than an honest one. Report it the way an unknown estimate is
+ * already reported instead of showing a number nobody can act on.
+ */
+const maxFixedPointAmountUsd = 1e21;
+
 function formatQuotedAmount(amountUsd: number, currency: string) {
+  if (!Number.isFinite(amountUsd) || Math.abs(amountUsd) >= maxFixedPointAmountUsd) return null;
   const [whole, fraction = ""] = amountUsd.toFixed(ledgerScaleDecimals).split(".");
   return `${currency} ${whole}.${fraction.replace(/0+$/, "").padEnd(centsDecimals, "0")}`;
 }
@@ -43,7 +52,7 @@ function formatQuotedAmount(amountUsd: number, currency: string) {
 export function generationEstimateLabel(preview: GenerationCostPreview | null | undefined, unknownLabel = "Estimate unavailable") {
   const safe = safeGenerationCostPreview(preview);
   if (!safe || !safe.estimatedProviderCostKnown || safe.estimatedProviderCostUsd === null) return unknownLabel;
-  return formatQuotedAmount(safe.estimatedProviderCostUsd, safe.currency);
+  return formatQuotedAmount(safe.estimatedProviderCostUsd, safe.currency) ?? unknownLabel;
 }
 
 export function requiresGenerationConfirmation(preview: GenerationCostPreview | null | undefined) {

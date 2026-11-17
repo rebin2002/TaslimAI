@@ -81,4 +81,15 @@ describe("generation cost guardrails", () => {
     expect(generationEstimateLabel(crossingThreshold)).toBe("USD 0.004");
   });
 
+  it("keeps the largest fixed-point quote readable at the ledger scale", () => {
+    expect(generationEstimateLabel(preview({ estimatedProviderCostUsd: 1e21 - 131072 }))).toBe("USD 999999999999999868928.00");
+  });
+
+  it("reports a quote beyond fixed-point notation as unavailable rather than malformed", () => {
+    expect(generationEstimateLabel(preview({ estimatedProviderCostUsd: 1e21 }))).toBe("Estimate unavailable");
+    expect(generationEstimateLabel(preview({ estimatedProviderCostUsd: Number.MAX_VALUE }))).toBe("Estimate unavailable");
+    expect(generationEstimateLabel(preview({ estimatedProviderCostUsd: Number.POSITIVE_INFINITY }))).toBe("Estimate unavailable");
+    expect(generationEstimateLabel(preview({ estimatedProviderCostUsd: Number.NaN }))).toBe("Estimate unavailable");
+  });
+
 });
