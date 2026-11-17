@@ -5,7 +5,7 @@ import {
   parseDocumentJobResult,
   sanitizeDocumentPreviewText,
 } from "./documentStudioState";
-import { DocumentPreviewTable } from "@/components/DocumentStudioView";
+import { DocumentPreviewTable } from "@/components/DocumentPreviewTable";
 import type { GenerationJob } from "./api";
 
 // All fixtures below are synthetic: fixed identifiers, fabricated prose, and crafted
