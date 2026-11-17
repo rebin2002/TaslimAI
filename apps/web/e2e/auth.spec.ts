@@ -123,8 +123,16 @@ test.describe("authentication and onboarding", () => {
       await expect(page.locator("html")).toHaveAttribute("lang", documentLang);
       await expect(page.locator("html")).toHaveAttribute("dir", "rtl");
 
-      await logoutInUi(page);
-      await loginInUi(page, testUser);
+      // Use stable form boundaries: translated button/label names legitimately
+      // change after a Sorani/Arabic selection, unlike the English-only helpers.
+      await page.goto("/account");
+      await page.locator(".security-logout").click();
+      await expect(page).toHaveURL((url) => url.pathname === "/" || url.pathname === "/login");
+      await page.goto("/login");
+      await page.locator('input[type="email"]').fill(testUser.email);
+      await page.locator('input[type="password"]').fill(testUser.password);
+      await page.locator(".auth-submit").click();
+      await expect(page).toHaveURL((url) => url.pathname === "/projects");
       await expect(page.getByRole("dialog")).toHaveCount(0);
       await expect(page.locator("html")).toHaveAttribute("lang", documentLang);
       await expect(page.locator("html")).toHaveAttribute("dir", "rtl");
