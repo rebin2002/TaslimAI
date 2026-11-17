@@ -1249,6 +1249,12 @@ public sealed class GenerationJobWorker(
                         .SetProperty(item => item.Status, GenerationJobStatus.Queued)
                         .SetProperty(item => item.QueuedAt, now)
                         .SetProperty(item => item.StartedAt, (DateTime?)null)
+                        // The requeued attempt executes the handler from the
+                        // beginning, so the dead attempt's progress must not
+                        // survive the transition; otherwise the status surface
+                        // keeps reporting a queued job at a stale, higher
+                        // progress until the next worker's first report.
+                        .SetProperty(item => item.ProgressPercent, 0)
                         .SetProperty(item => item.ClaimExpiresAt, (DateTime?)null)
                         .SetProperty(item => item.RetryCount, item => item.RetryCount + 1)
                         .SetProperty(item => item.ConcurrencyToken, recoveryToken), cancellationToken);
