@@ -14,6 +14,12 @@ import { api, type Asset, type GenerationJob, type MusicGenerationInput, type Pr
 import { findMediaJobArtifact, mediaJobArtifactDownloadState } from "@/lib/mediaJobArtifactState";
 import { canCancelMusicJob, isMusicProviderUnavailable, parseMusicJobResult } from "@/lib/musicStudioState";
 import {
+  decideMusicStudioSubmit,
+  musicStudioPreflightCopy,
+  type MusicStudioBriefDraft,
+  type MusicStudioSubmitDecision,
+} from "@/lib/musicStudioPreflight";
+import {
   REFERENCE_AUDIO_ACCEPT,
   clearReferenceAudioSelection,
   formatReferenceAudioSize,
@@ -193,6 +199,29 @@ export function ReferenceAudioPanel({ state, candidates, loading, t, onFileSelec
   </section>;
 }
 
+type MusicGenerationActionProps = Readonly<{
+  decision: MusicStudioSubmitDecision;
+  working: boolean;
+  noticeId: string;
+  t: (key: string) => string;
+}>;
+
+// The studio's only route to a generation request, rendered from the preflight
+// decision so the copy that pauses creation and the state of the action cannot
+// disagree. While the pause is what blocks the brief the button says so: a dead
+// control with no announced reason is a dead end for keyboard and screen-reader
+// users, and the notice is the only place that reason lives.
+export function MusicGenerationAction({ decision, working, noticeId, t }: MusicGenerationActionProps) {
+  return <button
+    className={decision.reasonKey ? "music-generate-button is-paused" : "music-generate-button"}
+    type="submit"
+    disabled={!decision.permitted}
+    aria-disabled={!decision.permitted || undefined}
+    aria-describedby={decision.reasonKey ? noticeId : undefined}
+    title={decision.reasonKey ? t(decision.reasonKey) : undefined}
+  ><Sparkles size={17} /> {working ? t("music.working") : t("music.generate")} <span aria-hidden="true">↗</span></button>;
+}
+
 function RecentMusicLibrary({ assets, loading, error, locale, t }: { assets: Asset[]; loading: boolean; error: string; locale: string; t: (key: string, values?: Record<string, string>) => string }) {
   return <section className="music-library-panel" aria-labelledby="music-library-title">
     <div className="music-section-heading">
@@ -345,23 +374,34 @@ function WorkspaceMusicStudio({ workspace }: { workspace: ReturnType<typeof useA
     applyReferenceAudioResult(clearReferenceAudioSelection(referenceAudio));
   }
 
+  const workspaceId = workspace?.id ?? "";
+  // One decision drives the disabled action, the reason announced on it and the
+  // submit guard below, so the affordance can never again promise a request the
+  // published preflight copy says will not run.
+  const submitDraft: MusicStudioBriefDraft = {
+    workspaceReady: workspaceId !== "",
+    submitting: working,
+    referenceSelected: referenceAudio.candidate !== null,
+    description,
+    purpose,
+  };
+  const submitDecision = decideMusicStudioSubmit(submitDraft);
+  const preflightCopy = musicStudioPreflightCopy();
+
   async function generate(event: React.FormEvent) {
     event.preventDefault();
-    if (!workspace || description.trim().length < 3 || purpose.trim().length < 3) {
-      setError(t("music.required"));
-      return;
-    }
-    // The reference audio path is selection and preview only for now: the job
-    // contract has no reference field yet, so never let a selection imply that
-    // it will reach a (possibly paid) provider call.
-    if (referenceAudio.candidate) {
-      setError(t("music.reference.note"));
+    // Paused creation outranks the brief itself: nothing leaves the browser, so
+    // no private description is posted to a route that can only refuse it and no
+    // request can reach a provider. The same guard covers implicit submission
+    // from a text field, where the disabled button would not have helped.
+    if (!submitDecision.permitted) {
+      if (submitDecision.messageKey) setError(t(submitDecision.messageKey));
       return;
     }
     setWorking(true);
     setError("");
     const input: MusicGenerationInput = {
-      workspaceId: workspace.id,
+      workspaceId,
       projectId: projectId || null,
       description: description.trim(),
       purpose: purpose.trim(),
@@ -414,11 +454,13 @@ function WorkspaceMusicStudio({ workspace }: { workspace: ReturnType<typeof useA
 
   return <div className="music-studio-page">
     <section className="music-studio-hero">
-      <div className="music-studio-hero-copy"><div className="music-live-mark"><span /> {t("music.providerStatus")}</div><p className="music-overline">{t("music.eyebrow")}</p><h1>{t("music.title")}</h1><p className="music-studio-subtitle">{t("music.subtitle")}</p></div>
+      <div className="music-studio-hero-copy">{preflightCopy ? <div className="music-live-mark"><span /> {t(preflightCopy.eyebrowKey)}</div> : null}<p className="music-overline">{t("music.eyebrow")}</p><h1>{t("music.title")}</h1><p className="music-studio-subtitle">{t("music.subtitle")}</p></div>
       <MusicArtwork large />
     </section>
 
-    <div className="music-studio-notice"><WandSparkles size={17} /><p><strong>{t("music.providerUnavailableTitle")}</strong> {t("music.providerUnavailableText")}</p></div>
+    {/* The preflight notice is the reason the primary action is inert, so it is
+         referenced by the button rather than sitting next to it as decoration. */}
+    {preflightCopy ? <div id="music-preflight-note" className="music-studio-notice" role="status"><WandSparkles size={17} aria-hidden="true" /><p><strong>{t(preflightCopy.titleKey)}</strong> {t(preflightCopy.textKey)}</p></div> : null}
 
     {!current ? <form className="music-studio-workspace" onSubmit={(event) => void generate(event)}>
       <section className="music-create-panel">
@@ -434,7 +476,7 @@ function WorkspaceMusicStudio({ workspace }: { workspace: ReturnType<typeof useA
         <details className="music-optional-controls"><summary>{t("music.moreOptions")}</summary><div className="music-optional-grid"><label className="music-choice-field"><span>{t("music.language")}</span><select value={language} onChange={(event) => setLanguage(event.target.value)}>{languages.map((value) => <option key={value} value={value}>{t(`music.language.${value}`)}</option>)}</select></label><label className="music-choice-field"><span>{t("music.project")}</span><select value={projectId} onChange={(event) => setProjectId(event.target.value)} disabled={loadingProjects}><option value="">{t("music.noProject")}</option>{projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}</select></label><label className="music-choice-field"><span>{t("music.titleLabel")}</span><input value={title} onChange={(event) => setTitle(event.target.value)} maxLength={160} placeholder={t("music.titlePlaceholder")} /></label><label className="music-primary-field music-field-wide"><span>{t("music.additionalInstructions")}</span><textarea className="is-short" value={additionalInstructions} onChange={(event) => setAdditionalInstructions(event.target.value)} maxLength={2000} placeholder={t("music.additionalInstructionsPlaceholder")} /></label></div></details>
         <ReferenceAudioPanel state={referenceAudio} candidates={referenceCandidates} loading={loadingReferenceLibrary} t={t} onFileSelected={handleReferenceFilePicked} onStoredPicked={handleReferenceStoredPicked} onClear={handleReferenceAudioClear} />
         {error && <div className="music-inline-error"><XCircle size={15} /> {error}</div>}
-        <button className="music-generate-button" type="submit" disabled={working || referenceAudio.candidate !== null || description.trim().length < 3 || purpose.trim().length < 3}><Sparkles size={17} /> {working ? t("music.working") : t("music.generate")} <span aria-hidden="true">↗</span></button>
+        <MusicGenerationAction decision={submitDecision} working={working} noticeId="music-preflight-note" t={t} />
       </section>
       <aside className="music-side-panel"><div className="music-side-icon"><Headphones size={20} /></div><p className="music-overline">{t("music.guidanceTitle")}</p><h2>{t("music.guidanceText")}</h2><ol><li>{t("music.guidanceOne")}</li><li>{t("music.guidanceTwo")}</li><li>{t("music.guidanceThree")}</li></ol><div className="music-side-footer"><Clock3 size={14} /> {t("music.safetyNote")}</div></aside>
     </form> : isSuccess && result?.assetId ? <section className="music-result-panel" aria-live="polite">
