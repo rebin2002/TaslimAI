@@ -9,6 +9,7 @@ import { ApiError, api, type ChatMessage, type Conversation, type Project, type 
 import { applyChatStreamEvent, createChatStreamState, failChatStream, stopChatStream } from "@/lib/chatStreamState";
 import { chatStreamAnnouncementKey, type ChatStreamAnnouncement } from "@/lib/chatStreamAnnouncement";
 import { beginChatStreamSession, invalidateChatStreamSessions, isCurrentChatStreamSession } from "@/lib/chatStreamSession";
+import { chatThreadAriaCurrent, resolveChatThreadListMount } from "@/lib/chatThreadFocus";
 import { resolveChatAttachmentScope } from "@/lib/chatAttachmentScope";
 import { beginChatAttachmentUpload, invalidateChatAttachmentUploads, isCurrentChatAttachmentUpload } from "@/lib/chatAttachmentLifecycle";
 import { claimSubmission, conversationPath, createChatRequestId, createRegenerateRetryRequest, createSendRetryRequest, createSubmission, isAbortError, releaseSubmission, shouldReplaceConversationUrl, studioTransitionPath, type ChatRetryRequest, type RegenerateRetryRequest, type SendRetryRequest } from "@/lib/chatLifecycle";
@@ -167,6 +168,11 @@ export function ChatView({ conversationId }: Readonly<ChatViewProps>) {
     return ["today", "yesterday", "week", "older"].map(key => ({ label: labels[key], items: filteredConversations.filter(item => dateGroup(item.updatedAt) === key) })).filter(group => group.items.length > 0);
   }, [filteredConversations, t]);
   const streamAnnouncementKey = chatStreamAnnouncementKey(streamAnnouncement);
+  // A thread switch raises `loading` for the whole view. Once rows are on
+  // screen the sidebar keeps them, so the activated row is never unmounted and
+  // keyboard focus survives the switch; progress is reported on the list
+  // instead. Only a first load, which has nothing rendered, shows the skeleton.
+  const threadMount = resolveChatThreadListMount(filteredConversations.length, loading);
 
   const canRegenerate = useCallback((message: ChatMessage) => {
     const latestAssistant = [...messages].reverse().find((item) => item.role === "Assistant" && item.status === "Completed");
@@ -459,8 +465,8 @@ export function ChatView({ conversationId }: Readonly<ChatViewProps>) {
       <div className="chat-sidebar-header"><div><p className="section-eyebrow">{t("chat.eyebrow")}</p><h1>{t("chat.title")}</h1></div><button type="button" className="chat-icon-button" onClick={startNewChat} aria-label={t("chat.newChat")}><Plus size={18} /></button></div>
       <button type="button" className="chat-new-button" onClick={startNewChat} disabled={generating}><Plus size={15} />{t("chat.newChat")}</button>
       <label className="chat-search"><Search size={15} /><input value={search} onChange={event => setSearch(event.target.value)} placeholder={t("chat.searchPlaceholder")} aria-label={t("chat.searchPlaceholder")} /></label>
-      <div className="chat-history" aria-label={t("chat.history")}>
-        {loading ? <div className="chat-sidebar-loading"><span className="loading-spinner" /></div> : groups.length === 0 ? <p className="chat-sidebar-empty">{t("chat.noConversations")}</p> : groups.map(group => <section key={group.label} className="chat-history-group"><span className="chat-history-label">{group.label}</span>{group.items.map(item => <button type="button" key={item.id} className={`chat-history-item ${selected?.id === item.id ? "is-active" : ""}`} onClick={() => selectConversation(item)} disabled={generating}><MessageCircle size={14} /><span>{item.title}</span>{item.projectId && <i aria-label={t("chat.projectContextActive")} />}</button>)}</section>)}
+      <div className="chat-history" role="region" aria-label={t("chat.history")} aria-busy={threadMount.revalidating}>
+        {threadMount.renderThreads ? groups.length === 0 ? <p className="chat-sidebar-empty">{t("chat.noConversations")}</p> : groups.map(group => <section key={group.label} className="chat-history-group"><span className="chat-history-label">{group.label}</span>{group.items.map(item => <button type="button" key={item.id} className={`chat-history-item ${selected?.id === item.id ? "is-active" : ""}`} aria-current={chatThreadAriaCurrent(selected?.id, item.id)} onClick={() => selectConversation(item)} disabled={generating}><MessageCircle size={14} /><span>{item.title}</span>{item.projectId && <i aria-label={t("chat.projectContextActive")} />}</button>)}</section>) : <div className="chat-sidebar-loading"><span className="loading-spinner" /></div>}
       </div>
       <div className="chat-sidebar-footer"><Sparkles size={15} /><span>{t("chat.providerNotice")}</span></div>
     </aside>
