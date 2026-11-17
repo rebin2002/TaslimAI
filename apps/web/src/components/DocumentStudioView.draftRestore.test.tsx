@@ -175,6 +175,7 @@ const testDocument = new TestDocument();
 const testContainer = testDocument.createElement("div");
 testDocument.body.appendChild(testContainer);
 const stored = new Map<string, string>();
+const draftWrites: Array<{ key: string; value: string }> = [];
 function makeWindow(document: TestDocument) {
   return {
     document,
@@ -186,7 +187,7 @@ function makeWindow(document: TestDocument) {
     clearTimeout: (id: ReturnType<typeof globalThis.setTimeout>) => globalThis.clearTimeout(id),
     sessionStorage: {
       getItem: (key: string) => stored.get(key) ?? null,
-      setItem: (key: string, value: string) => { stored.set(key, value); },
+      setItem: (key: string, value: string) => { draftWrites.push({ key, value }); stored.set(key, value); },
       removeItem: (key: string) => { stored.delete(key); },
     },
   };
@@ -281,6 +282,7 @@ async function submitBrief() {
 describe("Document Studio unsaved draft across a tab switch", () => {
   beforeEach(() => {
     stored.clear();
+    draftWrites.length = 0;
     harness.auth.workspace = null;
     harness.auth.user = { id: "user-a" };
     harness.api.listProjects.mockReset().mockResolvedValue([]);
@@ -385,6 +387,9 @@ describe("Document Studio unsaved draft across a tab switch", () => {
     harness.auth.user = { id: "user-b" };
     await act(async () => { root!.render(<DocumentStudioView />); await drain(); });
     expect(elementById("document-brief").value).toBe("");
+    // No transient write of user A's text may land in user B's empty draft.
+    const incomingKey = documentDraftStorageKey("user-b", workspaceA.id);
+    expect(draftWrites.filter((entry) => entry.key === incomingKey)).toEqual([]);
   });
 
   it("starts from a blank brief when nothing was left unsent", async () => {

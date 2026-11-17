@@ -227,9 +227,10 @@ export function DocumentStudioView() {
     setTone(draft.tone as DocumentTone);
     setIncludeTableOfContents(draft.includeTableOfContents);
     draftHydratedScope.current = ownerKey;
-    // Only a restored brief needs the skip: with nothing stored, the next
-    // mirror run already agrees with the mounted fields.
-    draftJustHydrated.current = !isDocumentDraftEmpty(draft);
+    // Even an empty incoming scope must skip the first mirror. This effect
+    // can run before React commits the cleared input state, and otherwise
+    // the outgoing account's brief is briefly persisted under the new owner.
+    draftJustHydrated.current = true;
   }, [current, searchParams, user, workspace]);
 
   const draft = useMemo<DocumentDraftState>(() => ({
