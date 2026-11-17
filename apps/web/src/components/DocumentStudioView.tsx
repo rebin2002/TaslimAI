@@ -355,6 +355,11 @@ export function DocumentStudioView() {
     activeAssetId.current = null;
     if (workspace) clearDocumentActiveJobId(workspace.id);
     setCurrent(null);
+    // Abandoning this view also abandons any in-flight export download (or cancellation):
+    // their completion fences compare against the refs just nulled, so none of them can
+    // release the shared busy flag anymore. Without clearing it here, the compose form
+    // renders Generate permanently disabled until the page is reloaded.
+    setWorking(false);
     setError("");
     setDownloadError("");
     setCopyState("idle");
