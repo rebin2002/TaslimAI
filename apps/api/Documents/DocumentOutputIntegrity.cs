@@ -12,6 +12,7 @@ public static class DocumentOutputIntegrityValidator
     private const string WordNamespace = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
     private const string DocxContentType = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
     private const string MainDocumentContentType = "application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml";
+    private const string OfficeDocumentRelationshipType = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument";
     public static void Validate(RenderedDocument rendered)
     {
         if (rendered.Content.Length == 0)
@@ -70,7 +71,17 @@ public static class DocumentOutputIntegrityValidator
             foreach (var part in new[] { "[Content_Types].xml", "_rels/.rels", "word/document.xml" })
                 _ = archive.GetEntry(part) ?? throw new DocumentOutputIntegrityException($"The DOCX package is missing required part '{part}'.");
             var contentTypes = RequireRoot(ParseRequiredXml(archive, "[Content_Types].xml"), "Types", ContentTypesNamespace, "[Content_Types].xml");
-            _ = RequireRoot(ParseRequiredXml(archive, "_rels/.rels"), "Relationships", RelationshipsNamespace, "_rels/.rels");
+            var relationships = RequireRoot(ParseRequiredXml(archive, "_rels/.rels"), "Relationships", RelationshipsNamespace, "_rels/.rels");
+            var hasMainDocumentRelationship = relationships.Elements(XName.Get("Relationship", RelationshipsNamespace)).Any(item =>
+                string.Equals(item.Attribute("Type")?.Value, OfficeDocumentRelationshipType, StringComparison.Ordinal)
+                && IsMainDocumentTarget(item.Attribute("Target")?.Value)
+                // OPC package relationships must target an internal part. An
+                // external relationship with the same Target text is not a
+                // link to word/document.xml in this DOCX archive.
+                && (item.Attribute("TargetMode") is null
+                    || string.Equals(item.Attribute("TargetMode")?.Value, "Internal", StringComparison.Ordinal)));
+            if (!hasMainDocumentRelationship)
+                throw new DocumentOutputIntegrityException("The DOCX package has no relationship to its main document part.");
             var hasMainDocumentContentType = contentTypes.Elements(XName.Get("Override", ContentTypesNamespace)).Any(item =>
                     string.Equals(item.Attribute("PartName")?.Value, "/word/document.xml", StringComparison.Ordinal)
                     && string.Equals(item.Attribute("ContentType")?.Value, MainDocumentContentType, StringComparison.Ordinal))
@@ -118,6 +129,8 @@ public static class DocumentOutputIntegrityValidator
             throw new DocumentOutputIntegrityException($"The DOCX package has an invalid root in '{part}'.");
         return root;
     }
+    private static bool IsMainDocumentTarget(string? target) =>
+        string.Equals(target?.Trim().TrimStart('/'), "word/document.xml", StringComparison.OrdinalIgnoreCase);
     private static bool ContainsPdfPageObject(ReadOnlySpan<byte> content) =>
         ContainsPdfToken(content, "/Type /Page"u8) || ContainsPdfToken(content, "/Type/Page"u8);
     private static bool ContainsPdfToken(ReadOnlySpan<byte> content, ReadOnlySpan<byte> token)
