@@ -102,6 +102,9 @@ function HomeDashboard() {
   const recentItems = useMemo(() => visibleDashboard ? buildHomeRecentItems(visibleDashboard, 4) : [], [visibleDashboard]);
   const hasWorkingGeneration = hasInFlightActivity(visibleDashboard?.activity ?? []);
   const projects = visibleDashboard?.projects ?? [];
+  // A project selected before the workspace switch must never be sent to the new
+  // workspace merely because its controlled select still carries the old id.
+  const visibleProjectId = projects.some((project) => project.id === projectId) ? projectId : "";
 
   async function askTaslim() {
     const prompt = idea.trim();
@@ -114,8 +117,8 @@ function HomeDashboard() {
     setAsking(true);
     setAskError("");
     try {
-      const conversation = await api.createConversation(workspace.id, projectId ? { projectId } : {});
-      const uploaded = await Promise.all(files.map((file) => api.uploadFile(workspace.id, file, { conversationId: conversation.id, projectId: projectId || undefined })));
+      const conversation = await api.createConversation(workspace.id, visibleProjectId ? { projectId: visibleProjectId } : {});
+      const uploaded = await Promise.all(files.map((file) => api.uploadFile(workspace.id, file, { conversationId: conversation.id, projectId: visibleProjectId || undefined })));
       await api.sendMessage(conversation.id, prompt, undefined, uploaded.map((file) => file.id));
       router.push(`/chat/${conversation.id}`);
     } catch {
@@ -135,7 +138,7 @@ function HomeDashboard() {
       <section className="home-creation-surface" aria-labelledby="home-composer-title">
         <div className="home-creation-orbit home-creation-orbit-one" aria-hidden="true" />
         <div className="home-creation-orbit home-creation-orbit-two" aria-hidden="true" />
-        <HomeComposer value={idea} onChange={(value) => { setIdea(value); if (askError) setAskError(""); }} onSubmit={() => void askTaslim()} busy={asking} projects={projects} projectId={projectId} onProjectChange={setProjectId} files={files} onFilesChange={(next) => setFiles((current) => [...current, ...next].slice(0, 5))} onRemoveFile={(index) => setFiles((current) => current.filter((_, itemIndex) => itemIndex !== index))} />
+        <HomeComposer value={idea} onChange={(value) => { setIdea(value); if (askError) setAskError(""); }} onSubmit={() => void askTaslim()} busy={asking} projects={projects} projectId={visibleProjectId} onProjectChange={setProjectId} files={files} onFilesChange={(next) => setFiles((current) => [...current, ...next].slice(0, 5))} onRemoveFile={(index) => setFiles((current) => current.filter((_, itemIndex) => itemIndex !== index))} />
       </section>
       {askError && <p className="home-composer-error" role="alert">{askError}</p>}
 
