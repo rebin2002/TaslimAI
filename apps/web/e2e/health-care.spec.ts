@@ -81,7 +81,7 @@ test.describe("Health Care route", () => {
     await page.goto("/account");
     await expect(page.locator(".account-control-grid select").first()).toHaveValue("en");
     await page.locator(".account-control-grid select").first().selectOption("ar");
-    await page.locator("form.profile-form button.primary-button").click();
+    await page.locator("form.account-profile-card button.primary-button").click();
     await expect(page.locator("html")).toHaveAttribute("lang", "ar");
     await page.goto("/create/health");
     await page.reload();
@@ -92,7 +92,7 @@ test.describe("Health Care route", () => {
 
     await page.goto("/account");
     await page.locator(".account-control-grid select").first().selectOption("ku");
-    await page.locator("form.profile-form button.primary-button").click();
+    await page.locator("form.account-profile-card button.primary-button").click();
     await expect(page.locator("html")).toHaveAttribute("lang", "ckb");
     await page.goto("/create/health");
     await page.reload();
