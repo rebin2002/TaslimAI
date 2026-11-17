@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { isHomeDashboardRequestCurrent, startHomeDashboardRequest } from "./homeDashboardRequest";
+import { currentHomeDashboard, isHomeDashboardRequestCurrent, startHomeDashboardRequest } from "./homeDashboardRequest";
 
 // Deterministic synthetic coverage for the home dashboard request fence: fixed
 // sequences and workspace ids only, no timers, no network, no provider.
@@ -54,5 +54,23 @@ describe("homeDashboardRequest", () => {
     const second = startHomeDashboardRequest(first.sequence, PERSONAL);
     expect(isHomeDashboardRequestCurrent(first, first.sequence, PERSONAL)).toBe(true);
     expect(isHomeDashboardRequestCurrent(second, first.sequence, PERSONAL)).toBe(false);
+  });
+});
+
+
+describe("render-time Home dashboard isolation", () => {
+  const personalSnapshot = { workspaceId: PERSONAL, projects: [{ id: "private-personal-project" }] };
+
+  it("keeps records in their own mounted workspace", () => {
+    expect(currentHomeDashboard(personalSnapshot, PERSONAL)).toBe(personalSnapshot);
+  });
+
+  it("hides previous-workspace records immediately, without waiting for effect cleanup", () => {
+    expect(currentHomeDashboard(personalSnapshot, BUSINESS)).toBeNull();
+  });
+
+  it("hides private records on sign-out or while no workspace is selected", () => {
+    expect(currentHomeDashboard(personalSnapshot, null)).toBeNull();
+    expect(currentHomeDashboard(null, PERSONAL)).toBeNull();
   });
 });
