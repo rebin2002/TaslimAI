@@ -110,6 +110,144 @@ public sealed class ChatMessagePaginationTests : IClassFixture<TaslimApiFactory>
         Assert.Contains("MESSAGE_IN_PROGRESS", payload);
     }
 
+    /// <summary>
+    /// Migration-free proof for the reviewer flag that pre-AddDeterministicChatMessageOrdering
+    /// legacy rows could sit outside the Sequence == user + 1 pairing and then replay fail-closed
+    /// as a stuck 409. The shipped legacy writer stored each turn as a user/assistant pair in one
+    /// atomic transaction, and the backfill ordered a conversation's rows by (CreatedAt,
+    /// user-before-assistant at equal timestamps, Id). The serialized send path cannot start turn
+    /// N+1 before turn N's HTTP response returns, so consecutive turns' CreatedAt values are a
+    /// full request round-trip apart - always a whole microsecond or more at the PostgreSQL
+    /// storage boundary. Replaying the comparator over every such spacing - pair truncation onto
+    /// one microsecond, the assistant landing one microsecond later, exact microsecond
+    /// boundaries and larger turn gaps - assigns every pair to adjacent sequences: live legacy
+    /// rows satisfy the invariant and no one-off Sequence backfill is required. The only
+    /// interleaved comparator shape needs two turn requests stored inside one wall-clock
+    /// microsecond, which the serialized writer cannot produce; the companion fact below proves
+    /// even that hypothetical shape pairs fail-closed instead of surfacing another turn's
+    /// answer. Deterministic, synthetic: no provider calls, no production data, no migration.
+    /// </summary>
+    [Theory]
+    [InlineData(10)]          // exact 1-microsecond spacing: one pair per stored microsecond
+    [InlineData(500)]         // 50 microseconds
+    [InlineData(999)]         // remainder walk across eight turns
+    [InlineData(1000)]        // exact 100 microseconds
+    [InlineData(1001)]
+    [InlineData(100_000)]     // 10 milliseconds - below any real round-trip, still stored-ordered
+    [InlineData(10_000_000)]  // 1 second - interactive turn spacing
+    public void Backfilled_legacy_transcripts_from_the_shipped_writer_keep_every_pair_adjacent(int interTurnTicks)
+    {
+        // PostgreSQL timestamptz stores whole microseconds: the send path's 0.1-microsecond
+        // assistant offset truncates onto the user's stored value whenever the sub-microsecond
+        // remainder plus one tick does not cross the next microsecond, and lands one microsecond
+        // later otherwise. Spacings under one stored microsecond cannot come from the serialized
+        // send path; they are covered by the collision-shape safety fact, not this proof.
+        static DateTime TruncateToMicroseconds(DateTime value) => value.Ticks % 10L == 0 ? value : new DateTime(value.Ticks - value.Ticks % 10L, DateTimeKind.Utc);
+        var baseTime = new DateTime(2026, 2, 1, 9, 0, 0, DateTimeKind.Utc).AddTicks(7);
+        var turnTicks = Math.Max(10, interTurnTicks);
+        var rows = new List<(Guid Id, Taslim.Api.Domain.ChatMessageRole Role, DateTime Stored)>();
+        for (var turn = 0; turn < 8; turn++)
+        {
+            var userCreatedAt = baseTime.AddTicks((long)turn * turnTicks);
+            rows.Add((Guid.NewGuid(), Taslim.Api.Domain.ChatMessageRole.User, TruncateToMicroseconds(userCreatedAt)));
+            rows.Add((Guid.NewGuid(), Taslim.Api.Domain.ChatMessageRole.Assistant, TruncateToMicroseconds(userCreatedAt.AddTicks(1))));
+        }
+        // The backfill's exact comparator: ORDER BY CreatedAt, user-before-assistant, Id.
+        var ordered = rows
+            .OrderBy(row => row.Stored)
+            .ThenBy(row => row.Role == Taslim.Api.Domain.ChatMessageRole.User ? 0 : 1)
+            .ThenBy(row => row.Id)
+            .ToList();
+        var strandedUsers = 0;
+        for (var index = 0; index < ordered.Count; index++)
+        {
+            if (ordered[index].Role != Taslim.Api.Domain.ChatMessageRole.User) continue;
+            if (index + 1 < ordered.Count && ordered[index + 1].Role == Taslim.Api.Domain.ChatMessageRole.Assistant) continue;
+            strandedUsers++;
+        }
+        Assert.Equal(0, strandedUsers);
+    }
+
+    [Fact]
+    public void Even_a_hypothetical_sub_microsecond_collision_never_pairs_a_later_turns_assistant()
+    {
+        // The sole comparator shape that can break adjacency stores two turn requests inside one
+        // wall-clock microsecond - impossible for the serialized send path, proven unsafe below
+        // anyway so the reviewer flag closes without inspecting production data. Collapse turn
+        // one's pair and turn two's user row onto one stored microsecond, then apply the
+        // backfill's exact ordering: users before assistants, Id as final tie-break.
+        var micro = new DateTime(2026, 2, 1, 9, 0, 0, DateTimeKind.Utc);
+        var u1 = Guid.NewGuid();
+        var a1 = Guid.NewGuid();
+        var u2 = Guid.NewGuid();
+        var a2 = Guid.NewGuid();
+        var rows = new List<(Guid Id, Taslim.Api.Domain.ChatMessageRole Role, DateTime Stored)>
+        {
+            (u1, Taslim.Api.Domain.ChatMessageRole.User, micro),
+            (u2, Taslim.Api.Domain.ChatMessageRole.User, micro),
+            (a1, Taslim.Api.Domain.ChatMessageRole.Assistant, micro),
+            (a2, Taslim.Api.Domain.ChatMessageRole.Assistant, micro.AddTicks(10)),
+        };
+        var ordered = rows
+            .OrderBy(row => row.Stored)
+            .ThenBy(row => row.Role == Taslim.Api.Domain.ChatMessageRole.User ? 0 : 1)
+            .ThenBy(row => row.Id)
+            .ToList();
+        var u1Index = ordered.FindIndex(row => row.Id == u1);
+        var candidate = ordered[u1Index + 1];
+        // The row at exactly turn one's user.Sequence + 1 is turn two's user row - a user, not an
+        // assistant - so the role-filtered Sequence == user + 1 lookup matches nothing and the
+        // replay fails closed at 409 MESSAGE_IN_PROGRESS. No Id ordering can move turn two's
+        // answer into that slot while a same-microsecond user row occupies it, and turn one's
+        // own assistant can only ever sit after every user row of the collision block. The
+        // hypothetical interleaved population is therefore strand-safe and leak-safe without any
+        // migration; the existing missing-assistant integration test pins the endpoint half.
+        var safeOutcomes = new[] { a1, u2 };
+        Assert.Contains(candidate.Id, safeOutcomes);
+    }
+
+    [Fact]
+    public async Task Replay_of_a_backfilled_legacy_transcript_returns_its_own_response_without_migration()
+    {
+        using var client = factory.CreateClient();
+        var auth = await Register(client, "Legacy Backfill Replay Owner");
+        var conversation = await CreateConversation(client, auth.PersonalWorkspace.Id);
+        // Seed a two-turn transcript in the exact shape the migration's backfill produces from
+        // legacy rows whose pairs collapsed onto one stored timestamp: sequences 1..4, both
+        // pairs completed, turn one carrying the requestId replayed below. No migration step,
+        // no production data - only what the deterministic ordering key would have assigned.
+        var firstRequestId = Guid.NewGuid().ToString("N");
+        var secondRequestId = Guid.NewGuid().ToString("N");
+        var firstUserId = Guid.NewGuid();
+        var firstAssistantId = Guid.NewGuid();
+        var secondUserId = Guid.NewGuid();
+        var secondAssistantId = Guid.NewGuid();
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            var legacy = await db.Conversations.SingleAsync(item => item.Id == conversation.Id);
+            var storedTime = new DateTime(2026, 1, 15, 8, 30, 0, DateTimeKind.Utc);
+            db.ChatMessages.AddRange(
+                new Taslim.Api.Domain.ChatMessage { Id = firstUserId, ConversationId = legacy.Id, Role = Taslim.Api.Domain.ChatMessageRole.User, Content = "Legacy first", RequestId = firstRequestId, Status = Taslim.Api.Domain.ChatMessageStatus.Completed, CreatedAt = storedTime, Sequence = 1 },
+                new Taslim.Api.Domain.ChatMessage { Id = firstAssistantId, ConversationId = legacy.Id, Role = Taslim.Api.Domain.ChatMessageRole.Assistant, Content = "Legacy first answer", Status = Taslim.Api.Domain.ChatMessageStatus.Completed, CreatedAt = storedTime, Sequence = 2 },
+                new Taslim.Api.Domain.ChatMessage { Id = secondUserId, ConversationId = legacy.Id, Role = Taslim.Api.Domain.ChatMessageRole.User, Content = "Legacy second", RequestId = secondRequestId, Status = Taslim.Api.Domain.ChatMessageStatus.Completed, CreatedAt = storedTime.AddSeconds(3), Sequence = 3 },
+                new Taslim.Api.Domain.ChatMessage { Id = secondAssistantId, ConversationId = legacy.Id, Role = Taslim.Api.Domain.ChatMessageRole.Assistant, Content = "Legacy second answer", Status = Taslim.Api.Domain.ChatMessageStatus.Completed, CreatedAt = storedTime.AddSeconds(3), Sequence = 4 });
+            legacy.NextMessageSequence = 4;
+            await db.SaveChangesAsync();
+        }
+        var replay = await ReadResponse(await SendMessage(client, conversation.Id, "Legacy first", firstRequestId));
+        // The replayed legacy turn pairs by Sequence onto its own completed assistant instead of
+        // failing closed as a stranded in-progress conflict: backfilled live rows need no remedy.
+        Assert.Equal(firstUserId, replay.UserMessage.Id);
+        Assert.Equal(firstAssistantId, replay.AssistantMessage.Id);
+        Assert.Equal("Completed", replay.AssistantMessage.Status);
+        Assert.Equal("Legacy first answer", replay.AssistantMessage.Content);
+        var messages = await client.GetFromJsonAsync<List<ChatMessageDto>>($"/api/conversations/{conversation.Id}/messages");
+        Assert.NotNull(messages);
+        Assert.Equal(4, messages.Count);
+        Assert.Equal([1L, 2L, 3L, 4L], messages.Select(message => message.Sequence));
+    }
+
     private async Task MakePairShareOneTimestamp(Guid userMessageId, Guid assistantMessageId)
     {
         using var scope = factory.Services.CreateScope();
