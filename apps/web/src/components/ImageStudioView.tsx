@@ -471,7 +471,21 @@ function ImageStudioContent() {
         <label className="image-prompt-field"><span className="sr-only">{t("image.promptLabel")}</span><textarea value={description} onChange={(event) => setDescription(event.target.value)} maxLength={4000} placeholder={t("image.promptPlaceholder")} aria-label={t("image.promptLabel")} required /><small>{description.length}/4000</small></label>
         <div className="image-panel-tools">
           <button className="image-attachment-button" type="button" disabled title={t("image.referenceUnavailable")}><Paperclip size={15} /> {t("image.attachReference")} <span>{t("image.unavailableTag")}</span></button>
-          <label className="image-project-select"><span>{t("image.project")}</span><select value={projectId} onChange={(event) => setProjectId(event.target.value)} disabled={loadingProjects}><option value="">{t("image.noProject")}</option>{projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}</select><ChevronDown size={13} /></label>
+          {/*
+           * The project selector is a choice control whose options are fetched from the workspace,
+           * so the studio's first render — and every render right after a workspace switch, which
+           * sets `loadingProjects` back to true — happens while the list is in flight. The browser's
+           * `disabled` attribute is therefore the wrong tool for that window, exactly as it is for
+           * the retry and cancel controls above: it takes the focused selector out of the
+           * accessibility tree and hands the caret back to the document, so a keyboard user either
+           * never reaches the control or loses their place inside it without any announcement.
+           * The selector instead stays tabbable and reports the transient state on itself through
+           * `aria-busy` and `aria-disabled`, and while loading it offers only an unselectable
+           * placeholder that says the list is loading: "No project" would assert an empty workspace
+           * the client has not observed. Activation is refused by the change handler while loading,
+           * the same idempotence contract {@link ImageStudioContent.cancel} uses.
+           */}
+          <label className="image-project-select"><span>{t("image.project")}</span><select value={projectId} onChange={(event) => { if (loadingProjects) return; setProjectId(event.target.value); }} aria-busy={loadingProjects} aria-disabled={loadingProjects || undefined}>{loadingProjects ? <option value="" disabled>{t("image.projectLoading")}</option> : <><option value="">{t("image.noProject")}</option>{projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}</>}</select><ChevronDown size={13} /></label>
         </div>
 
         <div className="image-option-group"><div className="image-option-label"><span id="image-purpose-label">{t("image.purpose")}</span><small id="image-purpose-hint">{t("image.autoHint")}</small></div><div className="image-purpose-grid" role="radiogroup" aria-labelledby="image-purpose-label" aria-describedby="image-purpose-hint">{purposes.map((value) => <button key={value} type="button" role="radio" aria-checked={purpose === value} tabIndex={purpose === value ? 0 : -1} className={purpose === value ? "is-selected" : ""} onClick={() => choosePurpose(value)} onKeyDown={(event) => handleImageChoiceKeyDown(event, purposes, purpose, choosePurpose)}><span className={`image-purpose-dot is-${value}`} aria-hidden="true" />{t(`image.purpose.${value}`)}</button>)}</div></div>
