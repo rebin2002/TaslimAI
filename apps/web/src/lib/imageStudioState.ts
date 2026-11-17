@@ -13,6 +13,26 @@ export function imageActiveJobStorageKey(userId: string, workspaceId: string) {
   return `${activeJobStoragePrefix}${encodeURIComponent(userId)}:${encodeURIComponent(workspaceId)}`;
 }
 
+export type ImageActiveJobListener = (userId: string, workspaceId: string) => void;
+
+// The persisted pointer outlives the component instance that wrote it. A submission whose POST
+// settles after an identity change persists its job id from a detached closure, and a studio that
+// is already mounted for that same identity has finished its one adoption pass, so nothing would
+// ever tell it that the generation it is paying for became visible. Writing or clearing the
+// pointer therefore announces the change to whoever is mounted in this document.
+const activeJobListeners = new Set<ImageActiveJobListener>();
+
+export function subscribeImageActiveJobChanges(listener: ImageActiveJobListener) {
+  activeJobListeners.add(listener);
+  return () => {
+    activeJobListeners.delete(listener);
+  };
+}
+
+function announceImageActiveJobChange(userId: string, workspaceId: string) {
+  for (const listener of [...activeJobListeners]) listener(userId, workspaceId);
+}
+
 export function readImageActiveJobId(userId: string, workspaceId: string) {
   if (typeof window === "undefined" || !userId.trim() || !workspaceId.trim()) return null;
   try {
@@ -25,12 +45,22 @@ export function readImageActiveJobId(userId: string, workspaceId: string) {
 
 export function persistImageActiveJobId(userId: string, workspaceId: string, jobId: string) {
   if (typeof window === "undefined" || !userId.trim() || !workspaceId.trim() || !jobId.trim()) return;
-  try { window.sessionStorage.setItem(imageActiveJobStorageKey(userId, workspaceId), jobId); } catch { /* Storage may be unavailable. */ }
+  try {
+    window.sessionStorage.setItem(imageActiveJobStorageKey(userId, workspaceId), jobId);
+  } catch {
+    return; /* Storage may be unavailable, and there is then nothing to announce. */
+  }
+  announceImageActiveJobChange(userId, workspaceId);
 }
 
 export function clearImageActiveJobId(userId: string, workspaceId: string) {
   if (typeof window === "undefined" || !userId.trim() || !workspaceId.trim()) return;
-  try { window.sessionStorage.removeItem(imageActiveJobStorageKey(userId, workspaceId)); } catch { /* Storage may be unavailable. */ }
+  try {
+    window.sessionStorage.removeItem(imageActiveJobStorageKey(userId, workspaceId));
+  } catch {
+    return; /* Storage may be unavailable, and there is then nothing to announce. */
+  }
+  announceImageActiveJobChange(userId, workspaceId);
 }
 
 export function isImageJob(job: GenerationJob | null): boolean {
