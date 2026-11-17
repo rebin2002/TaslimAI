@@ -477,3 +477,125 @@ describe("buildMusicLyricsDraft issue payloads never echo draft-local identifier
     expect(source).toMatch(/export const MUSIC_LYRICS_MAX_SECTION_ID_CHARACTERS = 64/);
   });
 });
+
+describe("buildMusicLyricsDraft Arabic and Sorani synthetic rejection payloads stay content-free", () => {
+  // The rejection payload's privacy claim is script-independent, but the corpus
+  // that exercises it was Latin-only plus one incidental Sorani line. Arabic and
+  // Sorani are the two RTL contract languages (#708) and the realistic private
+  // content in this product's lyric drafts, so an identifier formed from them —
+  // with diacritics, Sorani-only letters or bidi embeds — needs its own lock:
+  // every one of these words must reach the payload as zero bytes. All material
+  // here is synthetic test copy; it quotes no user data.
+  const arabicLine = "[TEST ONLY] لَا تُعِدْ كِتَابَةَ هَذَا السَّطْر";
+  const soraniLine = "[TEST ONLY] ئەم دێڕە تەنها بۆ تاقیکردنەوەیە";
+  const soraniGlyphLine = "[TEST ONLY] ڕەڵاڤۆژێ کێشچەرەپگ"; // ڕ ڵ ۆ ژ ێ ە چ پ گ
+  const arabicDialectCopy = "عِرَاقِي";
+  const arabicFileName = "أغنية_السر";
+  const soraniFileName = "نهێنی_ستۆدیۆ";
+
+  const rejects = (input: Partial<MusicLyricsDraftInput>) =>
+    buildMusicLyricsDraft({ lyricsRightsConfirmed: true, vocalLanguage: "ku", ...input } as MusicLyricsDraftInput)
+      .issues;
+
+  const containsNonAscii = (value: string) => Array.from(value).some((ch) => ch.codePointAt(0)! > 0x7f);
+
+  it("drops an Arabic lyric line used as the section identifier", () => {
+    const issues = rejects({ sections: [{ id: arabicLine, type: "hook", text: soraniLine }] });
+    expect(issues.length).toBeGreaterThan(0);
+    for (const issue of issues) {
+      expect(issue.sectionId).toBeUndefined();
+      expect(JSON.stringify(issue)).not.toContain("تُعِدْ");
+    }
+  });
+
+  it("drops a Sorani identifier built from the script's own letters", () => {
+    const issues = rejects({
+      sections: [
+        { id: soraniGlyphLine.replace("[TEST ONLY] ", ""), type: "chorus", text: soraniGlyphLine },
+        { id: "بەیانی_نەهێشتن", type: "bridge", text: "   " },
+      ],
+    });
+    expect(issues.map((issue) => issue.code)).toEqual(["section_empty"]);
+    for (const issue of issues) expect(JSON.stringify(issue)).not.toContain("نەهێشتن");
+  });
+
+  it("drops identifiers shaped like private Arabic or Sorani reference file names", () => {
+    const issues = rejects({
+      sections: [
+        { id: `local:4096:${arabicFileName}.mp3`, type: "hook", text: arabicLine },
+        { id: `local-video:8192:${soraniFileName}.mp4`, type: "hook", text: soraniLine },
+      ],
+    });
+    const serialized = JSON.stringify(issues);
+    expect(issues.map((issue) => issue.code)).toEqual(["section_type_invalid", "section_type_invalid"]);
+    expect(serialized).not.toContain(arabicFileName);
+    expect(serialized).not.toContain(soraniFileName);
+    expect(serialized).not.toContain(".mp3");
+    expect(serialized).not.toContain(".mp4");
+  });
+
+  it("drops identifiers carrying bidi embeds or overrides around Arabic words", () => {
+    for (const id of [`\u202b${arabicFileName}\u202c`, `\u202eڕۆژ\u202c`, `s1\u200f\u2026${soraniFileName}`]) {
+      for (const issue of rejects({ sections: [{ id, type: "hook", text: "x" }] }))
+        expect(JSON.stringify(issue)).not.toContain(id.trim());
+    }
+  });
+
+  it("reports dialect failures without the dialect copy itself", () => {
+    const unknown = rejects({ vocalLanguage: "ar", dialect: arabicDialectCopy, sections: [{ id: "s1", type: "verse", text: "x" }] });
+    expect(unknown.map((issue) => issue.code)).toContain("dialect_unknown");
+    expect(JSON.stringify(unknown)).not.toContain(arabicDialectCopy);
+
+    // Arabic has no default dialect by design; the requirement is reported as a
+    // code, never as Arabic-script prose.
+    const required = rejects({ vocalLanguage: "ar", sections: [{ id: "s1", type: "verse", text: "x" }] });
+    expect(required.map((issue) => issue.code)).toContain("dialect_required");
+    expect(JSON.stringify(required)).not.toMatch(/[؀-ۿ]/);
+  });
+
+  it("keeps every issue record pure ASCII across a full Arabic/Sorani violation sweep", () => {
+    // Structural lock, independent of any single word list: an issue may carry
+    // codes, ordinals, numeric limits and opaque ASCII tokens — nothing else.
+    // Non-ASCII inside `params` values is excluded by codepoint, so no lyric,
+    // dialect or file-name fragment in any script can ride along.
+    const sections = [
+      { id: arabicLine, type: "verse", text: "x".repeat(201) },
+      { id: soraniLine, type: "chorus", text: Array.from({ length: 31 }, (_, i) => `l${i} ${soraniGlyphLine}`).join("\n") },
+      { id: "local:4096:" + arabicFileName + ".mp3", type: "hook", text: soraniLine },
+      { id: "بەیانی", type: "bridge", text: arabicLine },
+    ];
+    const issues = [
+      ...rejects({ sections, vocalLanguage: "ckb" }),
+      ...rejects({ sections, vocalLanguage: "ar", dialect: arabicDialectCopy }),
+      ...rejects({ sections, vocalLanguage: "nope" }),
+    ];
+    expect(issues.length).toBeGreaterThan(8);
+    for (const issue of issues) expect(containsNonAscii(JSON.stringify(issue))).toBe(false);
+    for (const word of ["تُعِدْ", "دێڕە", "ڕەڵاڤۆژێ", "السر", "ستۆدیۆ", arabicDialectCopy])
+      expect(JSON.stringify(issues)).not.toContain(word);
+  });
+
+  it("leaves legitimate Arabic/Sorani payload content untouched — the filter guards identifiers, not lyrics", () => {
+    const arabic = buildMusicLyricsDraft({
+      sections: [{ id: "s1", type: "verse", text: arabicLine }],
+      vocalLanguage: "ar",
+      dialect: "iraqi_baghdadi",
+      lyricsRightsConfirmed: true,
+    } as MusicLyricsDraftInput);
+    expect(arabic.issues).toEqual([]);
+    expect(arabic.submittable).toBe(true);
+    expect(arabic.payload!.lyrics[0].lines).toEqual([arabicLine]);
+    expect(arabic.payload!.lyricsLanguage).toBe("ar");
+    expect(arabic.payload!.lyricsDialect).toBe("iraqi_baghdadi");
+
+    const sorani = buildMusicLyricsDraft({
+      sections: [{ id: "s1", type: "verse", text: soraniGlyphLine }],
+      vocalLanguage: "ckb",
+      lyricsRightsConfirmed: true,
+    } as MusicLyricsDraftInput);
+    expect(sorani.issues).toEqual([]);
+    expect(sorani.payload!.lyricsLanguage).toBe("ku");
+    expect(sorani.payload!.lyricsDialect).toBe("sorani");
+    expect(sorani.payload!.lyrics[0].lines).toEqual([soraniGlyphLine]);
+  });
+});

@@ -105,6 +105,13 @@ public sealed class MusicStudioFailureLogPrivacyTests : IClassFixture<MusicStudi
     private const string LyricsMarker = "TESTONLYLYRICMARKER7QM";
     private const string InstructionsMarker = "TESTONLYINSTRUCTIONSMARKER4KD";
     private const string TitleMarker = "TESTONLYTITLEMARKER2VT";
+    // Synthetic Arabic and Sorani lyric lines. They stand in for the realistic
+    // private content of this product's RTL drafts (#708): if the failure record
+    // echoed user text, these are the words it would echo. They quote no user
+    // data and are the only Arabic-script content in this test class, so their
+    // absence from every failure field and captured log record is the lock.
+    private const string ArabicLyricsMarker = "[TEST ONLY] لَا تُعِدْ كِتَابَةَ هَذَا السَّطْر";
+    private const string SoraniLyricsMarker = "[TEST ONLY] ئەم دێڕە تەنها بۆ تاقیکردنەوەیە";
     private static readonly Guid ReferenceAssetId = Guid.Parse("7c9e6679-7425-40de-944b-e07fc1f90ae7");
 
     private static readonly JsonSerializerOptions WebJson = new(JsonSerializerDefaults.Web);
@@ -120,6 +127,17 @@ public sealed class MusicStudioFailureLogPrivacyTests : IClassFixture<MusicStudi
         "\"CreationMode\":\"song_with_vocals\"," +
         "\"Lyrics\":[{\"Section\":\"verse\",\"Lines\":[\"" + LyricsMarker + " one\",\"" + LyricsMarker + " two\"]}]," +
         "\"LyricsLanguage\":\"ku\",\"LyricsDialect\":\"sorani\",\"LyricsRightsConfirmed\":true," +
+        "\"ReferenceAssets\":[{\"MediaType\":\"audio\",\"AssetId\":\"" + ReferenceAssetId + "\"}],\"ReferenceRightsConfirmed\":true}";
+
+    // The same persisted-input stress case with Arabic and Sorani verse/chorus
+    // lines, admitted language ar with its explicit iraqi_baghdadi dialect.
+    private static string RtlLyricsSongInputJson =>
+        "{\"Description\":\"a calm song about a long road\",\"Purpose\":\"Lock the failure log boundary\",\"Genre\":\"ambient\",\"Mood\":\"calm\",\"DurationSeconds\":30," +
+        "\"VocalPreference\":\"vocal\",\"Language\":\"auto\",\"Title\":\"" + TitleMarker + "\"," +
+        "\"AdditionalInstructions\":\"" + InstructionsMarker + "\"," +
+        "\"CreationMode\":\"song_with_vocals\"," +
+        "\"Lyrics\":[{\"Section\":\"verse\",\"Lines\":[\"" + ArabicLyricsMarker + "\"]},{\"Section\":\"chorus\",\"Lines\":[\"" + SoraniLyricsMarker + "\"]}]," +
+        "\"LyricsLanguage\":\"ar\",\"LyricsDialect\":\"iraqi_baghdadi\",\"LyricsRightsConfirmed\":true," +
         "\"ReferenceAssets\":[{\"MediaType\":\"audio\",\"AssetId\":\"" + ReferenceAssetId + "\"}],\"ReferenceRightsConfirmed\":true}";
 
     [Fact(DisplayName = "Music Studio: sung-lyrics admission fails closed without a provider and logs no lyric text")]
@@ -265,13 +283,123 @@ public sealed class MusicStudioFailureLogPrivacyTests : IClassFixture<MusicStudi
             "a Music Studio failure record must not quote the caller's own words");
     }
 
+    [Fact(DisplayName = "Music Studio: Arabic/Sorani sung-lyrics admission fails closed and echoes no script text")]
+    public async Task ArabicAndSoraniSungLyricsAdmissionEchoesNoScriptText()
+    {
+        // Mirror of the ASCII admission lock for the product's two RTL languages:
+        // a fully-formed Arabic song request (valid iraqi_baghdadi dialect) and
+        // Sorani lyric lines must be refused on the capability gate alone — a
+        // code and a fixed English message. No Arabic-script codepoint, and no
+        // fragment of the caller's lyric lines, may appear in the response
+        // envelope or in any captured log record.
+        using var client = factory.CreateClient();
+        var auth = await RegisterAsync(client);
+        var before = factory.Logs.Records.Count;
+
+        var response = await SendWithCsrfAsync(client, HttpMethod.Post, "/api/music-generation/jobs", new
+        {
+            workspaceId = auth.PersonalWorkspace.Id,
+            description = "a calm song about a long road",
+            purpose = "Lock the failure log boundary",
+            genre = "ambient",
+            mood = "calm",
+            durationSeconds = 30,
+            creationMode = "song_with_vocals",
+            vocalPreference = "vocal",
+            language = "auto",
+            lyricsLanguage = "ar",
+            lyricsDialect = "iraqi_baghdadi",
+            lyricsRightsConfirmed = true,
+            lyrics = new[]
+            {
+                new { section = "verse", lines = new[] { ArabicLyricsMarker } },
+                new { section = "chorus", lines = new[] { SoraniLyricsMarker } },
+            },
+            referenceAssets = new[] { new { mediaType = "audio", assetId = ReferenceAssetId } },
+            referenceRightsConfirmed = true,
+        });
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        var envelope = await response.Content.ReadAsStringAsync();
+        Assert.DoesNotContain(ArabicLyricsMarker, envelope, StringComparison.Ordinal);
+        Assert.DoesNotContain(SoraniLyricsMarker, envelope, StringComparison.Ordinal);
+        // Stronger structural lock: the rejection envelope carries no Arabic or
+        // Sorani codepoint at all, in any range the two scripts use.
+        Assert.False(ContainsRtlScriptText(envelope), $"rejection envelope carried RTL script text: {envelope}");
+
+        AssertNoMarkerInLogs(before, "Arabic/Sorani sung-lyrics admission");
+    }
+
+    [Fact(DisplayName = "Music Studio: persisted Arabic/Sorani lyric input never surfaces in the job failure record or its logs")]
+    public async Task PersistedArabicAndSoraniLyricInputStaysOutOfFailureRecords()
+    {
+        // Same honest stress case as the ASCII lock, with the lyric text
+        // genuinely persisted in InputJson in both RTL scripts: the failure
+        // record derived from that job must not carry it anywhere.
+        using var client = factory.CreateClient();
+        var auth = await RegisterAsync(client);
+        var before = factory.Logs.Records.Count;
+
+        var response = await SendWithCsrfAsync(client, HttpMethod.Post, "/api/generation/jobs", new
+        {
+            workspaceId = auth.PersonalWorkspace.Id,
+            jobType = "music.generate",
+            title = TitleMarker + " persisted RTL lyric input",
+            inputJson = RtlLyricsSongInputJson,
+        });
+        Assert.Equal(HttpStatusCode.Created, response.StatusCode);
+        var created = (await response.Content.ReadFromJsonAsync<GenerationJobDto>(WebJson))!;
+
+        var terminal = await WaitForTerminalAsync(client, created.Id);
+        Assert.Equal("Failed", terminal.Status);
+        Assert.False(string.IsNullOrWhiteSpace(terminal.ErrorCode));
+        Assert.DoesNotContain(ArabicLyricsMarker, terminal.ErrorMessage ?? string.Empty, StringComparison.Ordinal);
+        Assert.DoesNotContain(SoraniLyricsMarker, terminal.ErrorMessage ?? string.Empty, StringComparison.Ordinal);
+        Assert.False(ContainsRtlScriptText(terminal.ErrorMessage ?? string.Empty));
+
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        var job = await db.GenerationJobs.AsNoTracking().SingleAsync(item => item.Id == terminal.Id);
+        // Persisted exactly once, as the job input; absent from the failure field.
+        Assert.Contains(ArabicLyricsMarker, job.InputJson, StringComparison.Ordinal);
+        Assert.Contains(SoraniLyricsMarker, job.InputJson, StringComparison.Ordinal);
+        Assert.DoesNotContain(ArabicLyricsMarker, job.ErrorMessage ?? string.Empty, StringComparison.Ordinal);
+        Assert.DoesNotContain(SoraniLyricsMarker, job.ErrorMessage ?? string.Empty, StringComparison.Ordinal);
+
+        foreach (var usage in await db.UsageTransactions.AsNoTracking()
+                     .Where(item => item.RequestId == $"generation:{terminal.Id:N}").ToListAsync())
+        {
+            Assert.DoesNotContain(ArabicLyricsMarker, usage.SafeMetadataJson ?? string.Empty, StringComparison.Ordinal);
+            Assert.DoesNotContain(SoraniLyricsMarker, usage.SafeMetadataJson ?? string.Empty, StringComparison.Ordinal);
+        }
+        foreach (var attempt in await db.GenerationProviderAttempts.AsNoTracking()
+                     .Where(item => item.GenerationJobId == terminal.Id).ToListAsync())
+        {
+            Assert.DoesNotContain(ArabicLyricsMarker, attempt.SafeMetadataJson ?? string.Empty, StringComparison.Ordinal);
+            Assert.DoesNotContain(SoraniLyricsMarker, attempt.SafeMetadataJson ?? string.Empty, StringComparison.Ordinal);
+        }
+
+        AssertNoMarkerInLogs(before, "persisted Arabic/Sorani lyric input failure");
+    }
+
+    /// <summary>True when the text contains any codepoint from the Arabic script
+    /// ranges Sorani and Arabic are written in (base block, supplement, and the
+    /// two presentation-form blocks).</summary>
+    private static bool ContainsRtlScriptText(string value) => value.Any(ch =>
+        ch is >= '\u0600' and <= '\u06FF'
+        or >= '\u0750' and <= '\u077F'
+        or >= '\uFB50' and <= '\uFDFF'
+        or >= '\uFE70' and <= '\uFEFF');
+
     private static bool CarriesMarker(string? text) =>
         text is not null
         && (text.Contains(LyricsMarker, StringComparison.OrdinalIgnoreCase)
             || text.Contains(QuotedDescriptionMarker, StringComparison.OrdinalIgnoreCase)
             || text.Contains(InstructionsMarker, StringComparison.OrdinalIgnoreCase)
             || text.Contains(TitleMarker, StringComparison.OrdinalIgnoreCase)
-            || text.Contains(ReferenceAssetId.ToString(), StringComparison.OrdinalIgnoreCase));
+            || text.Contains(ReferenceAssetId.ToString(), StringComparison.OrdinalIgnoreCase)
+            || text.Contains(ArabicLyricsMarker, StringComparison.Ordinal)
+            || text.Contains(SoraniLyricsMarker, StringComparison.Ordinal));
 
     private void AssertNoMarkerInLogs(int from, string scenario)
     {

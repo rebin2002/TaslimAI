@@ -45,6 +45,8 @@ reference asset id:
 | A `lyrics` field of the wrong JSON type | Model binding rejects it, so the rejected *value* is the thing at risk of being echoed. | `400`, **0 marker hits** |
 | Lyric text persisted through the generic job endpoint, then the job fails | This is the honest stress case: the lyric text genuinely exists in `GenerationJob.InputJson` and the job reaches `Failed`. | `Failed`; marker present in `InputJson` exactly once and absent from `ErrorMessage`, `UsageTransaction.SafeMetadataJson`/`FailureCode` and `GenerationProviderAttempt.SafeMetadataJson`/`FailureCode`; **0 marker hits** |
 | A provider adapter that quotes the caller's own words into its own exception text | The worst realistic upstream behaviour: the words are inside `Exception.Message`, which every `Log*(exception, ...)` site renders. | `Failed`; the worker's `Error` record is present and carries `ExceptionType` only — the quoted text never reaches the log |
+| The same admission rejection with synthetic Arabic (tashkeel-bearing) and Sorani lyric lines under `ar`/`iraqi_baghdadi` | Arabic and Sorani are the product's two RTL lyric languages (#708) and the realistic private content of its drafts; an echo risk that only reproduces in non-Latin script is still an echo risk. | `400`; the envelope contains no Arabic-script codepoint in any range the two scripts use, **0 marker hits** |
+| Arabic/Sorani lyric text persisted through the generic job endpoint, then the job fails | RTL mirror of the honest stress case: the script text genuinely exists in `InputJson`. | `Failed`; markers present in `InputJson`, absent from `ErrorMessage` (which is additionally swept for any Arabic-script codepoint), usage/attempt metadata and **all captured logs** |
 
 Each assertion is guarded against a silent pass: the test fails if the scenario
 produced no log records at all, and separately requires at least one
@@ -93,6 +95,27 @@ user's words. `sectionOrdinal` is always present, so dropping an unsafe
 identifier costs the row's name and never the problem's addressability. Opaque
 tokens the editors already generate (`s1`, `a`, `hook1`, `blank`, `section-3`,
 `row_7`) keep working, which is asserted positively as well as negatively.
+
+## Arabic/Sorani synthetic coverage
+
+The privacy claim is script-independent, but the corpus proving it was not:
+the first cut of the tests exercised the identifier filter with Latin tokens
+plus one incidental Sorani line. This batch adds a dedicated Arabic/Sorani
+synthetic corpus on both sides of the boundary, all of it test copy marked
+`[TEST ONLY]` that quotes no user data:
+
+- Client (`musicLyricsDraftPayload.test.ts`): Arabic lyric lines, Sorani
+  identifiers using the script's own letters (`ڕ ڵ ۆ ێ ە چ پ ژ گ`), bidi
+  embeds/overrides (`U+202B`, `U+202E`, `U+200F`), and `local:<size>:…mp3`
+  identifiers shaped from Arabic and Sorani file names are all dropped from
+  rejection issues; dialect copy in Arabic script (`عِرَاقِي`) is never
+  echoed; a structural sweep asserts **every** issue record serialises to pure
+  ASCII across an Arabic/Sorani violation battery. The positive controls prove
+  the filter guards identifiers only: a clean Arabic (`ar` + `iraqi_baghdadi`)
+  and a clean Sorani (`ckb`) draft still map with lyric lines byte-verbatim.
+- Server (`MusicStudioFailureLogPrivacyTests.cs`): the two table rows above,
+  plus the two RTL markers folded into the shared `CarriesMarker` sweep, so
+  every pre-existing log assertion now also fails on an Arabic/Sorani leak.
 
 ## Ownership boundaries respected
 
