@@ -40,6 +40,7 @@ describe("account profile form lost-update boundary", () => {
   it("never announces a completed save for edits made after submit", () => {
     expect(accountViewSource).toContain("const submittedRevision = profileEditRevision.current");
     expect(accountViewSource).toContain("profileEditRevision.current += 1");
+    expect(accountViewSource).toContain('state === "saving" ? "saving" : "idle"');
     expect(accountViewSource).toContain('profileEditRevision.current === submittedRevision ? "saved" : "idle"');
   });
 
