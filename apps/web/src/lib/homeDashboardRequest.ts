@@ -25,3 +25,8 @@ export function isHomeDashboardRequestCurrent(token: HomeDashboardRequestToken, 
 export function currentHomeDashboard<T extends { workspaceId: string }>(snapshot: T | null, mountedWorkspaceId: string | null): T | null {
   return mountedWorkspaceId !== null && snapshot?.workspaceId === mountedWorkspaceId ? snapshot : null;
 }
+
+/** Do not submit a project id from a workspace whose project list is no longer mounted. */
+export function currentHomeProjectSelection(projectId: string, visibleProjects: ReadonlyArray<{ id: string }>): string {
+  return visibleProjects.some((project) => project.id === projectId) ? projectId : "";
+}
