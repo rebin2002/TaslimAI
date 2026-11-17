@@ -123,3 +123,18 @@ export function mergeResearchSources(result: ResearchJobResult | null, sources: 
 }
 export function isResearchSourceReady(file: { extension: string; status: string; textExtractionStatus: string }) { return [".pdf", ".docx", ".txt", ".md", ".csv", ".xlsx"].includes(file.extension.toLowerCase()) && file.status === "Ready" && file.textExtractionStatus === "Ready"; }
 export function isSafeExternalUrl(value: string | null) { if (!value) return false; try { const url = new URL(value); return url.protocol === "https:" || url.protocol === "http:"; } catch { return false; } }
+
+// The finished report's evidence panel has three distinct zero-source conditions that
+// must never render the same message: the source ledger is still being retrieved
+// ("loading"), retrieving it failed and a retry is available ("error"), or the run
+// genuinely cited nothing ("empty"). A fetch failure that falls through to the empty
+// copy would tell the reader the report has no citations when the citations exist but
+// the read failed, hiding a retryable fault behind an accurate-looking terminal state.
+export type ResearchSourcesLoadStatus = "loading" | "ready" | "error";
+export type ResearchSourcesPanelStatus = "populated" | "loading" | "error" | "empty";
+export function researchSourcesPanelStatus(load: ResearchSourcesLoadStatus, sourceCount: number): ResearchSourcesPanelStatus {
+  if (sourceCount > 0) return "populated";
+  if (load === "loading") return "loading";
+  if (load === "error") return "error";
+  return "empty";
+}
