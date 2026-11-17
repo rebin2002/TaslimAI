@@ -116,6 +116,45 @@ test.describe("language-pack foundation", () => {
     expect(await page.evaluate(() => localStorage.getItem("taslim-language-pack"))).toBeNull();
   });
 
+  test("adopts a device language selection when first login left no account choice", async ({ authenticatedPage: page }) => {
+    const response = await page.request.get("/api/auth/me");
+    expect(response.ok()).toBe(true);
+    const session = await response.json() as { user: { id: string; preferredLanguage: string } };
+    expect(session.user.preferredLanguage).toBe("en");
+
+    // The reader completed first login without touching the picker, so the account holds
+    // no language choice of its own. Switching to Arabic through the legacy `taslim-locale`
+    // key - the contract Billing, Health Care and Image Studio persist with - must drive
+    // the document direction, and stay applied after the anonymous bootstrap is cleared.
+    await page.evaluate(() => localStorage.setItem("taslim-locale", "ar"));
+    await page.reload();
+    await expect(page.locator("html")).toHaveAttribute("lang", "ar");
+    await expect(page.locator("html")).toHaveAttribute("dir", "rtl");
+    await expect.poll(() => page.evaluate((userId) => localStorage.getItem(`taslim-language-pack:user:${encodeURIComponent(userId)}`), session.user.id)).toBe("ar");
+    await page.goto("/projects");
+    await expect(page.locator("html")).toHaveAttribute("dir", "rtl");
+    await page.reload();
+    await expect(page.locator("html")).toHaveAttribute("lang", "ar");
+    await expect(page.locator("html")).toHaveAttribute("dir", "rtl");
+  });
+
+  test("keeps an explicitly saved account pack ahead of a stale device selection", async ({ authenticatedPage: page }) => {
+    const response = await page.request.get("/api/auth/me");
+    expect(response.ok()).toBe(true);
+    const session = await response.json() as { user: { id: string; preferredLanguage: string } };
+
+    // A saved account choice outranks the device value an earlier signed-out visit left
+    // behind, which is the sign-in overwrite this foundation must never repeat.
+    await page.evaluate((userId) => {
+      localStorage.setItem("taslim-locale", "ar");
+      localStorage.setItem(`taslim-language-pack:user:${encodeURIComponent(userId)}`, "zh-CN");
+    }, session.user.id);
+    await page.reload();
+    await expect(page.locator("html")).toHaveAttribute("lang", "zh-CN");
+    await expect(page.locator("html")).toHaveAttribute("dir", "ltr");
+    expect(await page.evaluate((userId) => localStorage.getItem(`taslim-language-pack:user:${encodeURIComponent(userId)}`), session.user.id)).toBe("zh-CN");
+  });
+
   test("keeps an unsaved account draft when a language is selected but not saved", async ({ authenticatedPage: page }) => {
     await page.goto("/account");
     const displayName = page.getByLabel(/display name/i);

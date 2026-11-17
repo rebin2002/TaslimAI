@@ -60,7 +60,20 @@ export function AuthProvider({ children }: Readonly<{ children: React.ReactNode 
       if (!savedLanguagePack) savedLanguagePack = readStoredLocale(window.localStorage, accountLocaleStorageKey(user.id));
       const preferredLanguagePack = defaultLanguagePackRegistry.has(user.preferredLanguage) ? user.preferredLanguage : "en";
       const localeSource = getLocaleSource();
-      if (localeSource !== "user" && (localeSource !== "anonymous-storage" || savedLanguagePack)) {
+      // `LocaleProvider` ranks the legacy `taslim-locale` device key above the pack
+      // bootstrap key because every lane persists an explicit in-browser selection
+      // through it - the Arabic and Sorani RTL journeys included. While the account
+      // holds no saved choice, that device selection is the reader's own, so adopt it
+      // and mirror it into the account key: the anonymous bootstrap is cleared below,
+      // and without a durable value the next document load would flip back to English.
+      const deviceLocaleSelection = localeSource === "anonymous-storage" ? readStoredLocale(window.localStorage) : null;
+      if (!savedLanguagePack && deviceLocaleSelection) {
+        try {
+          writeStoredLanguagePack(window.localStorage, accountLanguagePackStorageKey(user.id), deviceLocaleSelection);
+        } catch {
+          // Storage can be unavailable; the device selection stays active in memory.
+        }
+      } else if (localeSource !== "user" && (localeSource !== "anonymous-storage" || savedLanguagePack)) {
         setLanguagePack(savedLanguagePack ?? preferredLanguagePack, { persist: false, source: "account" });
       }
     }
@@ -136,17 +149,26 @@ export function AuthProvider({ children }: Readonly<{ children: React.ReactNode 
 
   const completeOnboarding = useCallback(async (input: OnboardingInput) => {
     const next = await api.completeOnboarding(input);
+    // The picker only marks the locale source as a user choice when the reader actually
+    // changed it, so read that before adoption rewrites the source.
+    const selectionWasMade = getLocaleSource() === "user";
     setSession(next);
     if (defaultLanguagePackRegistry.has(input.preferredLanguage)) {
       setLanguagePack(input.preferredLanguage, { persist: false, source: "account" });
-      // First-login selection becomes durable only after onboarding succeeds.
-      try {
-        writeStoredLanguagePack(window.localStorage, accountLanguagePackStorageKey(next.user.id), input.preferredLanguage);
-      } catch {
-        // Keep the accepted server value even without browser storage.
+      // First-login selection becomes durable only after onboarding succeeds, and only
+      // when it really was a selection. Completing the dialog untouched accepts the
+      // inherited default, and recording that as an account choice would let it
+      // outrank the device language every right-to-left lane selects through
+      // `taslim-locale`.
+      if (selectionWasMade) {
+        try {
+          writeStoredLanguagePack(window.localStorage, accountLanguagePackStorageKey(next.user.id), input.preferredLanguage);
+        } catch {
+          // Keep the accepted server value even without browser storage.
+        }
       }
     }
-  }, [setLanguagePack]);
+  }, [getLocaleSource, setLanguagePack]);
 
   const value = useMemo(() => ({ user: session?.user ?? null, workspace: session?.personalWorkspace ?? null, loading, signIn, register, signOut, updateProfile, completeOnboarding, refresh }), [completeOnboarding, loading, refresh, register, session, signIn, signOut, updateProfile]);
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
