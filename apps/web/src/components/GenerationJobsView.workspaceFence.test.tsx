@@ -476,3 +476,36 @@ describe("generation history read freshness in the rendered page", () => {
     expect(renderedText()).not.toContain("Alpha workspace job");
   });
 });
+
+
+describe("generation history pending controls across workspace reassignment", () => {
+  it("reenables the new workspace create control while the old workspace's create is unresolved", async () => {
+    await mountView(workspaceA);
+    await settleList(0, []);
+    const delayed = deferred<GenerationJob>();
+    harness.api.createGenerationJob.mockReturnValueOnce(delayed.promise);
+    const createButton = findByClass(container, "generation-create-button")[0];
+    await act(async () => {
+      createButton.dispatchEvent({ type: "click", bubbles: true });
+      await drain();
+    });
+    expect(renderedText()).toContain("jobs.working");
+    expect(findByClass(container, "generation-create-button")[0].getAttribute("disabled")).not.toBeNull();
+
+    // Workspace B gets its own immediately usable Create action; it must not inherit
+    // workspace A's pending request even before A's network promise settles.
+    await switchWorkspace(workspaceB);
+    await settleList(1, []);
+    expect(renderedText()).not.toContain("jobs.working");
+    expect(findByClass(container, "generation-create-button")[0].getAttribute("disabled")).toBeNull();
+
+    // A's late result is ignored and does not reset B's controls or seed private A data.
+    await act(async () => {
+      delayed.resolve(makeJob({ title: "Private A result", resultJson: '{"private":"A"}' }));
+      await drain();
+    });
+    expect(renderedText()).not.toContain("Private A result");
+    expect(renderedText()).not.toContain("jobs.working");
+    expect(findByClass(container, "generation-create-button")[0].getAttribute("disabled")).toBeNull();
+  });
+});
