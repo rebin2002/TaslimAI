@@ -483,10 +483,9 @@ public sealed class ChatController(
             // the paired response (a completed turn replays as a stuck in-progress conflict) and
             // the unordered scan slides onto a later turn's answer, duplicating and skipping
             // thread items at the equal-timestamp boundary. That turn's response is the first
-            // assistant whose Sequence follows the user message's.
+            // assistant at exactly the following Sequence; never consume a later turn's response.
             var existingAssistant = await db.ChatMessages
-                .Where(message => message.ConversationId == conversationId && message.Role == ChatMessageRole.Assistant && message.Sequence > existingUser.Sequence)
-                .OrderBy(message => message.Sequence)
+                .Where(message => message.ConversationId == conversationId && message.Role == ChatMessageRole.Assistant && message.Sequence == existingUser.Sequence + 1)
                 .FirstOrDefaultAsync(cancellationToken);
             if (existingAssistant is null) return PreparedChat.Failure(ApiResults.Error(this, StatusCodes.Status409Conflict, "MESSAGE_IN_PROGRESS", "That message is already being generated."));
             if (existingAssistant.Status == ChatMessageStatus.Failed)
