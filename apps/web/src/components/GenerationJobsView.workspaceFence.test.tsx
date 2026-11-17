@@ -478,6 +478,54 @@ describe("generation history read freshness in the rendered page", () => {
 });
 
 
+
+describe("generation history initial-load and mutation completion", () => {
+  it("refreshes the authoritative history after a Create overtakes the first list request", async () => {
+    await mountView(workspaceA);
+    expect(listRequests).toHaveLength(1);
+    const created = makeJob({ id: "job-a-new", title: "Newly created job" });
+    harness.api.createGenerationJob.mockResolvedValueOnce(created);
+
+    const createButton = findByClass(container, "generation-create-button")[0];
+    await act(async () => {
+      createButton.dispatchEvent({ type: "click", bubbles: true });
+      await drain();
+    });
+
+    // The original list was superseded by Create. Re-read the authoritative
+    // page so older rows are not silently lost from the history.
+    expect(listRequests).toHaveLength(2);
+    await settleList(0, [makeJob({ id: "job-a-old", title: "Earlier job" })]);
+    await settleList(1, [created, makeJob({ id: "job-a-old", title: "Earlier job" })]);
+    expect(renderedTitles()).toEqual(["Newly created job", "Earlier job"]);
+    expect(renderedText()).not.toContain("jobs.loading");
+  });
+
+  it("settles the initial loading state and offers Retry if a concurrent Create fails", async () => {
+    await mountView(workspaceA);
+    harness.api.createGenerationJob.mockRejectedValueOnce(new Error("Synthetic Create rejected"));
+
+    const createButton = findByClass(container, "generation-create-button")[0];
+    await act(async () => {
+      createButton.dispatchEvent({ type: "click", bubbles: true });
+      await drain();
+    });
+
+    // A failed mutation must not strand an invalidated list request behind
+    // an endless loading placeholder with no recovery action.
+    expect(renderedText()).toContain("Synthetic Create rejected");
+    expect(renderedText()).not.toContain("jobs.loading");
+    const retry = findByClass(container, "generation-retry-button");
+    expect(retry).toHaveLength(1);
+    expect(retry[0].getAttribute("disabled")).toBeNull();
+
+    await act(async () => { retry[0].dispatchEvent({ type: "click", bubbles: true }); await drain(); });
+    expect(listRequests).toHaveLength(2);
+    await settleList(1, [makeJob()]);
+    expect(renderedTitles()).toEqual(["Alpha workspace job"]);
+  });
+});
+
 describe("generation history pending controls across workspace reassignment", () => {
   it("reenables the new workspace create control while the old workspace's create is unresolved", async () => {
     await mountView(workspaceA);
