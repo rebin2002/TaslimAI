@@ -9,6 +9,13 @@ import type { Project } from "./api";
 export const ProjectListPageSize = 100;
 export const MaxProjectListPages = 50;
 
+// Render-time isolation prevents an old response from exposing a previous
+// workspace or tab's cards before effect cancellation has run.
+export function scopedProjectList(projects: readonly Project[], workspaceId: string | undefined, status: "Active" | "Archived"): Project[] {
+  if (!workspaceId) return [];
+  return projects.filter(project => project.workspaceId === workspaceId && project.status === status);
+}
+
 export type ProjectListPageFetcher = (page: number, pageSize: number) => Promise<Project[]>;
 
 /**

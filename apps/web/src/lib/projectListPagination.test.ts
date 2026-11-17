@@ -132,3 +132,22 @@ describe("collectAllProjectPages", () => {
     }
   });
 });
+
+describe("scopedProjectList workspace and tab isolation", () => {
+  it("never renders cards from another workspace or the inactive tab", async () => {
+    const { scopedProjectList } = await import("./projectListPagination");
+    const mixed = [
+      project(1, { workspaceId: "workspace-1", status: "Active" }),
+      project(2, { workspaceId: "workspace-2", status: "Active" }),
+      project(3, { workspaceId: "workspace-1", status: "Archived" }),
+    ];
+    expect(scopedProjectList(mixed, "workspace-1", "Active").map(item => item.id)).toEqual(["project-1"]);
+    expect(scopedProjectList(mixed, "workspace-2", "Active").map(item => item.id)).toEqual(["project-2"]);
+    expect(scopedProjectList(mixed, "workspace-1", "Archived").map(item => item.id)).toEqual(["project-3"]);
+  });
+
+  it("does not display prior-workspace rows with no authenticated workspace", async () => {
+    const { scopedProjectList } = await import("./projectListPagination");
+    expect(scopedProjectList(pageOf(1, 3), undefined, "Active")).toEqual([]);
+  });
+});
