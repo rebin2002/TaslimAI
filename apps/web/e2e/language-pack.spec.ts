@@ -94,6 +94,28 @@ test.describe("language-pack foundation", () => {
     await expect(page.locator("html")).toHaveAttribute("dir", "ltr");
   });
 
+
+  test("a saved account pack survives a stale anonymous-language bootstrap", async ({ authenticatedPage: page }) => {
+    const response = await page.request.get("/api/auth/me");
+    expect(response.ok()).toBe(true);
+    const session = await response.json() as { user: { id: string } };
+
+    // Browser A's saved account choice is zh-CN; its signed-out device
+    // bootstrap was Arabic. Reproduces the sign-in overwrite that #992 fixed
+    // for legacy locales, now pinned for installed language packs as well.
+    await page.evaluate((userId) => {
+      localStorage.setItem(`taslim-language-pack:user:${encodeURIComponent(userId)}`, "zh-CN");
+      localStorage.setItem("taslim-language-pack", "ar");
+    }, session.user.id);
+    await page.reload();
+    await expect(page.locator("html")).toHaveAttribute("lang", "zh-CN");
+    await expect(page.locator("html")).toHaveAttribute("dir", "ltr");
+    await expect.poll(() => page.evaluate((userId) =>
+      localStorage.getItem(`taslim-language-pack:user:${encodeURIComponent(userId)}`),
+    session.user.id)).toBe("zh-CN");
+    expect(await page.evaluate(() => localStorage.getItem("taslim-language-pack"))).toBeNull();
+  });
+
   test("keeps an unsaved account draft when a language is selected but not saved", async ({ authenticatedPage: page }) => {
     await page.goto("/account");
     const displayName = page.getByLabel(/display name/i);
