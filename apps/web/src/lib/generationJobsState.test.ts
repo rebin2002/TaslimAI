@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { GenerationJob } from "./api";
-import { canCancelGenerationJob, isTerminalJob, mergeGenerationJob, safeGenerationJobDisplay, selectActiveGenerationJob, type GenerationJobsState } from "./generationJobsState";
+import { canCancelGenerationJob, filterGenerationJobsToWorkspace, isTerminalJob, mergeGenerationJob, safeGenerationJobDisplay, selectActiveGenerationJob, type GenerationJobsState } from "./generationJobsState";
 
 function job(overrides: Partial<GenerationJob> = {}): GenerationJob {
   return {
@@ -80,6 +80,16 @@ describe("generation history workspace reassignment fencing", () => {
     expect(selectActiveGenerationJob({ current: stale, jobs: [scoped], activeWorkspaceId: current })).toBe(scoped);
     expect(selectActiveGenerationJob({ current: stale, jobs: [], activeWorkspaceId: current })).toBeNull();
     expect(selectActiveGenerationJob({ current: scoped, jobs: [scoped], activeWorkspaceId: null })).toBeNull();
+  });
+
+  it("filters the entire recent-jobs list synchronously when the workspace changes", () => {
+    const retained = job({ id: "job-old", workspaceId: "workspace-1", title: "Private old title", resultJson: '{"private":"old-data"}' });
+    const active = job({ id: "job-new", workspaceId: current, title: "Current title" });
+    const visible = filterGenerationJobsToWorkspace([retained, active], current);
+    expect(visible.map(item => item.id)).toEqual(["job-new"]);
+    expect(JSON.stringify(visible)).not.toContain("Private old title");
+    expect(JSON.stringify(visible)).not.toContain("old-data");
+    expect(filterGenerationJobsToWorkspace([retained, active], null)).toEqual([]);
   });
 
   it("filters the rendered history to the workspace being read", () => {

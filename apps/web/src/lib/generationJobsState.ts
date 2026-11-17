@@ -21,6 +21,15 @@ export function isJobReadableInWorkspace(job: GenerationJob, activeWorkspaceId: 
   return Boolean(activeWorkspaceId) && job.workspaceId === activeWorkspaceId;
 }
 
+// A mounted account history page can retain its previous workspace's array for one render
+// while AuthProvider switches workspaces. Fencing only the detail selection is not enough:
+// the recent-jobs list itself contains titles and can expose old-workspace rows.
+// Filter at render time, before the next effect/load has a chance to clear stale state.
+export function filterGenerationJobsToWorkspace(jobs: readonly GenerationJob[], activeWorkspaceId: string | null): GenerationJob[] {
+  if (!activeWorkspaceId) return [];
+  return jobs.filter(job => isJobReadableInWorkspace(job, activeWorkspaceId));
+}
+
 export function mergeGenerationJob(
   state: GenerationJobsState,
   job: GenerationJob,

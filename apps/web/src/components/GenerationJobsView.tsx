@@ -6,7 +6,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useAuth } from "@/components/AuthProvider";
 import { useLocale } from "@/components/LocaleProvider";
 import { api, type GenerationJob } from "@/lib/api";
-import { canCancelGenerationJob, isJobReadableInWorkspace, isTerminalJob, mergeGenerationJob, selectActiveGenerationJob } from "@/lib/generationJobsState";
+import { canCancelGenerationJob, isJobReadableInWorkspace, isTerminalJob, mergeGenerationJob, selectActiveGenerationJob, filterGenerationJobsToWorkspace } from "@/lib/generationJobsState";
 import { nextGenerationJobPollDelay } from "@/lib/generationJobsPolling";
 
 type Translate = (key: string, variables?: Record<string, string>) => string;
@@ -225,7 +225,10 @@ export function GenerationJobsView() {
     }
   }
 
-  const activeJob = selectActiveGenerationJob({ current, jobs, activeWorkspaceId: workspaceId });
+  // Filter the list in the same render as the AuthProvider workspace change. Waiting for
+  // loadRecent's effect would briefly expose old-workspace titles in the recent panel.
+  const visibleJobs = filterGenerationJobsToWorkspace(jobs, workspaceId);
+  const activeJob = selectActiveGenerationJob({ current, jobs: visibleJobs, activeWorkspaceId: workspaceId });
   const canCancel = canCancelGenerationJob(activeJob);
 
   return <div className="account-page generation-jobs-page">
@@ -243,7 +246,7 @@ export function GenerationJobsView() {
       </section>
       <section className="account-card generation-recent-card" aria-labelledby="generation-recent-title">
         <div className="card-title"><span className="card-title-icon"><Clock3 size={17} aria-hidden="true" /></span><div><h2 id="generation-recent-title">{t("jobs.recent")}</h2><p>{t("jobs.recentSubtitle")}</p></div></div>
-        {loading ? <div className="generation-empty" role="status" aria-live="polite">{t("jobs.loading")}</div> : jobs.length === 0 ? <div className="generation-empty" role="status" aria-live="polite">{t("jobs.empty")}</div> : <GenerationJobList jobs={jobs} activeJobId={activeJob?.id ?? null} t={t} onSelect={selectJob} />}
+        {loading ? <div className="generation-empty" role="status" aria-live="polite">{t("jobs.loading")}</div> : visibleJobs.length === 0 ? <div className="generation-empty" role="status" aria-live="polite">{t("jobs.empty")}</div> : <GenerationJobList jobs={visibleJobs} activeJobId={activeJob?.id ?? null} t={t} onSelect={selectJob} />}
       </section>
     </div>
   </div>;
