@@ -3,7 +3,7 @@ import { localeTag } from "@/lib/i18n";
 
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowLeft,
   Check,
@@ -26,15 +26,19 @@ import {
   clearDocumentActiveJobId,
   displayDocumentProgress,
   documentPresentationState,
-  isDocumentSourceReady,
+  type DocumentDraftState,
+  isDocumentDraftEmpty,
   isDocumentJobUnavailableError,
+  isDocumentSourceReady,
   isRestorableDocumentJob,
   nextDocumentPollDelay,
   parseDocumentJobResult,
   persistDocumentActiveJobId,
+  persistDocumentDraftState,
+  readDocumentActiveJobId,
+  readDocumentDraftState,
   retainDocumentWorkspaceProjectId,
   retainDocumentWorkspaceFileIds,
-  readDocumentActiveJobId,
   shouldResetDocumentWorkspaceState,
   shouldPollDocumentJob,
 } from "@/lib/documentStudioState";
@@ -113,6 +117,13 @@ export function DocumentStudioView() {
   const activeAssetId = useRef<string | null>(null);
   const observedWorkspaceId = useRef<string | null>(workspace?.id ?? null);
   const workspaceGeneration = useRef(0);
+  // The workspace whose unsaved brief is already represented by the mounted
+  // compose fields. Drafts are read once per workspace and mirrored on change.
+  const draftHydratedWorkspace = useRef<string | null>(null);
+  // Set by the hydration pass so the very next mirror run is skipped: that run
+  // still closes over the pre-hydration fields and would otherwise store (or
+  // clear) a brief the restored draft has not reached yet.
+  const draftJustHydrated = useRef(false);
 
   const loadSources = useCallback(async () => {
     if (!workspace) return;
@@ -158,6 +169,8 @@ export function DocumentStudioView() {
     restoreJobId.current = null;
     activeJobId.current = null;
     activeAssetId.current = null;
+    draftHydratedWorkspace.current = null;
+    draftJustHydrated.current = false;
     if (previousWorkspaceId === null && nextWorkspaceId !== null && !shouldResetDocumentWorkspaceState(current, nextWorkspaceId)) return;
     setCurrent(null);
     setSelected([]);
@@ -188,6 +201,55 @@ export function DocumentStudioView() {
   // Synchronize source documents, projects, and recent document assets when the authenticated workspace changes.
   // eslint-disable-next-line react-hooks/set-state-in-effect
   useEffect(() => { void loadSources(); }, [loadSources]);
+
+  // A tab switch away from the document editor unmounts this view, and an
+  // unsent brief only ever lived in component state: coming back showed an
+  // empty editor with the work discarded. Restore the workspace's unsaved
+  // draft once per mount, and only while no generation job owns the surface.
+  useEffect(() => {
+    if (!workspace || current || draftHydratedWorkspace.current === workspace.id) return;
+    const draft = readDocumentDraftState(workspace.id);
+    setProjectId(searchParams.get("projectId") || draft.projectId);
+    setSelected(draft.selected);
+    setTitle(draft.title);
+    setPrompt(draft.prompt);
+    setDocumentType(draft.documentType as DocumentType);
+    setLength(draft.length as DocumentLength);
+    setAudience(draft.audience);
+    setAdditionalInstructions(draft.additionalInstructions);
+    setLanguage(draft.language as DocumentLanguage);
+    setOutputFormat(draft.outputFormat as DocumentOutputFormat);
+    setTone(draft.tone as DocumentTone);
+    setIncludeTableOfContents(draft.includeTableOfContents);
+    draftHydratedWorkspace.current = workspace.id;
+    // Only a restored brief needs the skip: with nothing stored, the next
+    // mirror run already agrees with the mounted fields.
+    draftJustHydrated.current = !isDocumentDraftEmpty(draft);
+  }, [current, searchParams, workspace]);
+
+  const draft = useMemo<DocumentDraftState>(() => ({
+    projectId,
+    selected,
+    title,
+    prompt,
+    documentType,
+    length,
+    audience,
+    additionalInstructions,
+    language,
+    outputFormat,
+    tone,
+    includeTableOfContents,
+  }), [additionalInstructions, audience, documentType, includeTableOfContents, language, length, outputFormat, projectId, prompt, selected, title, tone]);
+
+  useEffect(() => {
+    if (!workspace || current || draftHydratedWorkspace.current !== workspace.id) return;
+    if (draftJustHydrated.current) {
+      draftJustHydrated.current = false;
+      return;
+    }
+    persistDocumentDraftState(workspace.id, draft);
+  }, [current, draft, workspace]);
 
   useEffect(() => {
     if (!workspace || current) return;
