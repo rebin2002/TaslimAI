@@ -23,5 +23,5 @@ export function isHomeDashboardRequestCurrent(token: HomeDashboardRequestToken, 
 
 /** Render-time privacy fence: effects may not run until after the first paint. */
 export function currentHomeDashboard<T extends { workspaceId: string }>(snapshot: T | null, mountedWorkspaceId: string | null): T | null {
-  return mountedWorkspaceId && snapshot?.workspaceId === mountedWorkspaceId ? snapshot : null;
+  return mountedWorkspaceId !== null && snapshot?.workspaceId === mountedWorkspaceId ? snapshot : null;
 }
