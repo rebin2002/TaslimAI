@@ -62,18 +62,14 @@ export function AuthProvider({ children }: Readonly<{ children: React.ReactNode 
       const localeSource = getLocaleSource();
       // `LocaleProvider` ranks the legacy `taslim-locale` device key above the pack
       // bootstrap key because every lane persists an explicit in-browser selection
-      // through it - the Arabic and Sorani RTL journeys included. While the account
-      // holds no saved choice, that device selection is the reader's own, so adopt it
-      // and mirror it into the account key: the anonymous bootstrap is cleared below,
-      // and without a durable value the next document load would flip back to English.
+      // through it - the Arabic and Sorani right-to-left journeys included. While the
+      // account holds no saved choice of its own, that device selection outranks the
+      // profile default: adopting the account value instead would flip those readers
+      // back to English, and copying it into the account key would strand them on the
+      // first language they picked, so a later switch through the same key is ignored.
       const deviceLocaleSelection = localeSource === "anonymous-storage" ? readStoredLocale(window.localStorage) : null;
-      if (!savedLanguagePack && deviceLocaleSelection) {
-        try {
-          writeStoredLanguagePack(window.localStorage, accountLanguagePackStorageKey(user.id), deviceLocaleSelection);
-        } catch {
-          // Storage can be unavailable; the device selection stays active in memory.
-        }
-      } else if (localeSource !== "user" && (localeSource !== "anonymous-storage" || savedLanguagePack)) {
+      const deviceSelectionIsSovereign = Boolean(deviceLocaleSelection) && !savedLanguagePack;
+      if (!deviceSelectionIsSovereign && localeSource !== "user" && (localeSource !== "anonymous-storage" || savedLanguagePack)) {
         setLanguagePack(savedLanguagePack ?? preferredLanguagePack, { persist: false, source: "account" });
       }
     }
@@ -90,8 +86,18 @@ export function AuthProvider({ children }: Readonly<{ children: React.ReactNode 
       if (getLocaleSource() === "user") {
         writeStoredLanguagePack(window.localStorage, accountLanguagePackStorageKey(userId), languagePackId);
       }
-      window.localStorage.removeItem(anonymousLanguagePackStorageKey);
-      window.localStorage.removeItem(anonymousLocaleStorageKey);
+      // Keep the bootstrap while it is the reader's own authority - nothing is saved on
+      // the account to outrank it and it is the value being displayed. Clearing it there
+      // would drop the language on the next document load and stop the same contract
+      // from carrying a later switch to another language.
+      const savedAccountChoice = readStoredLanguagePack(window.localStorage, accountLanguagePackStorageKey(userId))
+        ?? readStoredLocale(window.localStorage, accountLocaleStorageKey(userId));
+      const deviceBootstrap = readStoredLocale(window.localStorage) ?? readStoredLanguagePack(window.localStorage, anonymousLanguagePackStorageKey);
+      const deviceIsAuthority = getLocaleSource() === "anonymous-storage" && deviceBootstrap === languagePackId && !savedAccountChoice;
+      if (!deviceIsAuthority) {
+        window.localStorage.removeItem(anonymousLanguagePackStorageKey);
+        window.localStorage.removeItem(anonymousLocaleStorageKey);
+      }
     } catch {
       // Storage can be unavailable; the selected pack remains active in memory.
     }

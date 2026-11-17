@@ -116,25 +116,30 @@ test.describe("language-pack foundation", () => {
     expect(await page.evaluate(() => localStorage.getItem("taslim-language-pack"))).toBeNull();
   });
 
-  test("adopts a device language selection when first login left no account choice", async ({ authenticatedPage: page }) => {
+  test("adopts and re-applies a device language selection when first login left no account choice", async ({ authenticatedPage: page }) => {
     const response = await page.request.get("/api/auth/me");
     expect(response.ok()).toBe(true);
     const session = await response.json() as { user: { id: string; preferredLanguage: string } };
     expect(session.user.preferredLanguage).toBe("en");
 
-    // The reader completed first login without touching the picker, so the account holds
-    // no language choice of its own. Switching to Arabic through the legacy `taslim-locale`
-    // key - the contract Billing, Health Care and Image Studio persist with - must drive
-    // the document direction, and stay applied after the anonymous bootstrap is cleared.
+    // First login was completed untouched, so the account holds no language choice of
+    // its own. Arabic through the legacy `taslim-locale` key - the contract Billing,
+    // Health Care and Image Studio persist with - must drive the document direction,
+    // stay applied across document loads, and must not be frozen into an account value
+    // that would later silence a second switch through the same key.
     await page.evaluate(() => localStorage.setItem("taslim-locale", "ar"));
     await page.reload();
     await expect(page.locator("html")).toHaveAttribute("lang", "ar");
     await expect(page.locator("html")).toHaveAttribute("dir", "rtl");
-    await expect.poll(() => page.evaluate((userId) => localStorage.getItem(`taslim-language-pack:user:${encodeURIComponent(userId)}`), session.user.id)).toBe("ar");
     await page.goto("/projects");
-    await expect(page.locator("html")).toHaveAttribute("dir", "rtl");
-    await page.reload();
     await expect(page.locator("html")).toHaveAttribute("lang", "ar");
+    await expect(page.locator("html")).toHaveAttribute("dir", "rtl");
+    expect(await page.evaluate((userId) => localStorage.getItem(`taslim-language-pack:user:${encodeURIComponent(userId)}`), session.user.id)).toBeNull();
+
+    // Sorani through the same contract replaces Arabic rather than being outranked.
+    await page.evaluate(() => localStorage.setItem("taslim-locale", "ku"));
+    await page.reload();
+    await expect(page.locator("html")).toHaveAttribute("lang", "ckb");
     await expect(page.locator("html")).toHaveAttribute("dir", "rtl");
   });
 
