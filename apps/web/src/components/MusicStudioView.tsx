@@ -154,27 +154,42 @@ type ReferenceAudioPanelProps = {
 // the browser from this panel.
 export function ReferenceAudioPanel({ state, candidates, loading, t, onFileSelected, onStoredPicked, onClear }: ReferenceAudioPanelProps) {
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const chooseButtonRef = useRef<HTMLButtonElement>(null);
   const selected = state.candidate;
   const previewUrl = selected ? (selected.sourceKind === "local" ? state.previewObjectUrl : referenceAudioPreviewUrl(selected, api.assetFileUrl)) : null;
   const storedId = selected?.sourceKind === "stored_asset" ? selected.assetId ?? "" : "";
+  function handleClear() {
+    onClear();
+    // The clear button unmounts with the selection block. The chooser button
+    // survives the state update, so focus moves there instead of dropping to
+    // <body> and leaving the keyboard user at the top of the page.
+    chooseButtonRef.current?.focus();
+  }
   return <section className="music-reference-panel" aria-labelledby="music-reference-title">
     <div className="music-reference-heading"><div><p className="music-overline">{t("music.reference.eyebrow")}</p><h3 id="music-reference-title">{t("music.reference.title")}</h3></div><Info size={18} aria-hidden="true" /></div>
     <p className="music-reference-description">{t("music.reference.description")}</p>
     <div className="music-reference-picker">
       <input ref={fileInputRef} className="music-reference-input" type="file" accept={REFERENCE_AUDIO_ACCEPT} onChange={onFileSelected} aria-label={t("music.reference.uploadLabel")} />
-      <button type="button" className="music-action-button" onClick={() => fileInputRef.current?.click()}>{t("music.reference.chooseFile")}</button>
+      <button type="button" ref={chooseButtonRef} className="music-action-button" onClick={() => fileInputRef.current?.click()}>{t("music.reference.chooseFile")}</button>
       <span>{t("music.reference.fileHint")}</span>
     </div>
-    {loading ? <p className="music-reference-muted">{t("music.reference.loading")}</p> : candidates.length > 0 ? <label className="music-choice-field music-reference-select"><span>{t("music.reference.savedLabel")}</span><select value={storedId} onChange={(event) => {
+    {/* One persistent status paragraph: the private library query resolves
+        while this panel is already on screen, so the loading -> empty swap
+        lands in the same live region and is announced instead of silently
+        swapping two different paragraphs. */}
+    <p className="music-reference-muted music-reference-status" role="status">{loading ? t("music.reference.loading") : candidates.length === 0 ? t("music.reference.empty") : ""}</p>
+    {!loading && candidates.length > 0 ? <label className="music-choice-field music-reference-select"><span>{t("music.reference.savedLabel")}</span><select value={storedId} onChange={(event) => {
       const picked = event.target.value ? candidates.find((candidate) => candidate.assetId === event.target.value) : null;
       if (picked) onStoredPicked(picked);
-    }}><option value="">{t("music.reference.savedPlaceholder")}</option>{candidates.map((candidate) => <option key={candidate.id} value={candidate.assetId ?? ""}>{candidate.displayName}</option>)}</select></label> : <p className="music-reference-muted">{t("music.reference.empty")}</p>}
+    }}><option value="">{t("music.reference.savedPlaceholder")}</option>{candidates.map((candidate) => <option key={candidate.id} value={candidate.assetId ?? ""}>{candidate.displayName}</option>)}</select></label> : null}
     {state.rejectedReasonKey ? <p className="music-reference-error" role="alert">{t(state.rejectedReasonKey)}</p> : null}
-    {selected ? <div className="music-reference-selected" aria-live="polite">
-      <div className="music-reference-file"><MusicArtwork /><div><strong>{selected.displayName}</strong><span>{formatReferenceAudioSize(selected.sizeBytes) ?? t("music.reference.metadataUnavailable")}</span></div><button type="button" className="music-reference-clear" onClick={onClear}>{t("music.reference.clear")}</button></div>
-      {previewUrl ? <audio className="music-reference-audio" controls preload="metadata" src={previewUrl} aria-label={`${t("music.reference.previewLabel")}: ${selected.displayName}`} /> : <p className="music-reference-muted">{t("music.reference.previewUnavailable")}</p>}
-      <p className="music-reference-note">{t("music.reference.note")}</p>
-    </div> : null}
+    <div className="music-reference-live" aria-live="polite">
+      {selected ? <div className="music-reference-selected">
+        <div className="music-reference-file"><MusicArtwork /><div><strong>{selected.displayName}</strong><span>{formatReferenceAudioSize(selected.sizeBytes) ?? t("music.reference.metadataUnavailable")}</span></div><button type="button" className="music-reference-clear" onClick={handleClear}>{t("music.reference.clear")}</button></div>
+        {previewUrl ? <audio className="music-reference-audio" controls preload="metadata" src={previewUrl} aria-label={`${t("music.reference.previewLabel")}: ${selected.displayName}`} /> : <p className="music-reference-muted">{t("music.reference.previewUnavailable")}</p>}
+        <p className="music-reference-note">{t("music.reference.note")}</p>
+      </div> : null}
+    </div>
   </section>;
 }
 
