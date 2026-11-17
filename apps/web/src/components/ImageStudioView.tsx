@@ -27,7 +27,7 @@ import { useLocale } from "@/components/LocaleProvider";
 import { useSearchParams } from "next/navigation";
 import { ApiError, api, type Asset, type GenerationJob, type ImageGenerationInput, type Project } from "@/lib/api";
 import { localizedImageErrorMessage } from "@/lib/imageStudioErrors";
-import { canCancelImageJob, clearImageActiveJobId, isRestorableImageJob, mergeImageJobUpdate, nextImagePollDelay, nextImageRestoreDelay, parseImageJobResult, persistImageActiveJobId, readImageActiveJobId, shouldClearImageJobAfterPollError, shouldPollImageJob, shouldResetImageWorkspaceState, shouldRetryImageRestore } from "@/lib/imageStudioState";
+import { canCancelImageJob, clearImageActiveJobId, isRestorableImageJob, mergeImageJobUpdate, nextImagePollDelay, nextImageRestoreDelay, parseImageJobResult, persistImageActiveJobId, readImageActiveJobId, shouldClearImageJobAfterPollError, shouldPollImageJob, shouldResetImageWorkspaceState, shouldRetryImageRestore, subscribeImageActiveJobChanges } from "@/lib/imageStudioState";
 
 const styles = ["auto", "photorealistic", "product", "illustration", "3d", "minimal", "poster", "social_media"] as const;
 const aspects = ["square", "portrait", "landscape"] as const;
@@ -148,6 +148,21 @@ function ImageStudioContent() {
   const [loadingProjects, setLoadingProjects] = useState(true);
   const [loadingRecent, setLoadingRecent] = useState(true);
   const [error, setError] = useState("");
+  // Bumped whenever the active-job pointer for this identity changes, including when the write
+  // comes from a request that outlived the instance that issued it.
+  const [pointerRevision, setPointerRevision] = useState(0);
+
+  useEffect(() => {
+    const userId = user?.id;
+    const workspaceId = workspace?.id;
+    if (!userId || !workspaceId) return;
+    // Only the identity that owns the pointer may adopt it, so a write for a previous workspace
+    // or a previous account never starts a read here.
+    return subscribeImageActiveJobChanges((changedUserId, changedWorkspaceId) => {
+      if (changedUserId !== userId || changedWorkspaceId !== workspaceId) return;
+      setPointerRevision((revision) => revision + 1);
+    });
+  }, [user?.id, workspace?.id]);
 
   const loadProjects = useCallback(async () => {
     if (!user?.id || !workspace || sessionDeniedRef.current) return;
@@ -263,7 +278,7 @@ function ImageStudioContent() {
     };
     readStoredJob(0);
     return () => { active = false; window.clearTimeout(retryTimer); };
-  }, [user?.id, workspace, current, t]);
+  }, [user?.id, workspace, current, pointerRevision, t]);
 
   useEffect(() => {
     const workspaceId = workspace?.id;
