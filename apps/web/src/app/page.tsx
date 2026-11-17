@@ -97,7 +97,7 @@ function HomeDashboard() {
   // Effects run after a render commits. Never render cached rows or errors from the
   // previous workspace during the intervening frame before effect cleanup executes.
   const visibleDashboard = currentHomeDashboard(dashboard, workspace?.id ?? null);
-  const visibleLoadError = loadError?.workspaceId === workspace?.id ? loadError.message : "";
+  const visibleLoadError = loadError && loadError.workspaceId === workspace?.id ? loadError.message : "";
   const visibleLoading = loading || Boolean(dashboard && !visibleDashboard);
   const recentItems = useMemo(() => visibleDashboard ? buildHomeRecentItems(visibleDashboard, 4) : [], [visibleDashboard]);
   const hasWorkingGeneration = hasInFlightActivity(visibleDashboard?.activity ?? []);
