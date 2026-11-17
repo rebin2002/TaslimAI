@@ -446,8 +446,29 @@ function ResearchResultView({ result, sourcesLoadStatus, onRetrySources, working
   </section>;
 }
 
-function EvidenceRail({ sources, t }: { sources: ResearchSource[]; t: Translate }) {
-  return <div className="research-evidence-panel"><div className="research-sources-heading"><div><p className="research-section-kicker">{t("research.evidenceRail")}</p><h3>{t("research.sourcesTitle")}</h3></div><span>{sources.length}</span></div>{sources.length === 0 ? <p className="research-no-evidence">{t("research.noSources")}</p> : sources.map((source) => <article className="research-source-card" key={source.citationId}><div className="research-source-card-heading"><span className="research-citation">[{source.citationId}]</span><div><h4>{source.title}</h4><small>{source.publisher || source.domain} · {source.sourceType}</small></div>{isSafeExternalUrl(source.url) ? <a href={source.url ?? undefined} target="_blank" rel="noreferrer" aria-label={`${t("research.openSource")}: ${source.title}`}><ExternalLink size={15} /></a> : null}</div>{source.snippet && <p>{source.snippet}</p>}{source.evidence?.slice(0, 3).map((evidence, index) => <div className="research-evidence" key={`${source.citationId}-${index}`}><strong>{evidence.topic || t("research.evidence")}</strong><span>{evidence.excerpt}</span></div>)}</article>)}</div>;
+/**
+ * Render-boundary mirror of the server-side citation policy (apps/api/Research/
+ * ResearchCitationUrlPolicy.cs, pinned by ResearchCitationUrlIngestTests.cs). A stored
+ * locator such as "https://taslim.ai:secret@evil.example/report" names one host in the
+ * prefix the reader checks while the browser navigates to the authority after the "@".
+ * The ingest policy rejects that shape, but persisted rows reach this view verbatim
+ * from the detail endpoint and were never backfilled, so the evidence rail must fail
+ * closed on the click itself: absolute http(s), a host, and no "@" below the authority.
+ * An "@" in the path, query or fragment is a legitimate locator and stays clickable.
+ */
+export function isSafeCitationLocator(value: string | null) {
+  if (!value || !isSafeExternalUrl(value)) return false;
+  const locator = value.replace(/[\t\n\r]/g, "").trim();
+  try {
+    const url = new URL(locator);
+    if (!url.hostname) return false;
+    const authority = locator.slice(url.protocol.length).replace(/^\/\//, "").split(/[/?#\\]/, 1)[0] ?? "";
+    return !authority.includes("@");
+  } catch { return false; }
+}
+
+export function EvidenceRail({ sources, t }: { sources: ResearchSource[]; t: Translate }) {
+  return <div className="research-evidence-panel"><div className="research-sources-heading"><div><p className="research-section-kicker">{t("research.evidenceRail")}</p><h3>{t("research.sourcesTitle")}</h3></div><span>{sources.length}</span></div>{sources.length === 0 ? <p className="research-no-evidence">{t("research.noSources")}</p> : sources.map((source) => <article className="research-source-card" key={source.citationId}><div className="research-source-card-heading"><span className="research-citation">[{source.citationId}]</span><div><h4>{source.title}</h4><small>{source.publisher || source.domain} · {source.sourceType}</small></div>{isSafeCitationLocator(source.url) ? <a href={source.url ?? undefined} target="_blank" rel="noreferrer" aria-label={`${t("research.openSource")}: ${source.title}`}><ExternalLink size={15} /></a> : null}</div>{source.snippet && <p>{source.snippet}</p>}{source.evidence?.slice(0, 3).map((evidence, index) => <div className="research-evidence" key={`${source.citationId}-${index}`}><strong>{evidence.topic || t("research.evidence")}</strong><span>{evidence.excerpt}</span></div>)}</article>)}</div>;
 }
 
 function RecentResearch({ assets, loading, locale, t }: { assets: Asset[]; loading: boolean; locale: string; t: Translate }) {
