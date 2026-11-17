@@ -62,7 +62,13 @@ export function AuthProvider({ children }: Readonly<{ children: React.ReactNode 
         // Access to browser storage can be blocked by privacy settings.
       }
       const localeSource = getLocaleSource();
-      if (localeSource !== "user" && localeSource !== "anonymous-storage") {
+      // An explicit in-session selector choice keeps the floor. The
+      // mount-time anonymous bootstrap does too, but only while the account
+      // has no saved selector choice of its own: declining adoption here
+      // while the persistence effect below writes the current locale would
+      // overwrite that saved choice with the stale bootstrap value and lock
+      // it in for every later session on this browser.
+      if (localeSource !== "user" && (localeSource !== "anonymous-storage" || savedLocale)) {
         setLocale(savedLocale ?? user.preferredLanguage, { persist: false, source: "account" });
       }
     }
@@ -71,12 +77,19 @@ export function AuthProvider({ children }: Readonly<{ children: React.ReactNode 
     const userId = session?.user.id;
     if (!userId || sessionLocaleInitialized.current !== userId) return;
     try {
-      writeStoredLocale(window.localStorage, accountLocaleStorageKey(userId), locale);
+      // The account key stores only explicit choices - the header selector
+      // (source "user") or a profile save (persisted in updateProfile). An
+      // automatically adopted server profile language or a restored device
+      // bootstrap must not masquerade as one, or it would outvote the user's
+      // real saved selector choice on the next sign-in.
+      if (getLocaleSource() === "user") {
+        writeStoredLocale(window.localStorage, accountLocaleStorageKey(userId), locale);
+      }
       window.localStorage.removeItem(anonymousLocaleStorageKey);
     } catch {
       // The in-memory locale remains active when browser storage is unavailable.
     }
-  }, [locale, session?.user.id]);
+  }, [getLocaleSource, locale, session?.user.id]);
 
   const signIn = useCallback(async (input: LoginInput, redirectTo?: string) => {
     const request = ++authRequestGeneration.current;
@@ -113,7 +126,18 @@ export function AuthProvider({ children }: Readonly<{ children: React.ReactNode 
     // choice immediately so Account does not require a reload to switch the
     // document language and direction.
     const nextLocale = input.preferredLanguage as Locale;
-    if (locales.includes(nextLocale)) setLocale(nextLocale, { persist: false, source: "account" });
+    if (locales.includes(nextLocale)) {
+      setLocale(nextLocale, { persist: false, source: "account" });
+      // A profile save is an explicit choice, so it belongs in the account
+      // key right away even though the shared persistence effect only
+      // follows selector actions.
+      try {
+        writeStoredLocale(window.localStorage, accountLocaleStorageKey(next.user.id), nextLocale);
+      } catch {
+        // The server profile remains the source of truth when browser
+        // storage is unavailable; the in-memory choice still applies.
+      }
+    }
   }, [setLocale]);
 
   const completeOnboarding = useCallback(async (input: OnboardingInput) => {
