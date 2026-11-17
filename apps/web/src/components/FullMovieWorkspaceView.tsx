@@ -394,7 +394,7 @@ function revisionToDraft(revision: MovieStoryRevision): MovieStoryRevisionInput 
   return { premise: revision.premise, logline: revision.logline, synopsis: revision.synopsis, treatment: revision.treatment, authorship: revision.authorship, parentRevisionId: revision.parentRevisionId, changeSummary: revision.changeSummary ?? "", scenes: revision.scenes.map((scene) => ({ sceneIdentifier: scene.sceneIdentifier, actNumber: scene.actNumber, sequenceNumber: scene.sequenceNumber, movieSceneId: scene.movieSceneId, slugline: scene.slugline, synopsis: scene.synopsis, elements: scene.elements.map((element) => ({ elementType: element.elementType, content: element.content, characterName: element.characterName, parenthetical: element.parenthetical })) })) };
 }
 
-function StoryModule({ projectId, guideLocked }: { projectId: string; guideLocked: boolean }) {
+export function StoryModule({ projectId, guideLocked }: { projectId: string; guideLocked: boolean }) {
   const { t } = useLocale();
   const [story, setStory] = useState<MovieStory | null>(null);
   const [draft, setDraft] = useState<MovieStoryRevisionInput>(emptyStoryDraft);
@@ -411,6 +411,14 @@ function StoryModule({ projectId, guideLocked }: { projectId: string; guideLocke
   const [storySceneId, setStorySceneId] = useState<string | null>(null);
   const [storyBusy, setStoryBusy] = useState(false);
   const [focusAfterDirectorApply, setFocusAfterDirectorApply] = useState<StorySection | null>(null);
+  // Slow networks can leave a save or a revision read in flight while the editor
+  // moves on (typing, a newer revision click, or a project switch). The epoch
+  // fences those async continuations so a stale response never replays over the
+  // live editor, and draftRef lets a save confirm only the snapshot it sent.
+  const editorEpoch = useRef(0);
+  const draftRef = useRef(draft);
+  useEffect(() => { draftRef.current = draft; }, [draft]);
+  useEffect(() => { editorEpoch.current += 1; }, [projectId]);
 
   useEffect(() => {
     let mounted = true;
@@ -434,22 +442,32 @@ function StoryModule({ projectId, guideLocked }: { projectId: string; guideLocke
 
   async function saveDraft() {
     if (!story?.canEdit || saving) return;
+    const snapshot = draft;
+    const epoch = editorEpoch.current;
+    const superseded = () => epoch !== editorEpoch.current;
     setSaving(true);
     setError("");
     try {
       if (draftRevisionId) {
-        const saved = await api.updateMovieStoryDraft(projectId, draftRevisionId, draft);
-        setStory(await api.getMovieStory(projectId));
+        const saved = await api.updateMovieStoryDraft(projectId, draftRevisionId, snapshot);
+        const latest = await api.getMovieStory(projectId);
+        if (superseded()) return;
+        setStory(latest);
         setSelectedRevision(saved);
       } else {
-        const next = await api.createMovieStoryRevision(projectId, { ...draft, parentRevisionId: story.currentRevisionId });
+        const next = await api.createMovieStoryRevision(projectId, { ...snapshot, parentRevisionId: story.currentRevisionId });
+        if (superseded()) return;
         setStory(next);
         setSelectedRevision(next.currentRevision);
         setDraftRevisionId(next.currentRevisionId);
       }
-      setDirty(false);
+      // Clear dirty only while the editor still holds the exact snapshot the
+      // request sent; edits typed during a slow save keep the flag raised so the
+      // debounce effect re-arms and a follow-up save carries them to the server.
+      if (draftRef.current === snapshot) setDirty(false);
       setSavedAt(new Date());
     } catch (cause) {
+      if (superseded()) return;
       setError(cause instanceof Error ? cause.message : "The draft could not be saved.");
     } finally {
       setSaving(false);
@@ -457,11 +475,13 @@ function StoryModule({ projectId, guideLocked }: { projectId: string; guideLocke
   }
 
   useEffect(() => {
-    if (!dirty || !story?.canEdit || !draft.premise.trim() || !draft.logline.trim() || !draft.synopsis.trim() || !draft.treatment.trim()) return;
+    if (!dirty || saving || !story?.canEdit || !draft.premise.trim() || !draft.logline.trim() || !draft.synopsis.trim() || !draft.treatment.trim()) return;
     const timer = window.setTimeout(() => { void saveDraft(); }, 1800);
     return () => window.clearTimeout(timer);
     // The draft object is intentionally observed through the dirty flag to debounce editor input.
-  }, [dirty, draft]);
+    // 'saving' is a dependency so an edit that arrived mid-flight re-arms the timer the moment
+    // the in-flight save settles, giving the late keystrokes a follow-up save.
+  }, [dirty, saving, draft]);
 
   function updateDraft(patch: Partial<MovieStoryRevisionInput>) {
     setDraft((current) => ({ ...current, ...patch }));
@@ -519,13 +539,21 @@ function StoryModule({ projectId, guideLocked }: { projectId: string; guideLocke
   }
 
   async function inspectRevision(revisionId: string) {
+    const epoch = editorEpoch.current += 1;
+    const superseded = () => epoch !== editorEpoch.current;
     try {
       const revision = await api.getMovieStoryRevision(projectId, revisionId);
+      // Only the most recent revision click may take over the editor; a slower
+      // response for an earlier click must not replay its content on top.
+      if (superseded()) return;
       setSelectedRevision(revision);
       setDraft(revisionToDraft(revision));
       setDraftRevisionId(revision.status === "Draft" ? revision.id : null);
       setDirty(false);
-    } catch (cause) { setError(cause instanceof Error ? cause.message : "That revision could not be opened."); }
+    } catch (cause) {
+      if (superseded()) return;
+      setError(cause instanceof Error ? cause.message : "That revision could not be opened.");
+    }
   }
 
   async function createStoryProposal() {
