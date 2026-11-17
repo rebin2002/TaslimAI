@@ -11,7 +11,7 @@ import { useLocale } from "@/components/LocaleProvider";
 import { StudioChooser } from "@/components/StudioChooser";
 import { api, type ActivityItem, type Asset, type Conversation, type Project } from "@/lib/api";
 import { buildHomeRecentItems, hasInFlightActivity, type HomeRecentItem } from "@/lib/homeDashboardState";
-import { isHomeDashboardRequestCurrent, startHomeDashboardRequest } from "@/lib/homeDashboardRequest";
+import { currentHomeDashboard, isHomeDashboardRequestCurrent, startHomeDashboardRequest } from "@/lib/homeDashboardRequest";
 
 const promptChips = [
   { labelKey: "home.promptCampaign" },
@@ -19,7 +19,7 @@ const promptChips = [
   { labelKey: "home.promptPresentation" },
   { labelKey: "home.promptImage" },
 ] as const;
-type DashboardData = { projects: Project[]; conversations: Conversation[]; activity: ActivityItem[]; assets: Asset[] };
+type DashboardData = { workspaceId: string; projects: Project[]; conversations: Conversation[]; activity: ActivityItem[]; assets: Asset[] };
 
 function formatDate(value: string, locale: Locale) {
   return new Intl.DateTimeFormat(localeTag(locale), { month: "short", day: "numeric" }).format(new Date(value));
@@ -39,7 +39,7 @@ function HomeDashboard() {
   const [asking, setAsking] = useState(false);
   const [dashboard, setDashboard] = useState<DashboardData | null>(null);
   const [loading, setLoading] = useState(true);
-  const [loadError, setLoadError] = useState("");
+  const [loadError, setLoadError] = useState<{ workspaceId: string; message: string } | null>(null);
   const [askError, setAskError] = useState("");
   // Only the newest load for the workspace that is actually mounted may
   // publish: a dashboard started for a workspace the user has left, or for a
@@ -62,12 +62,12 @@ function HomeDashboard() {
         api.listAssets(workspaceId, { status: "Active", page: 1, pageSize: 12 }),
       ]);
       if (!isHomeDashboardRequestCurrent(request, dashboardRequestSequence.current, activeWorkspaceId.current)) return;
-      setDashboard({ projects, conversations, activity: activityResult.items, assets: assetsResult.items });
-      setLoadError("");
+      setDashboard({ workspaceId, projects, conversations, activity: activityResult.items, assets: assetsResult.items });
+      setLoadError(null);
     } catch (caught) {
       // A retired load cannot raise an alert over the mounted workspace.
       if (isHomeDashboardRequestCurrent(request, dashboardRequestSequence.current, activeWorkspaceId.current)) {
-        setLoadError(caught instanceof Error ? caught.message : t("home.loadError"));
+        setLoadError({ workspaceId, message: caught instanceof Error ? caught.message : t("home.loadError") });
       }
     } finally {
       if (isHomeDashboardRequestCurrent(request, dashboardRequestSequence.current, activeWorkspaceId.current)) setLoading(false);
@@ -81,7 +81,7 @@ function HomeDashboard() {
     dashboardRequestSequence.current += 1;
     /* eslint-disable react-hooks/set-state-in-effect */
     setDashboard(null);
-    setLoadError("");
+    setLoadError(null);
     /* eslint-enable react-hooks/set-state-in-effect */
   }, [workspace?.id]);
 
@@ -94,9 +94,14 @@ function HomeDashboard() {
     return () => { dashboardRequestSequence.current += 1; };
   }, [loadDashboard]);
 
-  const recentItems = useMemo(() => dashboard ? buildHomeRecentItems(dashboard, 4) : [], [dashboard]);
-  const hasWorkingGeneration = hasInFlightActivity(dashboard?.activity ?? []);
-  const projects = dashboard?.projects ?? [];
+  // Effects run after a render commits. Never render cached rows or errors from the
+  // previous workspace during the intervening frame before effect cleanup executes.
+  const visibleDashboard = currentHomeDashboard(dashboard, workspace?.id ?? null);
+  const visibleLoadError = loadError?.workspaceId === workspace?.id ? loadError.message : "";
+  const visibleLoading = loading || Boolean(dashboard && !visibleDashboard);
+  const recentItems = useMemo(() => visibleDashboard ? buildHomeRecentItems(visibleDashboard, 4) : [], [visibleDashboard]);
+  const hasWorkingGeneration = hasInFlightActivity(visibleDashboard?.activity ?? []);
+  const projects = visibleDashboard?.projects ?? [];
 
   async function askTaslim() {
     const prompt = idea.trim();
@@ -145,8 +150,8 @@ function HomeDashboard() {
           <div><p className="home-section-kicker">{t("home.continueKicker")}</p><h2 id="continue-work-title">{t("home.continueSectionTitle")}</h2><p>{hasWorkingGeneration ? t("home.workInProgress") : t("home.continueSubtitle")}</p></div>
           <Link href="/activity" className="home-view-all">{t("home.viewAll")} <ArrowUpRight size={14} /></Link>
         </div>
-        {loadError && <div className="inline-error home-dashboard-error" role="alert">{loadError}</div>}
-        {loading ? <div className="home-recent-loading"><LoaderCircle className="home-button-spinner" size={21} /><span>{t("home.loadingWork")}</span></div> : recentItems.length ? <div className="home-recent-grid">{recentItems.map((item) => <RecentWorkCard key={item.id} item={item} locale={locale} t={t} />)}</div> : <div className="home-empty-work"><FolderKanban size={20} /><p>{t("home.noWorkDescription")}</p><Link href="/projects" className="home-empty-link">{t("home.viewAll")} <ArrowRight size={14} /></Link></div>}
+        {visibleLoadError && <div className="inline-error home-dashboard-error" role="alert">{visibleLoadError}</div>}
+        {visibleLoading ? <div className="home-recent-loading"><LoaderCircle className="home-button-spinner" size={21} /><span>{t("home.loadingWork")}</span></div> : recentItems.length ? <div className="home-recent-grid">{recentItems.map((item) => <RecentWorkCard key={item.id} item={item} locale={locale} t={t} />)}</div> : <div className="home-empty-work"><FolderKanban size={20} /><p>{t("home.noWorkDescription")}</p><Link href="/projects" className="home-empty-link">{t("home.viewAll")} <ArrowRight size={14} /></Link></div>}
       </section>
     </div>
   );
