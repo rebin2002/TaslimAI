@@ -9,7 +9,6 @@ import {
   Check,
   CheckCircle2,
   Clock3,
-  Download,
   FileAudio,
   Headphones,
   LoaderCircle,
@@ -22,8 +21,10 @@ import {
   XCircle,
 } from "lucide-react";
 import { useAuth } from "@/components/AuthProvider";
+import { MediaJobArtifactDownload } from "@/components/MediaJobArtifactDownload";
 import { useLocale } from "@/components/LocaleProvider";
 import { ApiError, api, type Asset, type GenerationJob, type Project, type VoiceGenerationInput } from "@/lib/api";
+import { findMediaJobArtifact, mediaJobArtifactDownloadState } from "@/lib/mediaJobArtifactState";
 import { canCancelVoiceJob, clearVoiceActiveJobId, formatVoiceDuration, formatVoiceFileSize, isRestorableVoiceJob, isVoiceAsset, nextVoicePollDelay, parseVoiceJobResult, persistVoiceActiveJobId, readVoiceActiveJobId, shouldPollVoiceJob } from "@/lib/voiceStudioState";
 
 const languages = ["en", "ar", "ku"] as const;
@@ -215,6 +216,14 @@ export function VoiceStudioView() {
     }, nextVoicePollDelay(current, pollRetry) ?? 650);
     return () => { active = false; window.clearTimeout(timer); };
   }, [current, pollRetry, t]);
+  // A finished job re-reads the workspace lists, as the Music studio already
+  // does, so the download control reflects the stored-file state of its own
+  // artifact rather than the snapshot taken when the studio mounted.
+  useEffect(() => {
+    if (current?.status !== "Succeeded") return;
+    const timer = window.setTimeout(() => void loadWorkspaceData(), 0);
+    return () => window.clearTimeout(timer);
+  }, [current?.status, loadWorkspaceData]);
 
   async function generate(event: React.FormEvent) {
     event.preventDefault();
@@ -272,6 +281,11 @@ export function VoiceStudioView() {
   }
 
   const result = useMemo(() => parseVoiceJobResult(current), [current]);
+  // The loaded workspace list is what tells this studio whether the finished
+  // job's artifact still has a stored file, so the download control is derived
+  // from it instead of from the job result alone.
+  const resultArtifact = useMemo(() => findMediaJobArtifact(recentAssets, result?.assetId), [recentAssets, result]);
+  const resultArtifactState = mediaJobArtifactDownloadState(resultArtifact);
   const isSuccess = current?.status === "Succeeded" && !!result?.assetId;
   const isFailure = current?.status === "Failed" || current?.status === "Cancelled";
   const unavailable = current?.errorCode === "VOICE_PROVIDER_UNAVAILABLE";
@@ -309,7 +323,7 @@ export function VoiceStudioView() {
             <div className="voice-result-copy"><strong>{text.trim().slice(0, 72) || t("voice.untitledAudio")}</strong><span>{t(`voice.language.${result.language ?? language}`)} · {t(`voice.style.${result.voiceStyle ?? voiceStyle}`)} · {t(`voice.speaking.${result.speakingStyle ?? speakingStyle}`)}</span></div>
             <VoiceAudioPlayer src={api.assetFileUrl(result.assetId!, true)} label={t("voice.resultTitle")} durationMilliseconds={result.durationMilliseconds} />
           </div>
-          <div className="voice-result-actions"><a className="voice-secondary-action" href={api.assetFileUrl(result.assetId!)}><Download size={15} /> {t("voice.download")}</a><Link className="voice-secondary-action" href={`/assets?search=${encodeURIComponent(text.slice(0, 60))}`}>{t("voice.openAssets")}</Link><button className="voice-primary-action" type="button" onClick={createAnother}><RefreshCw size={15} /> {t("voice.createAnother")}</button></div>
+          <div className="voice-result-actions"><MediaJobArtifactDownload href={api.assetFileUrl(result.assetId!)} state={resultArtifactState} className="voice-secondary-action" label={t("voice.download")} unavailableLabel={t("assets.fileUnavailable")} /><Link className="voice-secondary-action" href={`/assets?search=${encodeURIComponent(text.slice(0, 60))}`}>{t("voice.openAssets")}</Link><button className="voice-primary-action" type="button" onClick={createAnother}><RefreshCw size={15} /> {t("voice.createAnother")}</button></div>
         </section>
       ) : isGenerating ? (
         <section className="voice-generation-panel" aria-labelledby="voice-generation-title">
@@ -346,7 +360,7 @@ export function VoiceStudioView() {
 
       <section className="voice-recent-section" aria-labelledby="voice-recent-title">
         <div className="voice-section-heading"><div><p className="section-eyebrow">03 / {t("voice.workflow.listen")}</p><h2 id="voice-recent-title">{t("voice.recentTitle")}</h2><p>{t("voice.recentSubtitle")}</p></div><Link href="/assets?type=audio" className="voice-text-link">{t("voice.openAssets")} <span aria-hidden="true">→</span></Link></div>
-        {loadingRecent ? <div className="voice-recent-loading" role="status" aria-live="polite"><LoaderCircle size={18} aria-hidden="true" /><span>{t("voice.recentLoading")}</span></div> : recentAssets.length === 0 ? <div className="voice-recent-empty"><div className="voice-empty-icon"><FileAudio size={22} /></div><div><h3>{t("voice.recentEmptyTitle")}</h3><p>{t("voice.recentEmptyDescription")}</p></div></div> : <div className="voice-recent-list">{recentAssets.map((asset) => <article className="voice-recent-item" key={asset.id}><div className="voice-recent-icon"><FileAudio size={17} /></div><div className="voice-recent-copy"><strong title={asset.name}>{asset.name}</strong><span>{asset.projectName ?? t("voice.noProject")} · {formatCreatedAt(asset.createdAt, locale)}</span><small>{formatVoiceFileSize(asset.fileSizeBytes)}{asset.mimeType ? ` · ${asset.mimeType.replace("audio/", "").toUpperCase()}` : ""}</small></div>{asset.hasFile && asset.canPreview ? <VoiceAudioPlayer src={api.assetFileUrl(asset.id, true)} label={asset.name} compact /> : <span className="voice-audio-unavailable">{t("voice.audioUnavailable")}</span>}<a className="voice-download-icon" href={api.assetFileUrl(asset.id)} aria-label={`${t("voice.download")} ${asset.name}`}><Download size={15} /></a></article>)}</div>}
+        {loadingRecent ? <div className="voice-recent-loading" role="status" aria-live="polite"><LoaderCircle size={18} aria-hidden="true" /><span>{t("voice.recentLoading")}</span></div> : recentAssets.length === 0 ? <div className="voice-recent-empty"><div className="voice-empty-icon"><FileAudio size={22} /></div><div><h3>{t("voice.recentEmptyTitle")}</h3><p>{t("voice.recentEmptyDescription")}</p></div></div> : <div className="voice-recent-list">{recentAssets.map((asset) => <article className="voice-recent-item" key={asset.id}><div className="voice-recent-icon"><FileAudio size={17} /></div><div className="voice-recent-copy"><strong title={asset.name}>{asset.name}</strong><span>{asset.projectName ?? t("voice.noProject")} · {formatCreatedAt(asset.createdAt, locale)}</span><small>{formatVoiceFileSize(asset.fileSizeBytes)}{asset.mimeType ? ` · ${asset.mimeType.replace("audio/", "").toUpperCase()}` : ""}</small></div>{asset.hasFile && asset.canPreview ? <VoiceAudioPlayer src={api.assetFileUrl(asset.id, true)} label={asset.name} compact /> : <span className="voice-audio-unavailable">{t("voice.audioUnavailable")}</span>}<MediaJobArtifactDownload variant="icon" href={api.assetFileUrl(asset.id)} state={mediaJobArtifactDownloadState(asset)} className="voice-download-icon" label={t("voice.download")} unavailableLabel={t("assets.fileUnavailable")} assetName={asset.name} /></article>)}</div>}
       </section>
       <p className="voice-studio-footnote">{t("voice.safetyNote")}</p>
     </div>
