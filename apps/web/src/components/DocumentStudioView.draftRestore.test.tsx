@@ -236,6 +236,12 @@ function elementById(id: string): TestNode {
   if (!node) throw new Error(`missing element #${id}`);
   return node;
 }
+/** Same walk as findByAttribute, for the cases where the element must be
+ * absent rather than present. */
+function hasAttribute(name: string, value: string): boolean {
+  const visit = (node: TestNode): boolean => node.getAttribute(name) === value || node.childNodes.some(visit);
+  return visit(testDocument);
+}
 function findByAttribute(name: string, value: string): TestNode {
   const visit = (node: TestNode): TestNode | null => (node.getAttribute(name) === value ? node : node.childNodes.map(visit).find(Boolean) ?? null);
   const found = visit(testDocument);
@@ -405,5 +411,40 @@ describe("Document Studio unsaved draft across a tab switch", () => {
 
     expect(elementById("document-brief").value).toBe("");
     expect(stored.has(documentDraftStorageKey(harness.auth.user.id, workspaceA.id))).toBe(false);
+  });
+
+  it("names the unsent brief as restored when it comes back", async () => {
+    await mountStudio(workspaceA);
+    await type(elementById("document-brief"), briefText);
+
+    await switchTabAwayAndBack(workspaceA);
+
+    // The text is back; the notice tells the user it came from their own
+    // unsent draft instead of leaving the restoration as an unexplained
+    // surprise. `t` is the identity mock, so the key names the catalog entry
+    // whose EN/AR/Sorani copies are pinned by i18nParity and the browser
+    // acceptance suite.
+    expect(hasAttribute("data-document-draft-restored", "true")).toBe(true);
+    const notice = findByAttribute("data-document-draft-restored", "true");
+    expect(notice.getAttribute("role")).toBe("status");
+    expect(notice.getAttribute("aria-live")).toBe("polite");
+    expect(notice.textContent).toContain("document.draftRestored");
+  });
+
+  it("stays silent when no unsent brief was restored", async () => {
+    await mountStudio(workspaceA);
+    expect(hasAttribute("data-document-draft-restored", "true")).toBe(false);
+
+    // A different workspace of the same browser session has no draft of its
+    // own: a blank editor must not be described as a restoration.
+    await type(elementById("document-brief"), briefText);
+    await switchTabAwayAndBack(workspaceB);
+    expect(elementById("document-brief").value).toBe("");
+    expect(hasAttribute("data-document-draft-restored", "true")).toBe(false);
+
+    // An unreadable stored value restores nothing, so nothing is announced.
+    stored.set(documentDraftStorageKey(harness.auth.user.id, workspaceB.id), "{not-json");
+    await switchTabAwayAndBack(workspaceB);
+    expect(hasAttribute("data-document-draft-restored", "true")).toBe(false);
   });
 });

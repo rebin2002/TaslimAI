@@ -44,6 +44,7 @@ import {
   persistDocumentDraftState,
   readDocumentDraftState,
   documentDraftStorageKey,
+  isDocumentDraftEmpty,
 } from "@/lib/documentStudioDraftState";
 import {
   documentStudioListLoad,
@@ -154,6 +155,14 @@ export function DocumentStudioView() {
   // still closes over the pre-hydration fields and would otherwise store (or
   // clear) a brief the restored draft has not reached yet.
   const draftJustHydrated = useRef(false);
+  // A restored brief arrives with no visible transition, so the silent return
+  // of text the user never sent is hard to tell apart from an editor that was
+  // never emptied. This notice names the restoration in the language the user
+  // reads the studio in. It is earned by the hydration pass only: set when
+  // that pass actually brought user work back, and dropped whenever the
+  // composer resets or an ownership boundary moves - never mirrored as draft
+  // content itself.
+  const [restoredNotice, setRestoredNotice] = useState(false);
 
 
   const loadSources = useCallback(async () => {
@@ -234,6 +243,7 @@ export function DocumentStudioView() {
     setError("");
     setDownloadError("");
     setCopyState("idle");
+    setRestoredNotice(false);
   }, [current, workspace?.id, user?.id]);
 
   // Synchronize source documents, projects, and recent document assets when the authenticated workspace changes.
@@ -262,6 +272,7 @@ export function DocumentStudioView() {
     setTone(draft.tone as DocumentTone);
     setIncludeTableOfContents(draft.includeTableOfContents);
     draftHydratedScope.current = ownerKey;
+    setRestoredNotice(!isDocumentDraftEmpty(draft));
     // Even an empty incoming scope must skip the first mirror. This effect
     // can run before React commits the cleared input state, and otherwise
     // the outgoing account's brief is briefly persisted under the new owner.
@@ -467,6 +478,7 @@ export function DocumentStudioView() {
     setDownloadError("");
     setCopyState("idle");
     setPollRetry(0);
+    setRestoredNotice(false);
   }
 
   function refineDocument() {
@@ -534,6 +546,7 @@ export function DocumentStudioView() {
             <div className="document-card-title"><span className="document-card-icon"><Sparkles size={16} /></span><div><p className="document-card-kicker">{t("document.createTitle")}</p><h2 id="document-create-title">{t("document.createSubtitle")}</h2></div></div>
             <span className="document-step-count">01</span>
           </div>
+          {restoredNotice && <p className="document-draft-note" role="status" aria-live="polite" data-document-draft-restored="true"><RefreshCw size={13} /> {t("document.draftRestored")}</p>}
           <label className="document-field document-field-primary"><span>{t("document.descriptionLabel")}</span><textarea id="document-brief" aria-describedby="document-brief-count" value={prompt} onChange={(event) => setPrompt(event.target.value)} maxLength={8000} placeholder={t("document.descriptionPlaceholder")} required /><small id="document-brief-count">{prompt.length}/8000</small></label>
           <div className="document-field-row"><label className="document-field"><span>{t("document.type")}</span><select value={documentType} onChange={(event) => setDocumentType(event.target.value as DocumentType)}><option value="auto">{t("document.typeAuto")}</option><option value="report">{t("document.typeReport")}</option><option value="proposal">{t("document.typeProposal")}</option><option value="business_letter">{t("document.typeLetter")}</option><option value="company_profile">{t("document.typeProfile")}</option><option value="meeting_minutes">{t("document.typeMinutes")}</option><option value="article">{t("document.typeArticle")}</option><option value="general">{t("document.typeGeneral")}</option></select></label><label className="document-field"><span>{t("document.length")}</span><select value={length} onChange={(event) => setLength(event.target.value as DocumentLength)}><option value="short">{t("document.lengthShort")}</option><option value="standard">{t("document.lengthStandard")}</option><option value="detailed">{t("document.lengthDetailed")}</option></select></label></div>
           <div className="document-field-row"><label className="document-field"><span>{t("document.tone")}</span><select value={tone} onChange={(event) => setTone(event.target.value as DocumentTone)}><option value="professional">{t("document.toneProfessional")}</option><option value="formal">{t("document.toneFormal")}</option><option value="friendly">{t("document.toneFriendly")}</option><option value="persuasive">{t("document.tonePersuasive")}</option><option value="neutral">{t("document.toneNeutral")}</option></select></label><label className="document-field"><span>{t("document.language")}</span><select value={language} onChange={(event) => setLanguage(event.target.value as DocumentLanguage)}><option value="auto">{t("document.languageAuto")}</option><option value="en">{t("document.languageEnglish")}</option><option value="ar">{t("document.languageArabic")}</option><option value="ku">{t("document.languageKurdish")}</option></select></label></div>
