@@ -190,6 +190,9 @@ export function GenerationJobsView() {
   }
   async function createTestJob() {
     if (!workspaceId) return;
+    // Starting a mutation supersedes the outstanding list request. Remember
+    // whether we interrupted that read so its loading state cannot be stranded.
+    const interruptedListRead = loading;
     const request = ++requestGeneration.current;
     setLiveRequestGeneration(request);
     const selection = selectionGeneration.current;
@@ -200,9 +203,16 @@ export function GenerationJobsView() {
       if (request !== requestGeneration.current) return;
       setRead((previous) => mergeGenerationJobIntoRead(previous, job, workspaceId, attemptEpoch));
       if (selection === selectionGeneration.current && isJobReadableInWorkspace(job, workspaceId)) setSelection({ workspaceId, jobId: job.id });
+      // The first list response can no longer settle after this mutation bumped
+      // the generation. Refresh its authoritative page so older history rows
+      // are not lost behind the newly created job.
+      if (interruptedListRead) void loadRecent();
     } catch (caught) {
       if (request !== requestGeneration.current) return;
-      setAlert({ workspaceId, epoch: attemptEpoch, message: caught instanceof Error ? caught.message : t("jobs.createError"), retryable: false });
+      // No list completion can clear loading now. Settle the view and allow the
+      // normal Retry to load history, while keeping the Create error visible.
+      if (interruptedListRead) setLoading(false);
+      setAlert({ workspaceId, epoch: attemptEpoch, message: caught instanceof Error ? caught.message : t("jobs.createError"), retryable: interruptedListRead });
     } finally {
       // Retire only this action; a newer workspace's pending request owns its own indicator.
       setWorkingRequest((previous) => previous?.request === request && previous.workspaceId === workspaceId ? null : previous);
