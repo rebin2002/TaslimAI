@@ -44,6 +44,9 @@ public sealed class AdminOperationsService(
         var providers = await providerHealth.GetAsync(range, cancellationToken);
         var movie = await BuildMovieAsync(range, providers, cancellationToken);
         var workers = await BuildWorkersAsync(cancellationToken);
+        // Live operational audit feed: the newest administrative actions are
+        // independent of the selected historical metrics range. The UI labels
+        // this panel "recent operational actions", not a date-filtered export.
         var recentAdminActions = await db.AdminOperationAuditEvents.AsNoTracking()
             .OrderByDescending(item => item.CreatedAt)
             .ThenByDescending(item => item.Id)
