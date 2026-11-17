@@ -2,7 +2,7 @@
 import { localeTag } from "@/lib/i18n";
 
 import Link from "next/link";
-import { FormEvent, useEffect, useState } from "react";
+import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import {
   BarChart3,
   Brain,
@@ -24,7 +24,14 @@ import {
 import { useAuth } from "@/components/AuthProvider";
 import { localeNames, locales, useLocale } from "@/components/LocaleProvider";
 import { api, type PasswordPolicy } from "@/lib/api";
-import { accountProfileDraftFromUser, accountProfileSessionKey, canonicalizeAccountProfileDraft } from "@/lib/accountProfileState";
+import {
+  accountProfileDraftFromUser,
+  accountProfileDraftsMatch,
+  accountProfileFormIdentityKey,
+  canonicalizeAccountProfileDraft,
+  reconcileAccountProfileDraft,
+  type AccountProfileDraft,
+} from "@/lib/accountProfileState";
 import type { Locale } from "@/lib/i18n";
 
 const timeZones = [
@@ -44,21 +51,40 @@ type SaveState = "idle" | "saving" | "saved";
 
 export function AccountView() {
   const { user } = useAuth();
-  return <AccountProfileForm key={accountProfileSessionKey(user)} />;
+  return <AccountProfileForm key={accountProfileFormIdentityKey(user)} />;
 }
 
 function AccountProfileForm() {
   const { user, workspace, updateProfile, signOut } = useAuth();
   const { t, locale } = useLocale();
-  const profileDefaults = accountProfileDraftFromUser(user);
-  const [displayName, setDisplayName] = useState(profileDefaults.displayName);
-  const [preferredLanguage, setPreferredLanguage] = useState<Locale>(profileDefaults.preferredLanguage);
-  const [defaultGenerationLanguage, setDefaultGenerationLanguage] = useState<Locale>(profileDefaults.defaultGenerationLanguage);
-  const [timeZone, setTimeZone] = useState(profileDefaults.timeZone);
-  const [outputPreference, setOutputPreference] = useState<(typeof outputPreferences)[number]>(profileDefaults.outputPreference);
-  const [includeSourceLinks, setIncludeSourceLinks] = useState(profileDefaults.includeSourceLinks);
+  const serverSnapshot = useMemo(() => accountProfileDraftFromUser(user), [user]);
+  const [draft, setDraft] = useState<AccountProfileDraft>(serverSnapshot);
+  const [syncedSnapshot, setSyncedSnapshot] = useState<AccountProfileDraft>(serverSnapshot);
   const [profileState, setProfileState] = useState<SaveState>("idle");
   const [profileError, setProfileError] = useState("");
+  // A successful response acknowledges only the draft that was submitted.
+  // Edits typed while the request was in flight are still unsaved.
+  const profileEditRevision = useRef(0);
+
+  // Server snapshots arrive from profile save responses and session
+  // refreshes while this form is open. Fields the user has not touched
+  // adopt the incoming server value; fields with a pending local edit keep
+  // the newer local value, so a save echo can never overwrite an edit made
+  // while the request was in flight.
+  // This runs as a render-phase adjustment: React re-renders the component
+  // immediately with the merged draft and children never see the stale
+  // snapshot. See https://react.dev/learn/you-might-not-need-an-effect.
+  if (!accountProfileDraftsMatch(syncedSnapshot, serverSnapshot)) {
+    setDraft((local) => reconcileAccountProfileDraft({ local, baseline: syncedSnapshot, server: serverSnapshot }));
+    setSyncedSnapshot(serverSnapshot);
+  }
+
+  function updateDraft(patch: Partial<AccountProfileDraft>) {
+    profileEditRevision.current += 1;
+    // Keep the in-flight save gate closed until its response settles.
+    setProfileState((state) => state === "saving" ? "saving" : "idle");
+    setDraft((local) => ({ ...local, ...patch }));
+  }
   const [currentPassword, setCurrentPassword] = useState("");
   const [newPassword, setNewPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
@@ -82,14 +108,14 @@ function AccountProfileForm() {
 
   async function saveProfile(event: FormEvent) {
     event.preventDefault();
-    const draft = canonicalizeAccountProfileDraft({ displayName, preferredLanguage, defaultGenerationLanguage, timeZone, outputPreference, includeSourceLinks });
+    const canonicalDraft = canonicalizeAccountProfileDraft(draft);
+    const submittedRevision = profileEditRevision.current;
     setProfileState("saving");
     setProfileError("");
     try {
-      await updateProfile(draft);
-      setDisplayName(draft.displayName);
-      setTimeZone(draft.timeZone);
-      setProfileState("saved");
+      await updateProfile(canonicalDraft);
+      // Do not announce "Saved" if newer, unsent edits were made meanwhile.
+      setProfileState(profileEditRevision.current === submittedRevision ? "saved" : "idle");
     } catch (caught) {
       setProfileState("idle");
       setProfileError(caught instanceof Error ? caught.message : t("account.saveError"));
@@ -142,17 +168,17 @@ function AccountProfileForm() {
       <div className="account-settings-grid">
         <form className="account-card profile-form account-profile-card" onSubmit={saveProfile}>
           <div className="card-title"><span className="card-title-icon"><UserRound size={17} /></span><div><h2>{t("account.profile")}</h2><p>{t("account.profileSubtitle")}</p></div></div>
-          <label><span>{t("auth.displayName")}</span><div className="input-shell"><UserRound size={16} /><input required minLength={2} maxLength={120} value={displayName} onChange={(event) => setDisplayName(event.target.value)} /></div></label>
+          <label><span>{t("auth.displayName")}</span><div className="input-shell"><UserRound size={16} /><input required minLength={2} maxLength={120} value={draft.displayName} onChange={(event) => updateDraft({ displayName: event.target.value })} /></div></label>
           <label><span>{t("auth.email")}</span><div className="input-shell is-disabled"><Mail size={16} /><input value={user?.email ?? ""} readOnly /></div><small className="field-hint">{t("account.emailHint")}</small></label>
           <div className="account-form-divider" />
           <div className="card-subheading"><Languages size={15} /><span>{t("account.preferences")}</span></div>
           <div className="account-control-grid">
-            <label><span>{t("account.interfaceLanguage")}</span><div className="select-shell"><Globe2 size={16} /><select value={preferredLanguage} onChange={(event) => setPreferredLanguage(event.target.value as Locale)}>{locales.map((item) => <option key={item} value={item}>{localeNames[item]}</option>)}</select></div></label>
-            <label><span>{t("account.defaultGenerationLanguage")}</span><div className="select-shell"><Languages size={16} /><select value={defaultGenerationLanguage} onChange={(event) => setDefaultGenerationLanguage(event.target.value as Locale)}>{locales.map((item) => <option key={item} value={item}>{localeNames[item]}</option>)}</select></div></label>
-            <label><span>{t("account.timezone")}</span><div className="select-shell"><Clock3 size={16} /><select value={timeZone} onChange={(event) => setTimeZone(event.target.value)}>{!timeZones.includes(timeZone) && <option value={timeZone}>{timeZone}</option>}{timeZones.map((item) => <option key={item} value={item}>{item}</option>)}</select></div></label>
-            <label><span>{t("account.outputPreference")}</span><div className="select-shell"><SlidersHorizontal size={16} /><select value={outputPreference} onChange={(event) => setOutputPreference(event.target.value as typeof outputPreferences[number])}>{outputPreferences.map((item) => <option key={item} value={item}>{t(`account.output.${item}`)}</option>)}</select></div></label>
+            <label><span>{t("account.interfaceLanguage")}</span><div className="select-shell"><Globe2 size={16} /><select value={draft.preferredLanguage} onChange={(event) => updateDraft({ preferredLanguage: event.target.value as Locale })}>{locales.map((item) => <option key={item} value={item}>{localeNames[item]}</option>)}</select></div></label>
+            <label><span>{t("account.defaultGenerationLanguage")}</span><div className="select-shell"><Languages size={16} /><select value={draft.defaultGenerationLanguage} onChange={(event) => updateDraft({ defaultGenerationLanguage: event.target.value as Locale })}>{locales.map((item) => <option key={item} value={item}>{localeNames[item]}</option>)}</select></div></label>
+            <label><span>{t("account.timezone")}</span><div className="select-shell"><Clock3 size={16} /><select value={draft.timeZone} onChange={(event) => updateDraft({ timeZone: event.target.value })}>{!timeZones.includes(draft.timeZone) && <option value={draft.timeZone}>{draft.timeZone}</option>}{timeZones.map((item) => <option key={item} value={item}>{item}</option>)}</select></div></label>
+            <label><span>{t("account.outputPreference")}</span><div className="select-shell"><SlidersHorizontal size={16} /><select value={draft.outputPreference} onChange={(event) => updateDraft({ outputPreference: event.target.value as AccountProfileDraft["outputPreference"] })}>{outputPreferences.map((item) => <option key={item} value={item}>{t(`account.output.${item}`)}</option>)}</select></div></label>
           </div>
-          <label className="account-check-row"><input type="checkbox" checked={includeSourceLinks} onChange={(event) => setIncludeSourceLinks(event.target.checked)} /><span><strong>{t("account.includeSourceLinks")}</strong><small>{t("account.includeSourceLinksHint")}</small></span></label>
+          <label className="account-check-row"><input type="checkbox" checked={draft.includeSourceLinks} onChange={(event) => updateDraft({ includeSourceLinks: event.target.checked })} /><span><strong>{t("account.includeSourceLinks")}</strong><small>{t("account.includeSourceLinksHint")}</small></span></label>
           {profileError && <div className="form-error" role="alert">{profileError}</div>}
           {profileState === "saved" && <div className="form-success"><Check size={15} /> {t("account.saved")}</div>}
           <button className="primary-button" disabled={profileState === "saving"}>{profileState === "saving" ? t("common.saving") : <><Check size={15} /> {t("common.saveChanges")}</>}</button>

@@ -20,6 +20,8 @@
 .eyebrow { margin: 0 0 8px; color: #317c79; font-size: 11px; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; }
 .header h1 { margin: 0; color: #172639; font-size: clamp(28px, 4vw, 42px); line-height: 1.12; letter-spacing: -.045em; }
 .intro { max-width: 62ch; margin: 12px 0 0; color: #617184; font-size: 14px; line-height: 1.7; }
+.draftNotice { margin: 12px 0 0; color: #617184; font-size: 14px; line-height: 1.7; }
+.draftNotice:empty { margin: 0; }
 
 .form { display: grid; gap: 17px; }
 .field { display: grid; min-width: 0; gap: 7px; }
