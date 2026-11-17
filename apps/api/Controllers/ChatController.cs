@@ -548,6 +548,17 @@ public sealed class ChatController(
             .ThenBy(message => message.Id)
             .Select(message => new AiChatMessage(message.Role.ToString().ToLowerInvariant(), message.Content))
             .ToListAsync(cancellationToken);
+        // docs/CHAT_ARCHITECTURE.md: a regeneration keeps the response it replaces as a completed
+        // transcript row, but only the newest assistant answer of a user turn is live, so a run of
+        // adjacent assistant rows means every row but the last one was superseded. The transcript
+        // is never edited here, and the ordering above is the only thing that tells a superseded
+        // response from a plain user/assistant pair. Without this filter the answer the user
+        // rejected is replayed into every later turn's context, and the surviving replacement is
+        // replayed beside it as a duplicate second assistant answer to the same user message.
+        for (var index = history.Count - 2; index >= 0; index--)
+        {
+            if (history[index].Role == "assistant" && history[index + 1].Role == "assistant") history.RemoveAt(index);
+        }
         var project = conversation.ProjectId is null
             ? null
             : await db.Projects.AsNoTracking()
