@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { currentHomeDashboard, isHomeDashboardRequestCurrent, startHomeDashboardRequest } from "./homeDashboardRequest";
+import { currentHomeDashboard, currentHomeProjectSelection, isHomeDashboardRequestCurrent, startHomeDashboardRequest } from "./homeDashboardRequest";
 
 // Deterministic synthetic coverage for the home dashboard request fence: fixed
 // sequences and workspace ids only, no timers, no network, no provider.
@@ -72,5 +72,19 @@ describe("render-time Home dashboard isolation", () => {
   it("hides private records on sign-out or while no workspace is selected", () => {
     expect(currentHomeDashboard(personalSnapshot, null)).toBeNull();
     expect(currentHomeDashboard(null, PERSONAL)).toBeNull();
+  });
+});
+
+
+describe("home project selection workspace gate", () => {
+  const businessProjects = [{ id: "business-project" }];
+  it("preserves selections in the mounted workspace", () => {
+    expect(currentHomeProjectSelection("business-project", businessProjects)).toBe("business-project");
+  });
+  it("drops a project from the previously mounted workspace", () => {
+    expect(currentHomeProjectSelection("personal-project", businessProjects)).toBe("");
+  });
+  it("withholds a project assignment until the new workspace list is loaded", () => {
+    expect(currentHomeProjectSelection("personal-project", [])).toBe("");
   });
 });
