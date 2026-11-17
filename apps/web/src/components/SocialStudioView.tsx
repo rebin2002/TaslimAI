@@ -92,11 +92,12 @@ const socialTypes: SocialType[] = ["auto", "announcement", "product_launch", "pr
 const tones: Tone[] = ["professional", "friendly", "persuasive", "educational", "playful", "concise", "thoughtful"];
 
 export function SocialStudioView() {
-  const { workspace } = useAuth();
+  const { workspace, user } = useAuth();
   const { t, locale } = useLocale();
   const copy = socialCopy[locale];
   const searchParams = useSearchParams();
   const workspaceId = workspace?.id ?? null;
+  const accountId = user?.id ?? null;
   const [projects, setProjects] = useState<Project[]>([]);
   const [files, setFiles] = useState<StoredFile[]>([]);
   const [assets, setAssets] = useState<Asset[]>([]);
@@ -125,6 +126,7 @@ export function SocialStudioView() {
   const [copyState, setCopyState] = useState("");
   const restoreJobId = useRef<string | null>(null);
   const workspaceIdRef = useRef<string | null>(workspaceId);
+  const accountIdRef = useRef<string | null>(accountId);
   // Counts session replacements. A workspace id cannot identify a session: leaving a workspace and
   // returning to it reuses the same id, so requests started by the replaced session would still
   // match an id comparison. Every identity change advances this counter.
@@ -164,8 +166,10 @@ export function SocialStudioView() {
   // A workspace switch must not retain or reintroduce a job from the previous workspace.
   useEffect(() => {
     const previousWorkspaceId = workspaceIdRef.current;
+    const previousAccountId = accountIdRef.current;
     workspaceIdRef.current = workspaceId;
-    if (previousWorkspaceId === workspaceId) return;
+    accountIdRef.current = accountId;
+    if (previousWorkspaceId === workspaceId && previousAccountId === accountId) return;
     sessionGeneration.current += 1;
     restoreJobId.current = null;
     setCurrent(null);
@@ -193,7 +197,7 @@ export function SocialStudioView() {
     setRestoreError("");
     setRestoreRetry(0);
     setCopyState("");
-  }, [workspaceId]);
+  }, [workspaceId, accountId]);
   // Hydrate the workspace-scoped draft after authentication/workspace changes.
   useEffect(() => {
     const workspaceId = workspace?.id ?? null;

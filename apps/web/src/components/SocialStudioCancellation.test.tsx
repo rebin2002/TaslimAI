@@ -91,7 +91,7 @@ class TestDocument extends TestNode {
 }
 
 const harness = vi.hoisted(() => ({
-  auth: { workspace: null as { id: string } | null },
+  auth: { workspace: null as { id: string } | null, user: null as { id: string } | null },
   api: {
     listProjects: vi.fn(), listFiles: vi.fn(), listAssets: vi.fn(), getGenerationJob: vi.fn(),
     createSocialGenerationJob: vi.fn(), cancelGenerationJob: vi.fn(),
@@ -99,7 +99,7 @@ const harness = vi.hoisted(() => ({
 }));
 
 vi.mock("@/components/AuthProvider", () => ({
-  useAuth: () => ({ workspace: harness.auth.workspace }),
+  useAuth: () => ({ workspace: harness.auth.workspace, user: harness.auth.user }),
 }));
 const translate = (key: string, variables?: Record<string, string>) =>
   Object.entries(variables ?? {}).reduce((value, [name, replacement]) => value.replace(`{${name}}`, replacement), key);
@@ -193,6 +193,7 @@ async function submitForm() {
 
 async function mount() {
   harness.auth.workspace = wsA;
+  harness.auth.user = { id: "user-a" };
   await act(async () => { root = createRoot(container as unknown as Element); root.render(<SocialStudioView />); await drain(); });
 }
 async function render() { await act(async () => { root.render(<SocialStudioView />); await drain(); }); }
@@ -228,6 +229,7 @@ beforeEach(() => {
   harness.api.createSocialGenerationJob.mockReset();
   harness.api.cancelGenerationJob.mockReset().mockResolvedValue({ status: "Running" });
   harness.auth.workspace = null;
+  harness.auth.user = null;
 });
 afterEach(() => { act(() => root?.unmount()); vi.unstubAllGlobals(); });
 
@@ -298,4 +300,31 @@ describe("Social Studio cancellation session semantics", () => {
     await settle(() => cancelPost.resolve({ status: "Running" }));
     expect(progressPercent()).toBe("55");
   });
+  it("keeps a cancellation from an old account from unlocking a new account in the same workspace", async () => {
+    storage.set(pointerKey(wsA.id), "job-a-1");
+    harness.api.getGenerationJob.mockResolvedValue(job({ progressPercent: 10 }));
+    await mount();
+    await runTimers();
+    const oldCancellation = deferred<{ status: string }>();
+    harness.api.cancelGenerationJob.mockReturnValue(oldCancellation.promise);
+    await clickCancelButton();
+    expect(harness.api.cancelGenerationJob).toHaveBeenCalledTimes(1);
+
+    // Account B has access to the same workspace id. Workspace-only fencing must not
+    // mistake this principal for the account that started the cancellation.
+    harness.auth.user = { id: "user-b" };
+    await render();
+    const newGeneration = deferred<GenerationJob>();
+    harness.api.createSocialGenerationJob.mockReturnValue(newGeneration.promise);
+    await typePrompt("shared team campaign created by the second account");
+    await submitForm();
+    expect(harness.api.createSocialGenerationJob).toHaveBeenCalledTimes(1);
+    expect(generateButtonLabel()).toContain("social.working");
+
+    await settle(() => oldCancellation.resolve({ status: "Running" }));
+    expect(generateButtonLabel()).toContain("social.working");
+    await settle(() => newGeneration.resolve(job({ id: "job-b-2", workspaceId: wsA.id, progressPercent: 5 })));
+    expect(progressPercent()).toBe("5");
+  });
+
 });
