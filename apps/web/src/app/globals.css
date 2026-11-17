@@ -442,6 +442,7 @@ select.memory-control { appearance: auto; cursor: pointer; }
 .document-compose-layout { display: grid; grid-template-columns: minmax(0, 1.45fr) minmax(300px, .7fr); gap: 18px; max-width: 1120px; margin: 0 auto; align-items: start; }
 .document-brief-card, .document-rail-card, .document-reader, .document-inspector, .document-state-card { border: 1px solid #dfe7ef; border-radius: 16px; background: #fff; box-shadow: 0 14px 38px rgba(23,38,57,.055); }
 .document-brief-card { display: grid; gap: 17px; padding: 24px; }
+.document-draft-note { display: flex; align-items: center; gap: 7px; margin: 0; padding: 9px 12px; color: #2f6fb0; border: 1px solid #d7e6f8; border-radius: 10px; background: #f2f8fe; font-size: 12px; line-height: 1.5; }
 .document-card-heading, .document-card-title, .document-recent-heading, .document-inspector-header, .document-brief-footer, .document-reader-topline, .document-inspector-footer { display: flex; align-items: center; justify-content: space-between; gap: 14px; }
 .document-card-title { justify-content: flex-start; }
 .document-card-icon, .document-rail-icon, .document-inspector-icon { display: grid; flex: 0 0 auto; place-items: center; width: 32px; height: 32px; color: var(--blue); border-radius: 10px; background: #eaf2ff; }
@@ -537,6 +538,7 @@ select.memory-control { appearance: auto; cursor: pointer; }
 .document-terminal-state .document-result-actions { justify-content: center; }
 .document-generation-state { display: grid; gap: 16px; max-width: 900px; }
 .generation-cancel-button { justify-self: center; }
+[dir="rtl"] .document-draft-note { flex-direction: row-reverse; }
 [dir="rtl"] .document-studio-header, [dir="rtl"] .document-card-heading, [dir="rtl"] .document-card-title, [dir="rtl"] .document-recent-heading, [dir="rtl"] .document-reader-topline, [dir="rtl"] .document-inspector-header, [dir="rtl"] .document-brief-footer, [dir="rtl"] .document-inspector-footer { flex-direction: row-reverse; }
 [dir="rtl"] .document-inspector-footer { align-items: flex-end; }
 [dir="rtl"] .document-reader-rule { margin-inline-start: auto; }
