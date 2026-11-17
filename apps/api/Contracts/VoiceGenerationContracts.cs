@@ -37,11 +37,79 @@ public static class VoiceGenerationValues
         Conversational, Clear, Expressive, Calm,
     };
 
-    public static readonly IReadOnlySet<string> Formats = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+   public static readonly IReadOnlySet<string> Formats = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+   {
+       "aac", "flac", "m4a", "mp3", "ogg", "opus", "wav", "webm",
+   };
+
+    /// <summary>
+    /// The media profile each advertised speech container is saved and served with, plus the provider
+    /// spellings that name that same container. A saved take downloads under a file name ending in the
+    /// container and is served with the media type recorded beside it, so both come from this one
+    /// speech contract rather than from the provider's own header - the download name, the stored file
+    /// record, the job result and the served Content-Type can then never disagree. Providers agree on
+    /// the container but not on what to call it: RFC 7845 registers audio/opus for the Opus stream
+    /// that lives in the Ogg container this contract calls audio/ogg, and the voice adapters already
+    /// tolerate exactly those aliases (audio/mp3, audio/opus, audio/x-wav) while forwarding the raw
+    /// header, which the private storage boundary then rejects after the synthesis was billed. Only a
+    /// spelling of this container's own audio essence is accepted; a header naming a different
+    /// container is refused by the quality gate before any output is built.
+    /// </summary>
+    public static readonly IReadOnlyDictionary<string, SpeechContainerProfile> SpeechContainers =
+        new Dictionary<string, SpeechContainerProfile>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["aac"] = new("audio/aac", Set("audio/aac", "audio/x-aac")),
+            ["flac"] = new("audio/flac", Set("audio/flac", "audio/x-flac")),
+            ["m4a"] = new("audio/mp4", Set("audio/mp4", "audio/x-m4a")),
+            ["mp3"] = new("audio/mpeg", Set("audio/mpeg", "audio/mp3", "audio/x-mpeg")),
+            ["ogg"] = new("audio/ogg", Set("audio/ogg", "audio/vorbis", "audio/opus")),
+            ["opus"] = new("audio/ogg", Set("audio/ogg", "audio/opus")),
+            ["wav"] = new("audio/wav", Set("audio/wav", "audio/x-wav", "audio/wave")),
+            ["webm"] = new("audio/webm", Set("audio/webm")),
+        };
+
+    /// <summary>
+    /// Resolves the single media type to persist for one speech container. The provider's header is
+    /// consulted only to confirm that the response carries this container's audio essence; casing,
+    /// surrounding whitespace and media-type parameters are decoration and never reach the record.
+    /// </summary>
+    public static bool TryResolveSpeechContentType(
+        string? container,
+        string? declaredContentType,
+        out string persistedContentType)
     {
-        "aac", "flac", "m4a", "mp3", "ogg", "opus", "wav", "webm",
-    };
+        persistedContentType = string.Empty;
+        if (container is null || declaredContentType is null) return false;
+        if (!SpeechContainers.TryGetValue(container.Trim(), out var profile)) return false;
+
+        var declared = NormalizeDeclaredContentType(declaredContentType);
+        if (!profile.ProviderContentTypes.Contains(declared)) return false;
+
+        persistedContentType = profile.PersistedContentType;
+        return true;
+    }
+
+    /// <summary>
+    /// Reduces a provider's <c>Content-Type</c> header to the bare type name it is comparing against:
+    /// an intermediary may pad the value with whitespace, and everything after the first semicolon is
+    /// a media-type parameter, never a different type.
+    /// </summary>
+    public static string NormalizeDeclaredContentType(string? declaredContentType)
+    {
+        if (string.IsNullOrWhiteSpace(declaredContentType)) return string.Empty;
+        var value = declaredContentType.Trim();
+        var separator = value.IndexOf(';');
+        return separator >= 0 ? value[..separator].Trim() : value;
+    }
+
+    private static HashSet<string> Set(params string[] values) => new(values, StringComparer.OrdinalIgnoreCase);
 }
+
+/// <summary>
+/// One speech container's serving identity: the registered profile that is persisted and served, and
+/// the header spellings that name that same audio essence.
+/// </summary>
+public sealed record SpeechContainerProfile(string PersistedContentType, IReadOnlySet<string> ProviderContentTypes);
 
 public sealed class VoiceGenerationRequest
 {
@@ -120,7 +188,17 @@ public static class VoiceGenerationContractMapper
         try
         {
             input = JsonSerializer.Deserialize<VoiceGenerationInput>(json, new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
-            return input is not null;
+            if (input is null
+                || input.Text is null
+                || input.Language is null
+                || input.VoiceStyle is null
+                || input.SpeakingStyle is null)
+            {
+                input = null;
+                return false;
+            }
+
+            return true;
         }
         catch (JsonException)
         {
