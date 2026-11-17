@@ -41,7 +41,6 @@ import {
 } from "@/lib/documentStudioState";
 import {
   type DocumentDraftState,
-  isDocumentDraftEmpty,
   persistDocumentDraftState,
   readDocumentDraftState,
   documentDraftStorageKey,
