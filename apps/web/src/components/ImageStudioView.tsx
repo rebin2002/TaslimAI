@@ -5,7 +5,7 @@ import { localeTag } from "@/lib/i18n";
 /* eslint-disable @next/next/no-img-element */
 
 import Link from "next/link";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { type KeyboardEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowUpRight,
   Check,
@@ -27,6 +27,7 @@ import { useLocale } from "@/components/LocaleProvider";
 import { useSearchParams } from "next/navigation";
 import { ApiError, api, type Asset, type GenerationJob, type ImageGenerationInput, type Project } from "@/lib/api";
 import { localizedImageErrorMessage } from "@/lib/imageStudioErrors";
+import { nextStudioChoiceIndex } from "@/lib/studioChoiceNavigation";
 import { canCancelImageJob, clearImageActiveJobId, isRestorableImageJob, mergeImageJobUpdate, nextImagePollDelay, nextImageRestoreDelay, parseImageJobResult, persistImageActiveJobId, readImageActiveJobId, shouldClearImageJobAfterPollError, shouldPollImageJob, shouldResetImageWorkspaceState, shouldRetryImageRestore, subscribeImageActiveJobChanges } from "@/lib/imageStudioState";
 
 const styles = ["auto", "photorealistic", "product", "illustration", "3d", "minimal", "poster", "social_media"] as const;
@@ -108,6 +109,22 @@ export function ImageGeneratingCanvas({ labels, percent, canCancel, working, onC
       <XCircle size={15} /> {labels.cancel}
     </button>}
   </div>;
+}
+
+/**
+ * Arrow-key model for a prompt preset choice group. In a radiogroup the axis keys move the
+ * selection itself: one key press changes the preset, moves focus to the newly selected radio,
+ * and (for the purpose group) keeps the preset's style side effect wired through
+ * {@link ImageStudioContent.choosePurpose}. The group's accessible name and hint come from the
+ * localized label elements referenced by `aria-labelledby` and `aria-describedby`, so the model
+ * is identical in English, Arabic, and Kurdish Sorani.
+ */
+function handleImageChoiceKeyDown<T extends string>(event: KeyboardEvent<HTMLButtonElement>, options: readonly T[], value: T, onChange: (next: T) => void) {
+  const nextIndex = nextStudioChoiceIndex(options.indexOf(value), event.key, options.length);
+  if (nextIndex === null) return;
+  event.preventDefault();
+  onChange(options[nextIndex]);
+  event.currentTarget.parentElement?.querySelectorAll<HTMLButtonElement>('[role="radio"]')[nextIndex]?.focus();
 }
 
 export function ImageStudioView() {
@@ -457,8 +474,8 @@ function ImageStudioContent() {
           <label className="image-project-select"><span>{t("image.project")}</span><select value={projectId} onChange={(event) => setProjectId(event.target.value)} disabled={loadingProjects}><option value="">{t("image.noProject")}</option>{projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}</select><ChevronDown size={13} /></label>
         </div>
 
-        <div className="image-option-group"><div className="image-option-label"><span>{t("image.purpose")}</span><small>{t("image.autoHint")}</small></div><div className="image-purpose-grid">{purposes.map((value) => <button key={value} type="button" className={purpose === value ? "is-selected" : ""} aria-pressed={purpose === value} onClick={() => choosePurpose(value)}><span className={`image-purpose-dot is-${value}`} />{t(`image.purpose.${value}`)}</button>)}</div></div>
-        <div className="image-option-group"><div className="image-option-label"><span>{t("image.aspectRatio")}</span></div><div className="image-segmented-control">{aspects.map((value) => <button key={value} type="button" className={aspectRatio === value ? "is-selected" : ""} aria-pressed={aspectRatio === value} onClick={() => setAspectRatio(value)}><span className={`image-format-icon is-${value}`} />{t(`image.aspect.${value}`)}</button>)}</div></div>
+        <div className="image-option-group"><div className="image-option-label"><span id="image-purpose-label">{t("image.purpose")}</span><small id="image-purpose-hint">{t("image.autoHint")}</small></div><div className="image-purpose-grid" role="radiogroup" aria-labelledby="image-purpose-label" aria-describedby="image-purpose-hint">{purposes.map((value) => <button key={value} type="button" role="radio" aria-checked={purpose === value} tabIndex={purpose === value ? 0 : -1} className={purpose === value ? "is-selected" : ""} onClick={() => choosePurpose(value)} onKeyDown={(event) => handleImageChoiceKeyDown(event, purposes, purpose, choosePurpose)}><span className={`image-purpose-dot is-${value}`} aria-hidden="true" />{t(`image.purpose.${value}`)}</button>)}</div></div>
+        <div className="image-option-group"><div className="image-option-label"><span id="image-aspect-label">{t("image.aspectRatio")}</span></div><div className="image-segmented-control" role="radiogroup" aria-labelledby="image-aspect-label">{aspects.map((value) => <button key={value} type="button" role="radio" aria-checked={aspectRatio === value} tabIndex={aspectRatio === value ? 0 : -1} className={aspectRatio === value ? "is-selected" : ""} onClick={() => setAspectRatio(value)} onKeyDown={(event) => handleImageChoiceKeyDown(event, aspects, aspectRatio, setAspectRatio)}><span className={`image-format-icon is-${value}`} aria-hidden="true" />{t(`image.aspect.${value}`)}</button>)}</div></div>
 
         <details className="image-advanced-options"><summary>{t("image.moreOptions")} <ChevronDown size={15} /></summary><div className="image-advanced-grid"><label className="image-field"><span>{t("image.style")}</span><select value={style} onChange={(event) => setStyle(event.target.value)}>{styles.map((value) => <option key={value} value={value}>{t(`image.style.${value}`)}</option>)}</select></label><label className="image-field"><span>{t("image.quality")}</span><select value={quality} onChange={(event) => setQuality(event.target.value)}>{qualities.map((value) => <option key={value} value={value}>{t(`image.quality.${value}`)}</option>)}</select></label><label className="image-field"><span>{t("image.titleLabel")}</span><input value={title} onChange={(event) => setTitle(event.target.value)} maxLength={120} placeholder={t("image.titlePlaceholder")} /></label><label className="image-field"><span>{t("image.mood")}</span><input value={mood} onChange={(event) => setMood(event.target.value)} maxLength={120} placeholder={t("image.moodPlaceholder")} /></label><label className="image-field image-field-wide"><span>{t("image.background")}</span><input value={background} onChange={(event) => setBackground(event.target.value)} maxLength={240} placeholder={t("image.backgroundPlaceholder")} /></label><label className="image-field image-field-wide"><span>{t("image.textInImage")}</span><input value={textInImage} onChange={(event) => setTextInImage(event.target.value)} maxLength={500} placeholder={t("image.textInImagePlaceholder")} /></label></div></details>
         {error && <div className="image-panel-error" role="alert"><XCircle size={15} /> {error}</div>}
