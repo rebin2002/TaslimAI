@@ -149,6 +149,49 @@ public sealed class AdminAuditExportUtcWindowTests : IClassFixture<TaslimApiFact
     }
 
     [Fact]
+    public void Negative_offset_bounds_normalize_to_the_utc_calendar_days()
+    {
+        // Fixed UTC-05:00 (US Eastern in winter, EST). The mirror image of
+        // the Baghdad case: a negative offset carries the wall clock BEHIND
+        // UTC, so the old SpecifyKind shortcut opened the window one UTC day
+        // EARLY and truncated the end a day short, instead of shifting it
+        // backwards as the +03:00 case does.
+        var west = TimeSpan.FromHours(-5);
+
+        // "fromUtc=2026-11-15T23:30:00-05:00" is the UTC instant
+        // 2026-11-16T04:30:00Z: the export must open on 2026-11-16, the UTC
+        // day of the instant, NOT on 2026-11-15, the wall-clock day the old
+        // SpecifyKind shortcut kept as if it were UTC.
+        var from = new DateTimeOffset(2026, 11, 15, 23, 30, 0, west);
+        Assert.Equal(new DateTime(2026, 11, 16, 4, 30, 0, DateTimeKind.Utc), from.UtcDateTime);
+
+        // "toUtc=2026-11-16T20:00:00-05:00" is the UTC instant
+        // 2026-11-17T01:00:00Z: the inclusive end day 2026-11-17 rolls
+        // forward to 2026-11-18 on the UTC calendar of the instant.
+        var to = new DateTimeOffset(2026, 11, 16, 20, 0, 0, west);
+        Assert.Equal(new DateTime(2026, 11, 17, 1, 0, 0, DateTimeKind.Utc), to.UtcDateTime);
+
+        var (fromUtc, toUtc) = Normalize(Bound(from), Bound(to));
+        Assert.Equal(new DateTime(2026, 11, 16, 0, 0, 0, DateTimeKind.Utc), fromUtc);
+        Assert.Equal(new DateTime(2026, 11, 18, 0, 0, 0, DateTimeKind.Utc), toUtc);
+        Assert.Equal(DateTimeKind.Utc, fromUtc.Kind);
+        Assert.Equal(DateTimeKind.Utc, toUtc.Kind);
+        // Both bound wall-clock days differ from the UTC calendar days the
+        // window must follow, in the direction opposite to the +03:00 case.
+        Assert.NotEqual(from.Date, fromUtc);
+        Assert.NotEqual(to.Date.AddDays(1), toUtc);
+
+        // A negative-offset bound inside its own UTC day must still roll the
+        // inclusive end to the next UTC midnight after conversion:
+        // 2026-11-15T10:00:00-05:00 = 2026-11-15T15:00:00Z, so a single-moment
+        // window opens 2026-11-15T00:00:00Z and ends 2026-11-16T00:00:00Z.
+        var sameDay = new DateTimeOffset(2026, 11, 15, 10, 0, 0, west);
+        var (rollFrom, rollTo) = Normalize(Bound(sameDay), Bound(sameDay));
+        Assert.Equal(new DateTime(2026, 11, 15, 0, 0, 0, DateTimeKind.Utc), rollFrom);
+        Assert.Equal(new DateTime(2026, 11, 16, 0, 0, 0, DateTimeKind.Utc), rollTo);
+    }
+
+    [Fact]
     public void Z_suffixed_utc_bounds_pass_through_to_the_same_utc_days()
     {
         // The console sends Z-suffixed bounds: "fromUtc=2026-11-15T21:00:00Z"
