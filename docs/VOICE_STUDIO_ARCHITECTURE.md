@@ -34,6 +34,8 @@ Cancellation uses the existing cooperative Generation Job cancellation flow. Exp
 
 Generated audio is stored through `FileProcessingService.StoreGeneratedAsync`, which uses the configured local or S3-compatible private storage implementation. The database stores only the private storage key and file metadata. The Asset points to the Stored File and to the source Generation Job.
 
+The media type that is persisted is the container profile registered in `GeneratedMediaSecurity`, never a free-form provider header, so the stored file record, the Asset media type, the saved output metadata, and the download response always describe the same media. Output that declares a profile its container does not carry is refused before any byte reaches private storage. A WebM container therefore saves audio-only speech as `audio/webm`, the profile both speech providers emit and the profile the Generation Job quality gate already recognizes, while movie output keeps declaring the same container as `video/webm`.
+
 The existing `GET /api/assets/{id}/download` endpoint remains the authorization boundary. The endpoint now permits authenticated inline delivery for `audio/*` content in addition to images. The Voice Studio player uses `?inline=true`; the download action uses the normal attachment response. Both paths require the authenticated session and workspace-level asset authorization.
 
 ## Usage accounting

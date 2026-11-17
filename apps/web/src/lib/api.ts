@@ -1,6 +1,7 @@
 import { createSseParser, type TaslimSseEvent } from "./sse";
 import { API_URL, assetFileUrl, assetRepresentationUrl } from "./apiBase";
 import { awaitWithChatStreamWatchdog, CHAT_STREAM_WATCHDOG_TIMEOUT_MS, ChatStreamTransportError } from "./chatStreamTransport";
+import { collectAllProjectPages } from "./projectListPagination";
 import {
   isIdempotentRead,
   isThrottleRetryStatus,
@@ -8,7 +9,6 @@ import {
   parseRetryAfterSeconds,
   waitBeforeRetry,
 } from "./apiRetryAfter";
-
 export type User = {
   id: string;
   email: string;
@@ -1201,6 +1201,10 @@ export const api = {
   changePassword: (input: ChangePasswordInput) => request<{ success: boolean }>("/api/auth/password", { method: "POST", body: JSON.stringify(input) }, true),
   revokeOtherSessions: async () => { const result = await request<{ success: boolean }>("/api/auth/sessions/revoke", { method: "POST" }, true); csrfToken = null; await csrf(true); return result; },
   listProjects: (workspaceId: string, status: "Active" | "Archived", signal?: AbortSignal) => request<Project[]>(`/api/workspaces/${workspaceId}/projects?status=${status}`, { signal }),
+  // The server pages this list and clamps every request to its own page size,
+  // so surfaces that render the complete list (the projects index tabs and
+  // their counts) must walk all pages instead of showing only page one.
+  listAllProjects: (workspaceId: string, status: "Active" | "Archived", signal?: AbortSignal) => collectAllProjectPages((page, pageSize) => request<Project[]>(`/api/workspaces/${workspaceId}/projects?status=${status}&page=${page}&pageSize=${pageSize}`, { signal })),
   listWorkspaces: () => request<Workspace[]>('/api/workspaces'),
   getWorkspace: (workspaceId: string) => request<Workspace>(`/api/workspaces/${workspaceId}`),
   createProject: (workspaceId: string, input: ProjectInput) => request<Project>(`/api/workspaces/${workspaceId}/projects`, { method: "POST", body: JSON.stringify(input) }, true),

@@ -176,6 +176,17 @@ public sealed class OpenAiImageGenerationProvider(
                 logger.LogWarning(exception, "Image provider request failed. ProviderKey={ProviderKey}", Key);
                 throw new ImageProviderUnavailableException();
             }
+            // The response was already accepted with ResponseHeadersRead, so a transport
+            // failure that happens while the bounded body is still streaming surfaces as
+            // IOException rather than HttpRequestException. Map it to the same safe,
+            // retryable provider outcome instead of letting an unclassified exception
+            // escape and be recorded as a non-retryable internal generation failure.
+            // HttpRequestException derives from IOException, so it stays matched above.
+            catch (IOException exception)
+            {
+                logger.LogWarning(exception, "Image provider response download failed. ProviderKey={ProviderKey}; Attempt={Attempt}", Key, attempt);
+                throw new ImageProviderUnavailableException();
+            }
             finally
             {
                 response?.Dispose();
