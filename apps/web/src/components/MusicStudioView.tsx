@@ -8,8 +8,10 @@ import { AlertCircle, AudioLines, CheckCircle2, Clock3, Download, FolderOpen, He
 import { Info } from "lucide-react";
 import { useAuth } from "@/components/AuthProvider";
 import { AccessibleProgressBar } from "@/components/AccessibleProgressBar";
+import { MediaJobArtifactDownload } from "@/components/MediaJobArtifactDownload";
 import { useLocale } from "@/components/LocaleProvider";
 import { api, type Asset, type GenerationJob, type MusicGenerationInput, type Project } from "@/lib/api";
+import { findMediaJobArtifact, mediaJobArtifactDownloadState } from "@/lib/mediaJobArtifactState";
 import { canCancelMusicJob, isMusicProviderUnavailable, parseMusicJobResult } from "@/lib/musicStudioState";
 import {
   REFERENCE_AUDIO_ACCEPT,
@@ -152,27 +154,42 @@ type ReferenceAudioPanelProps = {
 // the browser from this panel.
 export function ReferenceAudioPanel({ state, candidates, loading, t, onFileSelected, onStoredPicked, onClear }: ReferenceAudioPanelProps) {
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const chooseButtonRef = useRef<HTMLButtonElement>(null);
   const selected = state.candidate;
   const previewUrl = selected ? (selected.sourceKind === "local" ? state.previewObjectUrl : referenceAudioPreviewUrl(selected, api.assetFileUrl)) : null;
   const storedId = selected?.sourceKind === "stored_asset" ? selected.assetId ?? "" : "";
+  function handleClear() {
+    onClear();
+    // The clear button unmounts with the selection block. The chooser button
+    // survives the state update, so focus moves there instead of dropping to
+    // <body> and leaving the keyboard user at the top of the page.
+    chooseButtonRef.current?.focus();
+  }
   return <section className="music-reference-panel" aria-labelledby="music-reference-title">
     <div className="music-reference-heading"><div><p className="music-overline">{t("music.reference.eyebrow")}</p><h3 id="music-reference-title">{t("music.reference.title")}</h3></div><Info size={18} aria-hidden="true" /></div>
     <p className="music-reference-description">{t("music.reference.description")}</p>
     <div className="music-reference-picker">
       <input ref={fileInputRef} className="music-reference-input" type="file" accept={REFERENCE_AUDIO_ACCEPT} onChange={onFileSelected} aria-label={t("music.reference.uploadLabel")} />
-      <button type="button" className="music-action-button" onClick={() => fileInputRef.current?.click()}>{t("music.reference.chooseFile")}</button>
+      <button type="button" ref={chooseButtonRef} className="music-action-button" onClick={() => fileInputRef.current?.click()}>{t("music.reference.chooseFile")}</button>
       <span>{t("music.reference.fileHint")}</span>
     </div>
-    {loading ? <p className="music-reference-muted">{t("music.reference.loading")}</p> : candidates.length > 0 ? <label className="music-choice-field music-reference-select"><span>{t("music.reference.savedLabel")}</span><select value={storedId} onChange={(event) => {
+    {/* One persistent status paragraph: the private library query resolves
+        while this panel is already on screen, so the loading -> empty swap
+        lands in the same live region and is announced instead of silently
+        swapping two different paragraphs. */}
+    <p className="music-reference-muted music-reference-status" role="status">{loading ? t("music.reference.loading") : candidates.length === 0 ? t("music.reference.empty") : ""}</p>
+    {!loading && candidates.length > 0 ? <label className="music-choice-field music-reference-select"><span>{t("music.reference.savedLabel")}</span><select value={storedId} onChange={(event) => {
       const picked = event.target.value ? candidates.find((candidate) => candidate.assetId === event.target.value) : null;
       if (picked) onStoredPicked(picked);
-    }}><option value="">{t("music.reference.savedPlaceholder")}</option>{candidates.map((candidate) => <option key={candidate.id} value={candidate.assetId ?? ""}>{candidate.displayName}</option>)}</select></label> : <p className="music-reference-muted">{t("music.reference.empty")}</p>}
+    }}><option value="">{t("music.reference.savedPlaceholder")}</option>{candidates.map((candidate) => <option key={candidate.id} value={candidate.assetId ?? ""}>{candidate.displayName}</option>)}</select></label> : null}
     {state.rejectedReasonKey ? <p className="music-reference-error" role="alert">{t(state.rejectedReasonKey)}</p> : null}
-    {selected ? <div className="music-reference-selected" aria-live="polite">
-      <div className="music-reference-file"><MusicArtwork /><div><strong>{selected.displayName}</strong><span>{formatReferenceAudioSize(selected.sizeBytes) ?? t("music.reference.metadataUnavailable")}</span></div><button type="button" className="music-reference-clear" onClick={onClear}>{t("music.reference.clear")}</button></div>
-      {previewUrl ? <audio className="music-reference-audio" controls preload="metadata" src={previewUrl} aria-label={`${t("music.reference.previewLabel")}: ${selected.displayName}`} /> : <p className="music-reference-muted">{t("music.reference.previewUnavailable")}</p>}
-      <p className="music-reference-note">{t("music.reference.note")}</p>
-    </div> : null}
+    <div className="music-reference-live" aria-live="polite">
+      {selected ? <div className="music-reference-selected">
+        <div className="music-reference-file"><MusicArtwork /><div><strong>{selected.displayName}</strong><span>{formatReferenceAudioSize(selected.sizeBytes) ?? t("music.reference.metadataUnavailable")}</span></div><button type="button" className="music-reference-clear" onClick={handleClear}>{t("music.reference.clear")}</button></div>
+        {previewUrl ? <audio className="music-reference-audio" controls preload="metadata" src={previewUrl} aria-label={`${t("music.reference.previewLabel")}: ${selected.displayName}`} /> : <p className="music-reference-muted">{t("music.reference.previewUnavailable")}</p>}
+        <p className="music-reference-note">{t("music.reference.note")}</p>
+      </div> : null}
+    </div>
   </section>;
 }
 
@@ -385,6 +402,11 @@ function WorkspaceMusicStudio({ workspace }: { workspace: ReturnType<typeof useA
   }
 
   const result = useMemo(() => parseMusicJobResult(current), [current]);
+  // The reload the succeeded job triggers puts this artifact's own row in the
+  // loaded list, which is what tells the download control whether the stored
+  // file is still there.
+  const resultArtifact = useMemo(() => findMediaJobArtifact(recentMusic, result?.assetId), [recentMusic, result]);
+  const resultArtifactState = mediaJobArtifactDownloadState(resultArtifact);
   const isSuccess = current?.status === "Succeeded" && !!result?.assetId;
   const isFailure = current?.status === "Failed" || current?.status === "Cancelled";
   const referenceCandidates = useMemo(() => selectUnclaimedReferenceAudioCandidates(referenceAudioAssets), [referenceAudioAssets]);
@@ -418,7 +440,7 @@ function WorkspaceMusicStudio({ workspace }: { workspace: ReturnType<typeof useA
     </form> : isSuccess && result?.assetId ? <section className="music-result-panel" aria-live="polite">
       <div className="music-result-heading"><div><p className="music-overline">{t("music.resultEyebrow")}</p><h2>{t("music.resultTitle")}</h2></div><span className="music-success-badge"><CheckCircle2 size={15} /> {t("music.savedToAssets")}</span></div>
       <div className="music-result-hero"><MusicArtwork large /><div className="music-result-copy"><h3>{result.title ?? current.title ?? t("music.generatedTitle")}</h3><p>{result.format?.toUpperCase() ?? "AUDIO"}{result.durationSeconds ? ` · ${t("music.durationValue", { seconds: String(result.durationSeconds) })}` : ""}</p><AudioPlayer assetId={result.assetId} title={result.title ?? t("music.generatedTitle")} durationSeconds={result.durationSeconds} /></div></div>
-      <div className="music-result-actions"><a className="music-action-button is-primary" href={api.assetFileUrl(result.assetId)}><Download size={15} /> {t("music.download")}</a>{current.projectId && <Link className="music-action-button" href={`/projects/${current.projectId}`}><FolderOpen size={15} /> {t("music.openProject")}</Link>}<Link className="music-action-button" href={`/assets?search=${encodeURIComponent(result.title ?? t("music.generatedTitle"))}`}><Music2 size={15} /> {t("music.openAssets")}</Link><button className="music-action-button is-quiet" type="button" onClick={createAnother}><RefreshCw size={15} /> {t("music.createAnother")}</button></div>
+      <div className="music-result-actions"><MediaJobArtifactDownload href={api.assetFileUrl(result.assetId)} state={resultArtifactState} className="music-action-button is-primary" label={t("music.download")} unavailableLabel={t("assets.fileUnavailable")} />{current.projectId && <Link className="music-action-button" href={`/projects/${current.projectId}`}><FolderOpen size={15} /> {t("music.openProject")}</Link>}<Link className="music-action-button" href={`/assets?search=${encodeURIComponent(result.title ?? t("music.generatedTitle"))}`}><Music2 size={15} /> {t("music.openAssets")}</Link><button className="music-action-button is-quiet" type="button" onClick={createAnother}><RefreshCw size={15} /> {t("music.createAnother")}</button></div>
     </section> : isFailure ? <section className="music-state-panel is-failure" aria-live="polite"><div className="music-state-icon"><AlertCircle size={24} /></div><p className="music-overline">{isMusicProviderUnavailable(current) ? t("music.providerStatus") : t("music.progressEyebrow")}</p><h2>{failureCopy.title}</h2><p>{failureCopy.text}</p><button className="music-action-button is-primary" type="button" onClick={createAnother}><RefreshCw size={15} /> {t("music.retry")}</button></section> : <section className="music-state-panel" aria-live="polite"><div className="music-state-icon is-active"><LoaderCircle size={24} className="music-spin" aria-hidden="true" /></div><p className="music-overline">{t("music.progressEyebrow")}</p><h2>{t(`jobs.status${current.status}`)}</h2><p>{t("music.progressText")}</p><div className="music-progress-meta"><span>{t("jobs.progress")}</span><strong>{current.progressPercent}%</strong></div><AccessibleProgressBar className="music-progress-track" label={t("jobs.progress")} value={current.progressPercent} />{canCancelMusicJob(current) && <button className="music-action-button" type="button" onClick={() => void cancel()} disabled={working}><XCircle size={15} /> {t("music.cancel")}</button>}</section>}
 
     <RecentMusicLibrary assets={recentMusic} loading={loadingLibrary} error={libraryError} locale={locale} t={t} />
