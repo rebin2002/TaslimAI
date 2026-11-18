@@ -1,11 +1,23 @@
 #!/usr/bin/env bash
-# Validate the production web root document and its security headers.
+# Validate the production web root document, its security headers and its
+# private-document cache-policy coherence.
 #
 # This gate verifies the same revision as the API container smoke, so both halves
 # of the release evidence must judge one identical standard: the terminal HTTP
 # response. A redirect hop that carries X-Content-Type-Options or X-Frame-Options
 # does not vouch for the HTML document that was finally served, so those headers
 # must be present on the terminal response block.
+#
+# The same terminal block must also satisfy the private-document cache-policy
+# coherence contract: whenever the root document signals a non-shared response
+# (Cache-Control carrying no-store), that response must not simultaneously
+# advertise a shared or positive lifetime (s-maxage, public, or max-age > 0)
+# and must carry an indexing refusal (X-Robots-Tag: noindex). Pre-fence
+# production revisions answer the root document with the framework prerender
+# lifetime and no no-store signal, so this contract is green on them; from the
+# moment the SSR cache fence lands it pins the fenced policy end to end and
+# turns any partial-fence regression red in the one hosted job that runs the
+# production `next start` image, which `next dev`-mode E2E cannot observe.
 set -euo pipefail
 
 image="${1:?usage: $0 IMAGE [PORT] [TIMEOUT_SECONDS]}"
@@ -93,6 +105,47 @@ if headers.get("x-content-type-options") != "nosniff":
     raise SystemExit("web root terminal response is missing X-Content-Type-Options: nosniff")
 if headers.get("x-frame-options") != "deny":
     raise SystemExit("web root terminal response is missing X-Frame-Options: DENY")
+cache_control = headers.get("cache-control", "")
+cache_directives = {
+    part.split("=", 1)[0].strip() for part in cache_control.split(",") if part.strip()
+}
+cache_parameters = {
+    part.split("=", 1)[0].strip(): part.split("=", 1)[1].strip()
+    for part in cache_control.split(",")
+    if "=" in part
+}
+if "no-store" in cache_directives:
+    # A private document that forbids stores must not simultaneously advertise
+    # a shared or positive lifetime: one dropped directive reopens the CDN
+    # retention path the SSR cache fence exists to close.
+    if "s-maxage" in cache_parameters:
+        raise SystemExit(
+            "web root private document must not advertise s-maxage "
+            f"alongside no-store: {cache_control!r}"
+        )
+    if "public" in cache_directives:
+        raise SystemExit(
+            "web root private document must not advertise public "
+            f"alongside no-store: {cache_control!r}"
+        )
+    max_age = cache_parameters.get("max-age")
+    if max_age is not None:
+        try:
+            max_age_seconds = int(max_age)
+        except ValueError:
+            raise SystemExit(
+                f"web root private document max-age is not an integer: {max_age!r}"
+            )
+        if max_age_seconds > 0:
+            raise SystemExit(
+                "web root private document must not advertise a positive max-age "
+                f"alongside no-store: {cache_control!r}"
+            )
+    if "noindex" not in headers.get("x-robots-tag", ""):
+        raise SystemExit(
+            "web root private document is missing X-Robots-Tag: noindex "
+            "alongside no-store"
+        )
 body = body_path.read_text(errors="replace")
 if not body.strip() or "<html" not in body.lower():
     raise SystemExit("web root terminal response did not return a non-empty HTML document")
