@@ -128,7 +128,18 @@ public sealed class OperationalReadinessWorkerDegradationTests
             var result = await service.ReadinessAsync("worker-readiness-budget", CancellationToken.None);
 
             Assert.Equal("unavailable", Check(result.Response, "storage").Status);
-            Assert.True(storage.CancellationObserved);
+            // The storage task is deliberately abandoned by the probe once the
+            // budget fires, so its cancellation is observed on a continuation
+            // that can still be in flight at this point. Wait for the event
+            // instead of sampling it: the ceiling below only trips if the
+            // cancellation never propagates at all, which is exactly the defect
+            // this case exists to catch. Sampling a bool here raced with the
+            // scheduler and failed on a loaded hosted runner.
+            var cancellationSignal = await Task.WhenAny(
+                storage.CancellationObserved, Task.Delay(TimeSpan.FromSeconds(15)));
+            Assert.True(
+                ReferenceEquals(cancellationSignal, storage.CancellationObserved),
+                "the abandoned storage probe never observed the shared probe-budget cancellation");
             // The shared budget is gone, so the worker verdict is unknown rather
             // than a fabricated "available" or "degraded".
             Assert.Equal("unknown", Check(result.Response, "worker").Status);
@@ -277,8 +288,19 @@ public sealed class OperationalReadinessWorkerDegradationTests
 
     private sealed class BlockingStorageService : IFileStorageService
     {
+        // The readiness probe calls ExistsAsync(...).WaitAsync(budget). When the
+        // shared budget expires, WaitAsync throws and the probe returns
+        // "unavailable" WITHOUT ever awaiting the storage task it started, so the
+        // cancellation is observed later, on a thread-pool continuation, possibly
+        // after ReadinessAsync has already returned. Sampling a bool at that moment
+        // races with the scheduler and loses on a loaded runner, so the observation
+        // is published as an awaitable signal and the test waits for the event
+        // rather than polling for it.
+        private readonly TaskCompletionSource<bool> cancellationObserved =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
         public string ProviderKey => "test-storage";
-        public bool CancellationObserved { get; private set; }
+        public Task CancellationObserved => cancellationObserved.Task;
 
         public Task StoreAsync(string storageKey, Stream content, CancellationToken cancellationToken = default) => Task.CompletedTask;
         public Task<Stream?> OpenReadAsync(string storageKey, CancellationToken cancellationToken = default) => Task.FromResult<Stream?>(null);
@@ -293,7 +315,7 @@ public sealed class OperationalReadinessWorkerDegradationTests
             }
             catch (OperationCanceledException)
             {
-                CancellationObserved = true;
+                cancellationObserved.TrySetResult(true);
                 throw;
             }
         }
