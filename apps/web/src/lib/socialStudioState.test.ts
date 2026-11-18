@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { GenerationJob } from "./api";
-import { clearSocialActiveJobId, clearSocialDraft, displaySocialProgress, formatSocialPostForCopy, isSocialJobForWorkspace, isSocialSourceReady, nextSocialRestoreDelay, normalizeSocialPreviewPlatform, parseSocialJobResult, persistSocialActiveJobId, persistSocialDraft, readSocialActiveJobId, readSocialDraft, socialActiveJobStorageKey, socialDraftStorageKey, socialStudioState } from "./socialStudioState";
+import { clearSocialActiveJobId, clearSocialDraft, displaySocialProgress, formatSocialPostForCopy, isSocialJobForWorkspace, isSocialSourceReady, legacySocialDraftStorageKey, nextSocialRestoreDelay, normalizeSocialPreviewPlatform, parseSocialJobResult, persistSocialActiveJobId, persistSocialDraft, purgeSocialDraftsOnAccountBoundary, readSocialActiveJobId, readSocialDraft, resolveSocialDraftScope, retireLegacySocialDraft, socialActiveJobStorageKey, socialDraftScopeToken, socialDraftStorageKey, socialStudioState } from "./socialStudioState";
 
 const job = (overrides: Partial<GenerationJob> = {}): GenerationJob => ({ id: "job-1", workspaceId: "workspace-1", projectId: null, jobType: "social.generate", status: "Running", title: null, progressPercent: 100, resultJson: null, errorCode: null, errorMessage: null, cancellationRequested: false, createdAt: "2026-01-01T00:00:00Z", queuedAt: null, startedAt: null, completedAt: null, failedAt: null, cancelledAt: null, outputs: [], ...overrides });
 
@@ -51,25 +51,76 @@ describe("socialStudioState", () => {
     clearSocialActiveJobId("workspace-1");
     expect(readSocialActiveJobId("workspace-1")).toBeNull();
   });
-  it("persists drafts by workspace and bounds values restored from session storage", () => {
+  it("persists drafts for an identity + workspace pair and bounds values restored from session storage", () => {
     const values = new Map<string, string>();
     vi.stubGlobal("window", { sessionStorage: { getItem: (key: string) => values.get(key) ?? null, setItem: (key: string, value: string) => values.set(key, value), removeItem: (key: string) => values.delete(key) } });
-    persistSocialDraft("workspace-1", { projectId: "project-1", selectedFiles: ["file-1"], selectedAssets: ["asset-1"], prompt: "Brief", socialType: "announcement", platform: "linkedin", tone: "professional", language: "en", audience: "Owners", brandVoice: "Clear", callToAction: "Learn more", includeHashtags: true, includeEmojis: false, generateVariants: true });
-    expect(values.has(socialDraftStorageKey("workspace-1"))).toBe(true);
-    expect(readSocialDraft("workspace-2")).toBeNull();
-    expect(readSocialDraft("workspace-1")?.prompt).toBe("Brief");
-    values.set(socialDraftStorageKey("workspace-1"), JSON.stringify({ prompt: "x".repeat(7000), selectedFiles: ["a", "b", "c", "d", "e", "f"] }));
-    const restored = readSocialDraft("workspace-1");
+    const owner = { userId: "user-1", workspaceId: "workspace-1" };
+    persistSocialDraft(owner, { projectId: "project-1", selectedFiles: ["file-1"], selectedAssets: ["asset-1"], prompt: "Brief", socialType: "announcement", platform: "linkedin", tone: "professional", language: "en", audience: "Owners", brandVoice: "Clear", callToAction: "Learn more", includeHashtags: true, includeEmojis: false, generateVariants: true });
+    expect(values.has(socialDraftStorageKey(owner) as string)).toBe(true);
+    // Neither a neighbouring workspace nor a neighbouring identity can address this entry.
+    expect(readSocialDraft({ userId: "user-1", workspaceId: "workspace-2" })).toBeNull();
+    expect(readSocialDraft({ userId: "user-2", workspaceId: "workspace-1" })).toBeNull();
+    expect(readSocialDraft(owner)?.prompt).toBe("Brief");
+    values.set(socialDraftStorageKey(owner) as string, JSON.stringify({ v: 1, u: "user-1", w: "workspace-1", savedAt: 1, d: { prompt: "x".repeat(7000), selectedFiles: ["a", "b", "c", "d", "e", "f"] } }));
+    const restored = readSocialDraft(owner);
     expect(restored?.prompt).toHaveLength(6000);
     expect(restored?.selectedFiles).toEqual(["a", "b", "c", "d", "e"]);
-    values.set(socialDraftStorageKey("workspace-1"), JSON.stringify({ socialType: "unsupported", platform: "provider-only", tone: "unknown", language: "fr" }));
-    expect(readSocialDraft("workspace-1")).toMatchObject({ socialType: "auto", platform: "multi", tone: "professional", language: "auto" });
-    clearSocialDraft("workspace-1");
+    values.set(socialDraftStorageKey(owner) as string, JSON.stringify({ v: 1, u: "user-1", w: "workspace-1", savedAt: 1, d: { socialType: "unsupported", platform: "provider-only", tone: "unknown", language: "fr" } }));
+    expect(readSocialDraft(owner)).toMatchObject({ socialType: "auto", platform: "multi", tone: "professional", language: "auto" });
+    // An entry claiming a different owner is never surfaced to this identity, and is purged.
+    values.set(socialDraftStorageKey(owner) as string, JSON.stringify({ v: 1, u: "user-2", w: "workspace-1", savedAt: 1, d: { prompt: "SYNTHETIC foreign private" } }));
+    expect(readSocialDraft(owner)).toBeNull();
+    expect(values.has(socialDraftStorageKey(owner) as string)).toBe(false);
+    persistSocialDraft(owner, { projectId: "", selectedFiles: [], selectedAssets: [], prompt: "Brief", socialType: "auto", platform: "multi", tone: "professional", language: "auto", audience: "", brandVoice: "", callToAction: "", includeHashtags: true, includeEmojis: false, generateVariants: true });
+    clearSocialDraft(owner);
+    expect(readSocialDraft(owner)).toBeNull();
+  });
+  it("refuses to address a persisted draft by workspace alone (#688)", () => {
+    const values = new Map<string, string>();
+    vi.stubGlobal("window", { sessionStorage: { getItem: (key: string) => values.get(key) ?? null, setItem: (key: string, value: string) => values.set(key, value), removeItem: (key: string) => values.delete(key) } });
+    // A bare workspace id is an authorisation scope, not an authentication result: it resolves to no
+    // address at all, so an un-migrated or unauthenticated call site fails closed instead of leaking.
+    expect(socialDraftStorageKey("workspace-1")).toBeNull();
+    expect(resolveSocialDraftScope("workspace-1")).toBeNull();
+    expect(socialDraftScopeToken({ userId: null, workspaceId: "workspace-1" })).toBeNull();
+    const draft = { projectId: "", selectedFiles: [], selectedAssets: [], prompt: "SYNTHETIC private brief", socialType: "auto", platform: "multi", tone: "professional", language: "auto", audience: "", brandVoice: "", callToAction: "", includeHashtags: true, includeEmojis: false, generateVariants: true };
+    expect(persistSocialDraft("workspace-1", draft)).toBe(false);
     expect(readSocialDraft("workspace-1")).toBeNull();
+    expect(clearSocialDraft("workspace-1")).toBe(false);
+    expect([...values.keys()]).toEqual([]);
+    // Sentinel identities are refused the same way, and trimming does not launder one into a real id.
+    expect(resolveSocialDraftScope({ userId: "anonymous", workspaceId: "workspace-1" })).toBeNull();
+    expect(resolveSocialDraftScope({ userId: "  ", workspaceId: "workspace-1" })).toBeNull();
+    expect(resolveSocialDraftScope({ userId: "user-1", workspaceId: "workspace-1" })).toEqual({ userId: "user-1", workspaceId: "workspace-1" });
+  });
+  it("quarantines a pre-#688 workspace-only draft without ever surfacing it", () => {
+    const values = new Map<string, string>();
+    vi.stubGlobal("window", { sessionStorage: { getItem: (key: string) => values.get(key) ?? null, setItem: (key: string, value: string) => values.set(key, value), removeItem: (key: string) => values.delete(key) } });
+    const legacyKey = legacySocialDraftStorageKey("workspace-1");
+    values.set(legacyKey, JSON.stringify({ prompt: "SYNTHETIC pre-688 private draft", selectedAssets: ["synthetic-asset-688"] }));
+    // The identity that happens to arrive next cannot obtain the payload, and the entry leaves the tab.
+    expect(readSocialDraft({ userId: "user-1", workspaceId: "workspace-1" })).toBeNull();
+    expect(retireLegacySocialDraft({ userId: "user-1", workspaceId: "workspace-1" })).toBe("quarantined-removed");
+    expect(values.has(legacyKey)).toBe(false);
+    expect([...values.values()].join(" ")).not.toContain("SYNTHETIC pre-688 private draft");
+  });
+  it("scrubs only the proven signing-out identity's drafts at the account boundary", () => {
+    const values = new Map<string, string>();
+    vi.stubGlobal("window", { sessionStorage: { getItem: (key: string) => values.get(key) ?? null, setItem: (key: string, value: string) => values.set(key, value), removeItem: (key: string) => values.delete(key), key: (index: number) => [...values.keys()][index] ?? null, get length() { return values.size; } } });
+    const draft = (prompt: string) => ({ projectId: "", selectedFiles: [], selectedAssets: [], prompt, socialType: "auto", platform: "multi", tone: "professional", language: "auto", audience: "", brandVoice: "", callToAction: "", includeHashtags: true, includeEmojis: false, generateVariants: true });
+    persistSocialDraft({ userId: "user-1", workspaceId: "workspace-1" }, draft("A private"));
+    persistSocialDraft({ userId: "user-2", workspaceId: "workspace-1" }, draft("B private"));
+    expect(purgeSocialDraftsOnAccountBoundary("user-1")).toEqual({ removedCount: 1, refusedInvalidIdentity: false });
+    expect(readSocialDraft({ userId: "user-1", workspaceId: "workspace-1" })).toBeNull();
+    expect(readSocialDraft({ userId: "user-2", workspaceId: "workspace-1" })?.prompt).toBe("B private");
+    // An unproven identity destroys nothing at all, so a half-resolved session cannot wipe state.
+    expect(purgeSocialDraftsOnAccountBoundary(null)).toEqual({ removedCount: 0, refusedInvalidIdentity: true });
+    expect(purgeSocialDraftsOnAccountBoundary("anonymous")).toEqual({ removedCount: 0, refusedInvalidIdentity: true });
+    expect(readSocialDraft({ userId: "user-2", workspaceId: "workspace-1" })?.prompt).toBe("B private");
   });
   it("ignores malformed draft storage instead of breaking the studio", () => {
     vi.stubGlobal("window", { sessionStorage: { getItem: () => "{not-json", setItem: vi.fn(), removeItem: vi.fn() } });
-    expect(readSocialDraft("workspace-1")).toBeNull();
+    expect(readSocialDraft({ userId: "user-1", workspaceId: "workspace-1" })).toBeNull();
   });
   it("keeps generated drafts out of broad live announcements", () => {
     const source = readFileSync(new URL("../components/SocialStudioView.tsx", import.meta.url), "utf8");
