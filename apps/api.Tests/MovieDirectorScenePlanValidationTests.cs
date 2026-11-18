@@ -29,6 +29,7 @@ public sealed class MovieDirectorScenePlanValidationTests
     [InlineData(0)]
     [InlineData(3_601)]
     [InlineData(7_200)]
+    [InlineData(int.MaxValue)]
     public void Runtime_validator_never_accepts_an_out_of_range_context_as_a_clamped_plan(int requestedDurationSeconds)
     {
         var validator = CreateValidator();
@@ -56,6 +57,44 @@ public sealed class MovieDirectorScenePlanValidationTests
             DirectorScenePlanActionTypes.PlanScenes, context.CurrentRevision!.RevisionId,
             "snapshot", "en", "16:9", 3_600, 3_600,
             DirectorQualityLevels.Fast, "Fast", null, [Scene(3_600)]);
+
+        var result = validator.Validate(payload, context);
+
+        Assert.True(result.IsValid, string.Join(", ", result.Findings.Select(f => $"{f.ReasonCode}: {f.Field}")));
+    }
+
+    [Theory]
+    [InlineData(30, 31)]
+    [InlineData(30, 7_200)]
+    [InlineData(300, 301)]
+    public void Runtime_validator_follows_the_configured_ceiling_rather_than_the_default_three_thousand_six_hundred(
+        int configuredMaxDurationSeconds, int requestedDurationSeconds)
+    {
+        var validator = CreateValidator(configuredMaxDurationSeconds);
+        var context = CreateContext() with { DurationSeconds = requestedDurationSeconds };
+        var clampedDuration = Math.Clamp(requestedDurationSeconds, 1, configuredMaxDurationSeconds);
+        var payload = new DirectorScenePlanActionPayload(
+            DirectorScenePlanActionTypes.PlanScenes, context.CurrentRevision!.RevisionId,
+            "snapshot", "en", "16:9", clampedDuration, clampedDuration,
+            DirectorQualityLevels.Fast, "Fast", null, [Scene(clampedDuration)]);
+
+        var result = validator.Validate(payload, context);
+
+        Assert.False(result.IsValid);
+        Assert.Contains(result.Findings, finding =>
+            finding.ReasonCode == DirectorScenePlanValidationReasonCodes.RuntimeMismatch
+            && finding.Field == "targetDurationSeconds");
+    }
+
+    [Fact]
+    public void Runtime_validator_accepts_a_plan_at_the_one_second_floor()
+    {
+        var validator = CreateValidator();
+        var context = CreateContext() with { DurationSeconds = 1 };
+        var payload = new DirectorScenePlanActionPayload(
+            DirectorScenePlanActionTypes.PlanScenes, context.CurrentRevision!.RevisionId,
+            "snapshot", "en", "16:9", 1, 1,
+            DirectorQualityLevels.Fast, "Fast", null, [Scene(1)]);
 
         var result = validator.Validate(payload, context);
 
@@ -91,6 +130,10 @@ public sealed class MovieDirectorScenePlanValidationTests
 
     private static IMovieDirectorScenePlanValidator CreateValidator() => new MovieDirectorScenePlanValidator(
         Options.Create(new MovieDirectorScenePlanningOptions()),
+        NullLogger<MovieDirectorScenePlanValidator>.Instance);
+
+    private static IMovieDirectorScenePlanValidator CreateValidator(int maxDurationSeconds) => new MovieDirectorScenePlanValidator(
+        Options.Create(new MovieDirectorScenePlanningOptions { MaxDurationSeconds = maxDurationSeconds }),
         NullLogger<MovieDirectorScenePlanValidator>.Instance);
 
     private static DirectorSceneProposal Scene(int duration, string title = "Seed at Dawn") => new(
