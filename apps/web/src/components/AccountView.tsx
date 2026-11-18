@@ -1,6 +1,4 @@
 "use client";
-import { localeTag } from "@/lib/i18n";
-
 import Link from "next/link";
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import {
@@ -34,6 +32,8 @@ import {
   type AccountProfileDraft,
 } from "@/lib/accountProfileState";
 import type { Locale } from "@/lib/i18n";
+import { languagePackTag } from "@/lib/languagePackRegistry";
+import type { LanguagePackId } from "@/lib/languagePackTypes";
 
 const timeZones = [
   "UTC",
@@ -57,7 +57,7 @@ export function AccountView() {
 
 function AccountProfileForm() {
   const { user, workspace, updateProfile, signOut } = useAuth();
-  const { t, locale } = useLocale();
+  const { t, languagePackId, languagePackIds, languagePackNames } = useLocale();
   const serverSnapshot = useMemo(() => accountProfileDraftFromUser(user), [user]);
   const [draft, setDraft] = useState<AccountProfileDraft>(serverSnapshot);
   const [syncedSnapshot, setSyncedSnapshot] = useState<AccountProfileDraft>(serverSnapshot);
@@ -104,8 +104,8 @@ function AccountProfileForm() {
     return () => { active = false; };
   }, []);
 
-  const createdDate = user?.createdAt ? new Intl.DateTimeFormat(localeTag(locale), { dateStyle: "medium" }).format(new Date(user.createdAt)) : "—";
-  const initials = profileAvatarInitial(user, locale);
+  const createdDate = user?.createdAt ? new Intl.DateTimeFormat(languagePackTag(languagePackId), { dateStyle: "medium" }).format(new Date(user.createdAt)) : "—";
+  const initials = profileAvatarInitial(user, languagePackTag(languagePackId));
 
   async function saveProfile(event: FormEvent) {
     event.preventDefault();
@@ -174,7 +174,7 @@ function AccountProfileForm() {
           <div className="account-form-divider" />
           <div className="card-subheading"><Languages size={15} /><span>{t("account.preferences")}</span></div>
           <div className="account-control-grid">
-            <label><span>{t("account.interfaceLanguage")}</span><div className="select-shell"><Globe2 size={16} /><select value={draft.preferredLanguage} onChange={(event) => updateDraft({ preferredLanguage: event.target.value as Locale })}>{locales.map((item) => <option key={item} value={item}>{localeNames[item]}</option>)}</select></div></label>
+            <label><span>{t("account.interfaceLanguage")}</span><div className="select-shell"><Globe2 size={16} /><select value={draft.preferredLanguage} onChange={(event) => updateDraft({ preferredLanguage: event.target.value as LanguagePackId })}>{languagePackIds.map((item) => <option key={item} value={item}>{languagePackNames[item]}</option>)}</select></div></label>
             <label><span>{t("account.defaultGenerationLanguage")}</span><div className="select-shell"><Languages size={16} /><select value={draft.defaultGenerationLanguage} onChange={(event) => updateDraft({ defaultGenerationLanguage: event.target.value as Locale })}>{locales.map((item) => <option key={item} value={item}>{localeNames[item]}</option>)}</select></div></label>
             <label><span>{t("account.timezone")}</span><div className="select-shell"><Clock3 size={16} /><select value={draft.timeZone} onChange={(event) => updateDraft({ timeZone: event.target.value })}>{!timeZones.includes(draft.timeZone) && <option value={draft.timeZone}>{draft.timeZone}</option>}{timeZones.map((item) => <option key={item} value={item}>{item}</option>)}</select></div></label>
             <label><span>{t("account.outputPreference")}</span><div className="select-shell"><SlidersHorizontal size={16} /><select value={draft.outputPreference} onChange={(event) => updateDraft({ outputPreference: event.target.value as AccountProfileDraft["outputPreference"] })}>{outputPreferences.map((item) => <option key={item} value={item}>{t(`account.output.${item}`)}</option>)}</select></div></label>
