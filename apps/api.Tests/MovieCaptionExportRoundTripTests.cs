@@ -154,6 +154,115 @@ public sealed class MovieCaptionExportRoundTripTests : IClassFixture<TaslimApiFa
         Assert.Equal("Line one\nLine three", reimported.Cues[0].Text);
     }
 
+    /// <summary>
+    /// A stored cue can carry a lone carriage return, which the old exporters
+    /// copied verbatim: the download then held a bare CR inside an otherwise
+    /// CRLF container, so the file's own line breaks were not the grammar's.
+    /// Folding normalises every break style, leaving CRLF only.
+    /// </summary>
+    [Theory]
+    [InlineData("srt")]
+    [InlineData("vtt")]
+    public async Task Exported_document_writes_crlf_breaks_only(string format)
+    {
+        var owner = await Register($"Caption CRLF {format} Owner");
+        var track = await CreateCaptionTrack(owner.Client, owner.MovieId, $"CRLF {format}");
+        await AddCaptionCue(owner.Client, track.Id, 1, "00:00:01.000", "00:00:03.000", "Alpha\rBeta\nGamma\r\nDelta");
+
+        var exported = await Export(owner.Client, track.Id, format);
+
+        for (var index = 0; index < exported.Length; index++)
+        {
+            if (exported[index] == '\n')
+            {
+                Assert.True(index > 0 && exported[index - 1] == '\r',
+                    $"LF without a preceding CR at offset {index} of the exported {format} document.");
+            }
+            else if (exported[index] == '\r')
+            {
+                Assert.True(index + 1 < exported.Length && exported[index + 1] == '\n',
+                    $"Bare CR at offset {index} of the exported {format} document.");
+            }
+        }
+
+        // The break was folded, not dropped: all four authored lines survive.
+        var reimported = await Reimport(owner, exported, format, $"Reimported CRLF {format}");
+        var cue = Assert.Single(reimported.Cues);
+        Assert.Equal("Alpha\nBeta\nGamma\nDelta", cue.Text);
+    }
+
+    /// <summary>
+    /// Cue text is content, never structure: a timecode-shaped line, a header
+    /// keyword and a NOTE keyword inside cue text must not be read back as a
+    /// cue boundary once the interior blank line is folded away.
+    /// </summary>
+    [Theory]
+    [InlineData("srt")]
+    [InlineData("vtt")]
+    public async Task Grammar_looking_cue_text_stays_cue_text(string format)
+    {
+        var owner = await Register($"Caption Grammar Look {format} Owner");
+        var track = await CreateCaptionTrack(owner.Client, owner.MovieId, $"Grammar look {format}");
+        await AddCaptionCue(owner.Client, track.Id, 1, "00:00:01.000", "00:00:04.000",
+            "00:00:10.000 --> 00:00:11.000\n\nWEBVTT\nNOTE not a note");
+
+        var exported = await Export(owner.Client, track.Id, format);
+        Assert.Equal(1, CueBlocks(exported, format).Length);
+
+        var reimported = await Reimport(owner, exported, format, $"Reimported grammar look {format}");
+        var cue = Assert.Single(reimported.Cues);
+        Assert.Equal("00:00:10.000 --> 00:00:11.000\nWEBVTT\nNOTE not a note", cue.Text);
+    }
+
+    /// <summary>
+    /// Folding is a text operation only: the cues keep their own bounds, so a
+    /// download written from out-of-order sequences re-imports as the same three
+    /// timecode pairs in time order.
+    /// </summary>
+    [Theory]
+    [InlineData("srt")]
+    [InlineData("vtt")]
+    public async Task Folding_preserves_every_cue_timecode(string format)
+    {
+        var owner = await Register($"Caption Timing {format} Owner");
+        var track = await CreateCaptionTrack(owner.Client, owner.MovieId, $"Timing {format}");
+        await AddCaptionCue(owner.Client, track.Id, 3, "00:00:30.000", "00:00:31.500", "Late cue.\n\nCarried tail.");
+        await AddCaptionCue(owner.Client, track.Id, 1, "00:00:01.250", "00:00:02.000", "Opening cue.");
+        await AddCaptionCue(owner.Client, track.Id, 2, "00:01:00.000", "00:01:01.000", "One minute cue.");
+
+        var exported = await Export(owner.Client, track.Id, format);
+        Assert.Equal(3, CueBlocks(exported, format).Length);
+
+        var reimported = await Reimport(owner, exported, format, $"Reimported timing {format}");
+        Assert.Equal(3, reimported.Cues.Count);
+        Assert.Equal(
+            new[] { "00:00:01.250", "00:00:30.000", "00:01:00.000" },
+            reimported.Cues.Select(item => item.StartTimecode).ToArray());
+        Assert.Equal(
+            new[] { "00:00:02.000", "00:00:31.500", "00:01:01.000" },
+            reimported.Cues.Select(item => item.EndTimecode).ToArray());
+    }
+
+    /// <summary>
+    /// Helper for the re-import hop used by the grammar pins.
+    /// </summary>
+    private async Task<MovieCaptionTrackDto> Reimport((HttpClient Client, Guid MovieId) owner, string content, string format, string name)
+    {
+        using var reimport = await SendWithCsrf(owner.Client, HttpMethod.Post,
+            $"/api/movie-studio/projects/{owner.MovieId}/caption-tracks/import",
+            new
+            {
+                name,
+                trackType = MovieCaptionTrackTypes.Subtitle,
+                language = "en",
+                status = MovieCaptionTrackStatuses.Draft,
+                format,
+                content,
+            });
+        Assert.True(reimport.StatusCode == HttpStatusCode.OK, await reimport.Content.ReadAsStringAsync());
+        return (await reimport.Content.ReadFromJsonAsync<MovieCaptionTrackDto>())!;
+    }
+
     private static async Task<string> Export(HttpClient client, Guid trackId, string format)
     {
         using var export = await client.GetAsync($"/api/movie-studio/caption-tracks/{trackId}/export?format={format}");
