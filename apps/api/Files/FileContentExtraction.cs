@@ -162,7 +162,22 @@ public sealed class FileContentExtractor(IOptions<FileOptions> options) : IFileC
             }
             return builder.ToString();
         }
-        catch (Exception exception) when (exception is PdfDocumentFormatException or ArgumentOutOfRangeException)
+        // One shape is missing from the list above. When /Root names an object that the
+        // cross-reference table never registers, an undefined object number or the free-object
+        // number 0, PdfPig dereferences the absent object while it resolves the catalog and
+        // reports that as NullReferenceException from PdfDocumentFactory.ParseTrailer rather
+        // than as PdfDocumentFormatException, so it reaches this filter unconverted and escapes
+        // the boundary. The other unresolved-reference shapes checked against synthetic
+        // documents, an absent /Root key, a root naming a page, font, stream or literal, an
+        // unreachable startxref and a missing trailer, already raise one of the two types
+        // above, and a dangling /Pages, /Kids, /Contents or /Font reference either recovers or
+        // raises InvalidOperationException, which the outer filter contains. The added type is
+        // therefore the parser's catalog-resolution failure, not a general catch-all.
+        // Widening stays scoped to PDF parsing on purpose: the outer filter in ExtractAsync
+        // still omits NullReferenceException, so a null reference from document, spreadsheet or
+        // plain-text extraction, or from this class itself, keeps propagating to the generic
+        // unexpected-failure handling in FileProcessingService unchanged.
+        catch (Exception exception) when (exception is PdfDocumentFormatException or ArgumentOutOfRangeException or NullReferenceException)
         {
             throw new InvalidDataException("The PDF could not be parsed.", exception);
         }
