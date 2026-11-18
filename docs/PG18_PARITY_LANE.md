@@ -27,9 +27,12 @@ without waiting for it.
 
 ## Safe defaults
 
-* The workflow is **`workflow_dispatch` only**. There is no `push`,
-  `pull_request`, or `schedule` trigger, so an ordinary branch or PR cannot
-  consume CI minutes or silently start a database-backed run.
+* The lane executes from two explicit opt-ins and nothing else: a `push` to a
+  branch inside its own `ci/postgres18-` prefix (the only branch namespace it
+  can ever run on) or a `workflow_dispatch` (listed once the file exists on the
+  default branch). There is no `pull_request` or `schedule`/`cron` trigger, and
+  a prefix push still defaults to `guards-only`, so an ordinary branch or PR
+  cannot consume CI minutes or silently start a database-backed run.
 * `legs` defaults to `guards-only`, which runs the offline guard contracts and
   touches no database at all.
 * `candidate_ref` lets the lane qualify an **exact composed candidate** (for
