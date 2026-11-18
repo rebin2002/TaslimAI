@@ -276,7 +276,7 @@ public sealed class ChatMessagePaginationTests : IClassFixture<TaslimApiFactory>
         var history = await client.GetFromJsonAsync<List<ChatMessageDto>>($"/api/conversations/{conversation.Id}/messages");
         Assert.NotNull(history);
         Assert.Equal(2, history.Count);
-        Assert.Equal(first.AssistantMessage.Id, history.Single(message => message.Role == "Assistant").Id);
+        Assert.Equal("Pending", history.Single(message => message.Id == first.AssistantMessage.Id).Status);
     }
 
     private async Task MakePairShareOneTimestamp(Guid userMessageId, Guid assistantMessageId)
