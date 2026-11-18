@@ -24,6 +24,44 @@ public sealed class MovieDirectorScenePlanValidationTests
         Assert.Contains(result.Findings, item => item.ReasonCode == DirectorScenePlanValidationReasonCodes.Placeholder);
     }
 
+    [Theory]
+    [InlineData(-10)]
+    [InlineData(0)]
+    [InlineData(3_601)]
+    [InlineData(7_200)]
+    public void Runtime_validator_never_accepts_an_out_of_range_context_as_a_clamped_plan(int requestedDurationSeconds)
+    {
+        var validator = CreateValidator();
+        var context = CreateContext() with { DurationSeconds = requestedDurationSeconds };
+        var clampedDuration = Math.Clamp(requestedDurationSeconds, 1, 3_600);
+        var payload = new DirectorScenePlanActionPayload(
+            DirectorScenePlanActionTypes.PlanScenes, context.CurrentRevision!.RevisionId,
+            "snapshot", "en", "16:9", clampedDuration, clampedDuration,
+            DirectorQualityLevels.Fast, "Fast", null, [Scene(clampedDuration)]);
+
+        var result = validator.Validate(payload, context);
+
+        Assert.False(result.IsValid);
+        Assert.Contains(result.Findings, finding =>
+            finding.ReasonCode == DirectorScenePlanValidationReasonCodes.RuntimeMismatch
+            && finding.Field == "targetDurationSeconds");
+    }
+
+    [Fact]
+    public void Runtime_validator_accepts_a_plan_at_the_configured_duration_ceiling()
+    {
+        var validator = CreateValidator();
+        var context = CreateContext() with { DurationSeconds = 3_600 };
+        var payload = new DirectorScenePlanActionPayload(
+            DirectorScenePlanActionTypes.PlanScenes, context.CurrentRevision!.RevisionId,
+            "snapshot", "en", "16:9", 3_600, 3_600,
+            DirectorQualityLevels.Fast, "Fast", null, [Scene(3_600)]);
+
+        var result = validator.Validate(payload, context);
+
+        Assert.True(result.IsValid, string.Join(", ", result.Findings.Select(f => $"{f.ReasonCode}: {f.Field}")));
+    }
+
     [Fact]
     public async Task Unavailable_scene_plan_ai_fails_honestly_without_a_placeholder_plan()
     {
