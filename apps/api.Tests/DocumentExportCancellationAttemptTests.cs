@@ -37,6 +37,11 @@ public sealed class DocumentExportCancellationGate
     public Task ProviderStarted => providerStarted.Task;
     public Task PublisherStarted => publisherStarted.Task;
 
+    // Only the linked-token regression should abort the synthetic provider on cancellation.
+    // Other tests intentionally model a provider returning after cancellation to exercise
+    // the publication-fence finalizer rather than the existing exception handler.
+    public bool HonorProviderCancellation { get; set; }
+
     public void SignalProviderStarted() => providerStarted.TrySetResult();
     public void ReleaseProvider() => providerRelease.TrySetResult();
     public void SignalPublisherStarted() => publisherStarted.TrySetResult();
@@ -60,7 +65,7 @@ internal sealed class GatedDocumentProvider(DocumentExportCancellationGateHolder
     public async Task<DocumentProviderResult> GenerateAsync(DocumentGenerationPrompt prompt, DocumentGenerationOptions options, CancellationToken cancellationToken)
     {
         holder.Gate.SignalProviderStarted();
-        if (!await holder.Gate.WaitForProviderReleaseAsync(cancellationToken))
+        if (!await holder.Gate.WaitForProviderReleaseAsync(holder.Gate.HonorProviderCancellation ? cancellationToken : CancellationToken.None))
             throw new OperationCanceledException(cancellationToken);
 
         var draft = new DocumentDraft
@@ -226,6 +231,7 @@ public sealed class DocumentExportCancellationAttemptTests : IClassFixture<Docum
     public async Task Cancellation_observed_by_the_linked_worker_token_still_finalizes_the_attempt_and_keeps_the_export_unpublished()
     {
         var gate = factory.InstallGate();
+        gate.HonorProviderCancellation = true;
         using var client = factory.CreateClient();
         var auth = await Register(client);
         var created = await CreateDocumentJob(client, auth.PersonalWorkspace.Id);
@@ -249,7 +255,7 @@ public sealed class DocumentExportCancellationAttemptTests : IClassFixture<Docum
     }
 
     [Fact(Timeout = 90_000)]
-    public async Task Late_success_finalization_after_a_fence_cancel_cannot_reopen_the_attempt_or_book_a_charge()
+    public async Task Late_success_finalization_after_a_fence_cancel_cannot_reopen_the_attempt_or_record_provider_cost()
     {
         var gate = factory.InstallGate();
         using var client = factory.CreateClient();
@@ -268,7 +274,7 @@ public sealed class DocumentExportCancellationAttemptTests : IClassFixture<Docum
         // Fix-present precondition: the first fence exit has finalized the attempt, so
         // the job's attempt row is already terminal when the job itself is terminal.
         // Without the fix the row is still Started here, and the late finalization
-        // below reopens it into a charged success for an export that never published.
+        // below reopens it as a successful attempt with provider cost for an unpublished export.
         using (var scope = factory.Services.CreateScope())
         {
             var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
@@ -279,7 +285,7 @@ public sealed class DocumentExportCancellationAttemptTests : IClassFixture<Docum
 
         // A late success from an independent scope - the shape a delayed provider
         // completion or a retrying resilience layer would produce - must not mutate
-        // the terminal attempt or book an actual provider cost.
+        // the terminal attempt or record an actual provider cost.
         using (var scope = factory.Services.CreateScope())
         {
             var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
@@ -307,7 +313,7 @@ public sealed class DocumentExportCancellationAttemptTests : IClassFixture<Docum
     }
 
     [Fact(Timeout = 90_000)]
-    public async Task Concurrent_terminal_finalizations_after_a_publication_window_cancel_keep_one_cancelled_attempt_and_zero_charge()
+    public async Task Concurrent_terminal_finalizations_after_a_publication_window_cancel_keep_one_cancelled_attempt_and_null_provider_cost()
     {
         var gate = factory.InstallGate();
         using var client = factory.CreateClient();
