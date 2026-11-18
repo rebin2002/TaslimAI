@@ -476,6 +476,8 @@ public sealed class ChatController(
         {
             if (!string.Equals(existingUser.Content, content, StringComparison.Ordinal))
                 return PreparedChat.Failure(ApiResults.Error(this, StatusCodes.Status409Conflict, "REQUEST_ID_REUSED", "That message request cannot be reused with different content."));
+            if (!await HasSameAttachmentsAsync(existingUser.Id, request.AttachmentIds, cancellationToken))
+                return PreparedChat.Failure(ApiResults.Error(this, StatusCodes.Status409Conflict, "REQUEST_ID_REUSED", "That message request cannot be reused with different attachments."));
             var existingAssistant = await db.ChatMessages.FirstOrDefaultAsync(message => message.ConversationId == conversationId && message.Role == ChatMessageRole.Assistant && message.CreatedAt > existingUser.CreatedAt, cancellationToken);
             if (existingAssistant is null) return PreparedChat.Failure(ApiResults.Error(this, StatusCodes.Status409Conflict, "MESSAGE_IN_PROGRESS", "That message is already being generated."));
             if (existingAssistant.Status == ChatMessageStatus.Failed)
@@ -532,6 +534,17 @@ public sealed class ChatController(
             throw;
         }
         return PreparedChat.New(conversation, userMessage, assistantMessage);
+    }
+
+    private async Task<bool> HasSameAttachmentsAsync(Guid messageId, IReadOnlyCollection<Guid>? requestedIds, CancellationToken cancellationToken)
+    {
+        var requested = requestedIds?.Distinct().ToArray() ?? [];
+        var persisted = await db.ChatMessageAttachments.AsNoTracking()
+            .Where(attachment => attachment.ChatMessageId == messageId)
+            .OrderBy(attachment => attachment.SortOrder)
+            .Select(attachment => attachment.StoredFileId)
+            .ToArrayAsync(cancellationToken);
+        return requested.SequenceEqual(persisted);
     }
 
     private async Task<AiChatRequest> BuildContextAsync(Conversation conversation, Guid currentMessageId, CancellationToken cancellationToken, long? excludedAssistantAfterSequence = null)
@@ -611,9 +624,9 @@ public sealed class ChatController(
         return contextBuilder.Build(history, project?.Instructions, project?.ContextNotes, memories, fileContexts);
     }
 
-    private async Task<IActionResult?> AttachFilesAsync(Conversation conversation, ChatMessage message, IReadOnlyCollection<Guid> requestedIds, CancellationToken cancellationToken)
+    private async Task<IActionResult?> AttachFilesAsync(Conversation conversation, ChatMessage message, IReadOnlyCollection<Guid>? requestedIds, CancellationToken cancellationToken)
     {
-        var ids = requestedIds.Distinct().ToList();
+        var ids = requestedIds?.Distinct().ToList() ?? [];
         var maximumAttachments = Math.Clamp(fileOptions.Value.MaxAttachmentsPerMessage, 1, 20);
         if (ids.Count > maximumAttachments) return ApiResults.Validation(this, $"You can attach up to {maximumAttachments} files to one message.");
         if (ids.Count == 0) return null;
