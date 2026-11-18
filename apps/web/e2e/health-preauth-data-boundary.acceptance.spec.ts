@@ -280,7 +280,7 @@ test.describe("Health Care pre-consent data boundary (#714)", () => {
       expect(status, `${locale.code}: unauthenticated ${HEALTH_ROUTE} is a redirect, not a document`).toBe(307);
       expect(response.headers()["location"], `${locale.code}: redirect target`).toBe(LOGIN_DESTINATION);
       expect(body, `${locale.code}: the redirect body is not an HTML health document`)
-        .not.toMatch(/<h1[^>]*health/i);
+        .not.toMatch(/<h1\b[^>]*>\s*health\b/i);
       const leaks = findRecordLeak(body, allLocalizedHealthCopy);
       expect(leaks, `${locale.code}: initial response leaks ${leaks.join(", ") || "nothing"}`).toEqual([]);
       expect(body, `${locale.code}: initial response advertises no data-plane endpoint`)
