@@ -199,7 +199,7 @@ public sealed class BillingPeriodProvisioningLedgerIdempotencyTests
         return db;
     }
 
-    private static PaymentLifecycleService NewLifecycle(TaslimDbContext db) => new(db, new CreditLedgerService(db, Options.Create(new BillingOptions { CustomerChargingEnabled = true })), new NullNotificationEventWriter(), NullLogger<PaymentLifecycleService>.Instance);
+    private static PaymentLifecycleService NewLifecycle(TaslimDbContext db) => new(db, new CreditLedgerService(db, Options.Create(new BillingOptions { CustomerChargingEnabled = false })), new NullNotificationEventWriter(), NullLogger<PaymentLifecycleService>.Instance);
 
     private static async Task<(Workspace Workspace, Plan Plan, Subscription Subscription)> SeedSubscriptionAsync(TaslimDbContext db)
     {
