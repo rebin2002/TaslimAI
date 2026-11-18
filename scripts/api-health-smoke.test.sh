@@ -67,6 +67,16 @@ if [[ "${SMOKE_MODE:-retry}" == 'unsafe' && "$endpoint" == '/health/ready' ]]; t
     printf '{"status":"ready","service":"Taslim API","requestId":"smoke-request","checks":[{"name":"database","status":"available","required":true}],"password":"must-not-leak"}\n' > "$body"
 elif [[ "${SMOKE_MODE:-retry}" == 'invalid' && "$endpoint" == '/health/ready' ]]; then
     printf '{"status":"ready","service":"Taslim API","requestId":"smoke-request","checks":[{"name":"storage","status":"available","required":true}]}\n' > "$body"
+elif [[ "${SMOKE_MODE:-retry}" == 'advisory-worker' && "$endpoint" == '/health/ready' ]]; then
+    # A readiness document carrying an appended advisory check that is NOT
+    # available while every required check is: exactly the shape the worker
+    # degradation report produces. The status comes from SMOKE_WORKER_STATUS
+    # so both the degraded and the unknown verdicts are pinned.
+    printf '{"status":"ready","service":"Taslim API","requestId":"smoke-request","checks":[{"name":"database","status":"available","required":true},{"name":"storage","status":"available","required":true},{"name":"worker","status":"%s","required":false}]}\n' "${SMOKE_WORKER_STATUS:?}" > "$body"
+elif [[ "${SMOKE_MODE:-retry}" == 'required-worker' && "$endpoint" == '/health/ready' ]]; then
+    # The same document with the worker check marked required, so the helper
+    # is judged by the required-flag rule alone.
+    printf '{"status":"ready","service":"Taslim API","requestId":"smoke-request","checks":[{"name":"database","status":"available","required":true},{"name":"storage","status":"available","required":true},{"name":"worker","status":"degraded","required":true}]}\n' > "$body"
 elif [[ "$endpoint" == '/health/live' ]]; then
     printf '{"status":"alive","service":"Taslim API","requestId":"smoke-request","checks":[{"name":"process","status":"alive","required":true}]}\n' > "$body"
 else
@@ -134,6 +144,51 @@ fi
 grep -F 'returned an invalid response on attempt 1' "$temp_dir/invalid.output" >/dev/null || {
     echo 'The smoke helper did not report the invalid final-attempt response.' >&2
     cat "$temp_dir/invalid.output" >&2
+    exit 1
+}
+
+# Advisory-check consumption: a readiness document whose only non-available
+# check is flagged required:false (the worker degradation report) must still
+# pass the helper, because only required checks may gate the exit code. This
+# is the property the restart automation depends on: an advisory degraded or
+# unknown worker can never fail a deployment smoke or restart a container.
+# Before these fixtures no committed case carried a non-required check, so a
+# validator regression that gated on every check would pass this file green.
+for advisory_status in degraded unknown; do
+    advisory_log="$temp_dir/advisory-$advisory_status.log"
+    if ! PATH="$bin_dir:$PATH" \
+        SMOKE_COMMAND_LOG="$advisory_log" \
+        SMOKE_STATE_FILE="$temp_dir/advisory-$advisory_status.state" \
+        SMOKE_MODE=advisory-worker \
+        SMOKE_WORKER_STATUS="$advisory_status" \
+        SMOKE_MAX_ATTEMPTS=1 \
+        SMOKE_RETRY_SECONDS=0 \
+        bash "$script" http://127.0.0.1:5000 >"$temp_dir/advisory-$advisory_status.output" 2>&1; then
+        echo "The smoke helper failed a readiness document with advisory worker=${advisory_status}." >&2
+        cat "$temp_dir/advisory-$advisory_status.output" >&2
+        exit 1
+    fi
+done
+
+# The negative control: the identical document with the worker check marked
+# required must fail on the required-flag rule, proving the advisory pass
+# above is evidence of the required filter, not of a validator that ignores
+# the checks array entirely.
+required_log="$temp_dir/required-worker.log"
+if PATH="$bin_dir:$PATH" \
+    SMOKE_COMMAND_LOG="$required_log" \
+    SMOKE_STATE_FILE="$temp_dir/required-worker.state" \
+    SMOKE_MODE=required-worker \
+    SMOKE_MAX_ATTEMPTS=1 \
+    SMOKE_RETRY_SECONDS=0 \
+    bash "$script" http://127.0.0.1:5000 >"$temp_dir/required-worker.output" 2>&1; then
+    echo 'The smoke helper accepted a required worker check that is not available.' >&2
+    cat "$temp_dir/required-worker.output" >&2
+    exit 1
+fi
+grep -F 'required check worker is not available' "$temp_dir/required-worker.output" >/dev/null || {
+    echo 'The smoke helper did not report the required worker check failure reason.' >&2
+    cat "$temp_dir/required-worker.output" >&2
     exit 1
 }
 
