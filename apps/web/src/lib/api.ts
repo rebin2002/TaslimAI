@@ -13,7 +13,7 @@ export type User = {
   id: string;
   email: string;
   displayName: string;
-  preferredLanguage: "en" | "ar" | "ku";
+  preferredLanguage: string;
   personalWorkspaceId: string;
   createdAt: string;
   defaultGenerationLanguage: "en" | "ar" | "ku";
@@ -70,7 +70,7 @@ export type LoginInput = { email: string; password: string };
 export type OnboardingIntent = "project" | "chat" | "image" | "document" | "presentation" | "research";
 export type OnboardingInput = {
   displayName?: string;
-  preferredLanguage: "en" | "ar" | "ku";
+  preferredLanguage: string;
   defaultGenerationLanguage: "en" | "ar" | "ku";
   intent?: OnboardingIntent;
 };

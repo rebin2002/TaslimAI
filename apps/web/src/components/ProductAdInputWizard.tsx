@@ -63,6 +63,10 @@ type ProductAdCopy = {
   previewEmpty: string;
   mockBadge: string;
   localOnly: string;
+  /** Masked first paint of the authenticated route: announced, so it must be localized. */
+  maskRestoring: string;
+  /** Accessible name of the local artwork region, read instead of the image itself. */
+  previewArtworkLabel: string;
   captionWithBenefit: (benefit: string, productName: string) => string;
   captionWithoutBenefit: (productName: string) => string;
 };
@@ -93,6 +97,8 @@ const copyByLocale: Record<Locale, ProductAdCopy> = {
     previewEmpty: "Add a product name and photo to make a sample ad.",
     mockBadge: "Mock preview",
     localOnly: "Local-only preview. No files are uploaded, no provider is called, and nothing is published.",
+    maskRestoring: "Restoring saved product-ad draft…",
+    previewArtworkLabel: "Local product-photo preview",
     captionWithBenefit: (benefit, productName) => `${benefit} — discover ${productName} today.`,
     captionWithoutBenefit: (productName) => `Meet ${productName}—made to fit your day.`,
   },
@@ -121,6 +127,8 @@ const copyByLocale: Record<Locale, ProductAdCopy> = {
     previewEmpty: "أضف اسم المنتج وصورته لإنشاء إعلان تجريبي.",
     mockBadge: "معاينة تجريبية",
     localOnly: "معاينة محلية فقط. لا تُرفع ملفات، ولا يتم الاتصال بمزود، ولا يُنشر أي شيء.",
+    maskRestoring: "جارٍ استعادة مسودة الإعلان…",
+    previewArtworkLabel: "معاينة محلية لصورة المنتج",
     captionWithBenefit: (benefit, productName) => `${benefit} — اكتشف ${productName} اليوم.`,
     captionWithoutBenefit: (productName) => `تعرّف إلى ${productName}، المصمم ليومك.`,
   },
@@ -149,6 +157,8 @@ const copyByLocale: Record<Locale, ProductAdCopy> = {
     previewEmpty: "ناوی بەرهەم و وێنەکەی زیاد بکە بۆ دروستکردنی ڕیکلامێکی نموونەیی.",
     mockBadge: "پێشبینینی نموونەیی",
     localOnly: "تەنها پێشبینینی ناوخۆییە. هیچ فایلێک بار ناکرێت، پەیوەندی بە دابینکەرەوە ناکرێت و هیچ شتێک بڵاو ناکرێتەوە.",
+    maskRestoring: "ڕەشنووسی ڕیکلامی بەرهەم ڕێک دەکرێتەوە…",
+    previewArtworkLabel: "پێشبینینی ناوخۆیی وێنەی بەرهەم",
     captionWithBenefit: (benefit, productName) => `${benefit} — ${productName} بۆ ئەمڕۆت بدۆزەرەوە.`,
     captionWithoutBenefit: (productName) => `${productName} بناسە؛ بۆ ڕۆژەکەت دروستکراوە.`,
   },
@@ -387,7 +397,7 @@ export function ProductAdInputWizard({ locale = "en", principal = null }: Readon
     <section className={styles.shell} lang={localeTag(locale)} dir={localeDirection(locale)} aria-labelledby={`${id}-title`}>
       <div className={styles.formPanel}>
         {wizardHeader}
-        <p role="status">Restoring saved product-ad draft…</p>
+        <p role="status">{copy.maskRestoring}</p>
       </div>
     </section>
   );
@@ -504,7 +514,7 @@ export function ProductAdInputWizard({ locale = "en", principal = null }: Readon
             {productPhoto && productPhotoUrl && (
               <div
                 className={`${styles.previewArtwork} ${format === "story" ? styles.previewStory : format === "landscape" ? styles.previewLandscape : styles.previewSquare}`}
-                aria-label="Local product-photo preview"
+                aria-label={copy.previewArtworkLabel}
               >
                 {/* File data is only read via revocable browser object URLs. */}
                 {/* eslint-disable-next-line @next/next/no-img-element */}
