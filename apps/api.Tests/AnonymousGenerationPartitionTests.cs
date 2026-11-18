@@ -36,6 +36,12 @@ namespace Taslim.Api.Tests;
 /// be reached on, and no raw address material reaches a key or a response body.
 /// Forwarded client-address headers are consumed nowhere in this API, so rotating
 /// them cannot move a budget either - pinned as an abuse-resistance contract.
+/// The later tests extend that proof from key equality to the enforced limiter
+/// itself (a saturated peer gains no extra permit from any forged header), to the
+/// peerless-transport branch (headers are inert there too, and no client-supplied
+/// input can alias or squat the fallback partition), and to a structural pin on
+/// the pipeline: the API consumes no forwarded client address anywhere, so wiring
+/// one in later trips this suite before it can silently become an exemption.
 ///
 /// All of it is deterministic: the concurrency limiter is saturated with held leases
 /// (PermitLimit = 4, QueueLimit = 0) rather than by racing a clock, and the keyed digest
@@ -320,5 +326,177 @@ public sealed class AnonymousGenerationPartitionTests
         var body = await new StreamReader(context.Response.Body, Encoding.UTF8).ReadToEndAsync();
         Assert.Contains("RATE_LIMITED", body, StringComparison.Ordinal);
         Assert.DoesNotContain("203.0.113.200", body, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Rotated_spoofed_headers_on_the_real_peer_cannot_add_budget_to_the_enforced_limiter()
+    {
+        // End-to-end abuse resistance through the enforced limiter, not just key
+        // equality: with the transport peer's generation budget already saturated,
+        // every follow-up request is refused however its proxy-style headers are
+        // forged. A single peer also cannot exceed the budget with clean headers, so
+        // the refusal cannot be waved through as "extra spoofed requests" either.
+        var peer = IPAddress.Loopback;
+        var options = CreateOptions();
+        var limiter = options.GlobalLimiter!;
+
+        using var leases = await SaturateAsync(limiter, CreateAnonymousContext(GenerationPolicy, peer), GenerationConcurrencyPermitLimit);
+
+        string[] spoofs =
+        [
+            "2001:db8:cafe::1337",
+            "203.0.113.7, 198.51.100.1, 192.0.2.9",
+            "for=\"[2001:db8::1]:8080\";by=internal",
+        ];
+
+        foreach (var spoof in spoofs)
+        {
+            foreach (var (name, value) in new[]
+            {
+                ("X-Forwarded-For", spoof),
+                ("X-Real-IP", spoof),
+                ("Forwarded", $"for={spoof}"),
+                ("CF-Connecting-IP", spoof),
+                ("True-Client-IP", spoof),
+                ("X-Client-IP", spoof),
+            })
+            {
+                var context = CreateAnonymousContext(GenerationPolicy, peer);
+                context.Request.Headers[name] = value;
+                using var overflow = await limiter.AcquireAsync(context);
+                Assert.False(overflow.IsAcquired,
+                    $"'{name}: {spoof}' minted extra budget for a peer whose concurrency limit is already exhausted.");
+            }
+        }
+
+        // Control: the saturated peer's next clean request is refused too, so the
+        // rejections above reflect the budget, not an artefact of the spoof headers.
+        using var cleanOverflow = await limiter.AcquireAsync(CreateAnonymousContext(GenerationPolicy, peer));
+        Assert.False(cleanOverflow.IsAcquired);
+    }
+
+    [Fact]
+    public void Header_rotations_cannot_move_the_budget_of_a_peerless_transport_either()
+    {
+        // Rotated_forwarded_ip_headers... pins the address-derived branch. The
+        // fallback branch - transports that expose no peer address - is keyed on the
+        // server-assigned connection id and needs the same abuse-resistance proof:
+        // client headers must be inert there as well, or the branch would hand out a
+        // header-named budget to whoever forges it.
+        var baseline = PartitionKey("generation", CreateAnonymousContext(GenerationPolicy, peerAddress: null, connectionId: "conn-privacy-1"));
+
+        var context = CreateAnonymousContext(GenerationPolicy, peerAddress: null, connectionId: "conn-privacy-1");
+        context.Request.Headers["X-Forwarded-For"] = "203.0.113.7";
+        context.Request.Headers["X-Real-IP"] = "198.51.100.1";
+
+        Assert.Equal(baseline, PartitionKey("generation", context));
+        Assert.DoesNotContain("203.0.113", baseline, StringComparison.Ordinal);
+        Assert.DoesNotContain("198.51.100", baseline, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Caller_supplied_inputs_never_alias_the_peerless_fallback_partition()
+    {
+        // The fallback branch must be reachable only by callers the server itself
+        // could not separate (no peer address AND no connection id). If any
+        // client-controllable input - header name casing, header value, path, query -
+        // could reproduce that literal key, every caller reaching the socket-style
+        // transport from the network would collapse into, or squat on, the one
+        // shared budget instead of staying per-connection.
+        const string PeerlessKey = "generation:anon:peerless";
+        var peerless = PartitionKey("generation", CreateAnonymousContext(GenerationPolicy, peerAddress: null, connectionId: null));
+        Assert.Equal(PeerlessKey, peerless);
+
+        // Whitespace-only connection ids are treated as absent by the identity
+        // function, so those callers share the one fallback budget. The abuse-bound
+        // claim this relies on is that a real server transport always carries a
+        // server-generated id; nothing client-supplied can clear it.
+        Assert.Equal(PeerlessKey, PartitionKey("generation", CreateAnonymousContext(GenerationPolicy, peerAddress: null, connectionId: "   ")));
+
+        foreach (var spoof in new[] { "peerless", "conn-peerless", "203.0.113.7", "*:*" })
+        {
+            foreach (var name in new[] { "X-Forwarded-For", "X-ReAl-Ip", "x-real-ip", "Forwarded", "X-Client-IP", "True-Client-IP", "CF-Connecting-IP" })
+            {
+                var context = CreateAnonymousContext(GenerationPolicy, peerAddress: null, connectionId: "conn-distinct-42");
+                context.Request.Headers[name] = spoof;
+                context.Request.Path = "/api/generation/jobs";
+                context.Request.QueryString = new QueryString($"?{Uri.EscapeDataString(name)}={Uri.EscapeDataString(spoof)}");
+                Assert.NotEqual(PeerlessKey, PartitionKey("generation", context));
+            }
+        }
+    }
+
+    [Fact]
+    public void Connection_digest_partition_keys_are_unguessable_and_cannot_be_squatted()
+    {
+        // Per-connection budgets only hold if an attacker cannot pre-create (squat)
+        // another caller's key: the key embeds an HMAC of the server-assigned id
+        // under a process-private salt, is fixed-length lowercase hex, and never
+        // contains the id it came from - so neither the ids of neighbour connections
+        // nor their digests are predictable from the outside.
+        const string ConnectionId = "0HNBBT3QGG7V1:00000001";
+        var key = PartitionKey("generation", CreateAnonymousContext(GenerationPolicy, peerAddress: null, connectionId: ConnectionId));
+
+        var digest = key["generation:anon:conn-".Length..];
+        Assert.Equal(32, digest.Length);
+        Assert.Matches("^[0-9a-f]{32}$", digest);
+        Assert.DoesNotContain(ConnectionId, key, StringComparison.OrdinalIgnoreCase);
+
+        // The address-derived key has the same shape, so raw material is neither
+        // present nor length-predictable there either.
+        var addressKey = PartitionKey("generation", CreateAnonymousContext(GenerationPolicy, IPAddress.Parse("203.0.113.7")));
+        var addressDigest = addressKey["generation:anon:".Length..];
+        Assert.Equal(32, addressDigest.Length);
+        Assert.Matches("^[0-9a-f]{32}$", addressDigest);
+    }
+
+    [Fact]
+    public void Api_pipeline_consumes_no_forwarded_client_address_anywhere()
+    {
+        // The structural half of the "untrusted proxy headers cannot bypass the
+        // limits" proof: the keying tests above show the partition identity is
+        // header-inert today, and this pins the pipeline contract that nothing ever
+        // feeds a forwarded address into that identity. The middleware is bound to
+        // the scheme alone (Program.cs: ForwardedHeaders = XForwardedProto,
+        // ForwardLimit = 1), so RemoteIpAddress - the only transport material the
+        // key reads - is never rewritten from forwarded-IP headers, and no
+        // application source references those header names or the forwarded-IP
+        // enum at all. Adding forwarded-IP consumption anywhere trips this test and
+        // forces the partition keying to be re-reviewed together with it.
+        var sourceRoot = LocateApiSourceRoot();
+        var apiSource = Path.Combine(sourceRoot, "apps", "api");
+        var program = Path.Combine(apiSource, "Program.cs");
+        Assert.True(File.Exists(program), $"Could not locate the API source tree from {AppContext.BaseDirectory}.");
+        var programText = File.ReadAllText(program);
+        const string ForwardedIpEnum = "XForwarded" + "For";
+        Assert.Contains("options.ForwardedHeaders = ForwardedHeaders.XForwardedProto;", programText, StringComparison.Ordinal);
+        Assert.DoesNotContain(ForwardedIpEnum, programText, StringComparison.Ordinal);
+
+        foreach (var file in Directory.EnumerateFiles(apiSource, "*.cs", SearchOption.AllDirectories))
+        {
+            var text = File.ReadAllText(file);
+            Assert.DoesNotContain(ForwardedIpEnum, text, StringComparison.Ordinal);
+            foreach (var header in new[] { "X-Forwarded-For", "X-Real-IP", "CF-Connecting-IP", "True-Client-IP", "True-ClientIp", "X-Client-IP" })
+            {
+                Assert.True(!text.Contains(header, StringComparison.OrdinalIgnoreCase),
+                    $"{Path.GetFileName(file)} references '{header}'; forwarded client addresses must not be consumed without re-reviewing the rate-limit partition keying.");
+            }
+        }
+    }
+
+    private static string LocateApiSourceRoot()
+    {
+        var directory = new DirectoryInfo(AppContext.BaseDirectory);
+        while (directory is not null)
+        {
+            if (File.Exists(Path.Combine(directory.FullName, "apps", "api", "Program.cs")))
+            {
+                return directory.FullName;
+            }
+
+            directory = directory.Parent;
+        }
+
+        throw new DirectoryNotFoundException("Repository root containing apps/api/Program.cs not found.");
     }
 }
