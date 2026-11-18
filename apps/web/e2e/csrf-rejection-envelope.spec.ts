@@ -3,25 +3,34 @@ import { test, expect, apiJson, E2E_API_URL } from "./fixtures";
 // Browser lane of the CSRF rejection contract (PR #1039).
 //
 // The API lane (apps/api.Tests/CsrfRejectionEnvelopeTests.cs) already proves the
-// envelope with HttpClient against the in-memory TestServer. Nothing here repeats
-// that claim at the same layer. What only a real browser can prove is that the
-// rejection a user actually receives — issued from the app origin with the app's
-// own cookie jar, and again through the app's own same-origin API proxy — is the
+// envelope with HttpClient against the in-memory TestServer, including the
+// /api/auth/register spellings. Nothing here repeats that claim at the same
+// layer. What only a real browser can prove is that the rejection a user
+// actually receives -- issued from the app origin with the app's own cookie jar,
+// and again through the app's own same-origin API proxy -- is the
 // machine-readable CSRF_VALIDATION_FAILED envelope the web client depends on to
 // recognize a stale token, refresh once, and retry (apps/web/src/lib/api.ts keys
 // that recovery solely on this code). A generic Problem Details body, which is
 // what the MVC enforcement layer returned before this fix, is invisible to that
-// client and turns a recoverable rejection into a dead form.
+// client and turns a recoverable rejection into a form that cannot submit again.
 //
 // These tests also pin the other half of the contract: antiforgery strictness is
 // unchanged. A refusal must never apply the mutation, and a valid double-submit
 // pair must still be accepted.
 //
+// Request budget: the anonymous authentication endpoints share the fixed-window
+// "authentication" limiter (60 requests/minute, partitioned by client IP, and
+// counted before the antiforgery boundary). Every request in the describe block
+// below that touches those endpoints is issued here, four in total, and the
+// remaining coverage uses authenticated workspace routes, which are partitioned
+// by user id and carry no authentication policy. That keeps this lane
+// comfortably inside the suite's shared budget on CI.
+//
 // Provider-free by construction: every refusal happens at the antiforgery or
 // authorization boundary, before any generation, storage, billing or payment
 // code runs, and the only accepted write is a project row. No provider call, no
 // secret, and no real user data: the accounts are throwaway fixture users. No
-// wall-clock budgets, sleeps, or counters that depend on scheduling, so the
+// sleeps, wall-clock budgets, or counters that depend on scheduling, so the
 // assertions are deterministic.
 
 const CSRF_CODE = "CSRF_VALIDATION_FAILED";
@@ -29,6 +38,7 @@ const CSRF_MESSAGE = "Request validation failed.";
 // Never a real credential: it exists only to prove the rejection body does not
 // echo the submitted payload back to the browser.
 const PROBE_PASSWORD = "CsrfProbeOnly!123";
+const PROBE_EMAIL = "csrf-browser-anonymous@example.test";
 
 type BrowserPost = {
   status: number;
@@ -67,9 +77,7 @@ async function postFromPage(
 }
 
 /** Reads the double-submit pair the browser already holds, without a page reload. */
-async function tokenFromBrowserContext(
-  page: import("@playwright/test").Page,
-): Promise<string> {
+async function tokenFromBrowserContext(page: import("@playwright/test").Page): Promise<string> {
   const issued = await page.request.get(`${E2E_API_URL}/api/auth/csrf`);
   expect(issued.ok(), `CSRF token issuance failed: ${issued.status()}`).toBeTruthy();
   const { token } = await issued.json() as { token: string };
@@ -83,7 +91,7 @@ function expectStableCsrfEnvelope(probe: BrowserPost, label: string) {
   const body = JSON.parse(probe.text) as Record<string, unknown>;
   // Not a Problem Details document: those members are exactly what the web
   // client cannot use to recognize a stale token.
-  for (const member of ["type", "title", "status", "instance", "detail", "errors", "traceId", "trace_id"]) {
+  for (const member of ["type", "title", "status", "detail", "instance", "errors", "traceId", "trace_id"]) {
     expect(body, `${label}: must not expose Problem Details member "${member}"`).not.toHaveProperty(member);
   }
   expect(body.error, `${label}: rejection carries an error member`).toBeTruthy();
@@ -97,64 +105,40 @@ function expectStableCsrfEnvelope(probe: BrowserPost, label: string) {
 }
 
 test.describe("CSRF rejection envelope from the browser", () => {
-  test("an anonymous browser POST without a double-submit header is refused with the stable envelope", async ({ page }) => {
+  // The canonical spelling is refused by AntiforgeryValidationMiddleware, which
+  // names the anonymous authentication endpoints by exact path. These two
+  // spellings still route to the same controller but miss that exact-path list,
+  // so they are answered by the MVC antiforgery filter -- the layer this fix
+  // normalizes. Asserted together so one request carries both claims.
+  test("canonical, trailing-separator and case-variant spellings all return the same stable envelope", async ({ page }) => {
     await page.goto("/login");
-    expectStableCsrfEnvelope(
-      await postFromPage(page, `${E2E_API_URL}/api/auth/login`, {
-        email: "csrf-browser-anonymous@example.test",
-        password: PROBE_PASSWORD,
-      }),
-      "canonical anonymous login spelling",
-    );
-  });
+    const payload = { email: PROBE_EMAIL, password: PROBE_PASSWORD };
+    const canonical = await postFromPage(page, `${E2E_API_URL}/api/auth/login`, payload);
+    const trailingSeparator = await postFromPage(page, `${E2E_API_URL}/api/auth/login/`, payload);
+    const caseVariant = await postFromPage(page, `${E2E_API_URL}/API/AUTH/LOGIN`, payload);
 
-  // These spellings route to the controller but are missed by the middleware's
-  // exact-path anonymous-auth list, so they are answered by the MVC layer -- the
-  // layer this fix normalizes.
-  for (const spelling of [
-    "/api/auth/login/",
-    "/API/AUTH/LOGIN",
-    "/api/auth/register/",
-    "/API/Auth/Register",
-  ]) {
-    test(`the routed spelling ${spelling} is refused with the stable envelope, not Problem Details`, async ({ page }) => {
-      await page.goto("/login");
-      const isRegister = spelling.toLowerCase().includes("register");
-      const payload = isRegister
-        ? {
-            displayName: "CSRF Browser Probe",
-            email: `csrf-browser-probe@example.test`,
-            password: PROBE_PASSWORD,
-            preferredLanguage: "en",
-          }
-        : { email: "csrf-browser-anonymous@example.test", password: PROBE_PASSWORD };
-      expectStableCsrfEnvelope(
-        await postFromPage(page, `${E2E_API_URL}${spelling}`, payload),
-        `MVC-layer spelling ${spelling}`,
-      );
-    });
-  }
+    for (const [label, probe] of [
+      ["middleware layer /api/auth/login", canonical],
+      ["MVC layer /api/auth/login/", trailingSeparator],
+      ["MVC layer /API/AUTH/LOGIN", caseVariant],
+    ] as Array<[string, BrowserPost]>) {
+      expectStableCsrfEnvelope(probe, label);
+    }
 
-  test("the middleware layer and the MVC layer return byte-identical bodies to the browser", async ({ page }) => {
-    await page.goto("/login");
-    const payload = { email: "csrf-browser-anonymous@example.test", password: PROBE_PASSWORD };
-    const middlewareLayer = await postFromPage(page, `${E2E_API_URL}/api/auth/login`, payload);
-    const mvcLayer = await postFromPage(page, `${E2E_API_URL}/api/auth/login/`, payload);
-    expect(middlewareLayer.status).toBe(400);
-    expect(mvcLayer.status).toBe(400);
-    expect(mvcLayer.text).toBe(middlewareLayer.text);
-    expectStableCsrfEnvelope(mvcLayer, "MVC layer");
+    // The contract must not depend on which enforcement layer observed the
+    // rejection first: the browser receives one byte-identical body.
+    expect(trailingSeparator.text, "trailing-separator body differs from the middleware body").toBe(canonical.text);
+    expect(caseVariant.text, "case-variant body differs from the middleware body").toBe(canonical.text);
   });
 
   test("the app's same-origin API proxy forwards the rejection with the same status and envelope", async ({ page }) => {
     await page.goto("/login");
-    // Root-relative, so the browser talks to the app, and the app's own proxy
+    // Root-relative, so the browser talks to the app and the app's own proxy
     // (apps/web/src/app/api/[...path]/route.ts) forwards the API rejection.
+    // This is the exact response the web client inspects to decide whether it
+    // may refresh its token once and retry.
     expectStableCsrfEnvelope(
-      await postFromPage(page, `/api/auth/login`, {
-        email: "csrf-browser-anonymous@example.test",
-        password: PROBE_PASSWORD,
-      }),
+      await postFromPage(page, `/api/auth/login`, { email: PROBE_EMAIL, password: PROBE_PASSWORD }),
       "same-origin proxy",
     );
   });
@@ -169,7 +153,7 @@ test.describe("CSRF rejection envelope from the browser", () => {
         page,
         `${E2E_API_URL}/api/workspaces/${auth.personalWorkspace.id}/projects`,
         { name: projectName, type: "Business", description: "Must never be created." },
-        // Well-formed header that is not the value paired with the browser's
+        // A well-formed header that is not the value paired with the browser's
         // cookie. Strictness means this is refused, not waved through.
         { "X-CSRF-TOKEN": `${token}tampered` },
       ),
@@ -184,7 +168,7 @@ test.describe("CSRF rejection envelope from the browser", () => {
     expect(projects.map((project) => project.name), "the refused mutation must not be persisted").not.toContain(projectName);
   });
 
-  test("an anonymous browser write into another account's workspace is refused and never applied", async ({ authenticatedPage: page, request }) => {
+  test("an anonymous write into another account's workspace is refused and never applied", async ({ authenticatedPage: page, request }) => {
     const owner = await apiJson<{ personalWorkspace: { id: string } }>(page.request, "GET", "/api/auth/me");
     const projectName = "CSRF Anonymous Cross-Account Write";
     // `request` is an isolated context: no session cookie, no double-submit pair.
