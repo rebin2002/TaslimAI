@@ -71,11 +71,17 @@ public static class AssetContractMapper
         asset.AssetType,
         asset.MimeType,
         asset.Status.ToString(),
-        asset.StoredFileId.HasValue,
-        asset.StoredFileId.HasValue && (asset.MimeType?.StartsWith("image/", StringComparison.OrdinalIgnoreCase) == true
+        // A rendition is only something the library can show or fetch while its stored file is
+        // Ready. An expired or pruned rendition keeps the asset's StoredFileId — that is exactly
+        // what FileProcessingService.DeleteAsync leaves behind — so availability has to be read
+        // from the file's status, the same fact the download route enforces. Reporting the
+        // identity alone promises a preview and a download that dead-end, and keeps the Assets
+        // library detail view's unavailable fallback from ever firing for a live row.
+        asset.StoredFile is { Status: StoredFileStatus.Ready },
+        asset.StoredFile is { Status: StoredFileStatus.Ready } && (asset.MimeType?.StartsWith("image/", StringComparison.OrdinalIgnoreCase) == true
             || asset.MimeType?.StartsWith("audio/", StringComparison.OrdinalIgnoreCase) == true
             || asset.MimeType?.StartsWith("video/", StringComparison.OrdinalIgnoreCase) == true),
-        asset.StoredFile?.SizeBytes,
+        asset.StoredFile is { Status: StoredFileStatus.Ready } ? asset.StoredFile.SizeBytes : null,
         SourceStudioKey(asset.SourceGenerationJob?.JobType),
         asset.SourceGenerationJob?.Title,
         asset.CreatedAt,
