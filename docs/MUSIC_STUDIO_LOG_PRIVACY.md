@@ -9,7 +9,8 @@ described here, exercised deterministically in tests, and deliberately not
 extended.
 
 Out of scope by instruction: the `#708` preflight **UI** (open PR #772 editor,
-open PRs #560/#561 studio wiring, `MusicLyricsPreflightPanel.tsx`) and the
+open PR #847 panel + a11y test, merged #939 blocked-preview handoff,
+`MusicLyricsPreflightPanel.tsx`) and the
 **reference isolation worker** (open PRs #774, #805, #815 and the sibling
 `Music Studio selected reference isolation` task). No file owned by those lanes
 is read as a mutation target or changed here.
@@ -141,7 +142,7 @@ this document, and `sectionId` is a field on the shared issue type, so any
 future gate inherits the same obligation.
 
 This repo's suites are green and blind to it: `musicLyricsDraftPayload.test.ts`
-32/32, `MusicLyricsPreflightPanel.test.tsx` 25/25 and
+38/38, `MusicLyricsPreflightPanel.test.tsx` 25/25 and
 `MusicLyricsPreflightPanel.accessibility.test.tsx` 10/10 pass together,
 because every panel fixture uses opaque ids and no test drives the gate with a
 content-bearing one. The new server-side C# lock cannot see this channel.
@@ -179,8 +180,10 @@ synthetic corpus on both sides of the boundary, all of it test copy marked
 
 ## Ownership boundaries respected
 
-Audited file-by-file against all 516 open PRs on `main` before this branch was
-cut. This slice touches exactly four paths, none claimed by any open PR:
+Audited file-by-file against every open PR before this branch was cut (509 open
+PRs at the latest re-run of that sweep, 2026-11-18), and again against each of the
+four most recent `main` moves. This slice touches exactly four paths, none claimed
+by any other open PR:
 
 - `apps/web/src/lib/musicLyricsDraftPayload.ts` (fix + corrected header claim)
 - `apps/web/src/lib/musicLyricsDraftPayload.test.ts` (reproduction + regression)
