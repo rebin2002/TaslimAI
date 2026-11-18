@@ -1,10 +1,16 @@
+using System.Collections.Concurrent;
 using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
 using Microsoft.AspNetCore.Hosting;
+using System.Data.Common;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Diagnostics;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
+using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Options;
+using Npgsql;
 using Taslim.Api.Ai;
 using Taslim.Api.Assets;
 using Taslim.Api.Contracts;
@@ -386,6 +392,300 @@ public sealed class DocumentExportCancellationAttemptTests : IClassFixture<Docum
         var afterRace = await client.GetFromJsonAsync<GenerationJobDto>($"/api/generation/jobs/{created.Job.Id}");
         Assert.Equal(GenerationJobStatus.Cancelled.ToString(), afterRace!.Status);
         Assert.DoesNotContain("assetId", afterRace.ResultJson ?? string.Empty);
+    }
+
+    [Fact(Timeout = 90_000)]
+    public async Task Two_finalizers_that_both_observed_the_started_attempt_elect_one_winner_and_the_stale_writer_adopts_it()
+    {
+        // Synthetic deterministic contention: two independent scopes read the same
+        // provider attempt while it is still Started - the interleaving the previous
+        // read-check-write mishandled - and then each finalizes with a different
+        // terminal outcome. The compare-and-set must let the first writer commit and
+        // force the stale second writer to adopt it instead of last-write-winning.
+        using var client = factory.CreateClient();
+        var auth = await Register(client);
+
+        Guid attemptId;
+        var succeededCost = 0.0007m;
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            var job = new GenerationJob
+            {
+                Id = Guid.NewGuid(),
+                WorkspaceId = auth.PersonalWorkspace.Id,
+                CreatedByUserId = auth.User.Id,
+                JobType = GenerationJobTypes.DocumentGenerate,
+                Status = GenerationJobStatus.Cancelled,
+                InputJson = "{}",
+                CreatedAt = DateTime.UtcNow,
+            };
+            var attempt = new GenerationProviderAttempt
+            {
+                Id = Guid.NewGuid(),
+                GenerationJobId = job.Id,
+                JobConcurrencyToken = job.ConcurrencyToken,
+                IdempotencyKey = $"generation:{job.Id:N}:attempt:1",
+                Capability = job.JobType,
+                AttemptNumber = 1,
+                Provider = "synthetic-contender",
+                Status = GenerationProviderAttemptStatus.Started,
+                ResultClassification = "Started",
+                EstimatedProviderCostUsd = succeededCost,
+                EstimatedProviderCostKnown = true,
+                FinalizationKey = $"generation:{job.Id:N}:attempt:1",
+                StartedAt = DateTime.UtcNow,
+            };
+            db.GenerationJobs.Add(job);
+            db.GenerationProviderAttempts.Add(attempt);
+            await db.SaveChangesAsync();
+            attemptId = attempt.Id;
+        }
+
+        using var staleScope = factory.Services.CreateScope();
+        using var winnerScope = factory.Services.CreateScope();
+        var staleDb = staleScope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        var winnerDb = winnerScope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        var staleCopy = await staleDb.GenerationProviderAttempts.SingleAsync(item => item.Id == attemptId);
+        var winnerCopy = await winnerDb.GenerationProviderAttempts.SingleAsync(item => item.Id == attemptId);
+        Assert.Equal(GenerationProviderAttemptStatus.Started, staleCopy.Status);
+        Assert.Equal(GenerationProviderAttemptStatus.Started, winnerCopy.Status);
+
+        await winnerScope.ServiceProvider.GetRequiredService<IGenerationBudgetService>()
+            .CompleteAttemptAsync(winnerCopy, succeededCost, true, GenerationProviderAttemptStatus.Succeeded, null, CancellationToken.None);
+        await staleScope.ServiceProvider.GetRequiredService<IGenerationBudgetService>()
+            .CompleteAttemptAsync(staleCopy, null, false, GenerationProviderAttemptStatus.Cancelled, GenerationJobErrorCodes.Cancelled, CancellationToken.None);
+
+        using (var verifyScope = factory.Services.CreateScope())
+        {
+            var db = verifyScope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            var attempt = Assert.Single(await db.GenerationProviderAttempts.AsNoTracking().Where(item => item.Id == attemptId).ToListAsync());
+            Assert.Equal(GenerationProviderAttemptStatus.Succeeded, attempt.Status);
+            Assert.Equal("Succeeded", attempt.ResultClassification);
+            Assert.Equal(succeededCost, attempt.ActualProviderCostUsd);
+            Assert.True(attempt.ActualProviderCostKnown);
+            Assert.Null(attempt.FailureCode);
+            Assert.NotNull(attempt.CompletedAt);
+        }
+
+        // The losing scope adopted the committed winner instead of carrying its own
+        // superseded outcome, so any later use of its copy - and its own flush -
+        // repeats the committed outcome rather than overwriting status or cost.
+        Assert.Equal(GenerationProviderAttemptStatus.Succeeded, staleCopy.Status);
+        Assert.Equal(succeededCost, staleCopy.ActualProviderCostUsd);
+        Assert.Null(staleCopy.FailureCode);
+    }
+
+    [DisposablePostgresFact]
+    public async Task Concurrent_postgres_finalizers_that_both_observed_the_started_attempt_commit_exactly_one_outcome()
+    {
+        // Deterministic contention regression against the disposable PostgreSQL the
+        // API CI job provisions (skipped elsewhere; never against production data).
+        // Two independent contexts read the attempt while it is still Started and,
+        // gated by a command barrier so both compare-and-set UPDATEs reach the engine
+        // while the other is in flight, finalize with different terminal outcomes.
+        // Exactly one UPDATE may affect a row; the loser must adopt the committed
+        // winner so the attempt status and provider-cost attribution never disagree.
+        var connectionString = Environment.GetEnvironmentVariable("ConnectionStrings__Postgres")!;
+        var schema = $"attempt_cas_{Guid.NewGuid():N}";
+        var adminBuilder = new NpgsqlConnectionStringBuilder(connectionString);
+        await using (var admin = new NpgsqlConnection(adminBuilder.ConnectionString))
+        {
+            await admin.OpenAsync();
+            await using var create = admin.CreateCommand();
+            create.CommandText = $"CREATE SCHEMA \"{schema}\"";
+            await create.ExecuteNonQueryAsync();
+        }
+
+        var costedOutcome = (Status: GenerationProviderAttemptStatus.Succeeded, Cost: (decimal?)0.0042m, CostKnown: true, FailureCode: (string?)null, Classification: "Succeeded");
+        var cancelledOutcome = (Status: GenerationProviderAttemptStatus.Cancelled, Cost: (decimal?)null, CostKnown: false, FailureCode: (string?)GenerationJobErrorCodes.Cancelled, Classification: "Cancelled");
+        try
+        {
+            var scopedBuilder = new NpgsqlConnectionStringBuilder(connectionString) { SearchPath = schema };
+            Guid attemptId;
+            var plainOptions = new DbContextOptionsBuilder<TaslimDbContext>().UseNpgsql(scopedBuilder.ConnectionString).Options;
+            await using (var db = new TaslimDbContext(plainOptions))
+            {
+                await db.Database.EnsureCreatedAsync();
+                var now = DateTime.UtcNow;
+                var userId = Guid.NewGuid();
+                db.Users.Add(new ApplicationUser
+                {
+                    Id = userId,
+                    UserName = $"attempt-cas-{userId:N}@example.com",
+                    NormalizedUserName = $"ATTEMPT-CAS-{userId:N}@EXAMPLE.COM",
+                    Email = $"attempt-cas-{userId:N}@example.com",
+                    NormalizedEmail = $"ATTEMPT-CAS-{userId:N}@EXAMPLE.COM",
+                    DisplayName = "Attempt CAS Tester",
+                    CreatedAt = now,
+                    UpdatedAt = now,
+                });
+                var workspaceId = Guid.NewGuid();
+                db.Workspaces.Add(new Workspace
+                {
+                    Id = workspaceId,
+                    Name = "Attempt CAS Workspace",
+                    Slug = $"attempt-cas-{workspaceId:N}",
+                    Type = WorkspaceType.Personal,
+                    CreatedAt = now,
+                    UpdatedAt = now,
+                });
+                var jobId = Guid.NewGuid();
+                db.GenerationJobs.Add(new GenerationJob
+                {
+                    Id = jobId,
+                    WorkspaceId = workspaceId,
+                    CreatedByUserId = userId,
+                    JobType = GenerationJobTypes.DocumentGenerate,
+                    Status = GenerationJobStatus.Cancelled,
+                    InputJson = "{}",
+                    CreatedAt = now,
+                });
+                var attempt = new GenerationProviderAttempt
+                {
+                    Id = Guid.NewGuid(),
+                    GenerationJobId = jobId,
+                    JobConcurrencyToken = Guid.NewGuid(),
+                    IdempotencyKey = $"generation:{jobId:N}:attempt:1",
+                    Capability = GenerationJobTypes.DocumentGenerate,
+                    AttemptNumber = 1,
+                    Provider = "synthetic-contender",
+                    Status = GenerationProviderAttemptStatus.Started,
+                    ResultClassification = "Started",
+                    EstimatedProviderCostUsd = 0.0042m,
+                    EstimatedProviderCostKnown = true,
+                    FinalizationKey = $"generation:{jobId:N}:attempt:1",
+                    StartedAt = now,
+                };
+                db.GenerationProviderAttempts.Add(attempt);
+                await db.SaveChangesAsync();
+                attemptId = attempt.Id;
+            }
+
+            var barrier = new AttemptFinalizationCasBarrierInterceptor();
+            var contendedOptions = new DbContextOptionsBuilder<TaslimDbContext>()
+                .UseNpgsql(scopedBuilder.ConnectionString)
+                .AddInterceptors(barrier)
+                .Options;
+
+            var loadCountdown = new CountdownEvent(2);
+
+            async Task<GenerationProviderAttempt> FinalizeOnFreshContext(
+                (GenerationProviderAttemptStatus Status, decimal? Cost, bool CostKnown, string? FailureCode, string Classification) outcome)
+            {
+                await using var db = new TaslimDbContext(contendedOptions);
+                var budget = new GenerationBudgetService(db, Options.Create(new GenerationBudgetOptions()), NullLogger<GenerationBudgetService>.Instance);
+                var attempt = await db.GenerationProviderAttempts.SingleAsync(item => item.Id == attemptId);
+                Assert.Equal(GenerationProviderAttemptStatus.Started, attempt.Status);
+                // Both finalizers must pass the read phase before either compare-and-set runs.
+                loadCountdown.Signal();
+                loadCountdown.Wait(TimeSpan.FromSeconds(30));
+                await budget.CompleteAttemptAsync(attempt, outcome.Cost, outcome.CostKnown, outcome.Status, outcome.FailureCode, CancellationToken.None);
+                return attempt;
+            }
+
+            var costedTask = Task.Run(() => FinalizeOnFreshContext(costedOutcome));
+            var cancelledTask = Task.Run(() => FinalizeOnFreshContext(cancelledOutcome));
+            await barrier.WaitForBothCasCommandsAsync(TimeSpan.FromSeconds(60));
+            barrier.ReleaseCasCommands();
+            var costedCopy = await costedTask;
+            var cancelledCopy = await cancelledTask;
+
+            // The signature of the atomic guard: exactly one compare-and-set committed.
+            Assert.Equal(new[] { 0, 1 }, barrier.AffectedRows.OrderBy(count => count).ToArray());
+
+            using (var verify = new TaslimDbContext(plainOptions))
+            {
+                var attempt = Assert.Single(await verify.GenerationProviderAttempts.AsNoTracking().Where(item => item.Id == attemptId).ToListAsync());
+                Assert.NotNull(attempt.CompletedAt);
+                var committedCosted = attempt.Status == costedOutcome.Status
+                    && attempt.ActualProviderCostUsd == costedOutcome.Cost
+                    && attempt.ActualProviderCostKnown == costedOutcome.CostKnown
+                    && attempt.FailureCode == costedOutcome.FailureCode
+                    && attempt.ResultClassification == costedOutcome.Classification;
+                var committedCancelled = attempt.Status == cancelledOutcome.Status
+                    && attempt.ActualProviderCostUsd == cancelledOutcome.Cost
+                    && attempt.ActualProviderCostKnown == cancelledOutcome.CostKnown
+                    && attempt.FailureCode == cancelledOutcome.FailureCode
+                    && attempt.ResultClassification == cancelledOutcome.Classification;
+                Assert.True(committedCosted || committedCancelled, "The committed attempt mixes status and cost attribution across finalizers.");
+
+                // Whichever finalizer lost, its in-context copy adopted the durable
+                // winner, so a later flush of that context cannot rewrite the outcome.
+                Assert.Equal(attempt.Status, costedCopy.Status);
+                Assert.Equal(attempt.ActualProviderCostUsd, costedCopy.ActualProviderCostUsd);
+                Assert.Equal(attempt.FailureCode, costedCopy.FailureCode);
+                Assert.Equal(attempt.Status, cancelledCopy.Status);
+                Assert.Equal(attempt.ActualProviderCostUsd, cancelledCopy.ActualProviderCostUsd);
+                Assert.Equal(attempt.FailureCode, cancelledCopy.FailureCode);
+            }
+        }
+        finally
+        {
+            await using var admin = new NpgsqlConnection(adminBuilder.ConnectionString);
+            await admin.OpenAsync();
+            await using var drop = admin.CreateCommand();
+            drop.CommandText = $"DROP SCHEMA IF EXISTS \"{schema}\" CASCADE";
+            await drop.ExecuteNonQueryAsync();
+        }
+    }
+
+    /// <summary>
+    /// Holds the two contending compare-and-set UPDATE statements in flight until both
+    /// reach the engine, so the loser's Status = Started predicate is re-evaluated
+    /// against the winner's committed row. Plain SaveChanges flushes (WHERE only on Id)
+    /// pass through unheld.
+    /// </summary>
+    private sealed class AttemptFinalizationCasBarrierInterceptor : DbCommandInterceptor
+    {
+        private readonly ConcurrentQueue<int> affectedRows = new();
+        private readonly TaskCompletionSource<bool> bothCasCommands = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource<bool> releaseCasCommands = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private int casCommandCount;
+
+        public int[] AffectedRows => affectedRows.ToArray();
+        public Task WaitForBothCasCommandsAsync(TimeSpan timeout) => bothCasCommands.Task.WaitAsync(timeout);
+        public void ReleaseCasCommands() => releaseCasCommands.TrySetResult(true);
+
+        public override async ValueTask<InterceptionResult<int>> NonQueryExecutingAsync(
+            DbCommand command,
+            CommandEventData eventData,
+            InterceptionResult<int> result,
+            CancellationToken cancellationToken = default)
+        {
+            if (!IsAttemptStatusCompareAndSet(command)) return result;
+            var count = Interlocked.Increment(ref casCommandCount);
+            if (count == 2) bothCasCommands.TrySetResult(true);
+            if (count > 2) throw new InvalidOperationException("Expected exactly two compare-and-set finalization commands in the PostgreSQL contention test.");
+            await releaseCasCommands.Task.WaitAsync(cancellationToken);
+            return result;
+        }
+
+        public override ValueTask<int> NonQueryExecutedAsync(
+            DbCommand command,
+            CommandExecutedEventData eventData,
+            int result,
+            CancellationToken cancellationToken = default)
+        {
+            if (IsAttemptStatusCompareAndSet(command)) affectedRows.Enqueue(result);
+            return ValueTask.FromResult(result);
+        }
+
+        private static bool IsAttemptStatusCompareAndSet(DbCommand command)
+        {
+            var sql = command.CommandText;
+            if (!IsAttemptUpdate(command)) return false;
+            var whereIndex = sql.IndexOf("WHERE", StringComparison.OrdinalIgnoreCase);
+            if (whereIndex < 0) return false;
+            return System.Text.RegularExpressions.Regex.IsMatch(
+                sql[whereIndex..],
+                @"""?Status""?\s*=",
+                System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.CultureInvariant);
+        }
+
+        private static bool IsAttemptUpdate(DbCommand command) =>
+            command.CommandText.Contains("UPDATE", StringComparison.OrdinalIgnoreCase)
+            && command.CommandText.Contains("GenerationProviderAttempts", StringComparison.OrdinalIgnoreCase);
     }
 
     private async Task<CreateDocumentGenerationResponse> CreateDocumentJob(HttpClient client, Guid workspaceId)
