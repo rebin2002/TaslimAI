@@ -17,8 +17,11 @@ namespace Taslim.Api.Assets;
 /// </summary>
 public static class AssetSearchPattern
 {
-    /// <summary>Escape character declared to the provider and prefixed to metacharacters.</summary>
-    public const string EscapeCharacter = "\\";
+    /// <summary>
+    /// Use a non-backslash escape so SQL ESCAPE '!' is valid regardless of PostgreSQL
+    /// standard_conforming_strings mode. Backslashes remain literal search text.
+    /// </summary>
+    public const string EscapeCharacter = "!";
 
     /// <summary>
     /// Builds the <c>ILIKE</c> pattern that matches assets whose text contains
@@ -30,7 +33,7 @@ public static class AssetSearchPattern
         var builder = new StringBuilder(term.Length + 4).Append('%');
         foreach (var character in term)
         {
-            if (character is '%' or '_' or '\\') builder.Append(EscapeCharacter);
+            if (character is '%' or '_' or '!') builder.Append(EscapeCharacter);
             builder.Append(character);
         }
 

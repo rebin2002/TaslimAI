@@ -161,6 +161,31 @@ public sealed class AssetLibrarySearchPaginationTests
     }
 
     [DisposablePostgresFact]
+    public async Task Postgres_library_search_remains_literal_with_legacy_string_literals()
+    {
+        // A backslash SQL escape literal fails when standard_conforming_strings is off;
+        // the non-backslash escape must work in both PostgreSQL modes.
+        await using var scoped = await PostgresSchema.CreateAsync("legacy", legacyStringMode: true);
+        var fixture = await SeedAsync(scoped.Db);
+
+        await fixture.Db.Database.OpenConnectionAsync();
+        try
+        {
+            await using var command = fixture.Db.Database.GetDbConnection().CreateCommand();
+            command.CommandText = "SHOW standard_conforming_strings";
+            Assert.Equal("off", await command.ExecuteScalarAsync());
+        }
+        finally
+        {
+            await fixture.Db.Database.CloseConnectionAsync();
+        }
+
+        await AssertLiteralSubstringSemanticsAsync(fixture);
+        var percent = await ListAsync(fixture, fixture.WorkspaceA, "plan%final");
+        Assert.Equal(new[] { fixture.IdsByName[BackslashVictim] }, percent.Items.Select(item => item.Id));
+    }
+
+    [DisposablePostgresFact]
     public async Task Postgres_library_search_pagination_walks_a_stable_cursor_over_the_filtered_set()
     {
         await using var scoped = await PostgresSchema.CreateAsync("cursor");
@@ -224,10 +249,11 @@ public sealed class AssetLibrarySearchPaginationTests
     /// </summary>
     [Theory]
     [InlineData("quarterly", "%quarterly%")]
-    [InlineData("50%", @"%50\%%")]
-    [InlineData("hero_v2", @"%hero\_v2%")]
-    [InlineData(@"plan\", @"%plan\\%")]
-    [InlineData(@"100%\_x", @"%100\%\\\_x%")]
+    [InlineData("50%", "%50!%%")]
+    [InlineData("hero_v2", "%hero!_v2%")]
+    [InlineData(@"plan\", @"%plan\%")]
+    [InlineData(@"100%\_x", @"%100!%\!_x%")]
+    [InlineData("wow!", "%wow!!%")]
     public void Search_pattern_neutralises_like_metacharacters(string term, string expected) =>
         Assert.Equal(expected, AssetSearchPattern.Contains(term));
 
@@ -242,7 +268,7 @@ public sealed class AssetLibrarySearchPaginationTests
             Schema = schema;
         }
 
-        public static async Task<PostgresSchema> CreateAsync(string label)
+        public static async Task<PostgresSchema> CreateAsync(string label, bool legacyStringMode = false)
         {
             var connectionString = Environment.GetEnvironmentVariable("ConnectionStrings__Postgres")!;
             var schema = $"asset_search_{label}_{Guid.NewGuid():N}";
@@ -256,6 +282,11 @@ public sealed class AssetLibrarySearchPaginationTests
             }
 
             var scoped = new NpgsqlConnectionStringBuilder(connectionString) { SearchPath = schema };
+            if (legacyStringMode)
+            {
+                scoped.Pooling = false;
+                scoped.Options = "-c standard_conforming_strings=off";
+            }
             var options = new DbContextOptionsBuilder<TaslimDbContext>().UseNpgsql(scoped.ConnectionString).Options;
             var db = new TaslimDbContext(options);
             await db.Database.EnsureCreatedAsync();
