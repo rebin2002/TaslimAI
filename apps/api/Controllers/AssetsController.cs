@@ -109,6 +109,12 @@ public sealed class AssetsController(
 
     private async Task<IActionResult> StreamDownloadAsync(AssetDownload download, bool inline, CancellationToken cancellationToken)
     {
+        // Private asset bytes, and the Content-Disposition carrying the owner's original file
+        // name, are served from a workspace- and user-independent URL under cookie
+        // authentication. The endpoint claims its own cache fence here instead of inheriting
+        // one from the authentication pipeline, so the privacy property cannot be lost by an
+        // unrelated change to cookie re-issue behaviour.
+        AssetDownloadResponsePolicy.ApplyPrivateNoStore(Response);
         try
         {
             var stream = await storage.OpenReadAsync(download.StoredFile.StorageKey, cancellationToken);
