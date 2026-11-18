@@ -248,6 +248,37 @@ public sealed class ChatMessagePaginationTests : IClassFixture<TaslimApiFactory>
         Assert.Equal([1L, 2L, 3L, 4L], messages.Select(message => message.Sequence));
     }
 
+    [Fact]
+    public async Task Replay_of_a_pending_same_sequence_assistant_returns_conflict_not_an_empty_success()
+    {
+        using var client = factory.CreateClient();
+        var auth = await Register(client, "Pending Pair Replay Owner");
+        var conversation = await CreateConversation(client, auth.PersonalWorkspace.Id);
+        var requestId = Guid.NewGuid().ToString("N");
+        var first = await ReadResponse(await SendMessage(client, conversation.Id, "Still working", requestId));
+
+        // Emulate the persisted in-flight state deterministically, without waiting on a provider.
+        // PostgreSQL can store the user and pending assistant with an identical CreatedAt;
+        // Sequence still pairs them, but the replay must not report an empty 200 OK.
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            var assistant = await db.ChatMessages.SingleAsync(message => message.Id == first.AssistantMessage.Id);
+            assistant.Status = Taslim.Api.Domain.ChatMessageStatus.Pending;
+            assistant.Content = string.Empty;
+            await db.SaveChangesAsync();
+        }
+
+        var replay = await SendMessage(client, conversation.Id, "Still working", requestId);
+        Assert.Equal(HttpStatusCode.Conflict, replay.StatusCode);
+        Assert.Contains("MESSAGE_IN_PROGRESS", await replay.Content.ReadAsStringAsync());
+
+        var history = await client.GetFromJsonAsync<List<ChatMessageDto>>($"/api/conversations/{conversation.Id}/messages");
+        Assert.NotNull(history);
+        Assert.Equal(2, history.Count);
+        Assert.Equal(first.AssistantMessage.Id, history.Single(message => message.Role == "Assistant").Id);
+    }
+
     private async Task MakePairShareOneTimestamp(Guid userMessageId, Guid assistantMessageId)
     {
         using var scope = factory.Services.CreateScope();
