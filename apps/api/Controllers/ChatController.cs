@@ -487,7 +487,10 @@ public sealed class ChatController(
             var existingAssistant = await db.ChatMessages
                 .Where(message => message.ConversationId == conversationId && message.Role == ChatMessageRole.Assistant && message.Sequence == existingUser.Sequence + 1)
                 .FirstOrDefaultAsync(cancellationToken);
-            if (existingAssistant is null) return PreparedChat.Failure(ApiResults.Error(this, StatusCodes.Status409Conflict, "MESSAGE_IN_PROGRESS", "That message is already being generated."));
+            // A same-sequence assistant can already exist while the first request is still generating.
+            // Do not replay its empty Pending body as a successful completed response.
+            if (existingAssistant is null || existingAssistant.Status == ChatMessageStatus.Pending)
+                return PreparedChat.Failure(ApiResults.Error(this, StatusCodes.Status409Conflict, "MESSAGE_IN_PROGRESS", "That message is already being generated."));
             if (existingAssistant.Status == ChatMessageStatus.Failed)
             {
                 existingAssistant.Status = ChatMessageStatus.Pending;
