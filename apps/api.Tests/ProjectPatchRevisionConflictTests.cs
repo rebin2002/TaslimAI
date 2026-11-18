@@ -4,6 +4,7 @@ using System.Net.Http.Json;
 using System.Text.Json;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.EntityFrameworkCore;
 using Taslim.Api.Contracts;
 using Taslim.Api.Domain;
 using Taslim.Api.Persistence;
@@ -104,6 +105,17 @@ public sealed class ProjectPatchRevisionConflictTests : IClassFixture<TaslimApiF
         using var getAfter = await editorA.GetAsync($"/api/projects/{project.Id}");
         Assert.Equal(HttpStatusCode.OK, getAfter.StatusCode);
         Assert.NotEqual(etag.ToString(), getAfter.Headers.ETag!.ToString());
+
+        // The header the endpoint hands back must be re-usable verbatim as If-Match on
+        // whichever store serves the row. A stamp read back in the production term
+        // (Kind=Utc, from `timestamp with time zone`) used to gain a second UTC
+        // designator here, so the very token the fence publishes was unparseable.
+        var handedBack = getAfter.Headers.ETag!.ToString();
+        Assert.DoesNotContain("ZZ", handedBack);
+        Assert.True(Taslim.Api.Projects.ProjectRevision.TryParseETag(handedBack, out var parsedHanded));
+        var reread = await editorA.GetFromJsonAsync<ProjectDto>($"/api/projects/{project.Id}");
+        Assert.NotNull(reread);
+        Assert.Equal(reread!.UpdatedAt.Ticks, parsedHanded.Ticks);
     }
 
     [Fact]
@@ -156,6 +168,72 @@ public sealed class ProjectPatchRevisionConflictTests : IClassFixture<TaslimApiF
         Assert.Equal("Legacy synopsis", after.Description);
     }
 
+    [Fact]
+    public async Task NonMember_CannotDiscoverTheRevision_StaleOrWildcardWriteIsRefusedBeforeTheFence()
+    {
+        var (editorA, _, project) = await CreateProjectWithTwoTabsAsync();
+        var outsider = await CreateOutsiderAsync("patch-outsider");
+
+        // Membership is decided before any conditional-request handling: an outsider
+        // must not be able to read the stamp, nor use a stale, malformed or wildcard
+        // If-Match to learn anything beyond "you are not a member".
+        using (var probe = await outsider.GetAsync($"/api/projects/{project.Id}"))
+        {
+            Assert.Equal(HttpStatusCode.Forbidden, probe.StatusCode);
+            Assert.False(probe.Headers.Contains("ETag"));
+        }
+
+        var stale = await PatchAsync(outsider, project.Id, "\"2020-01-01T00:00:00.0000000Z\"", Form(project, name: "Outsider rename"));
+        Assert.Equal(HttpStatusCode.Forbidden, stale.StatusCode);
+
+        var junk = await PatchAsync(outsider, project.Id, "\"not-a-revision\"", Form(project, name: "Outsider rename"));
+        Assert.Equal(HttpStatusCode.Forbidden, junk.StatusCode);
+
+        var forced = await PatchAsync(outsider, project.Id, "*", Form(project, name: "Outsider rename"));
+        Assert.Equal(HttpStatusCode.Forbidden, forced.StatusCode);
+
+        var after = await editorA.GetFromJsonAsync<ProjectDto>($"/api/projects/{project.Id}");
+        Assert.NotNull(after);
+        Assert.Equal(project.Name, after.Name);
+    }
+
+    [Fact]
+    public async Task GuardedUpdate_FencedOnASupersededRevision_TouchesNoRowsAndLeavesTheCommittedFields()
+    {
+        // The last line of defence against a commit that lands between the endpoint's own
+        // read and its write is the conditional UPDATE, not the header comparison that
+        // already passed. Its store-level semantics cannot be scheduled deterministically
+        // over HTTP, so the identical fenced write is replayed here against a revision that
+        // a second writer has demonstrably advanced: zero rows affected, nothing overwritten.
+        var (editorA, _, project) = await CreateProjectWithTwoTabsAsync();
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+
+        var observed = await db.Projects.AsNoTracking()
+            .Where(item => item.Id == project.Id)
+            .Select(item => item.UpdatedAt)
+            .SingleAsync();
+        var advanced = await db.Projects
+            .Where(item => item.Id == project.Id)
+            .ExecuteUpdateAsync(setters => setters
+                .SetProperty(item => item.Description, "Committed by the second writer")
+                .SetProperty(item => item.UpdatedAt, Taslim.Api.Projects.ProjectRevision.NextStamp(observed, observed)));
+        Assert.Equal(1, advanced);
+
+        var fenced = await db.Projects
+            .Where(item => item.Id == project.Id && item.UpdatedAt == observed)
+            .ExecuteUpdateAsync(setters => setters
+                .SetProperty(item => item.Name, "Must not land")
+                .SetProperty(item => item.Description, "Must not land either")
+                .SetProperty(item => item.UpdatedAt, DateTime.UtcNow));
+        Assert.Equal(0, fenced);
+
+        var survivor = await editorA.GetFromJsonAsync<ProjectDto>($"/api/projects/{project.Id}");
+        Assert.NotNull(survivor);
+        Assert.Equal(project.Name, survivor!.Name);
+        Assert.Equal("Committed by the second writer", survivor.Description);
+    }
+
     private async Task<(HttpClient EditorA, HttpClient EditorB, ProjectDto Project)> CreateProjectWithTwoTabsAsync()
     {
         var email = $"patch-conflict-{Guid.NewGuid():N}@example.com";
@@ -179,6 +257,16 @@ public sealed class ProjectPatchRevisionConflictTests : IClassFixture<TaslimApiF
         var editorB = factory.CreateClient();
         await LoginAsync(editorB, email);
         return (editorA, editorB, project);
+    }
+
+    /// <summary>An authenticated account that has no membership in the edited project's workspace.</summary>
+    private async Task<HttpClient> CreateOutsiderAsync(string label)
+    {
+        var outsider = factory.CreateClient();
+        var response = await SendWithCsrfAsync(outsider, HttpMethod.Post, "/api/auth/register",
+            new { displayName = "Not A Member", email = $"{label}-{Guid.NewGuid():N}@example.com", password = Password, preferredLanguage = "en" });
+        Assert.True(response.IsSuccessStatusCode, await response.Content.ReadAsStringAsync());
+        return outsider;
     }
 
     private static object Form(ProjectDto project, string? name = null, string? description = null) => new
@@ -312,6 +400,32 @@ public sealed class ProjectRevisionStampTests
         Assert.False(Taslim.Api.Projects.ProjectRevision.TryParseETag("not-a-revision", out _));
         Assert.False(Taslim.Api.Projects.ProjectRevision.TryParseETag("\"a\",\"b\"", out _));
         Assert.False(Taslim.Api.Projects.ProjectRevision.TryParseETag("  ", out _));
+    }
+
+    [Fact]
+    public void FormattedETag_WritesTheUtcDesignatorExactlyOnce_ForEveryKindTheStoreCanReturn()
+    {
+        // `timestamp with time zone` — the production column behind Projects.UpdatedAt —
+        // hands the stamp back as Kind=Utc, while the in-memory test store hands back
+        // Kind=Unspecified. The round-trip format already carries the designator for the
+        // UTC term, so appending it once more published an unparseable token and every
+        // honest If-Match was refused as INVALID_IF_MATCH. That is invisible through the
+        // SQLite-backed flow alone, so both terms are pinned here.
+        foreach (var kind in new[] { DateTimeKind.Unspecified, DateTimeKind.Utc })
+        {
+            var token = Taslim.Api.Projects.ProjectRevision.FormatETag(DateTime.SpecifyKind(Base, kind));
+            Assert.EndsWith("Z\"", token);
+            Assert.DoesNotContain("ZZ", token);
+            Assert.True(Taslim.Api.Projects.ProjectRevision.TryParseETag(token, out var parsed));
+            Assert.Equal(Base.Ticks, parsed.Ticks);
+        }
+
+        // A local-kind stamp is brought back to the same instant before the designator is
+        // written, so the token never claims a UTC instant the row does not hold.
+        var local = DateTime.SpecifyKind(Base, DateTimeKind.Local);
+        Assert.True(Taslim.Api.Projects.ProjectRevision.TryParseETag(
+            Taslim.Api.Projects.ProjectRevision.FormatETag(local), out var fromLocal));
+        Assert.Equal(local.ToUniversalTime().Ticks, fromLocal.Ticks);
     }
 
     [Fact]

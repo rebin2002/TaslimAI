@@ -21,8 +21,22 @@ public static class ProjectRevision
     internal static readonly TimeSpan MinimumStampAdvance = TimeSpan.FromMicroseconds(1);
 
     /// <summary>Formats a persisted stamp as a strong ETag token.</summary>
-    public static string FormatETag(DateTime revision) =>
-        "\"" + revision.ToString("O", CultureInfo.InvariantCulture) + "Z\"";
+    /// <remarks>
+    /// The round-trip ("O") format is deliberately not used here: it already appends a
+    /// <c>Z</c> when the value carries <see cref="DateTimeKind.Utc"/>, which is exactly the
+    /// kind Postgres hands back for a <c>timestamp with time zone</c> column. Appending the
+    /// designator a second time produced an unparseable token, so every honest
+    /// <c>If-Match</c> taken from this endpoint's own <c>ETag</c> was refused as
+    /// <c>INVALID_IF_MATCH</c> on the production store while the in-memory test store,
+    /// which returns <see cref="DateTimeKind.Unspecified"/>, stayed green. The digits are
+    /// therefore rendered explicitly and the UTC designator is written exactly once, after
+    /// any local-kind value has been brought back to UTC.
+    /// </remarks>
+    public static string FormatETag(DateTime revision)
+    {
+        var utc = revision.Kind == DateTimeKind.Local ? revision.ToUniversalTime() : revision;
+        return "\"" + utc.ToString("yyyy-MM-dd'T'HH:mm:ss.fffffff'Z'", CultureInfo.InvariantCulture) + "\"";
+    }
 
     /// <summary>
     /// Parses an <c>If-Match</c> token into the revision stamp it carries. Accepts strong
