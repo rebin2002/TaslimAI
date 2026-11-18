@@ -29,6 +29,7 @@
  * cannot fail is not evidence.
  */
 import { act } from "react";
+import { readFileSync } from "node:fs";
 import { createElement, type ReactElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
@@ -179,6 +180,12 @@ function bootstrapRegion(): TestNode | undefined {
 const ARABIC_SCRIPT = /[\u0600-\u06FF\u0750-\u077A\uFB50-\uFDFF\uFE70-\uFEFF]/;
 const PURELY_LATIN = /^[A-Za-z0-9 ,.'\-?()]+$/;
 
+/**
+ * The gate's own source, for the one invariant that cannot be observed through
+ * a timer. See the case in section D that reads it.
+ */
+const gateSource = readFileSync(new URL("../components/ProtectedPage.tsx", import.meta.url), "utf8");
+
 /* ------------------------------------------------------------ harness ---- */
 const PROTECTED_ROUTE = "/create/document";
 const ARM_SEARCH = "?projectId=project-1&tab=source";
@@ -199,7 +206,11 @@ const routerStub = vi.hoisted(() => ({ replace: vi.fn(), push: vi.fn(), prefetch
 // Wrapped, not replaced: section B needs to observe *when* the boundary asks for
 // the visitor's language, which is what separates a render-phase read (a
 // hydration mismatch against the English server shell) from an effect.
+// `localeReads` therefore counts effect-time resolutions (one per mount), while
+// `boundaryCommits` counts calls to the label helper, which runs on every render
+// of the boundary and so is the render counter section D needs.
 const localeReads = vi.hoisted(() => vi.fn());
+const boundaryCommits = vi.hoisted(() => vi.fn());
 vi.mock("../lib/protectedPageI18n", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../lib/protectedPageI18n")>();
   return {
@@ -207,6 +218,10 @@ vi.mock("../lib/protectedPageI18n", async (importOriginal) => {
     readBrowserProtectedPageBootstrapLocale: () => {
       localeReads();
       return actual.readBrowserProtectedPageBootstrapLocale();
+    },
+    protectedPageBootstrapStatusText: (locale: Parameters<typeof actual.protectedPageBootstrapStatusText>[0]) => {
+      boundaryCommits();
+      return actual.protectedPageBootstrapStatusText(locale);
     },
   };
 });
@@ -355,6 +370,7 @@ beforeEach(() => {
   nav.pathname = PROTECTED_ROUTE;
   routerStub.replace.mockReset();
   localeReads.mockReset();
+  boundaryCommits.mockReset();
   vi.stubGlobal("document", dom);
   windowStub = {
     document: dom,
@@ -633,6 +649,48 @@ describe("D. the post-hydration locale swap does not extend the recovery window"
     await renderGate();
     await advance(PROTECTED_PAGE_AUTH_TIMEOUT_MS);
     expect(loginRedirects()).toHaveLength(1);
+  });
+
+  it("cannot extend the window in principle: the locale commits only at mount, and is absent from the watchdog deps", () => {
+    // Measured, not assumed: this invariant is asserted structurally because it
+    // is NOT observable behaviourally, and pretending otherwise would be a
+    // false guarantee. Adding `bootstrapLocale` to the watchdog's dependency
+    // array - a plausible-looking "fix" - was tried against this suite and every
+    // timer case still passed, because the locale is written by a mount effect
+    // that runs while the virtual clock is still at 0. A re-arm at t=0 produces
+    // exactly the same deadline as the original arm, so no amount of advancing
+    // the clock distinguishes them. What makes the hazard unreachable is the
+    // shape of the code, and only the shape of the code can be asserted.
+    const localeEffect = gateSource.match(/setBootstrapLocale\(readBrowserProtectedPageBootstrapLocale\(\)\);[\s\S]*?\}, \[([^\]]*)\]\);/);
+    expect(localeEffect, "the locale restore effect must be locatable").not.toBeNull();
+    expect((localeEffect as RegExpMatchArray)[1].trim(), "mount-only: the commit can never land mid-window").toBe("");
+
+    const watchdogEffect = gateSource.match(/shouldArmBootstrapWatchdog\(loading, hasHydratedSession\)[\s\S]*?\}, \[([^\]]*)\]\);/);
+    expect(watchdogEffect, "the watchdog effect must be locatable").not.toBeNull();
+    const deps = (watchdogEffect as RegExpMatchArray)[1];
+    expect(deps, "the locale must not re-arm the recovery window").not.toMatch(/bootstrapLocale|locale/i);
+    // The documented window is still the one the deps describe.
+    expect(deps).toContain("hasHydratedSession");
+    expect(deps).toContain("pathname");
+  });
+
+  it("commits the boundary twice under RTL and once in English, so the RTL cases above are not vacuous", async () => {
+    // The effect writes the value it initialised to when the reader is already
+    // in English, so React bails out and the gate commits once; under an Arabic
+    // or Sorani document the value differs and it commits twice. Recorded here
+    // so the RTL window cases above are known to be exercising a real second
+    // render rather than an English path under a different label.
+    const commitsFor = async (scenario: LocaleScenario) => {
+      act(() => root?.unmount());
+      boundaryCommits.mockReset();
+      applyDocumentLocale(scenario);
+      await mountGate();
+      return boundaryCommits.mock.calls.length;
+    };
+    expect(await commitsFor(SCENARIOS[0]), "English: no second commit").toBe(1);
+    expect(await commitsFor(SCENARIOS[1]), "Arabic: adopts the language").toBe(2);
+    expect(await commitsFor(SCENARIOS[2]), "Sorani: adopts the language").toBe(2);
+    expect(accessibleName(bootstrapRegion())).toBe(protectedPageBootstrapStatusLabels.ku);
   });
 });
 
