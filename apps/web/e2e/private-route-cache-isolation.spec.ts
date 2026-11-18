@@ -54,6 +54,33 @@ test.describe("authenticated SSR route cache isolation", () => {
     expect(response!.headers()["x-robots-tag"] ?? "").toBe("");
   });
 
+  // The App Router also answers `<route>.rsc` with that route's serialized
+  // payload (`Content-Type: text/x-component`). Those URLs are keyed by a
+  // private route's path, so they belong inside the guarded set; before the
+  // matcher gained its second entry a single top-level segment such as
+  // `/search.rsc` satisfied the static-file carve-out instead, while the deeper
+  // `/create/image.rsc` was already guarded. The payload of an allowlisted
+  // credential form stays untouched, because Next resolves it back to that
+  // form page before the policy is consulted (verified on `next dev` and
+  // `next start`).
+  test("route payload URLs carry the private policy at every depth", async ({ page }) => {
+    for (const path of ["/projects.rsc", "/chat.rsc", "/account/billing.rsc"]) {
+      const response = await page.goto(path);
+      expect(response, path).not.toBeNull();
+      expect(response!.status(), path).toBeLessThan(300);
+      const headers = response!.headers();
+      expect(headers["cache-control"] ?? "", path).toMatch(/no-store/);
+      expect(headers["cache-control"] ?? "", path).not.toMatch(/s-maxage|max-age=(?!0[,\s]|0$)/);
+      expect(headers["x-robots-tag"] ?? "", path).toMatch(/noindex/);
+    }
+  });
+
+  test("payload URL of a public credential form stays outside the private policy", async ({ page }) => {
+    const response = await page.goto("/register.rsc");
+    expect(response).not.toBeNull();
+    expect(response!.headers()["x-robots-tag"] ?? "").toBe("");
+  });
+
   test("a second session in the same browser never replays the first session's /chat document or data", async ({ page }) => {
     // Session A creates a private conversation marker.
     const alpha = makeUser(ALPHA_MARKER);

@@ -19,7 +19,12 @@ export const PRIVATE_DOC_ROBOTS = "noindex, nofollow, noarchive, nosnippet";
 
 export function isPublicDocPath(pathname: string): boolean {
   const normalized = pathname.length > 1 ? pathname.replace(/\/+$/, "") : pathname;
-  return PUBLIC_DOC_PATHNAMES.has(normalized.toLowerCase());
+  // Exact, case-sensitive membership after trailing-slash normalization. App
+  // Router route registration is case-sensitive, so only the real public paths
+  // may be exempted: folding case would widen the exemption onto surfaces that
+  // render the private not-found document (`/Login`, `/LOGIN`). Normalization
+  // is therefore allowed to err only in the fail-closed direction.
+  return PUBLIC_DOC_PATHNAMES.has(normalized);
 }
 
 export default function middleware(request: NextRequest): NextResponse {
@@ -37,5 +42,14 @@ export const config = {
   // API proxy responses carry upstream-owned headers, and Next-owned
   // `/_next/*` assets and extension-bearing public files (robots.txt, icons,
   // fonts) keep their framework cache policies. Everything else runs here.
-  matcher: ["/((?!api/|_next/|[^/]+\\.[\\w-]+).*)"],
+  //
+  // That static-file carve-out is deliberately paired with a second entry.
+  // The App Router also answers `<route>.rsc` with that route's serialized
+  // payload (`Content-Type: text/x-component`), the same cache-key surface as
+  // the `?_rsc=` document variant. A top-level segment such as `/search.rsc`
+  // or `/chat.rsc` otherwise satisfied `[^/]+\.[\w-]+` and kept only the
+  // framework default, while the deeper `/create/image.rsc` was guarded: an
+  // asymmetry, not a design decision. The second entry closes it, and because
+  // both `api/` and `_next/` stay excluded it cannot capture a real asset.
+  matcher: ["/((?!api/|_next/|[^/]+\\.[\\w-]+).*)", "/((?!api/|_next/).+\\.rsc)"],
 };
