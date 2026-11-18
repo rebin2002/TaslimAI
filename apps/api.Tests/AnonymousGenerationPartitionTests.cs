@@ -34,6 +34,8 @@ namespace Taslim.Api.Tests;
 /// clients keep different budgets (so healthy traffic is never starved by a neighbour),
 /// the same client is not split across two budgets by the address family it happened to
 /// be reached on, and no raw address material reaches a key or a response body.
+/// Forwarded client-address headers are consumed nowhere in this API, so rotating
+/// them cannot move a budget either - pinned as an abuse-resistance contract.
 ///
 /// All of it is deterministic: the concurrency limiter is saturated with held leases
 /// (PermitLimit = 4, QueueLimit = 0) rather than by racing a clock, and the keyed digest
@@ -167,6 +169,59 @@ public sealed class AnonymousGenerationPartitionTests
         var plain = CreateAnonymousContext(GenerationPolicy, IPAddress.Parse("203.0.113.7"));
 
         Assert.Equal(PartitionKey("generation", mapped), PartitionKey("generation", plain));
+    }
+
+    [Fact]
+    public void Rotated_forwarded_ip_headers_cannot_move_or_widen_the_budget()
+    {
+        // Abuse resistance: this API consumes no forwarded client-address header
+        // (docs/AUTHENTICATION.md), so a budget follows the transport peer alone. A
+        // caller that rotates X-Forwarded-For, X-Real-IP or Forwarded per request may
+        // therefore neither mint a fresh budget (stability under header churn) nor
+        // reach another client's budget (no header material in the key), and identical
+        // spoofed headers must not make two distinct peers collide. This is a contract
+        // guard rather than a fix-dependent assertion: it holds on main unchanged, and
+        // keeps holding if anyone later wires ForwardedHeaders middleware in without
+        // re-reviewing the keying - at which point a rotated header would move the
+        // budget and this test fails before that becomes a live exemption.
+        var peer = IPAddress.Parse("203.0.113.5");
+        var baseline = PartitionKey("generation", CreateAnonymousContext(GenerationPolicy, peer));
+
+        var rotations = new (string Name, string Value)[]
+        {
+            ("X-Forwarded-For", "198.51.100.1"),
+            ("X-Forwarded-For", "198.51.100.1, 203.0.113.100"),
+            ("X-Real-IP", "198.51.100.2"),
+            ("Forwarded", "for=198.51.100.3;by=203.0.113.5"),
+        };
+
+        foreach (var (name, value) in rotations)
+        {
+            var context = CreateAnonymousContext(GenerationPolicy, peer);
+            context.Request.Headers[name] = value;
+            var key = PartitionKey("generation", context);
+
+            // Same transport peer under any header rotation: one budget, unmoved.
+            Assert.Equal(baseline, key);
+            // No header material reaches the key, so it cannot alias another client.
+            Assert.DoesNotContain("198.51.100", key, StringComparison.Ordinal);
+        }
+
+        // Two distinct peers carrying identical spoofed headers stay distinct clients.
+        var otherPeer = CreateAnonymousContext(GenerationPolicy, IPAddress.Parse("198.51.100.9"));
+        var spoofedPeer = CreateAnonymousContext(GenerationPolicy, peer);
+        otherPeer.Request.Headers["X-Forwarded-For"] = "198.51.100.1";
+        spoofedPeer.Request.Headers["X-Forwarded-For"] = "198.51.100.1";
+        Assert.NotEqual(PartitionKey("generation", otherPeer), PartitionKey("generation", spoofedPeer));
+
+        // The concurrency arm (generation-creation limiter) keys off the same
+        // transport-derived identity, so header churn moves that budget neither.
+        var plainPeer = CreateAnonymousContext(GenerationPolicy, peer);
+        var churned = CreateAnonymousContext(GenerationPolicy, peer);
+        churned.Request.Headers["X-Forwarded-For"] = "192.0.2.200";
+        Assert.Equal(
+            PartitionKey($"concurrency:{GenerationPolicy}", plainPeer),
+            PartitionKey($"concurrency:{GenerationPolicy}", churned));
     }
 
     [Fact]
