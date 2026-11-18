@@ -8,6 +8,7 @@ import {
   MUSIC_REFERENCES_MAX_ASSETS,
   buildMusicLyricsDraft,
   splitLyricsDraftLines,
+  safeDraftSectionId,
   type MusicLyricsDraftInput,
 } from "./musicLyricsDraftPayload";
 
@@ -597,5 +598,63 @@ describe("buildMusicLyricsDraft Arabic and Sorani synthetic rejection payloads s
     expect(sorani.payload!.lyricsLanguage).toBe("ku");
     expect(sorani.payload!.lyricsDialect).toBe("sorani");
     expect(sorani.payload!.lyrics[0].lines).toEqual([soraniGlyphLine]);
+  });
+});
+
+describe("safeDraftSectionId whitespace normalisation is a normaliser, not a dropper", () => {
+  // `String.prototype.trim()` also strips U+00A0 and the other White_Space
+  // codepoints, so a padded token normalises instead of being dropped. Padded
+  // whitespace is not content, and the behaviour is deliberate; this lock exists
+  // so a future reader does not "fix" the normaliser into a dropper and silently
+  // break every padded row label. All input is synthetic.
+  it("keeps a token padded with ordinary and no-break spaces", () => {
+    expect(safeDraftSectionId("  s1  ")).toBe("s1");
+    expect(safeDraftSectionId("\u00a0s1\u00a0")).toBe("s1");
+    expect(safeDraftSectionId("\u2007s_1\u202f")).toBe("s_1");
+  });
+
+  it("still drops a padded identifier that carries content after trimming", () => {
+    expect(safeDraftSectionId("\u00a0local:4096:نهێنی.wav\u00a0")).toBeUndefined();
+    expect(safeDraftSectionId(" \u00a0يا قلبُ الوطنِ \u00a0")).toBeUndefined();
+    expect(safeDraftSectionId(`\u00a0${"k".repeat(65)}`)).toBeUndefined();
+  });
+
+  it("treats whitespace-only and non-string input as absent, never as an empty echo", () => {
+    for (const value of ["", "   ", "\u00a0\u2003", "\t\n"]) expect(safeDraftSectionId(value)).toBeUndefined();
+    for (const value of [undefined, null, 42, {}, [], true]) expect(safeDraftSectionId(value)).toBeUndefined();
+  });
+});
+
+describe("safeDraftSectionId is exported as the shared primitive for every issue producer", () => {
+  // `sectionId` is a field on the issue type, so any present or future producer
+  // of issue records inherits the same obligation as this mapper. The one known
+  // producer that does not route through it today is the preflight panel's own
+  // `lyrics_invisible_only` gate issue (owned by open PR #847, whose file this
+  // lane deliberately does not edit) — see docs/MUSIC_STUDIO_LOG_PRIVACY.md.
+  // These cases pin the exact shapes that channel still echoes, so the shared
+  // rule is already correct and testable for whoever fixes it, and the export is
+  // locked so it cannot be un-exported back into a private helper.
+  it("exposes the primitive on the module's public surface", () => {
+    expect(typeof safeDraftSectionId).toBe("function");
+    expect(source).toMatch(/export function safeDraftSectionId/);
+    expect(source).toMatch(/The claim is deliberately scoped to this module/);
+  });
+
+  it("rejects every identifier shape the unfiltered gate channel leaks", () => {
+    const leakedShapes = [
+      "local:4096:گۆرانی_سۆران_کۆتایی.wav", // Sorani reference file name
+      "local-video:8192:أغنية_السر.mp4", // Arabic reference file name
+      "https://cdn.invalid/signed/PRIVATE-TOKEN?t=1", // signed asset URL
+      "يا قلبُ الوطنِ", // Arabic lyric line used as a row id
+      "ڕەنگێکی_نهێنی", // Sorani letters only
+      "verse\u202e", // bidi override
+    ];
+    for (const shape of leakedShapes) expect(safeDraftSectionId(shape)).toBeUndefined();
+  });
+
+  it("accepts the opaque ids the panel already uses, so routing the gate costs no addressability", () => {
+    for (const opaque of ["s1", "a", "hook1", "blank", "section-3", "row_7", "S12_x-z"]) {
+      expect(safeDraftSectionId(opaque)).toBe(opaque);
+    }
   });
 });

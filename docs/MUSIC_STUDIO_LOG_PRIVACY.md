@@ -87,14 +87,74 @@ file name is kept out of the diagnostic. The lyrics channel never got the
 equivalent treatment.
 
 The fix adds `safeDraftSectionId` with
-`MUSIC_LYRICS_MAX_SECTION_ID_CHARACTERS = 64` and routes every `sectionId`
-emission through it. A `sectionId` survives only as an opaque ASCII token
+`MUSIC_LYRICS_MAX_SECTION_ID_CHARACTERS = 64` and routes **every `sectionId`
+emission this mapper makes** through it. A `sectionId` survives only as an opaque ASCII token
 (`[A-Za-z0-9][A-Za-z0-9_-]{0,63}` after trimming); everything else is **dropped,
 never truncated**, because a truncated echo still publishes a prefix of the
 user's words. `sectionOrdinal` is always present, so dropping an unsafe
 identifier costs the row's name and never the problem's addressability. Opaque
 tokens the editors already generate (`s1`, `a`, `hook1`, `blank`, `section-3`,
 `row_7`) keep working, which is asserted positively as well as negatively.
+
+`safeDraftSectionId` applies `String.prototype.trim()`, which also strips
+`U+00A0` (no-break space) and the other White_Space codepoints. A
+whitespace-padded token therefore **normalises** rather than drops
+(`"\u00A0s1\u00A0"` maps to `s1`). That is intended: padding is not content,
+and the positive controls above pin it so a future reader does not "fix" the
+normaliser into a dropper.
+
+## Scope of the guarantee: one emission channel is outside this lane
+
+The rule above binds the four codes this mapper emits
+(`section_type_invalid`, `section_empty`, `lines_too_many`, `line_too_long`).
+It does **not** bind a caller that appends its own issue records, and one such
+caller exists on `main`.
+
+`MusicLyricsPreflightPanel.tsx` adds a gate issue of its own,
+`musicLyricsPreflightGateIssueCode = "lyrics_invisible_only"`, whose
+`sectionId` is copied raw at `:240`
+(`const sectionId = typeof entry?.id === "string" ? entry.id : undefined`),
+placed on the gate record at `:259` and merged with the mapper's array at
+`:265-274` without re-filtering. The module header of the panel never calls
+`safeDraftSectionId` (0 references on current `main`).
+
+Reproduced against this head through the panel's real exported
+`evaluateMusicLyricsPreflight`, with one invisible-only synthetic section
+(`\u200B\u200C\uFEFF \u2060\u180E`, i.e. `musicLyricsVisibleGlyphCount === 0` —
+exactly the case the gate exists to catch) and synthetic identifiers only:
+
+| Raw `entry.id` | `issues[]` `sectionId` on the returned array |
+| --- | --- |
+| `local:4096:گۆرانی_سۆران_کۆتایی.wav` | echoed verbatim (Sorani file name) |
+| `https://cdn.invalid/signed/PRIVATE-TOKEN?t=1` | echoed verbatim (signed URL) |
+| `يا قلبُ الوطنِ` | echoed verbatim (Arabic lyric line) |
+| `ڕەنگێکی_نهێنی` | echoed verbatim (Sorani letters) |
+| `s1` | echoed — correct, it is an opaque token |
+
+Severity, stated precisely: the panel renders this code as the localized
+`invisibleOnlyIssue` string (`:462-464`), so the raw identifier does **not**
+reach visible DOM text for the gate code, and the content is a local-draft
+identifier echoed back into the same user's own session — not remote
+disclosure. What fails is the **durability** clause: a returned array that is
+not uniformly safe cannot be handed to an error reporter on the strength of
+this document, and `sectionId` is a field on the shared issue type, so any
+future gate inherits the same obligation.
+
+This repo's suites are green and blind to it: `musicLyricsDraftPayload.test.ts`
+32/32, `MusicLyricsPreflightPanel.test.tsx` 25/25 and
+`MusicLyricsPreflightPanel.accessibility.test.tsx` 10/10 pass together,
+because every panel fixture uses opaque ids and no test drives the gate with a
+content-bearing one. The new server-side C# lock cannot see this channel.
+
+**Ownership, respected rather than taken:** the panel and its a11y test are
+claimed by open PR **#847** (head `a8d39947`, which modifies both), and the
+editor/preview UI by **#772** and merged **#939**. This lane therefore records
+the gap and does not edit a fifth path. The fix belongs to that lane: route the
+gate's `sectionId` through this module's exported `safeDraftSectionId` (it is
+already exported for exactly this reason) and pin it with a test that drives
+the gate with a content-bearing identifier. Until then, read the client
+guarantee as "every `sectionId` this mapper emits", which is what the header
+now says.
 
 ## Arabic/Sorani synthetic coverage
 
@@ -137,7 +197,7 @@ Deliberately untouched, with their owners:
 | `MusicGenerationController.cs`, `MusicGenerationAuthorizationTests.cs` | open PR #359 | Controller surface owned there. |
 | `GenerationJobExecution.cs` | open PRs #353/#361 (and others) | Worker failure-log shape is heavily claimed; this lane pins it instead of editing it. |
 | `OperationalObservability.cs`, `OperationalFailureClassification.cs` (+ tests) | open PRs #258, #515/#533 | Redaction infrastructure owned there. |
-| `MusicLyricsPreflightPanel.tsx` (+ test), `LyricsSectionEditor.tsx` | `#708` UI, open PR #772 | Explicitly excluded by the task; the panel keeps its own local mapping. |
+| `MusicLyricsPreflightPanel.tsx` (+ test and a11y test), `LyricsSectionEditor.tsx` | `#708` UI: open PRs #772 and #847 (panel + a11y test), merged #939 | Explicitly excluded by the task; the panel keeps its own local mapping, including the unfiltered gate `sectionId` recorded above. |
 | `musicStudioState.ts` (+ test) | open PRs #572/#573/#847 | Studio job state owned there. |
 | `MusicReferenceEligibility*`, `MusicReferenceAssetAuthorization*`, `MusicReferenceVideoAudioExtraction*`, `MusicReferenceAudioValidationRegressionTests.cs` | open PRs #730/#773/#774/#776/#805/#815 and the reference isolation task | The reference isolation worker is explicitly excluded. |
 | `musicGuidedSongDraft.ts`, `musicReferenceAudioState.ts`, `musicReferenceVideoState.ts` | unclaimed | Read as evidence for how identifiers are formed; unchanged, because the correct boundary is where the failure payload is built. |

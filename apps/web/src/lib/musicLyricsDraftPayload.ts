@@ -18,7 +18,12 @@
  * no dialect copy, no reference file name, and no draft-local identifier that
  * is not an opaque bounded token (see `safeDraftSectionId`). A failure
  * therefore describes the problem without publishing the material it was
- * found in, and an issue array can be logged or reported as-is.
+ * found in, so the issue array returned by THIS mapper can be logged or
+ * reported as-is. The claim is deliberately scoped to this module: a caller
+ * that appends its own issue records owns their privacy, and
+ * `docs/MUSIC_STUDIO_LOG_PRIVACY.md` records one such channel — the preflight
+ * panel's `lyrics_invisible_only` gate issue, owned by open PR #847 — that
+ * still copies a raw draft id into `sectionId` unfiltered.
  */
 
 /** Section vocabulary of the shared request contract (PR #709). */
