@@ -50,9 +50,9 @@ The API separates process liveness from dependency readiness.
 | --- | --- | --- |
 | `/health` | Backward-compatible liveness endpoint | Returns HTTP 200 when the process can answer. |
 | `/health/live` | Process liveness | Returns HTTP 200 with `status=alive`; it does not query dependencies. |
-| `/health/ready` | Application readiness | Returns HTTP 200 with `status=ready` only when the database is reachable and required storage is available. Otherwise it returns HTTP 503 with safe check names and statuses. |
+| `/health/ready` | Application readiness | Returns HTTP 200 with `status=ready` only when the database is reachable and required storage is available. Otherwise it returns HTTP 503 with safe check names and statuses. The appended `worker` check is advisory (`required: false`) and never changes the status code. |
 
-Readiness checks the database with a connectivity probe and checks the configured storage adapter with a read-only existence request for a reserved health prefix. Both checks share a bounded timeout controlled by `Health:ProbeTimeoutSeconds` (default 5 seconds, accepted range 1–60 seconds). A timed-out dependency is reported as `unavailable` and produces HTTP 503 without exposing provider details. The probe does not write a sentinel object and it never returns an R2 endpoint, bucket, credential, or key.
+Readiness checks the database with a connectivity probe and checks the configured storage adapter with a read-only existence request for a reserved health prefix. Both checks share a bounded timeout controlled by `Health:ProbeTimeoutSeconds` (default 5 seconds, accepted range 1–60 seconds). A timed-out dependency is reported as `unavailable` and produces HTTP 503 without exposing provider details. The probe does not write a sentinel object and it never returns an R2 endpoint, bucket, credential, or key. A third, advisory `worker` check reads the same generation-worker heartbeats as the Admin Operations dashboard and reports `available`, `degraded` (no live worker will claim queued jobs), `disabled` (this deployment runs no worker), or `unknown` (the probe could not run or complete); it is informational only and cannot gate readiness, because evicting a replica that still serves HTTP correctly — or restart-looping a single-container deployment during a stalled queue — would trade a visible incident for an invisible one.
 
 Optional providers are intentionally absent from readiness. A disabled or unconfigured provider must not prevent the API from serving authentication, existing assets, or other available studios. Provider health is reported separately as `disabled`, `unconfigured`, `available_unknown`, or `recent_operational_failure`; `available_unknown` means that configuration is present but no paid health-generation call was made.
 
@@ -133,7 +133,7 @@ For an API incident, follow this sequence:
 
 1. Open the API deployment and confirm the latest deployment is running rather than repeatedly restarting.
 2. Request `/health/live` to separate process availability from dependency readiness.
-3. Request `/health/ready` and record the status of `database` and `storage`.
+3. Request `/health/ready` and record the status of `database`, `storage`, and the advisory `worker` check.
 4. Search structured logs by `X-Request-ID`, `JobId`, `PaymentEventId`, or `FileId`.
 5. Compare the incident time with PostgreSQL and R2 provider status.
 6. Confirm that optional provider flags and payment charging remain at their intended values.
