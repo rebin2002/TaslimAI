@@ -158,11 +158,14 @@ function buildEstimate(workspace: ProductionWorkspaceModel, selectedTier: MovieR
 
 /**
  * Rounds a money figure to two decimals, or returns null when the value is not a usable amount.
- * Math.round yields signed zero for a sub-cent negative value, so zero is returned explicitly.
+ * A figure can be finite and still be unpriceable: scaling it into cents leaves the finite range,
+ * so that overflow is rejected here instead of handing the caller a non-finite amount. Math.round
+ * also yields signed zero for a sub-cent value, so zero is returned explicitly.
  */
 function round(value: number): number | null {
   if (!Number.isFinite(value)) return null;
   const cents = Math.round(value * 100);
+  if (!Number.isFinite(cents)) return null;
   return cents === 0 ? 0 : cents / 100;
 }
 

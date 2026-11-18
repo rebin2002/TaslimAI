@@ -65,10 +65,28 @@ describe("movie budget and readiness planning", () => {
   });
 
   it("refuses a path comparison when the spend figures sum outside the finite range", () => {
-    const model = buildMovieBudgetReadiness({ project, workspace: workspace(), selectedTier: "Upgrade", cost: cost({ recordedProviderCostUsd: Number.MAX_VALUE, estimatedRemainingProviderCostUsd: Number.MAX_VALUE }) });
+    // Largest finite double. Summing two of them overflows to +Infinity, which is the signal the
+    // guard must reject. Written as a literal because Number.MAX_VALUE is an Annex B compatibility
+    // alias: if a runtime ever dropped it the sample would become undefined and this case would
+    // pass vacuously through the unknown path instead of the non-finite one it names.
+    const largestFinite = 1.7976931348623157e308;
+    const model = buildMovieBudgetReadiness({ project, workspace: workspace(), selectedTier: "Upgrade", cost: cost({ recordedProviderCostUsd: largestFinite, estimatedRemainingProviderCostUsd: largestFinite }) });
     expect(model.estimate.state).toBe("unavailable");
     expect(model.estimate.optimizedAmount).toBeNull();
     expect(model.estimate.naiveAmount).toBeNull();
+  });
+
+  it("refuses a path comparison when a finite spend cannot be scaled into cents", () => {
+    // The base is a legitimate finite number here, so the sum guard cannot see it. Converting it to
+    // cents leaves the finite range, and an unpriceable figure must not be reported as a known amount.
+    const unpriceable = 1.7e308;
+    const model = buildMovieBudgetReadiness({ project, workspace: workspace(), selectedTier: "Draft", cost: cost({ recordedProviderCostUsd: unpriceable, estimatedRemainingProviderCostUsd: 0 }) });
+    expect(model.estimate.state).toBe("unavailable");
+    expect(model.estimate.optimizedAmount).toBeNull();
+    expect(model.estimate.naiveAmount).toBeNull();
+    expect(model.estimate.savingsAmount).toBeNull();
+    expect(model.estimate.savingsPercent).toBeNull();
+    expect(formatMovieBudgetAmount(model.estimate.optimizedAmount, model.estimate.currency)).toBe("Estimate pending");
   });
 
   it("never hands the panel a negative, signed-zero or non-finite money figure", () => {
@@ -77,6 +95,8 @@ describe("movie budget and readiness planning", () => {
       cost({ recordedProviderCostUsd: 0, estimatedRemainingProviderCostUsd: -3 }),
       cost({ recordedProviderCostUsd: Number.NaN, estimatedRemainingProviderCostUsd: 4 }),
       cost({ recordedProviderCostUsd: -12, estimatedRemainingProviderCostUsd: 5 }),
+      cost({ recordedProviderCostUsd: Number.POSITIVE_INFINITY, estimatedRemainingProviderCostUsd: 4 }),
+      cost({ recordedProviderCostUsd: 1.7e308, estimatedRemainingProviderCostUsd: 0 }),
     ];
     for (const selectedTier of ["Draft", "Upgrade", "Master"] as const) {
       for (const sample of samples) {
@@ -99,5 +119,16 @@ describe("movie budget and readiness planning", () => {
     expect(model.estimate.savingsAmount).toBe(0);
     expect(model.estimate.savingsPercent).toBe(0);
     expect(formatMovieBudgetAmount(model.estimate.optimizedAmount, model.estimate.currency)).toBe("USD 0.00");
+  });
+
+  it("refuses to render a signed, negative or non-finite figure as money at the display step", () => {
+    // The estimate guard is not the only boundary: a figure reaching the formatter from any other
+    // caller still has to fail closed rather than print "USD -7.00" or "USD NaN" into the panel.
+    expect(formatMovieBudgetAmount(-7)).toBe("Estimate pending");
+    expect(formatMovieBudgetAmount(-0.004)).toBe("Estimate pending");
+    expect(formatMovieBudgetAmount(Number.NaN)).toBe("Estimate pending");
+    expect(formatMovieBudgetAmount(Number.POSITIVE_INFINITY)).toBe("Estimate pending");
+    // Signed zero is not negative, so it renders as the honest zero figure rather than "USD -0.00".
+    expect(formatMovieBudgetAmount(-0)).toBe("USD 0.00");
   });
 });
