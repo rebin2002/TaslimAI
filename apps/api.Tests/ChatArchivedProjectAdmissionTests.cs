@@ -127,6 +127,25 @@ public sealed class ChatArchivedProjectAdmissionTests : IClassFixture<TaslimApiF
         Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
     }
 
+    [Fact]
+    public async Task Active_project_from_another_workspace_is_rejected_by_admission()
+    {
+        using var owner = factory.CreateClient();
+        using var member = factory.CreateClient();
+        var ownerAuth = await Register(owner, "Cross Workspace Project Owner");
+        var memberAuth = await Register(member, "Cross Workspace Project Member");
+        // The project stays Active, so this isolates the WorkspaceId half of the predicate:
+        // a caller who passes their own membership still cannot bind a foreign project, and
+        // the answer is the same opaque 404 envelope used for archived and missing projects.
+        var foreignProject = await CreateProject(owner, ownerAuth.PersonalWorkspace.Id, "Someone else's live plan");
+
+        var response = await CreateConversation(member, memberAuth.PersonalWorkspace.Id, foreignProject.Id);
+
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+        var body = await response.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal("PROJECT_NOT_FOUND", body.GetProperty("error").GetProperty("code").GetString());
+    }
+
     private async Task<AuthResponse> Register(HttpClient client, string displayName)
     {
         var response = await SendWithCsrf(client, HttpMethod.Post, "/api/auth/register", new
