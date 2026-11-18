@@ -71,7 +71,7 @@ elif [[ "${SMOKE_MODE:-retry}" == 'advisory-worker' && "$endpoint" == '/health/r
     # A readiness document carrying an appended advisory check that is NOT
     # available while every required check is: exactly the shape the worker
     # degradation report produces. The status comes from SMOKE_WORKER_STATUS
-    # so both the degraded and the unknown verdicts are pinned.
+    # so degraded, unknown, and disabled verdicts are pinned.
     printf '{"status":"ready","service":"Taslim API","requestId":"smoke-request","checks":[{"name":"database","status":"available","required":true},{"name":"storage","status":"available","required":true},{"name":"worker","status":"%s","required":false}]}\n' "${SMOKE_WORKER_STATUS:?}" > "$body"
 elif [[ "${SMOKE_MODE:-retry}" == 'required-worker' && "$endpoint" == '/health/ready' ]]; then
     # The same document with the worker check marked required, so the helper
@@ -151,10 +151,10 @@ grep -F 'returned an invalid response on attempt 1' "$temp_dir/invalid.output" >
 # check is flagged required:false (the worker degradation report) must still
 # pass the helper, because only required checks may gate the exit code. This
 # is the property the restart automation depends on: an advisory degraded or
-# unknown worker can never fail a deployment smoke or restart a container.
+# disabled/unknown worker can never fail deployment smoke or restart a container.
 # Before these fixtures no committed case carried a non-required check, so a
 # validator regression that gated on every check would pass this file green.
-for advisory_status in degraded unknown; do
+for advisory_status in degraded unknown disabled; do
     advisory_log="$temp_dir/advisory-$advisory_status.log"
     if ! PATH="$bin_dir:$PATH" \
         SMOKE_COMMAND_LOG="$advisory_log" \
