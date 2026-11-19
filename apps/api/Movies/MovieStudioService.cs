@@ -192,7 +192,7 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
                     item.Id, item.Name, item.AssetType, item.MimeType,
                     item.HasReadyFile,
                     item.HasReadyFile && item.MimeType != null
-                        && (item.MimeType.StartsWith("image/") || item.MimeType.StartsWith("audio/") || item.MimeType.StartsWith("video/"))))
+                        && (item.MimeType.StartsWith("image/", StringComparison.OrdinalIgnoreCase) || item.MimeType.StartsWith("audio/", StringComparison.OrdinalIgnoreCase) || item.MimeType.StartsWith("video/", StringComparison.OrdinalIgnoreCase))))
                 .ToArrayAsync(cancellationToken);
         return new MovieWorldWorkspaceDto(movie.Id, movie.WorkspaceId, movie.ProjectId, movie.Status, movie.Title, movie.Description, movie.DurationSeconds, movie.AspectRatio, movie.Style, movie.Language, world, usageDetails, assets);
     }
