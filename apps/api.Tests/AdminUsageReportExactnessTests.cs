@@ -80,16 +80,39 @@ public sealed class AdminUsageReportExactnessTests
         Assert.Equal("7.90123456", cost.GetRawText());
 
         // Invariant rendering is required no matter what culture the request thread carries.
+        // A host in globalization-invariant mode (Alpine or distroless images, or
+        // InvariantGlobalization=true) cannot build a regional culture at all: the constructor
+        // throws CultureNotFoundException there. That is an environment property, not a report
+        // defect, so the leg degrades to the invariant culture instead of failing, and still
+        // asserts the same bytes. Where ICU cultures exist, which is every hosted gate, this
+        // exercises ar-EG for real.
         var originalCulture = CultureInfo.CurrentCulture;
         try
         {
-            CultureInfo.CurrentCulture = new CultureInfo("ar-EG");
+            CultureInfo.CurrentCulture = RequestCulture("ar-EG");
             var localizedJson = JsonSerializer.Serialize(report.Summary, new JsonSerializerOptions(JsonSerializerDefaults.Web));
             Assert.Contains("\"totalProviderCostUsd\":7.90123456", localizedJson, StringComparison.Ordinal);
         }
         finally
         {
             CultureInfo.CurrentCulture = originalCulture;
+        }
+    }
+
+    /// <summary>
+    /// The named culture when the host can construct one, otherwise the invariant culture.
+    /// Exists only so the wire-format leg stays runnable on globalization-invariant hosts;
+    /// the assertion it feeds is identical either way.
+    /// </summary>
+    private static CultureInfo RequestCulture(string name)
+    {
+        try
+        {
+            return new CultureInfo(name);
+        }
+        catch (CultureNotFoundException)
+        {
+            return CultureInfo.InvariantCulture;
         }
     }
 
