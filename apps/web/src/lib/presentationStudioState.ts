@@ -143,6 +143,50 @@ export function isPresentationTerminal(job: GenerationJob | null) { return !!job
 export function shouldPollPresentationJob(job: GenerationJob | null) { return !!job && !isPresentationTerminal(job); }
 export function nextPresentationPollDelay(job: GenerationJob | null, retryAttempt = 0) { return shouldPollPresentationJob(job) ? Math.min(700 * Math.max(1, retryAttempt + 1), 2_800) : null; }
 export function canCancelPresentationJob(job: GenerationJob | null) { return !!job && ["Pending", "Queued", "Running"].includes(job.status) && !job.cancellationRequested; }
+
+// Presentation job snapshots can reach the browser out of order: a poll issued
+// before the user pressed Cancel can resolve after the cancel request was
+// accepted, and a snapshot taken before the worker published the generated file
+// can resolve after it. The server keeps a cancelled job cancelled and never
+// re-opens a terminal job, so the client merges snapshots monotonically instead
+// of overwriting them. Re-applying the same snapshot, or an older one after a
+// newer one, is a no-op.
+export function resolvePresentationJobSnapshot(current: GenerationJob | null, incoming: GenerationJob | null): GenerationJob | null {
+  if (!incoming) return current;
+  if (!current || current.id !== incoming.id) return incoming;
+  if (isPresentationTerminal(current)) return current.status === incoming.status ? incoming : current;
+  if (isPresentationTerminal(incoming)) return incoming;
+  return incoming.cancellationRequested || !current.cancellationRequested ? incoming : { ...incoming, cancellationRequested: true };
+}
+
+// A cancellation the server accepted stays requested until the job reports its
+// terminal outcome, so a pre-cancellation response cannot re-arm the action.
+export function markPresentationCancellationRequested(current: GenerationJob | null): GenerationJob | null {
+  if (!current || isPresentationTerminal(current) || current.cancellationRequested) return current;
+  return { ...current, cancellationRequested: true };
+}
+
+// A cancellation belongs to the job that issued it. The marker runs against the
+// live state rather than the snapshot captured before the request, so an accepted
+// cancellation must never mark a different job as cancelling. A cancel request
+// that settles after the state slot changed hands - the job was cleared by a
+// 403/404 poll and a new brief started, or a second submission installed its own
+// job - would otherwise strand that other job with a sticky cancellation nobody
+// asked for: hiding its cancel control, so a separately chargeable generation can
+// no longer be stopped, and keeping the monotonic snapshot merge in the
+// cancelling path. Server job ids are unique, so binding on the id keeps the
+// accepted cancellation on its own job.
+export function markPresentationCancellationRequestedForJob(jobId: string) {
+  return (current: GenerationJob | null): GenerationJob | null =>
+    (current && current.id === jobId ? markPresentationCancellationRequested(current) : current);
+}
+
+// Cancelling a job that already settled is an idempotent no-op, not a failed
+// cancellation: the caller adopts the authoritative job state instead.
+export function isPresentationCancellationNoOp(status: number, code?: string | null) {
+  return status === 409 && (!code || code === "JOB_NOT_CANCELLABLE");
+}
+
 export function displayPresentationProgress(job: GenerationJob | null) { if (!job) return 0; const progress = Math.max(0, Math.min(100, job.progressPercent)); return isPresentationTerminal(job) ? progress : Math.min(progress, 99); }
 export function presentationStudioState(job: GenerationJob | null, result: PresentationJobResult | null): PresentationStudioState {
   if (!job) return "compose";
