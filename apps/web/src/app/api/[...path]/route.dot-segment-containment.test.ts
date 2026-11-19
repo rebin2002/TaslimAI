@@ -5,6 +5,13 @@ import { GET, POST } from "./route";
 // containment fix that flips the red-by-design contract test in
 // route.scanner-probes.test.ts (draft PR #1105). Synthetic, in-process only:
 // fetch is stubbed, hosts and cookies are fake, nothing reaches a network.
+//
+// Review follow-on (review #5969689743 on #1107): dropping a relative segment
+// and forwarding the remainder still invoked a *different* valid endpoint with
+// the caller's session cookie, so the handler now refuses the request outright
+// with a non-disclosing 400 and the fetch spy below must never be called for a
+// traversal spelling. route.traversal-refusal.test.ts carries the dedicated
+// negative controls; this file keeps the spelling-by-spelling contract.
 
 type RouteContext = { params: Promise<{ path: string[] }> };
 
@@ -34,7 +41,7 @@ afterEach(() => {
 });
 
 describe("literal dot-segment containment at the proxy handler contract", () => {
-  it("keeps every relative-segment spelling inside /api/ while still forwarding", async () => {
+  it("refuses every relative-segment spelling instead of rewriting it into another endpoint", async () => {
     const fetchMock = recordingFetch();
     vi.stubGlobal("fetch", fetchMock);
     const cases: string[][] = [
@@ -51,29 +58,31 @@ describe("literal dot-segment containment at the proxy handler contract", () => 
       const request = new Request(`http://localhost:3000/api/${path.join("/")}`, {
         headers: { cookie: "taslim.auth=synthetic-session" },
       });
-      await GET(request, context(path));
+      const response = await GET(request, context(path));
+      // The old contract - containment by deletion - turned ["v1","..","..",
+      // "admin"] into /api/v1/admin and authenticated it. Deletion is not a
+      // refusal, so every spelling here must answer 400.
+      expect(response.status, path.join("/")).toBe(400);
+      await expect(response.json()).resolves.toEqual({
+        error: { code: "INVALID_PATH", message: "The requested path is not valid." },
+      });
     }
-    expect(fetchMock.mock.calls.length).toBe(cases.length);
-    for (const [target] of fetchMock.mock.calls as [string, RequestInit][]) {
-      expect(composedRequestLine(target).startsWith("/api/")).toBe(true);
-    }
+    expect(fetchMock).toHaveBeenCalledTimes(0);
   });
 
-  it("carries no session material out of the namespace for a direct relative-segment injection", async () => {
+  it("carries no session material anywhere for a direct relative-segment injection", async () => {
     const fetchMock = recordingFetch();
     vi.stubGlobal("fetch", fetchMock);
     const request = new Request("http://localhost:3000/api/x", {
       headers: { cookie: "taslim.auth=synthetic-session" },
     });
-    await GET(request, context(["v1", "..", "..", "admin"]));
-    const [target] = fetchMock.mock.calls[0] as [string, RequestInit];
+    const response = await GET(request, context(["v1", "..", "..", "admin"]));
     // Without containment this exact spelling collapses to
-    // ${API_ORIGIN}/admin — out of the namespace, session cookie attached.
-    // The fix must keep the request line under /api/ rather than let it
-    // normalize away, and must not send it to any other origin either.
-    expect(new Request(target).url).not.toBe(`${API_ORIGIN}/admin`);
-    expect(composedRequestLine(target)).not.toBe("/admin");
-    expect(target.startsWith(`${API_ORIGIN}/api/`)).toBe(true);
+    // ${API_ORIGIN}/admin - out of the namespace, session cookie attached -
+    // and rewriting it to /api/v1/admin would still authenticate a different
+    // endpoint. Refusing it means no request line and no cookie ever leaves.
+    expect(response.status).toBe(400);
+    expect(fetchMock).toHaveBeenCalledTimes(0);
   });
 
   it("keeps every legitimate spelling byte-identical, including dot-adjacent names and encoded slashes", async () => {
@@ -101,29 +110,48 @@ describe("literal dot-segment containment at the proxy handler contract", () => 
     }
   });
 
-  it("refuses double-encoded relative spellings too, keeping the namespace path identical", async () => {
+  it("refuses double- and repeatedly-encoded relative spellings too", async () => {
     const fetchMock = recordingFetch();
     vi.stubGlobal("fetch", fetchMock);
-    // Double-encoded dots cannot collapse at the URL parser either, so
-    // refusing them is strictly safer than forwarding the encoded noise; the
-    // surrounding legitimate segments are untouched.
-    await GET(new Request("http://localhost:3000/api/v1/%252e%252e/admin"), context(["v1", "%252e%252e", "admin"]));
-    expect(fetchMock.mock.calls[0][0]).toBe(`${API_ORIGIN}/api/v1/admin`);
-    expect(composedRequestLine(fetchMock.mock.calls[0][0] as string)).toBe("/api/v1/admin");
+    // Dropping "%252e%252e" rewrote this into /api/v1/admin: a different
+    // endpoint, requested with credentials. Repeated percent-encoding of the
+    // same relative segment is refused the same way; the surrounding
+    // legitimate segments are never forwarded either, because the whole
+    // request is refused.
+    for (const path of [["v1", "%252e%252e", "admin"], ["v1", "%25252e%25252e", "admin"]]) {
+      const response = await GET(
+        new Request(`http://localhost:3000/api/${path.join("/")}`, {
+          headers: { cookie: "taslim.auth=synthetic-session" },
+        }),
+        context(path),
+      );
+      expect(response.status, path.join("/")).toBe(400);
+    }
+    expect(fetchMock).toHaveBeenCalledTimes(0);
   });
 
-  it("preserves query strings when relative segments are removed from the namespace path", async () => {
+  it("preserves query strings for valid paths and refuses them for relative ones", async () => {
     const fetchMock = recordingFetch();
     vi.stubGlobal("fetch", fetchMock);
     await GET(
+      new Request("http://localhost:3000/api/v1/documents?mode=list&flag=1", {
+        headers: { cookie: "taslim.auth=synthetic-session" },
+      }),
+      context(["v1", "documents"]),
+    );
+    const [target] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(target.endsWith("?mode=list&flag=1")).toBe(true);
+    expect(composedRequestLine(target).startsWith("/api/")).toBe(true);
+    // The same query string arriving with relative segments is refused rather
+    // than forwarded to whatever endpoint the rewrite would have produced.
+    const refused = await GET(
       new Request("http://localhost:3000/api/v1/admin?mode=list&flag=1", {
         headers: { cookie: "taslim.auth=synthetic-session" },
       }),
       context(["v1", "..", "..", "admin"]),
     );
-    const [target] = fetchMock.mock.calls[0] as [string, RequestInit];
-    expect(target.endsWith("?mode=list&flag=1")).toBe(true);
-    expect(composedRequestLine(target).startsWith("/api/")).toBe(true);
+    expect(refused.status).toBe(400);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
   it("still forwards valid authenticated POST bodies with cookies and CSRF material", async () => {
@@ -161,10 +189,15 @@ describe("literal dot-segment containment at the proxy handler contract", () => 
     const [target] = fetchMock.mock.calls[0] as [string, RequestInit];
     expect(composedRequestLine(target)).toBe("/api/..%252f..%252fadmin");
     // Contrast: the same leaf supplied as a genuine relative segment is
-    // removed instead of collapsing the request line out of /api/.
+    // refused outright, not deleted-then-forwarded as /api/admin.
     fetchMock.mockClear();
-    await GET(new Request("http://localhost:3000/api/../../admin"), context(["..", "..", "admin"]));
-    const [refused] = fetchMock.mock.calls[0] as [string, RequestInit];
-    expect(composedRequestLine(refused)).toBe("/api/admin");
+    const response = await GET(
+      new Request("http://localhost:3000/api/../../admin", {
+        headers: { cookie: "taslim.auth=synthetic-session" },
+      }),
+      context(["..", "..", "admin"]),
+    );
+    expect(response.status).toBe(400);
+    expect(fetchMock).toHaveBeenCalledTimes(0);
   });
 });

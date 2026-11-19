@@ -43,20 +43,16 @@ describe("scanner probes at the same-origin API proxy boundary", () => {
     vi.unstubAllGlobals();
   });
 
-  it("keeps every scanner-shaped target inside the /api/ namespace, with no dot segments surviving into the request line", async () => {
+  it("keeps every ordinary scanner spelling inside /api/ and refuses the relative ones", async () => {
     const fetchMock = recordingFetch();
     vi.stubGlobal("fetch", fetchMock);
-    // Segments exactly as the App Router delivers them for the probe spellings
-    // that survive edge normalization, plus the sensitive leaf names verbatim.
+    // Ordinary (non-relative) scanner noise keeps forwarding byte-identically.
     const cases: string[][] = [
       ["%2e%2e.env"],
       ["%2E%2E%2F%2E%2E%2F.env"],
       ["..%2f..%2f.env"],
       ["v1", "..%5c..%5c.env"],
-      [".", "health"],
-      ["%2e", "%2e", "%2e%2e", ".env"],
       ["auth", ".env"],
-      ["health", ".."],
     ];
     for (const path of cases) {
       const request = new Request(`http://localhost:3000/api/${path.join("/")}`, {
@@ -76,20 +72,43 @@ describe("scanner probes at the same-origin API proxy boundary", () => {
       expect(pathname.split("/").filter((s) => s !== "" && s !== "api")).not.toContain("..");
       expect(pathname.split("/")).not.toContain(".");
     }
+    // A genuine relative segment is now refused with a non-disclosing 400
+    // instead of being deleted from a request that still gets forwarded.
+    const refusedCases: string[][] = [
+      [".", "health"],
+      ["%2e", "%2e", "%2e%2e", ".env"],
+      ["health", ".."],
+    ];
+    for (const path of refusedCases) {
+      const response = await GET(
+        new Request(`http://localhost:3000/api/${path.join("/")}`, {
+          headers: { cookie: "taslim.auth=synthetic-session" },
+        }),
+        context(path),
+      );
+      expect(response.status, path.join("/")).toBe(400);
+    }
+    expect(fetchMock).toHaveBeenCalledTimes(cases.length);
   });
 
-  it("fails closed on a literal relative segment instead of collapsing out of /api/", async () => {
+  it("fails closed on a literal relative segment instead of collapsing or rewriting it", async () => {
     const fetchMock = recordingFetch();
     vi.stubGlobal("fetch", fetchMock);
     // Direct handler-level injection of a resolved ".." segment: the spellings
     // the deployed edge rejects before routing, pinned here as the containment
     // contract for the handler itself (RED by design until route.ts refuses
-    // relative segments; see the draft PR body for the one-line fix option).
-    const request = new Request("http://localhost:3000/api/x");
-    await GET(request, context(["v1", "..", "..", "admin"]));
-    const [target] = fetchMock.mock.calls[0] as [string, RequestInit];
-    const pathname = new URL(new Request(target).url).pathname;
-    expect(pathname.startsWith("/api/")).toBe(true);
+    // relative segments). Refusal, not deletion, is the contract: dropping the
+    // segment produced /api/v1/admin and authenticated it with the caller's
+    // cookie, so the spy below must record zero upstream calls.
+    const request = new Request("http://localhost:3000/api/x", {
+      headers: { cookie: "taslim.auth=synthetic-session" },
+    });
+    const response = await GET(request, context(["v1", "..", "..", "admin"]));
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toEqual({
+      error: { code: "INVALID_PATH", message: "The requested path is not valid." },
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(0);
   });
 
   it("returns a non-disclosing unavailable envelope when the probe target cannot be served", async () => {
@@ -107,14 +126,16 @@ describe("scanner probes at the same-origin API proxy boundary", () => {
     const fetchMock = recordingFetch();
     vi.stubGlobal("fetch", fetchMock);
     // The synthetic cookie exists only to prove what would travel if a probe
-    // escaped the namespace; under the contract above none of these requests
-    // may reach a non-/api path at the fixed API origin.
+    // escaped the namespace. A relative segment now never reaches the
+    // upstream at all, rewritten or otherwise, so no cookie can travel.
     const request = new Request("http://localhost:3000/api/v1/%2e%2e/%2e%2e/.env", {
       headers: { cookie: "taslim.auth=synthetic-session" },
     });
-    await GET(request, context(["v1", "%2e%2e", "%2e%2e", ".env"]));
-    const [target] = fetchMock.mock.calls[0] as [string, RequestInit];
-    expect(target.startsWith(`${API_ORIGIN}/api/`)).toBe(true);
-    expect(new Request(target).url).toContain("/api/");
+    const response = await GET(request, context(["v1", "%2e%2e", "%2e%2e", ".env"]));
+    expect(response.status).toBe(400);
+    expect(fetchMock).toHaveBeenCalledTimes(0);
+    // Nothing about the probe, the namespace, or the fixed API origin is
+    // reflected back to the scanner.
+    await expect(response.clone().text()).resolves.not.toContain(API_ORIGIN);
   });
 });
