@@ -44,17 +44,30 @@ namespace Taslim.Api.Tests;
 ///    two promised hours silently become one paid hour. Fail-closed rejection with
 ///    <c>MOVIE_CLIP_DURATION_UNSUPPORTED</c> is owned by PR #269; the same clamp family in
 ///    <c>MovieProductionPreflight.cs:123/:199</c> is shared with PR #348. Pinned here only as the
-///    containment invariant that must hold in every merge order.
+///    containment invariant that must hold in every merge order, and the strict fail-closed clip
+///    gate is now pinned separately as RED below, never asserted as behaviour main already has.
 /// 2. <c>MovieDurationBudgetPolicy.MaxMovieDurationSeconds</c> is 86,400 s, so the
 ///    duration-budget read model accepts a 7,201 s target that the create request refuses; the
 ///    120-minute cap exists in exactly one place (<c>MovieStudioValidation.Validate</c>, main:
 ///    3,600 s today, and <c>MovieBudgetDirectorService.MaxProjectPlanningDurationSeconds</c> =
-///    7,200 s). Reconciling the ceiling across those surfaces is the #269 lane.
+///    7,200 s). Reconciling the ceiling across those surfaces is the #269 lane; the read-model
+///    half is now pinned separately as RED below, and no green test in this file requires the
+///    unreconciled ceiling any more.
 ///
 /// Provider-free: file-backed SQLite test databases, the deterministic in-memory fake movie
 /// adapter, the generation worker disabled, synthetic pricing at synthetic amounts. No provider is
 /// contacted, nothing is charged or reserved, no production database, customer data, secret or
 /// migration is touched, and nothing is merged or deployed.
+///
+/// QA correction (review 5970827169 on PR #1133, applied by this test-only stacked PR): the
+/// release-facing acceptance contract now REFUSES whole-film runtimes above the approved 7,200 s
+/// at the create and clip boundaries; the positive assertions that 7,201 s and 10,800 s travel
+/// through the scene and duration-budget surfaces as accepted numbers are gone; and the two gates
+/// the review required before any release sign-off are added as pinned RED cases whose Skip
+/// reasons name their dependencies — #269 (approved 7,200 s ceiling plus the fail-closed
+/// MOVIE_CLIP_DURATION_UNSUPPORTED refusal) and #348 (the preflight clamp family). They unpin to
+/// GREEN when the owners land, and the green cases are written so they do not regress when that
+/// happens. No production file is touched.
 /// </summary>
 public sealed class MovieWholeFilmClipAdmissionBoundaryTests : IDisposable
 {
@@ -150,43 +163,92 @@ public sealed class MovieWholeFilmClipAdmissionBoundaryTests : IDisposable
     [Theory]
     [InlineData(7_201)]
     [InlineData(10_800)]
-    public async Task ProjectScaleCarriesRuntimesPastTheFilmCeilingWhileTheClipScaleRefusesTheSameNumber(int durationSeconds)
+    public async Task WholeFilmRuntimesAboveTheApprovedCeilingAreRefusedAtTheCreateAndClipBoundaries(int durationSeconds)
     {
         using var client = plainFactory.CreateClient();
         var fixture = await MovieOperationalFixtures.CreateFullMovieAsync(
-            client, title: $"Long film scale probe {durationSeconds}");
+            client, title: $"Whole-film ceiling probe {durationSeconds}");
 
-        // Project scale: nothing at the 120-minute boundary is enforced on the scene entity, so
-        // the number the create request will eventually permit travels through the API intact.
-        var scene = await MovieOperationalFixtures.PostAsync<MovieSceneDto>(
-            client, $"/api/movie-studio/projects/{fixture.Project.Project.Id}/scenes",
-            new { title = "Two hour single scene", summary = "One scene spanning the approved runtime.", durationSeconds });
-        Assert.Equal(durationSeconds, scene.DurationSeconds);
-        await SetProjectRuntimeAsync(plainFactory, fixture.Project.Project.Id, durationSeconds);
-
-        // The duration-budget read model reports the whole-film target verbatim. HOLD (#269):
-        // it bounds the film at MovieDurationBudgetPolicy.MaxMovieDurationSeconds (86,400 s), so
-        // it is not where the approved 120-minute ceiling is enforced.
-        var budget = await MovieOperationalFixtures.GetAsync<MovieDurationBudgetResult>(
-            client, $"/api/movie-studio/projects/{fixture.Project.Project.Id}/duration-budget");
-        Assert.Equal(durationSeconds, budget.TargetDurationSeconds);
+        // Release-facing acceptance contract at the project boundary: a whole-film create
+        // request above the approved 120-minute runtime is refused. Today the create cap is
+        // stricter than the approved one (MovieStudioValidation: 1-3,600 s), so this refusal
+        // holds both now and after #269/#685 raise the cap to exactly 7,200 s — which is why
+        // only the non-success decision is asserted, never the reason text or the 3,600 number.
+        var refusedCreate = await MovieOperationalFixtures.SendWithCsrfAsync(
+            client, HttpMethod.Post, "/api/movie-studio/projects", new
+            {
+                workspaceId = fixture.Owner.PersonalWorkspace.Id,
+                mode = MovieProjectModes.Full,
+                title = $"Over-ceiling whole-film probe {durationSeconds}",
+                description = "A whole-film create request above the approved runtime.",
+                durationSeconds,
+                aspectRatio = "16:9",
+                language = "en",
+            });
+        Assert.False(refusedCreate.IsSuccessStatusCode);
 
         // Clip scale: the same number on one shot — the unit a provider is paid for — is refused
         // at the request boundary against the independent per-clip ceiling.
         var overCapShot = await MovieOperationalFixtures.SendWithCsrfAsync(
-            client, HttpMethod.Post, $"/api/movie-studio/scenes/{scene.Id}/shots",
-            new { description = "One shot carrying the entire film runtime.", durationSeconds });
+            client, HttpMethod.Post, $"/api/movie-studio/scenes/{fixture.Scene.Id}/shots",
+            new { description = "One shot carrying more than the approved film runtime.", durationSeconds });
         Assert.Equal(HttpStatusCode.BadRequest, overCapShot.StatusCode);
         var shotRefusal = await overCapShot.Content.ReadAsStringAsync();
         Assert.Contains("MOVIE_SHOT_INVALID", shotRefusal, StringComparison.Ordinal);
         Assert.Contains($"{RenderableClipCeilingSeconds} seconds", shotRefusal, StringComparison.Ordinal);
 
-        // And the shot bound is not quietly widened by the long project: a compliant short shot
-        // in the same project is accepted unchanged.
+        // Discrimination, so the refusal above is proven duration-driven rather than a blanket
+        // admission failure: a compliant short shot in the same scene is accepted unchanged.
         var compliantShot = await MovieOperationalFixtures.PostAsync<MovieShotDto>(
-            client, $"/api/movie-studio/scenes/{scene.Id}/shots",
+            client, $"/api/movie-studio/scenes/{fixture.Scene.Id}/shots",
             new { description = "A provider-sized shot inside a two hour film.", durationSeconds = 10 });
         Assert.Equal(10, compliantShot.DurationSeconds);
+    }
+
+    [Theory(Skip = "RED — pinned by the #1133 QA review (5970827169). Dependency: #269 "
+        + "reconciles MovieDurationBudgetPolicy.MaxMovieDurationSeconds (86,400 s on main) to the "
+        + "approved 7,200 s whole-film ceiling, and #685 raises the create boundary to exactly "
+        + "7,200 s. Until those land the duration-budget read model reports an over-ceiling "
+        + "whole-film target as an approved number — documented here as the current-main defect, "
+        + "never required by a green test. The case is written to pass in either fail-closed "
+        + "shape (non-2xx response, or a 2xx response that flags the target itself); unpin when "
+        + "the owners land.")]
+    [InlineData(7_201)]
+    [InlineData(10_800)]
+    public async Task DurationBudgetNeverPresentsARuntimeAboveTheApprovedFilmCeilingAsAnApprovedTarget(int durationSeconds)
+    {
+        // The over-ceiling runtime is placed with the fixture's direct database mutation, not
+        // with an API request the contract is asked to approve: the scene surface still carries
+        // the number verbatim today (no 120-minute boundary on the entity), and reconciling
+        // every one of those surfaces is the same #269 lane, not an acceptance this file pins.
+        using var client = plainFactory.CreateClient();
+        var fixture = await MovieOperationalFixtures.CreateFullMovieAsync(
+            client, title: $"Budget ceiling probe {durationSeconds}");
+        await SetProjectRuntimeAsync(plainFactory, fixture.Project.Project.Id, durationSeconds);
+
+        using var response = await MovieOperationalFixtures.SendWithCsrfAsync(
+            client, HttpMethod.Get,
+            $"/api/movie-studio/projects/{fixture.Project.Project.Id}/duration-budget", null);
+
+        if (response.IsSuccessStatusCode)
+        {
+            // Fail-closed in the read model's own language: an over-ceiling whole-film target
+            // is never status Valid, never IsValid, and is flagged at the targetDurationSeconds
+            // path — not merely out of balance against the scene totals.
+            var budget = System.Text.Json.JsonSerializer.Deserialize<MovieDurationBudgetResult>(
+                await response.Content.ReadAsStringAsync(),
+                new System.Text.Json.JsonSerializerOptions(System.Text.Json.JsonSerializerDefaults.Web))!;
+            Assert.NotEqual(MovieDurationBudgetStatuses.Valid, budget.Status);
+            Assert.False(budget.IsValid);
+            Assert.Contains(budget.Diagnostics, diagnostic =>
+                diagnostic.Severity == MovieDurationBudgetDiagnosticSeverities.Error
+                && diagnostic.Path == "targetDurationSeconds");
+        }
+        else
+        {
+            Assert.True((int)response.StatusCode >= 400,
+                $"A {durationSeconds}-second runtime above the {ApprovedWholeFilmSeconds:N0}-second ceiling was not refused.");
+        }
     }
 
     [Theory]
@@ -238,7 +300,7 @@ public sealed class MovieWholeFilmClipAdmissionBoundaryTests : IDisposable
         Assert.Equal(jobsBefore, await CountAsync(guardrailFactory, db => db.GenerationJobs.LongCountAsync()));
         Assert.Equal(usageBefore, await CountAsync(guardrailFactory, db => db.UsageTransactions.LongCountAsync()));
         Assert.Equal(0, guardrailFactory.Calls.Calls(FakeProviderKind.Movie));
-        await NoJobAndNoClipForIdempotencyKeyAsync("685-whole-film-over-cap-clip");
+        await NoJobAndNoClipForIdempotencyKeyAsync(guardrailFactory, "685-whole-film-over-cap-clip");
 
         // Discrimination, so the refusal above is proven duration-driven rather than a blanket
         // admission failure: the same project admits a clip inside the provider's cap.
@@ -299,8 +361,48 @@ public sealed class MovieWholeFilmClipAdmissionBoundaryTests : IDisposable
         else
         {
             Assert.Contains("MOVIE_CLIP_DURATION_UNSUPPORTED", body, StringComparison.Ordinal);
-            await NoJobAndNoClipForIdempotencyKeyAsync("685-whole-film-clip-containment");
+            await NoJobAndNoClipForIdempotencyKeyAsync(renderableCapFactory, "685-whole-film-clip-containment");
         }
+    }
+
+    [Fact(Skip = "RED — pinned by the #1133 QA review (5970827169) as the fail-closed clip gate. "
+        + "On current main this request is admitted with 202 Accepted and the 7,200 s shot is "
+        + "silently clamped to 3,600 s (MovieStudioService.QueueClipAsync clamp at apps/api/"
+        + "Movies/MovieStudioService.cs:1292, shared with :1056/:1110). Dependency: #269 replaces "
+        + "the clamp with an explicit MOVIE_CLIP_DURATION_UNSUPPORTED refusal reserving nothing, "
+        + "and #348 lands the matching preflight guard (MovieProductionPreflight.cs:123/:199). "
+        + "Unpin when both land; the green containment half above keeps the invariant enforced "
+        + "meanwhile and is not this gate.")]
+    public async Task WholeFilmSizedSingleClipRequestFailsClosedWithNoReservation()
+    {
+        // Distinct from WholeFilmSizedSingleClipNeverBecomesAQueuedProviderClip: that case
+        // tolerates either a refusal or a truncated admission (containment); this one is the
+        // release gate the QA review requires — silence is never acceptance.
+        using var client = renderableCapFactory.CreateClient();
+        var fixture = await MovieOperationalFixtures.CreateFullMovieAsync(
+            client, title: "Whole film sized clip fail-closed gate");
+        await SetProjectRuntimeAsync(renderableCapFactory, fixture.Project.Project.Id, ApprovedWholeFilmSeconds);
+        await SetShotDurationAsync(renderableCapFactory, fixture.Shot.Id, ApprovedWholeFilmSeconds);
+
+        var clipsBefore = await CountAsync(renderableCapFactory, db => db.MovieClips.LongCountAsync());
+        var jobsBefore = await CountAsync(renderableCapFactory, db => db.GenerationJobs.LongCountAsync());
+        var usageBefore = await CountAsync(renderableCapFactory, db => db.UsageTransactions.LongCountAsync());
+
+        using var refused = await MovieOperationalFixtures.SendWithCsrfAsync(
+            client, HttpMethod.Post, $"/api/movie-studio/shots/{fixture.Shot.Id}/generate",
+            new { title = "Two hours promised as one clip" },
+            idempotencyKey: "685-whole-film-clip-fail-closed");
+
+        // An explicit non-success duration refusal, naming the reason…
+        Assert.False(refused.IsSuccessStatusCode);
+        Assert.Contains("MOVIE_CLIP_DURATION_UNSUPPORTED",
+            await refused.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+        // …with nothing reserved, queued, or charged behind it.
+        await NoJobAndNoClipForIdempotencyKeyAsync(renderableCapFactory, "685-whole-film-clip-fail-closed");
+        Assert.Equal(clipsBefore, await CountAsync(renderableCapFactory, db => db.MovieClips.LongCountAsync()));
+        Assert.Equal(jobsBefore, await CountAsync(renderableCapFactory, db => db.GenerationJobs.LongCountAsync()));
+        Assert.Equal(usageBefore, await CountAsync(renderableCapFactory, db => db.UsageTransactions.LongCountAsync()));
+        Assert.Equal(0, renderableCapFactory.Calls.Calls(FakeProviderKind.Movie));
     }
 
     public void Dispose()
@@ -430,9 +532,12 @@ public sealed class MovieWholeFilmClipAdmissionBoundaryTests : IDisposable
         return (clip.DurationSeconds ?? 0, input.DurationSeconds);
     }
 
-    private async Task NoJobAndNoClipForIdempotencyKeyAsync(string idempotencyKey)
+    /// <summary>Zero reservation behind a refusal, checked against the factory that actually
+    /// served the request — previously hard-wired to the guardrail factory, which made the
+    /// containment call vacuously true.</summary>
+    private async Task NoJobAndNoClipForIdempotencyKeyAsync(GenerationJobsApiFactory factory, string idempotencyKey)
     {
-        using var scope = guardrailFactory.Services.CreateScope();
+        using var scope = factory.Services.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
         Assert.False(await db.GenerationJobs.AsNoTracking().AnyAsync(item => item.IdempotencyKey == idempotencyKey));
         Assert.Equal(0, await db.MovieClips.AsNoTracking()
