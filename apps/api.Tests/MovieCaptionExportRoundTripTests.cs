@@ -110,6 +110,30 @@ public sealed class MovieCaptionExportRoundTripTests : IClassFixture<TaslimApiFa
         Assert.Contains("Private caption text.", allowed, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// A speaker name supplied with CR/LF or Unicode whitespace must remain
+    /// one physical WebVTT voice tag, never an injected cue line.
+    /// </summary>
+    [Fact]
+    public void WebVtt_voice_label_linebreaks_are_collapsed_before_export()
+    {
+        var adapter = new WebVttMovieCaptionFormatAdapter();
+        var document = new MovieCaptionDocument(new[]
+        {
+            new MovieCaptionDocumentCue(1000, 3000, "سڵاو", "Alice\r\n\r\nBob\tچاو"),
+        });
+
+        var exported = adapter.Serialize(document);
+
+        Assert.Single(CueBlocks(exported, "vtt"));
+        Assert.Contains("<v Alice Bob چاو>سڵاو</v>", exported, StringComparison.Ordinal);
+        Assert.DoesNotContain("\n", exported.Replace("\r\n", "", StringComparison.Ordinal), StringComparison.Ordinal);
+        var parsed = adapter.Parse(exported);
+        Assert.Single(parsed.Cues);
+        Assert.Equal("Alice Bob چاو", parsed.Cues[0].SpeakerName);
+        Assert.Equal("سڵاو", parsed.Cues[0].Text);
+    }
+
     private static string[] CueBlocks(string document, string format)
     {
         var normalized = document.Replace("\r\n", "\n", StringComparison.Ordinal).Replace('\r', '\n');
