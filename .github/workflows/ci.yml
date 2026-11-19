@@ -65,6 +65,44 @@ jobs:
       - uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
         with:
           dotnet-version: ${{ env.DOTNET_VERSION }}
+      # Hosted Movie media release qualification
+      # (MovieFinalAssemblyHostedFfmpegGateTests) shells out to the real
+      # /usr/bin/ffmpeg and /usr/bin/ffprobe and drives the mixed silent/sounded,
+      # landscape/portrait assembly and caption burn-in fixture. GitHub-hosted
+      # ubuntu-latest images ship neither, so 'API integration tests' fails closed
+      # on #298 / #807 / #1138. FFmpeg is installed from the Ubuntu archive and
+      # hard-verified before the suite runs. The gate itself is untouched: it still
+      # fails closed, and nothing here skips, mocks, disables or short-circuits it.
+      - name: Install and verify real FFmpeg for hosted media qualification
+        run: |
+          set -euo pipefail
+          sudo DEBIAN_FRONTEND=noninteractive apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ffmpeg
+          test -x /usr/bin/ffmpeg || { echo "::error::/usr/bin/ffmpeg missing after install" >&2; exit 1; }
+          test -x /usr/bin/ffprobe || { echo "::error::/usr/bin/ffprobe missing after install" >&2; exit 1; }
+          # Every assertion below reads a captured variable instead of a live pipe:
+          # measured in development, `ffprobe ... | grep -q` turned a passing probe into
+          # a false failure because grep exits at the first match and the writer then
+          # dies of SIGPIPE under `set -o pipefail`.
+          ffmpeg_version="$(/usr/bin/ffmpeg -hide_banner -version)"
+          ffprobe_version="$(/usr/bin/ffprobe -hide_banner -version)"
+          echo "${ffmpeg_version%%$'\n'*}"
+          echo "${ffprobe_version%%$'\n'*}"
+          # Capture first: grep -q closing the pipe early would make ffmpeg exit
+          # with SIGPIPE under `set -o pipefail` and fail this step spuriously.
+          encoders="$(/usr/bin/ffmpeg -hide_banner -encoders)"
+          grep -Eq ' (mpeg4|aac) ' <<<"$encoders" || { echo "::error::mpeg4/aac encoders unavailable" >&2; exit 1; }
+          tmp="$(mktemp -d)"
+          /usr/bin/ffmpeg -hide_banner -loglevel error -y \
+            -f lavfi -i "color=c=red:s=320x180:r=10" \
+            -f lavfi -i "sine=frequency=880:sample_rate=48000" \
+            -t 0.2 -c:v mpeg4 -c:a aac "$tmp/mixed.mp4"
+          probe="$(/usr/bin/ffprobe -v error -show_entries stream=codec_type:format=duration -of json "$tmp/mixed.mp4")"
+          grep -q '"codec_type": "audio"' <<<"$probe" || { echo "::error::ffprobe did not report an audio stream" >&2; exit 1; }
+          grep -q '"codec_type": "video"' <<<"$probe" || { echo "::error::ffprobe did not report a video stream" >&2; exit 1; }
+          rm -rf "$tmp"
+          echo "Real mixed audio/video assembly + ffprobe toolchain verified for hosted media qualification."
+
       - name: Audit production NuGet dependencies
         shell: bash
         run: |
@@ -78,6 +116,29 @@ jobs:
         env:
           ConnectionStrings__Postgres: Host=localhost;Port=5432;Database=taslim_tests;Username=taslim;Password=change-me
           Database__ApplyMigrations: "false"
+
+      # Named, explicit pass over the same qualification gate so the release lane reads
+      # the media proof from its own step on the exact head. Measured behaviour: a filter
+      # matching zero tests still exits 0, so "the gate exists and executed" is taken from
+      # the summary line rather than trusted from the exit code.
+      - name: Run hosted media release qualification gate explicitly
+        run: |
+          set -euo pipefail
+          # `dotnet test` exits 0 even when a filter matches nothing, so the named
+          # proof is asserted against its summary line rather than its exit code:
+          # zero matches, or any failure, fails this step closed. Output is captured
+          # first because grep -q closing the pipe early trips `set -o pipefail`.
+          out="$(dotnet test apps/api.Tests/Taslim.Api.Tests.csproj --no-build \
+                --filter "FullyQualifiedName=Taslim.Api.Tests.MovieFinalAssemblyHostedFfmpegGateTests.Hosted_ci_executes_real_mixed_audio_video_assembly_and_probes_output" 2>&1)"
+          printf '%s\n' "$out"
+          if grep -Eiq 'No test (matches|that matches)' <<<"$out"; then
+            echo "::error::hosted media qualification gate was not found; refusing to report green" >&2
+            exit 1
+          fi
+          grep -Eq 'Passed:[[:space:]]+1,[[:space:]]+Skipped:[[:space:]]+0,[[:space:]]+Total:[[:space:]]+1' <<<"$out" || {
+            echo "::error::hosted media qualification gate did not run exactly one executed test" >&2
+            exit 1
+          }
 
   e2e:
     name: Browser E2E
