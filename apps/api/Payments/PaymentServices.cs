@@ -1,4 +1,5 @@
 using System.Data;
+using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -371,7 +372,10 @@ public sealed class PaymentLifecycleService(TaslimDbContext db, ICreditLedgerSer
         {
             period = new BillingPeriod
             {
-                Id = Guid.NewGuid(), SubscriptionId = subscription.Id, Status = BillingPeriodStatus.Open,
+                // Identity, not entropy: the primary key is a function of the same natural key that
+                // the durable unique index on BillingPeriod (SubscriptionId, StartsAt) already treats
+                // as one period. See RenewalPeriodIdentity for why that is the concurrency guard.
+                Id = RenewalPeriodIdentity(subscription.Id, periodStart), SubscriptionId = subscription.Id, Status = BillingPeriodStatus.Open,
                 StartsAt = periodStart, EndsAt = periodEnd, IncludedCredits = plan.MonthlyCreditAllowance, CreatedAt = DateTime.UtcNow,
             };
             db.BillingPeriods.Add(period);
@@ -380,6 +384,44 @@ public sealed class PaymentLifecycleService(TaslimDbContext db, ICreditLedgerSer
         var idempotencyKey = $"included:{subscription.Id}:{period.Id}";
         await creditLedger.GrantAsync(subscription.WorkspaceId, CreditEntitlementType.IncludedMonthly, plan.MonthlyCreditAllowance,
             idempotencyKey, reason, periodEnd, period.Id, sourceReference: subscription.ProviderSubscriptionReference, cancellationToken: cancellationToken);
+    }
+
+    // The renewal identity is a name-based (RFC 9562 version 5 style) UUID over the durable natural
+    // key of a renewal - the subscription, and the period it renews - instead of per-delivery
+    // entropy. It changes nothing about what a period *is*; it only makes the minting of its primary
+    // key a function of that identity.
+    //
+    // Why that matters: `included:{subscriptionId}:{periodId}` is the key the credit ledger
+    // deduplicates on, and with a `Guid.NewGuid()` period id two deliveries that each read "no such
+    // period" computed two *different* grant keys. A unique index cannot refuse a collision that does
+    // not exist, so across two independent transactions the ledger guard was inert and the invariant
+    // rested entirely on the BillingPeriod index - proven by the mutation test in PR #1094, where
+    // dropping that index pays the workspace the monthly allowance twice.
+    //
+    // Deriving the key from the identity makes the collision real, so a duplicate delivery is now
+    // refused by durable constraints that already exist - the BillingPeriod primary key and the
+    // unique indexes on CreditEntitlements and CreditLedgerEntries (WorkspaceId, IdempotencyKey) -
+    // rather than by one index alone. No schema change, no migration, no new lock protocol, no
+    // provider call and no monetary value changes: the granted amount is still
+    // plan.MonthlyCreditAllowance and the audit reason is still the caller's string.
+    //
+    // Rows created before this derivation are unaffected: the lookup above still finds them first and
+    // their stored id keeps producing the historical grant key. Kind is deliberately not part of the
+    // name, because two representations of the same instant denote the same renewal period - exactly
+    // what the unique index on (SubscriptionId, StartsAt) enforces.
+    internal static Guid RenewalPeriodIdentity(Guid subscriptionId, DateTime periodStart)
+    {
+        var name = Encoding.UTF8.GetBytes(string.Create(
+            CultureInfo.InvariantCulture,
+            $"taslim:billing-period:v1:{subscriptionId:N}:{periodStart.Ticks}"));
+        var digest = SHA1.HashData(name);
+        digest[6] = (byte)((digest[6] & 0x0F) | 0x50); // version 5 (name-based)
+        digest[8] = (byte)((digest[8] & 0x3F) | 0x80); // RFC 4122 variant
+        // Parsed from hex so the byte order is the RFC 4122 order that PostgreSQL also displays,
+        // rather than whatever an overload or platform endianness convention happens to select. A
+        // silently constant identity would be worse than the bug this replaces, so the derivation is
+        // pinned by a golden value in BillingRenewalPeriodIdentityTests.
+        return Guid.Parse(Convert.ToHexString(digest.AsSpan(0, 16)).ToLowerInvariant());
     }
 
     private async Task<PaymentAttempt> GetAttemptAsync(Guid workspaceId, Guid id, CancellationToken cancellationToken) =>
