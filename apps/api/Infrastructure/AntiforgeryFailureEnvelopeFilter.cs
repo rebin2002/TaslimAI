@@ -1,4 +1,5 @@
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.Mvc.Core.Infrastructure;
 using Microsoft.AspNetCore.Mvc.Filters;
 using Taslim.Api.Contracts;
 
@@ -34,7 +35,12 @@ public sealed class AntiforgeryFailureEnvelopeFilter(
 
     public void OnResultExecuting(ResultExecutingContext context)
     {
-        if (context.Result is not AntiforgeryValidationFailedResult)
+        // Match the framework's marker interface rather than the concrete result type:
+        // it is the documented way to recognize an antiforgery rejection from inside an
+        // MVC result filter, and it stays correct if the concrete class is ever
+        // re-factored. This branch only ever re-labels a rejection that has already
+        // happened, so the choice of type test cannot turn a refusal into an acceptance.
+        if (context.Result is not IAntiforgeryValidationFailedResult)
         {
             return;
         }

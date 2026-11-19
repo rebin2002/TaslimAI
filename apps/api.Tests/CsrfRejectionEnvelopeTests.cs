@@ -78,6 +78,12 @@ public sealed class CsrfRejectionEnvelopeTests : IClassFixture<TaslimApiFactory>
         using var client = factory.CreateClient();
         var auth = await RegisterAsync(client, "Envelope Owner");
 
+        // This is the canonical, case-exact path of an authenticated user, so the
+        // middleware observes and refuses it first. The point is regression cover for
+        // the half of the contract the lane must not disturb: adding the filter changes
+        // nothing about the rejection the middleware already produced. The filter layer
+        // itself is pinned by the spelling variants above and by
+        // CsrfRejectionEnvelopePasswordRecoveryInterplayTests.
         var response = await SendWithoutToken(client,
             $"/api/workspaces/{auth.GetProperty("personalWorkspace").GetProperty("id").GetString()}/projects",
             new { name = "Needs A Token", type = "Business" });
@@ -108,12 +114,37 @@ public sealed class CsrfRejectionEnvelopeTests : IClassFixture<TaslimApiFactory>
         var response = await SendWithoutToken(client, "/api/autopilot/events",
             new { eventType = "unknown", payload = JsonDocument.Parse("{}").RootElement });
 
+        // Asserted unconditionally. Gating on the presence of `error.code` would let a
+        // moved route, a bare 401 challenge or a non-JSON answer pass without ever
+        // exercising the claim, because the assertion would simply not run. The route
+        // must still exist, and the rejection code must be absent whatever shape the
+        // response turns out to have.
+        Assert.NotEqual(HttpStatusCode.NotFound, response.StatusCode);
+        var raw = await response.Content.ReadAsStringAsync();
+        Assert.DoesNotContain(CsrfFailureCode, raw, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task An_unrelated_validation_failure_keeps_its_own_code_and_is_not_relabelled()
+    {
+        using var client = factory.CreateClient();
+        var auth = await RegisterAsync(client, "Envelope Validation Owner");
+        var workspaceId = auth.GetProperty("personalWorkspace").GetProperty("id").GetString();
+        var token = await GetCsrfAsync(client);
+
+        // A valid double-submit pair, so antiforgery passes, over a body that violates
+        // CreateProjectRequest's [Required, StringLength(1, 160)] Name. The refusal
+        // therefore comes from InvalidModelStateResponseFactory rather than from
+        // antiforgery, and the envelope filter -- which matches only the antiforgery
+        // rejection type -- must leave an unrelated 400 alone.
+        var response = await SendWithToken(client, HttpMethod.Post,
+            $"/api/workspaces/{workspaceId}/projects", token, new { type = "Business" });
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
         var body = await ReadJson(response);
-        if (body.TryGetProperty("error", out var error)
-            && error.TryGetProperty("code", out var code))
-        {
-            Assert.NotEqual(CsrfFailureCode, code.GetString());
-        }
+        var code = body.GetProperty("error").GetProperty("code").GetString();
+        Assert.Equal("VALIDATION_ERROR", code);
+        Assert.NotEqual(CsrfFailureCode, code);
     }
 
     [Fact]
