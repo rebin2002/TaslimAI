@@ -220,7 +220,10 @@ public sealed class WebVttMovieCaptionFormatAdapter : IMovieCaptionFormatAdapter
                 .Append(MovieCaptionTimecode.FormatVtt(cue.StartMilliseconds)).Append(" --> ")
                 .Append(MovieCaptionTimecode.FormatVtt(cue.EndMilliseconds)).Append("\r\n");
             var text = MovieCaptionTextFolding.Fold(cue.Text).Replace("&", "&amp;", StringComparison.Ordinal).Replace("<", "&lt;", StringComparison.Ordinal).Replace(">", "&gt;", StringComparison.Ordinal).Replace("\n", "\r\n", StringComparison.Ordinal);
-            builder.Append(cue.SpeakerName is null ? text : $"<v {WebUtility.HtmlEncode(cue.SpeakerName)}>{text}</v>")
+            // A voice label is one VTT tag attribute, never a physical cue line.
+            // Encode after collapsing whitespace so a stored CR/LF cannot split the <v> tag.
+            var speakerName = cue.SpeakerName is null ? null : Regex.Replace(cue.SpeakerName, @"\s+", " ").Trim();
+            builder.Append(speakerName is null ? text : $"<v {WebUtility.HtmlEncode(speakerName)}>{text}</v>")
                 .Append("\r\n\r\n");
         }
         return builder.ToString();
