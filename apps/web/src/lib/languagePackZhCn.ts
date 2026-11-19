@@ -42,7 +42,7 @@ export const simplifiedChineseLanguagePack: LanguagePackResource = {
       { namespace: "movie", translated: 36, total: 151 },
       { namespace: "movieDeep", translated: 10, total: 92 },
       { namespace: "account", translated: 20, total: 80 },
-      { namespace: "auth", translated: 20, total: 30 },
+      { namespace: "auth", translated: 20, total: 46 },
       { namespace: "navigation", translated: 11, total: 21 },
       { namespace: "common", translated: 3, total: 5 },
       { namespace: "brand", translated: 1, total: 1 },
