@@ -156,6 +156,10 @@ public sealed class MovieFinalAssemblyService(
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web) { WriteIndented = false };
     private const string AssemblyIdempotencyUniqueIndexName = "IX_MovieAssemblies_MovieProjectId_IdempotencyKey";
+    // Issue #696 scenario (a): how many times an identical request may re-drive a
+    // pre-publication queue failure that committed nothing durable. Bounded by design
+    // (required behavior 4) so a recurring transient fault cannot spend queue capacity forever.
+    private const int MaxQueueRedriveAttempts = 3;
 
     internal static bool IsAssemblyIdempotencyUniqueViolation(DbUpdateException exception)
     {
@@ -250,6 +254,24 @@ public sealed class MovieFinalAssemblyService(
         var canonicalJson = JsonSerializer.Serialize(canonicalPayload, JsonOptions);
         var fingerprint = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(canonicalJson))).ToLowerInvariant();
         var normalizedIdempotencyKey = NormalizeIdempotencyKey(idempotencyKey) ?? $"assembly:{fingerprint[..48]}";
+        // The canonical job payload for this exact request, rebuilt against whichever assembly
+        // row owns the idempotency key. A re-drive publishes what the failed attempt was already
+        // publishing: the fingerprint is verified equal before this is ever used, and
+        // MovieFinalAssemblyQueueRedrive696Tests pins the payload identity so the two
+        // constructions cannot drift apart silently.
+        MovieFinalAssemblyInput BuildCanonicalInput(Guid targetAssemblyId) => new(
+            "final_assembly",
+            targetAssemblyId,
+            movieProjectId,
+            profile.Key,
+            profile,
+            canonicalTimeline,
+            audioInputs,
+            captions,
+            fingerprint,
+            normalizedIdempotencyKey,
+            expectedDuration,
+            persistedTransitions);
         var existing = await db.MovieAssemblies
             .Include(item => item.GenerationJob).ThenInclude(item => item!.Outputs)
             .FirstOrDefaultAsync(item => item.MovieProjectId == movieProjectId && item.IdempotencyKey == normalizedIdempotencyKey, cancellationToken);
@@ -262,6 +284,11 @@ public sealed class MovieFinalAssemblyService(
             // that stays terminal falls through to the canonical job projection.
             if (!await RecoverQueueLinkAsync(existing, normalizedIdempotencyKey, fingerprint, cancellationToken))
             {
+                // Issue #696 scenario (a): nothing was durably committed, so this terminal row is
+                // a transient pre-publication failure rather than a finished job. Re-drive it
+                // under the same key; anything not safely re-drivable falls through unchanged.
+                var redriven = await TryRedriveQueueAsync(existing, userId, movie.WorkspaceId, movie.ProjectId, $"{movie.Title} master export", normalizedIdempotencyKey, fingerprint, () => BuildCanonicalInput(existing.Id), cancellationToken);
+                if (redriven is not null) return ToDto(existing, redriven);
                 await ReconcileTerminalJobAsync(existing, cancellationToken);
             }
             return ToDto(existing);
@@ -326,6 +353,11 @@ public sealed class MovieFinalAssemblyService(
             // bounded reconciliation as the direct idempotent replay.
             if (!await RecoverQueueLinkAsync(winner, normalizedIdempotencyKey, fingerprint, cancellationToken))
             {
+                // ... and the same bounded re-drive: the winner may have been stranded by a
+                // pre-publication failure that committed nothing, which is exactly the case
+                // issue #696 reports as permanently unrecoverable by retry.
+                var redriven = await TryRedriveQueueAsync(winner, userId, movie.WorkspaceId, movie.ProjectId, $"{movie.Title} master export", normalizedIdempotencyKey, fingerprint, () => BuildCanonicalInput(winner.Id), cancellationToken);
+                if (redriven is not null) return ToDto(winner, redriven);
                 await ReconcileTerminalJobAsync(winner, cancellationToken);
             }
             return ToDto(winner);
@@ -645,6 +677,196 @@ public sealed class MovieFinalAssemblyService(
         assembly.UpdatedAt = now;
         return true;
     }
+
+    /// <summary>
+    /// Issue #696 scenario (a): re-drives a master export that a transient queue fault stranded
+    /// before anything was durably committed. Deliberately narrow and fail-closed:
+    /// <list type="bullet">
+    /// <item>only the pre-publication marker on a row with no link at all is eligible, so an
+    /// assembly whose job genuinely started or finished executing is never resurrected here -
+    /// that belongs to the explicit job retry seam;</item>
+    /// <item>zero durable jobs for this requester and key is additionally required. Exactly one
+    /// committed candidate is the reconciliation case <see cref="RecoverQueueLinkAsync"/> owns,
+    /// and any other count is ambiguous: re-driving beside either could publish the second
+    /// canonical job this issue forbids;</item>
+    /// <item>the attempt budget is durable in the row's checkpoint and is spent before the seam
+    /// is touched, so a fault that keeps recurring converges on the bound instead of queueing
+    /// forever (required behavior 4);</item>
+    /// <item>the stranded row is claimed with a fenced compare-and-swap first, so simultaneous
+    /// identical retries have exactly one owner;</item>
+    /// <item>the seam is called with the original idempotency key, which the shared job service
+    /// resolves to the existing job rather than a second one, so re-driving is safe by
+    /// construction rather than by assumption.</item>
+    /// </list>
+    /// Returns the durable job once the assembly is back in flight, and null when no safe
+    /// re-drive applies, leaving the caller's terminal projection untouched. It never throws for
+    /// a transient fault: a re-drive that fails again restores the marker it consumed.
+    /// </summary>
+    private async Task<GenerationJob?> TryRedriveQueueAsync(
+        MovieAssembly assembly,
+        Guid userId,
+        Guid workspaceId,
+        Guid? projectId,
+        string jobTitle,
+        string idempotencyKey,
+        string fingerprint,
+        Func<MovieFinalAssemblyInput> buildInput,
+        CancellationToken cancellationToken)
+    {
+        if (assembly.Status != MovieAssemblyStatuses.Failed
+            || !string.Equals(assembly.LastErrorCode, GenerationJobErrorCodes.MovieAssemblyQueueFailed, StringComparison.Ordinal)
+            || assembly.GenerationJobId is not null)
+        {
+            return null;
+        }
+        // Only the requester whose row was stranded may re-drive it, and only while the
+        // durable budget holds.
+        if (assembly.RequestedByUserId is not Guid requesterId || requesterId != userId) return null;
+        var attempts = ReadQueueRedriveAttempts(assembly.CheckpointJson);
+        if (attempts >= MaxQueueRedriveAttempts) return null;
+        // The distinguishing evidence of scenario (a): the fault happened before anything was
+        // durable. One candidate is #807's reconcile case, and anything else is ambiguous.
+        var durable = await db.GenerationJobs.AsNoTracking()
+            .Where(item => item.CreatedByUserId == requesterId
+                && item.IdempotencyKey == idempotencyKey
+                && item.JobType == GenerationJobTypes.MovieAssembly)
+            .ToListAsync(cancellationToken);
+        if (durable.Count != 0) return null;
+        // Claim before touching the seam. The attempt is spent up front so a re-drive that
+        // faults again cannot spend the budget twice, and the fenced compare-and-swap gives
+        // simultaneous identical retries exactly one owner.
+        var checkpoint = WriteQueueRedriveCheckpoint(attempts + 1);
+        var claimedAt = DateTime.UtcNow;
+        var claimed = await db.MovieAssemblies
+            .Where(item => item.Id == assembly.Id
+                && item.Status == MovieAssemblyStatuses.Failed
+                && item.LastErrorCode == GenerationJobErrorCodes.MovieAssemblyQueueFailed
+                && item.GenerationJobId == null
+                && item.RequestFingerprint == fingerprint)
+            .ExecuteUpdateAsync(setters => setters
+                .SetProperty(item => item.Status, MovieAssemblyStatuses.Planned)
+                .SetProperty(item => item.LastErrorCode, (string?)null)
+                .SetProperty(item => item.CheckpointJson, checkpoint)
+                .SetProperty(item => item.UpdatedAt, claimedAt), cancellationToken);
+        if (claimed == 0)
+        {
+            // Another identical retry owns this row right now: never re-drive beside it, and
+            // publish the durable state rather than this stale copy.
+            await db.Entry(assembly).ReloadAsync(cancellationToken);
+            return null;
+        }
+        assembly.Status = MovieAssemblyStatuses.Planned;
+        assembly.LastErrorCode = null;
+        assembly.CheckpointJson = checkpoint;
+        assembly.UpdatedAt = claimedAt;
+        GenerationJob job;
+        try
+        {
+            job = await jobs.CreateAsync(userId, new CreateGenerationJobRequest
+            {
+                WorkspaceId = workspaceId,
+                ProjectId = projectId,
+                JobType = GenerationJobTypes.MovieAssembly,
+                Title = jobTitle,
+                // The same default-System.Text.Json payload contract as the original publish:
+                // the caller verified this request's fingerprint equals the stranded row's
+                // before reaching here, so the re-driven job is the very same master export.
+                InputJson = JsonSerializer.Serialize(buildInput()),
+                EstimatedProviderCostUsd = 0m,
+                InternalCostEstimate = new GenerationCostEstimate(true, 0m, UsageCurrencies.Usd, null, null, null, []),
+            }, cancellationToken, idempotencyKey);
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            // Still transient, and still nothing durable. Keep the terminal marker and the
+            // spent attempt so the next identical request is one attempt closer to the bound.
+            await RestoreQueueFailureAsync(assembly, fingerprint, attempts + 1);
+            return null;
+        }
+        catch (OperationCanceledException)
+        {
+            // The request itself went away: put the row back into the marker state this method
+            // understands before propagating, so it can never orphan a claimed Planned row with
+            // no durable job and no eligible recovery path.
+            await RestoreQueueFailureAsync(assembly, fingerprint, attempts + 1);
+            throw;
+        }
+        var trackedJob = db.ChangeTracker.Entries<GenerationJob>().FirstOrDefault(entry => ReferenceEquals(entry.Entity, job));
+        if (trackedJob is not null) trackedJob.State = EntityState.Detached;
+        // Publish through #807's fenced link+status repair so both recovery paths produce the
+        // identical durable pairing, from exactly the claim state written above.
+        if (await TryRepairQueueLinkAsync(assembly, job)) return job;
+        // The job is durable but the link write faulted again. Restoring the marker stays
+        // correct: the next identical request sees one committed candidate, which
+        // RecoverQueueLinkAsync reconciles instead of re-queuing.
+        await RestoreQueueFailureAsync(assembly, fingerprint, attempts + 1);
+        return null;
+    }
+
+    /// <summary>
+    /// Returns a claimed re-drive to the terminal pre-publication marker. Fenced on the exact
+    /// claimed pre-image, so a concurrent owner that already put the assembly back in flight is
+    /// never overwritten by a losing re-drive. Never throws: if the row cannot be reached, the
+    /// durable state is whatever the fault left it as and the caller still reports honestly.
+    /// </summary>
+    private async Task RestoreQueueFailureAsync(MovieAssembly assembly, string fingerprint, int attempts)
+    {
+        var checkpoint = WriteQueueRedriveCheckpoint(attempts);
+        var now = DateTime.UtcNow;
+        try
+        {
+            // Cancellation must not abandon this compensation: leaving a claimed Planned row with
+            // no durable job and no marker is the stranding this issue is about.
+            var restored = await db.MovieAssemblies
+                .Where(item => item.Id == assembly.Id
+                    && item.Status == MovieAssemblyStatuses.Planned
+                    && item.GenerationJobId == null
+                    && item.RequestFingerprint == fingerprint)
+                .ExecuteUpdateAsync(setters => setters
+                    .SetProperty(item => item.Status, MovieAssemblyStatuses.Failed)
+                    .SetProperty(item => item.LastErrorCode, GenerationJobErrorCodes.MovieAssemblyQueueFailed)
+                    .SetProperty(item => item.CheckpointJson, checkpoint)
+                    .SetProperty(item => item.UpdatedAt, now), CancellationToken.None);
+            if (restored == 0)
+            {
+                await db.Entry(assembly).ReloadAsync(CancellationToken.None);
+                return;
+            }
+        }
+        catch (Exception)
+        {
+            // A dead database is outside what this compensation can promise; fall through so the
+            // caller reports the terminal state it saw for this request only.
+        }
+        assembly.Status = MovieAssemblyStatuses.Failed;
+        assembly.LastErrorCode = GenerationJobErrorCodes.MovieAssemblyQueueFailed;
+        assembly.CheckpointJson = checkpoint;
+        assembly.UpdatedAt = now;
+    }
+
+    /// <summary>
+    /// Reads the durable re-drive budget from the checkpoint the recovery already maintains,
+    /// deliberately without touching <see cref="MovieAssembly.AttemptCount"/>, which belongs to
+    /// the execution seam. An unreadable checkpoint is treated as no attempts spent, because the
+    /// eligibility gates above, not the counter, are what make a re-drive safe.
+    /// </summary>
+    private static int ReadQueueRedriveAttempts(string? checkpointJson)
+    {
+        if (string.IsNullOrWhiteSpace(checkpointJson)) return 0;
+        try
+        {
+            using var document = JsonDocument.Parse(checkpointJson);
+            return document.RootElement.ValueKind == JsonValueKind.Object
+                && document.RootElement.TryGetProperty("queueRedriveAttempts", out var value)
+                && value.TryGetInt32(out var attempts)
+                ? attempts
+                : 0;
+        }
+        catch (JsonException) { return 0; }
+    }
+
+    private static string WriteQueueRedriveCheckpoint(int attempts) =>
+        JsonSerializer.Serialize(new { phase = "queue_redrive", progressPercent = 0, queueRedriveAttempts = attempts }, JsonOptions);
 
     private static string? ReadAssemblyInputFingerprint(string? inputJson)
     {
