@@ -77,6 +77,13 @@ elif [[ "${SMOKE_MODE:-retry}" == 'required-worker' && "$endpoint" == '/health/r
     # The same document with the worker check marked required, so the helper
     # is judged by the required-flag rule alone.
     printf '{"status":"ready","service":"Taslim API","requestId":"smoke-request","checks":[{"name":"database","status":"available","required":true},{"name":"storage","status":"available","required":true},{"name":"worker","status":"degraded","required":true}]}\n' > "$body"
+elif [[ "${SMOKE_MODE:-retry}" == 'truthy-flag-worker' && "$endpoint" == '/health/ready' ]]; then
+    # The same advisory worker shape, but its required flag is a TRUTHY value
+    # that is not the JSON boolean true: the raw JSON comes from
+    # SMOKE_TRUTHY_FLAG ("true" or 1). Flag identity is part of the contract,
+    # so this document must still pass exactly like the required:false cases;
+    # treating any truthy value as required would flip it into a restart.
+    printf '{"status":"ready","service":"Taslim API","requestId":"smoke-request","checks":[{"name":"database","status":"available","required":true},{"name":"storage","status":"available","required":true},{"name":"worker","status":"degraded","required":%s}]}\n' "${SMOKE_TRUTHY_FLAG:?}" > "$body"
 elif [[ "$endpoint" == '/health/live' ]]; then
     printf '{"status":"alive","service":"Taslim API","requestId":"smoke-request","checks":[{"name":"process","status":"alive","required":true}]}\n' > "$body"
 else
@@ -166,6 +173,30 @@ for advisory_status in degraded unknown disabled; do
         bash "$script" http://127.0.0.1:5000 >"$temp_dir/advisory-$advisory_status.output" 2>&1; then
         echo "The smoke helper failed a readiness document with advisory worker=${advisory_status}." >&2
         cat "$temp_dir/advisory-$advisory_status.output" >&2
+        exit 1
+    fi
+done
+
+# Flag identity, the case the degraded/unknown/disabled loop above cannot see:
+# a non-available check whose required flag is truthy but is NOT the boolean
+# true stays advisory, because the helper gates on `required is True`. Without
+# this fixture the identity test can be relaxed to plain truthiness and the
+# whole suite still passes green, while real behaviour flips rc=0 -> rc=1 for
+# required:"true" or required:1 and an advisory worker verdict restarts a
+# container. Each flag below is emitted as raw JSON by the stub.
+for truthy_flag in '"true"' '1'; do
+    truthy_slug="${truthy_flag//\"/}"
+    truthy_log="$temp_dir/truthy-$truthy_slug.log"
+    if ! PATH="$bin_dir:$PATH" \
+        SMOKE_COMMAND_LOG="$truthy_log" \
+        SMOKE_STATE_FILE="$temp_dir/truthy-$truthy_slug.state" \
+        SMOKE_MODE=truthy-flag-worker \
+        SMOKE_TRUTHY_FLAG="$truthy_flag" \
+        SMOKE_MAX_ATTEMPTS=1 \
+        SMOKE_RETRY_SECONDS=0 \
+        bash "$script" http://127.0.0.1:5000 >"$temp_dir/truthy-$truthy_slug.output" 2>&1; then
+        echo "The smoke helper gated on a non-boolean required=$truthy_flag advisory worker check." >&2
+        cat "$temp_dir/truthy-$truthy_slug.output" >&2
         exit 1
     fi
 done
