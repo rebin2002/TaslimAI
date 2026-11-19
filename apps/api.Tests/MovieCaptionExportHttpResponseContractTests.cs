@@ -264,38 +264,43 @@ public sealed class MovieCaptionExportHttpResponseContractTests : IClassFixture<
     }
 
     /// <summary>
-    /// KNOWN GAP, reproduced and left deliberately skipped so this file stays green on
-    /// <c>fed75e4f</c>: WebVTT prints the speaker inside a <c>&lt;v&gt;</c> voice tag on the cue
-    /// text line, and only <c>cue.Text</c> goes through <c>MovieCaptionTextFolding</c>.
-    /// <c>SpeakerName</c> is stored after <c>Trim()</c> only, and <c>WebUtility.HtmlEncode</c>
-    /// neutralises <c>&lt; &gt; &amp;</c> but not line breaks, so a break stored in the speaker
-    /// name reaches the served file verbatim.
+    /// The voice tag is the one place a stored break could still reach the served WebVTT file, because
+    /// <c>SpeakerName</c> is the only exported field that does not pass through
+    /// <c>MovieCaptionTextFolding</c>: the container escapes <c>&lt; &gt; &amp;</c> in the label, but an
+    /// escaping function does not remove a CR or an LF, and SRT/WebVTT both end a cue text line at the
+    /// first break.
     ///
-    /// Observed against <c>GET /api/movie-studio/caption-tracks/{track}/export?format=vtt</c>:
-    /// <code>
-    /// LF without a preceding CR at offset 56 of the served WebVTT file.
-    /// </code>
-    /// The served cue text line becomes two physical lines - an unterminated <c>&lt;v Announcer</c>
-    /// followed by <c>00:00:09.000 --&amp;gt; 00:00:10.000&gt;Spoken line.&lt;/v&gt;</c> - so the
-    /// download breaks the single-line-per-cue-text rule the exporter otherwise guarantees, and a
-    /// stored break imitates the container's own timecode syntax.
+    /// This case was authored against <c>fed75e4f</c> as a deliberately <c>Skip</c>ped reproduction -
+    /// observed as "LF without a preceding CR at offset 56 of the served WebVTT file" - and the Skip is
+    /// removed here because PR #1036 closed the gap it recorded: <c>0c460f06</c> collapses every Unicode
+    /// whitespace run in the label to a single space and trims it before encoding, and <c>4cb6092e</c>
+    /// pins the same rule at the adapter level with a Sorani fixture. Nothing is asserted twice: the
+    /// parent's regression reads the string the adapter returns, while every assertion below reads the
+    /// bytes the download endpoint actually serves.
     ///
-    /// The fix belongs in <c>MovieCaptions.cs</c>/<c>MovieCaptionTextFolding.cs</c>, both owned by
-    /// PR #1036, so it is not carried here: folding the speaker name on the same path as the cue
-    /// text (<c>MovieCaptionTextFolding.Fold(cue.SpeakerName)</c> inside the voice tag) makes this
-    /// pass. Remove the Skip to verify.
+    /// The cases are the shapes that can be stored through the ordinary cue endpoint: a break that
+    /// imitates the container's own timecode syntax, a Sorani label mixing CRLF, tab and U+00A0, a label
+    /// carrying markup and <c>&amp;</c>, and U+2028, which stays ordinary content inside cue <b>text</b>
+    /// (<see cref="Non_ascii_cue_content_survives_the_download_byte_for_byte"/>) yet is a break the
+    /// <b>label</b> may not keep. The asymmetry is deliberate: text may be multi-line, a voice tag may
+    /// not.
     /// </summary>
-    [Fact(Skip = "Known gap on fed75e4f: a line break stored in SpeakerName is written verbatim into the served WebVTT voice tag. Fix belongs in PR #1036's owned MovieCaptions.cs.")]
-    public async Task Speaker_name_cannot_break_the_webvtt_cue_line()
+    [Theory]
+    [InlineData("Announcer\n00:00:09.000 --> 00:00:10.000", "Announcer 00:00:09.000 --&gt; 00:00:10.000")]
+    [InlineData("\u06AF\u06D5\u067E\r\n\t\u0698\u06CC\u0644\u0627\u0646\u00A0\u06A9\u06C6\u0646", "\u06AF\u06D5\u067E \u0698\u06CC\u0644\u0627\u0646 \u06A9\u06C6\u0646")]
+    [InlineData("\"\u062F\u0627\u0646\u0627\" <b> & \u202EQout ", "&quot;\u062F\u0627\u0646\u0627&quot; &lt;b&gt; &amp; \u202EQout")]
+    [InlineData("\u062F\u0627\u0646\u0627\u2028\u0698\u06CC\u0644\u0627\u0646", "\u062F\u0627\u0646\u0627 \u0698\u06CC\u0644\u0627\u0646")]
+    public async Task Speaker_name_cannot_break_the_webvtt_cue_line(string storedSpeakerName, string expectedEncodedLabel)
     {
         var owner = await Register($"Export Speaker VTT {Guid.NewGuid():N} Owner");
         var track = await CreateCaptionTrack(owner.Client, owner.MovieId, "Speaker vtt");
         await AddCue(owner.Client, track.Id, 1, "00:00:01.000", "00:00:04.000", "Spoken line.",
-            speakerName: "Announcer\n00:00:09.000 --> 00:00:10.000");
+            speakerName: storedSpeakerName);
 
         var body = await ExportText(owner.Client, track.Id, "vtt");
 
-        // Every break the exporter wrote is CRLF: a stored LF may not survive on its own.
+        // Both directions of the exporter's CRLF promise, so neither a bare LF nor a bare CR survives:
+        // every LF is preceded by its CR and every CR is followed by its LF.
         for (var index = 0; index < body.Length; index++)
         {
             if (body[index] == '\n')
@@ -303,14 +308,67 @@ public sealed class MovieCaptionExportHttpResponseContractTests : IClassFixture<
                 Assert.True(index > 0 && body[index - 1] == '\r',
                     $"LF without a preceding CR at offset {index} of the served WebVTT file.");
             }
+            else if (body[index] == '\r')
+            {
+                Assert.True(index + 1 < body.Length && body[index + 1] == '\n',
+                    $"CR not followed by LF at offset {index} of the served WebVTT file.");
+            }
         }
 
         var cue = Assert.Single(CueBlocks(body, "vtt"));
         var lines = SplitLines(cue);
         Assert.Equal(3, lines.Length);
-        Assert.StartsWith("<v ", lines[2], StringComparison.Ordinal);
-        Assert.EndsWith("</v>", lines[2], StringComparison.Ordinal);
-        Assert.DoesNotContain("-->", lines[2][..^4], StringComparison.Ordinal);
+        Assert.Equal("1", lines[0]);
+        Assert.Equal("00:00:01.000 --> 00:00:04.000", lines[1]);
+        // The whole label, markup neutralised and every break collapsed, on one physical line.
+        Assert.Equal($"<v {expectedEncodedLabel}>Spoken line.</v>", lines[2]);
+
+        // Structure was not imitated either: the timing line the exporter wrote stays the only
+        // index/timecode-shaped line in the block, so the stored label cannot open a second cue.
+        Assert.Equal(1, Array.FindIndex(lines, line => TimingLine.IsMatch(line)));
+    }
+
+    /// <summary>
+    /// Authorisation for the download belongs to the caption track, not to the format string, and the
+    /// export route is keyed by a bare track id. A caller in a different personal workspace - the same
+    /// shape as two unrelated Taslim accounts - therefore has to be denied the owner's bytes, with the
+    /// container's own media type and file name staying out of the response. The owner's request on the
+    /// identical route and format is asserted in the same test, so a denial cannot be an artefact of a
+    /// broken endpoint, and neither party's cue text leaks into the other's download.
+    /// </summary>
+    [Theory]
+    [InlineData("srt", "application/x-subrip")]
+    [InlineData("vtt", "text/vtt")]
+    public async Task Another_workspace_cannot_download_the_caption_track(string format, string expectedMediaType)
+    {
+        var owner = await Register($"Export Foreign {Guid.NewGuid():N} Owner");
+        var track = await CreateCaptionTrack(owner.Client, owner.MovieId, $"Foreign {format}");
+        await AddCue(owner.Client, track.Id, 1, "00:00:01.000", "00:00:02.000", "Private subtitle.");
+
+        var stranger = await Register($"Export Stranger {Guid.NewGuid():N} Owner");
+        var strangerTrack = await CreateCaptionTrack(stranger.Client, stranger.MovieId, $"Stranger {format}");
+        await AddCue(stranger.Client, strangerTrack.Id, 1, "00:00:01.000", "00:00:02.000", "Stranger subtitle.");
+
+        // Positive control first: the route works, so the denial below is about scope, not plumbing.
+        using var mine = await ExportResponse(owner.Client, track.Id, format);
+
+        Assert.Equal(HttpStatusCode.OK, mine.StatusCode);
+        Assert.Equal(expectedMediaType, mine.Content.Headers.ContentType?.MediaType);
+
+        using var stolen = await ExportResponse(stranger.Client, track.Id, format);
+
+        Assert.Equal(HttpStatusCode.NotFound, stolen.StatusCode);
+        Assert.False(stolen.Content.Headers.Contains("Content-Disposition"),
+            $"A cross-workspace {format} denial still offered a download file name.");
+        Assert.NotEqual(expectedMediaType, stolen.Content.Headers.ContentType?.MediaType);
+        var denial = await stolen.Content.ReadAsStringAsync();
+        Assert.Contains("MOVIE_CAPTION_TRACK_NOT_FOUND", denial, StringComparison.Ordinal);
+        Assert.DoesNotContain("Private subtitle.", denial, StringComparison.Ordinal);
+
+        // And the stranger's own download stays clean: the shared fixture must not have crossed bytes.
+        var strangerBody = await ExportText(stranger.Client, strangerTrack.Id, format);
+        Assert.Contains("Stranger subtitle.", strangerBody, StringComparison.Ordinal);
+        Assert.DoesNotContain("Private subtitle.", strangerBody, StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -388,6 +446,9 @@ public sealed class MovieCaptionExportHttpResponseContractTests : IClassFixture<
         Assert.False(string.IsNullOrWhiteSpace(fileName));
         return fileName!;
     }
+
+    private static async Task<HttpResponseMessage> ExportResponse(HttpClient client, Guid trackId, string format) =>
+        await client.GetAsync($"/api/movie-studio/caption-tracks/{trackId}/export?format={format}");
 
     private static async Task<byte[]> ExportBytes(HttpClient client, Guid trackId, string format)
     {
