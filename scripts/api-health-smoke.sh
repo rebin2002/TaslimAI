@@ -4,6 +4,10 @@
 # A liveness-only probe can pass while the API cannot reach required dependencies.
 # This gate waits for both liveness and readiness, then validates the safe response
 # shape, cache policy, and request correlation contract.
+#
+# Validation is bound to the terminal HTTP response only. A redirect hop that carries
+# Cache-Control, Pragma, or X-Request-ID does not vouch for the health document that
+# was actually served, so those headers must be present on the final response block.
 set -euo pipefail
 
 BASE_URL="${1:-${API_BASE_URL:-http://127.0.0.1:5000}}"
@@ -36,21 +40,47 @@ import sys
 from pathlib import Path
 
 headers_path, body_path, endpoint = sys.argv[1:]
-headers = {}
+# curl --dump-header appends every response block of a redirect chain to the same
+# file. The cache policy, correlation id, and status must therefore be read from
+# the terminal response that actually produced the body; a header carried only by
+# an earlier 3xx hop must never satisfy the contract for the health document.
+blocks: list[list[str]] = []
 for line in Path(headers_path).read_text(errors="replace").splitlines():
+    if line.lower().startswith("http/"):
+        blocks.append([])
+    if blocks:
+        blocks[-1].append(line)
+
+if not blocks:
+    raise SystemExit(
+        f"{endpoint}: no HTTP response block was captured; refusing to infer a safe response"
+    )
+
+headers = {}
+terminal_status = None
+for position, line in enumerate(blocks[-1]):
+    if position == 0:
+        fields = line.split()
+        if len(fields) < 2 or not fields[1].isdigit():
+            raise SystemExit(f"{endpoint}: terminal HTTP status line is not parseable: {line!r}")
+        terminal_status = int(fields[1])
+        continue
     if ":" not in line:
         continue
     name, value = line.split(":", 1)
     headers[name.lower()] = value.strip()
 
+if terminal_status != 200:
+    raise SystemExit(f"{endpoint}: terminal HTTP response status is {terminal_status}, not 200")
+
 cache_control = headers.get("cache-control", "").lower()
 if "no-store" not in cache_control:
-    raise SystemExit(f"{endpoint}: missing Cache-Control: no-store")
+    raise SystemExit(f"{endpoint}: terminal response is missing Cache-Control: no-store")
 if "no-cache" not in headers.get("pragma", "").lower():
-    raise SystemExit(f"{endpoint}: missing Pragma: no-cache")
+    raise SystemExit(f"{endpoint}: terminal response is missing Pragma: no-cache")
 request_id = headers.get("x-request-id", "")
 if not request_id:
-    raise SystemExit(f"{endpoint}: missing X-Request-ID")
+    raise SystemExit(f"{endpoint}: terminal response is missing X-Request-ID")
 
 try:
     payload = json.loads(Path(body_path).read_text())

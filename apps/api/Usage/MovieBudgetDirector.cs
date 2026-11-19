@@ -19,6 +19,7 @@ public static class MovieBudgetDirectorReasons
     public const string CostEstimateUnavailable = "cost_estimate_unavailable";
     public const string LedgerEvidenceRequired = "ledger_evidence_required";
     public const string NoGenerationUnits = "no_generation_units";
+    public const string ProjectDurationUnsupported = "project_duration_unsupported";
 }
 
 /// <summary>
@@ -115,6 +116,14 @@ public sealed class MovieBudgetDirectorService(
 {
     private const string NaivePathKey = "naive_high_cost";
     private const string OptimizedPathKey = "optimized_draft_select_master";
+    // Issue #685 planning bounds. The approved 120-minute limit is a project/timeline bound,
+    // never a per-generation bound: one representative shot stays inside the independently
+    // enforced per-clip ceiling, so a long-form brief is expanded into a shot grid instead of
+    // being modelled as one oversized clip. These values plan cost only; they queue nothing,
+    // reserve nothing, and call no provider.
+    internal const int MaxProjectPlanningDurationSeconds = 120 * 60;
+    internal const int MaxShotPlanningDurationSeconds = 60 * 60;
+    internal const int DefaultUnplannedShotDurationSeconds = 60;
 
     public async Task<MovieBudgetDirectorEstimate> EstimateAsync(
         MovieBudgetDirectorRequest request,
@@ -286,21 +295,56 @@ public sealed class MovieBudgetDirectorService(
             .Select(item => new { item.DurationSeconds, item.SelectedTakeId, item.FinalTakeId })
             .ToListAsync(cancellationToken);
         var shotCount = shots.Count;
-        var duration = shotCount == 0
-            ? Math.Max(1, project.DurationSeconds)
-            : Math.Max(1, (int)Math.Ceiling(shots.Sum(item => item.DurationSeconds ?? 0) > 0
+        var selectedTakeCount = shots.Count(item => item.SelectedTakeId.HasValue || item.FinalTakeId.HasValue);
+        // A project that already has planned shots keeps its persisted representative shot
+        // duration. A project brief carries only a total runtime, so it is expanded into a
+        // provider-compatible shot grid: MovieBudgetDirectorRequest.DurationSeconds is the
+        // duration of ONE shot, and a whole-film runtime is never one shot.
+        int duration;
+        int plannedShotCount;
+        if (shotCount == 0)
+        {
+            (plannedShotCount, duration) = DeriveUnplannedProjectShotGrid(project.DurationSeconds);
+        }
+        else
+        {
+            plannedShotCount = shotCount;
+            duration = Math.Max(1, (int)Math.Ceiling(shots.Sum(item => item.DurationSeconds ?? 0) > 0
                 ? shots.Sum(item => item.DurationSeconds ?? 0) / (double)shotCount
                 : Math.Max(1, project.DurationSeconds) / (double)shotCount));
-        var selectedTakeCount = shots.Count(item => item.SelectedTakeId.HasValue || item.FinalTakeId.HasValue);
+        }
         var derivedRequest = request ?? new MovieBudgetDirectorRequest
         {
             DurationSeconds = duration,
-            ShotCount = Math.Max(shotCount, 1),
+            ShotCount = Math.Max(plannedShotCount, 1),
             CandidatePassesPerShot = 3,
             SelectedTakeCount = selectedTakeCount,
             SelectedOnlyMastering = true,
         };
         return await EstimateAsync(derivedRequest, cancellationToken);
+    }
+
+    /// <summary>
+    /// Expands an unbuilt project brief into a representative shot grid for cost planning.
+    /// The per-shot duration never exceeds the independently enforced per-clip ceiling, so a
+    /// 120-minute brief plans as many provider-compatible shots instead of one impossible
+    /// 7,200-second shot. Modelled footage is rounded up, never truncated: shot count times
+    /// representative duration always covers the approved runtime. Anything outside the
+    /// approved planning window fails closed before any estimate is produced.
+    /// </summary>
+    internal static (int ShotCount, int DurationSeconds) DeriveUnplannedProjectShotGrid(int projectDurationSeconds)
+    {
+        if (projectDurationSeconds is < 1 or > MaxProjectPlanningDurationSeconds)
+            throw new MovieBudgetDirectorValidationException(
+                MovieBudgetDirectorReasons.ProjectDurationUnsupported,
+                $"Movie duration must be between 1 second and {MaxProjectPlanningDurationSeconds / 60} minutes to plan a budget.");
+        var shotCount = Math.Max(1, (int)Math.Ceiling(projectDurationSeconds / (double)DefaultUnplannedShotDurationSeconds));
+        var durationSeconds = Math.Max(1, (int)Math.Ceiling(projectDurationSeconds / (double)shotCount));
+        if (durationSeconds > MaxShotPlanningDurationSeconds)
+            throw new MovieBudgetDirectorValidationException(
+                MovieBudgetDirectorReasons.ProjectDurationUnsupported,
+                $"A single shot cannot be budgeted above {MaxShotPlanningDurationSeconds / 60} minutes. Split the plan into shorter provider-supported shots.");
+        return (shotCount, durationSeconds);
     }
 
     private async Task<MovieGenerationCostEstimate> EstimateRepeatedAsync(
