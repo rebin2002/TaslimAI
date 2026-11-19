@@ -24,11 +24,16 @@ namespace Taslim.Api.Tests;
 /// no production billing/usage code and no file owned by that PR.
 ///
 /// Invariants asserted for every interleaving:
-/// 1. exactly one reversal row survives the race, keyed once by <c>usage:{id}:refund</c>;
+/// 1. at most one durable adjustment row survives the race and it carries the full charge: the leg
+///    that booked it is the leg that reports <c>Created = true</c>, and the other leg adopts that
+///    same row instead of writing a second one. Which key wins a genuinely simultaneous insert is
+///    decided by the database's insert ordering and by no contract in the ledger, so the sequenced
+///    PostgreSQL case below pins <c>usage:{id}:refund</c> and <c>Refund</c> deterministically;
 /// 2. the usage row and that reversal agree - status, <c>ChargedAmount</c>, <c>ReversedAmount</c>
 ///    and <c>RefundedAt</c> are never mixed across two finalizers;
 /// 3. no negative or double credit: <c>ReversedAmount</c> never exceeds <c>ChargedAmount</c>;
-/// 4. replaying the key, or a competing retry key, afterwards is a no-op.
+/// 4. replaying the key, or a competing retry key, afterwards is a no-op: no second row, no amount
+///    movement, and no currency other than the transaction's own.
 ///
 /// Fixture note: <see cref="SafeUsageChargingService"/> hard-wires the customer charge to zero, so a
 /// refundable row (Completed, billable, <c>ChargedAmount &gt; 0</c>) cannot be produced through the
@@ -416,7 +421,15 @@ public sealed class UsageRefundCancellationLedgerRaceTests : IDisposable
             var results = await Task.WhenAll(refundTask, retryTask);
 
             // Exactly one leg may report that it created the reversal; the loser adopts the winner.
-            Assert.Equal(1, results.Count(item => item is not null && item.Created));
+            // Both legs must also return a result: a leg that silently returned null would let a
+            // dropped refund, or a reversal that never reached the ledger, pass this test unnoticed.
+            var bookingLegs = results.Where(item => item is not null && item.Created).ToList();
+            var adoptingLegs = results.Where(item => item is not null && !item.Created).ToList();
+            Assert.Equal(2, results.Count(item => item is not null));
+            Assert.Single(bookingLegs);
+            Assert.Single(adoptingLegs);
+            var bookingLeg = bookingLegs[0];
+            var adoptingLeg = adoptingLegs[0];
 
             // The stale cancellation finalizer now writes, holding the pre-charge snapshot.
             await Ledger(staleDb).CancelAsync(staleCancelCopy, CancellationCode);
@@ -426,35 +439,173 @@ public sealed class UsageRefundCancellationLedgerRaceTests : IDisposable
             var adjustments = await verify.UsageTransactionAdjustments.AsNoTracking()
                 .Where(item => item.UsageTransactionId == txId).ToListAsync();
 
-            // Row-count and amount guarantees under real contention.
+            // Row-count and amount guarantees under real contention. "At most one durable adjustment"
+            // is enforced by the unique UsageTransactionId index, so exactly one row must survive; it
+            // must carry the full charge, and it must be the very row the booking leg claims to have
+            // booked. The key and type of that row are deliberately NOT pinned: with two legs released
+            // by the same barrier, whichever INSERT reaches the unique index first wins, which is a
+            // database scheduling decision rather than a ledger contract. The hosted runner observed the
+            // retry leg reaching it first every time; locally the winner flipped both ways. The canonical
+            // key itself is pinned by the sequenced case below, which asserts this same shape.
             var adjustment = Assert.Single(adjustments);
-            Assert.Equal(UsageTransactionAdjustmentType.Refund, adjustment.Type);
             Assert.Equal(ChargedAmountUsd, adjustment.AmountUsd);
+            Assert.Equal(bookingLeg.Adjustment.Id, adjustment.Id);
+            Assert.Equal(bookingLeg.Adjustment.Type, adjustment.Type);
+            Assert.Equal(bookingLeg.Adjustment.IdempotencyKey, adjustment.IdempotencyKey);
+            Assert.Equal(adjustment.Id, adoptingLeg.Adjustment.Id);
+            Assert.Equal(adjustment.AmountUsd, adoptingLeg.Adjustment.AmountUsd);
+            // The race is exactly the two keys this file is about, and nothing else can have been booked.
+            Assert.Contains(adjustment.IdempotencyKey, new[] { $"usage:{txId:N}:refund", $"usage:{txId:N}:retry-1" });
+            // No hidden currency change: both legs read the same transaction and wrote nothing else.
+            Assert.Equal(UsageCurrencies.Usd, adjustment.Currency);
+            Assert.Equal(UsageCurrencies.Usd, row.Currency);
 
-            // The consistency guarantee the reviewer flagged as untested.
+            // The consistency guarantee the reviewer flagged as untested. This is the assertion that
+            // carries the finance weight of the case, and it holds under either winner.
             AssertRowAgreesWithItsReversal(row, adjustment, "postgres contention");
 
             var attempt = await verify.GenerationProviderAttempts.AsNoTracking().SingleAsync();
             Assert.Equal(GenerationProviderAttemptStatus.Cancelled, attempt.Status);
             Assert.Null(attempt.ActualProviderCostUsd);
 
-            // Replay after the contended race is a no-op.
+            // Replay of the canonical refund key after the contended race must never add a second
+            // durable adjustment and must never move an amount. When the refund leg booked the reversal
+            // the replay resolves to that committed row; when the retry leg reached the unique index
+            // first there is no refund-key row, and the already-terminal status short-circuits the call
+            // to a no-op. Both shapes are zero new rows and zero amount movement, and the row-count and
+            // amount assertions below are unconditional, so neither branch can pass vacuously.
+            var chargedBeforeReplay = row.ChargedAmount;
+            var reversedBeforeReplay = row.ReversedAmount;
+            await using var replayDb = new TaslimDbContext(options);
+            var replayCopy = await replayDb.UsageTransactions.SingleAsync(item => item.Id == txId);
+            var replay = await Ledger(replayDb).RefundAsync(replayCopy);
+            if (adjustment.Type == UsageTransactionAdjustmentType.Refund)
+            {
+                Assert.NotNull(replay);
+                Assert.False(replay!.Created);
+                Assert.Equal(adjustment.Id, replay.Adjustment.Id);
+            }
+            else
+            {
+                Assert.Null(replay);
+            }
+            await using var after = new TaslimDbContext(options);
+            var rowAfterReplay = await after.UsageTransactions.AsNoTracking().SingleAsync(item => item.Id == txId);
+            Assert.Single(await after.UsageTransactionAdjustments.AsNoTracking()
+                .Where(item => item.UsageTransactionId == txId).ToListAsync());
+            Assert.Equal(chargedBeforeReplay, rowAfterReplay.ChargedAmount);
+            Assert.Equal(reversedBeforeReplay, rowAfterReplay.ReversedAmount);
+            Assert.Equal(0m, rowAfterReplay.NetChargedAmount);
+            Assert.Equal(UsageCurrencies.Usd, rowAfterReplay.Currency);
+        }
+        finally
+        {
+            await DropPostgresSchemaAsync(adminBuilder.ConnectionString, schema);
+        }
+    }
+
+    [DisposablePostgresFact]
+    public async Task Postgres_refund_leg_that_reaches_the_unique_index_first_keeps_the_canonical_key_and_the_retry_leg_adopts_it()
+    {
+        // Deterministic counterpart to the contended case above, and the reason relaxing that case does
+        // not lose coverage. The legs are ordered explicitly, so the canonical <c>usage:{id}:refund</c>
+        // key is the row that survives and its type is the <c>Refund</c> adjustment #1103 wanted pinned.
+        // The retry leg still loses on the real PostgreSQL unique UsageTransactionId index and still
+        // adopts the committed winner, so the loser-adopts branch stays exercised on the engine that
+        // produced the flake, without depending on insert ordering. Every assertion of the contended
+        // case is present here and strictly narrower.
+        var adminConnectionString = Environment.GetEnvironmentVariable("ConnectionStrings__Postgres")!;
+        var schema = $"refund_seq_{Guid.NewGuid():N}";
+        await CreatePostgresSchemaAsync(adminConnectionString, schema);
+        var scopedBuilder = new NpgsqlConnectionStringBuilder(adminConnectionString) { SearchPath = schema };
+        var options = new DbContextOptionsBuilder<TaslimDbContext>().UseNpgsql(scopedBuilder.ConnectionString).Options;
+        try
+        {
+            var txId = await SeedPendingTransactionAsync(options);
+            await using var staleDb = new TaslimDbContext(options);
+            var staleCancelCopy = await staleDb.UsageTransactions.SingleAsync(item => item.Id == txId);
+            Assert.Equal(UsageTransactionStatus.Pending, staleCancelCopy.Status);
+
+            await CommitChargeLegAsync(options, txId);
+
+            // Both legs read the row while it is still Completed, so both pass the in-memory guard and
+            // both are genuinely eligible to book the reversal; only the unique index decides the winner.
+            await using var refundDb = new TaslimDbContext(options);
+            await using var retryDb = new TaslimDbContext(options);
+            var refundCopy = await refundDb.UsageTransactions.SingleAsync(item => item.Id == txId);
+            var retryCopy = await retryDb.UsageTransactions.SingleAsync(item => item.Id == txId);
+            Assert.Equal(UsageTransactionStatus.Completed, refundCopy.Status);
+            Assert.Equal(UsageTransactionStatus.Completed, retryCopy.Status);
+
+            var booked = await Ledger(refundDb).RefundAsync(refundCopy);
+            Assert.NotNull(booked);
+            Assert.True(booked!.Created);
+
+            var adopted = await Ledger(retryDb).ReverseAsync(retryCopy, $"usage:{txId:N}:retry-1", "Competing retry key");
+            Assert.NotNull(adopted);
+            Assert.False(adopted!.Created);
+
+            await Ledger(staleDb).CancelAsync(staleCancelCopy, CancellationCode);
+
+            await using var verify = new TaslimDbContext(options);
+            var row = await verify.UsageTransactions.AsNoTracking().SingleAsync(item => item.Id == txId);
+            var adjustment = Assert.Single(await verify.UsageTransactionAdjustments.AsNoTracking()
+                .Where(item => item.UsageTransactionId == txId).ToListAsync());
+
+            // The canonical key and type are pinned here, deterministically, on PostgreSQL.
+            Assert.Equal(UsageTransactionAdjustmentType.Refund, adjustment.Type);
+            Assert.Equal($"usage:{txId:N}:refund", adjustment.IdempotencyKey);
+            Assert.Equal(ChargedAmountUsd, adjustment.AmountUsd);
+            Assert.Equal(UsageCurrencies.Usd, adjustment.Currency);
+            Assert.Equal(booked.Adjustment.Id, adjustment.Id);
+            Assert.Equal(adjustment.Id, adopted.Adjustment.Id);
+            Assert.Equal(adjustment.AmountUsd, adopted.Adjustment.AmountUsd);
+
+            AssertRowAgreesWithItsReversal(row, adjustment, "postgres sequenced refund");
+            Assert.Equal(UsageCurrencies.Usd, row.Currency);
+
+            var attempt = await verify.GenerationProviderAttempts.AsNoTracking().SingleAsync();
+            Assert.Equal(GenerationProviderAttemptStatus.Cancelled, attempt.Status);
+            Assert.Null(attempt.ActualProviderCostUsd);
+
+            // Replay of the canonical key is a plain no-op that resolves to the committed row.
             await using var replayDb = new TaslimDbContext(options);
             var replayCopy = await replayDb.UsageTransactions.SingleAsync(item => item.Id == txId);
             var replay = await Ledger(replayDb).RefundAsync(replayCopy);
             Assert.NotNull(replay);
             Assert.False(replay!.Created);
+            Assert.Equal(adjustment.Id, replay.Adjustment.Id);
             await using var after = new TaslimDbContext(options);
+            var rowAfterReplay = await after.UsageTransactions.AsNoTracking().SingleAsync(item => item.Id == txId);
             Assert.Single(await after.UsageTransactionAdjustments.AsNoTracking()
                 .Where(item => item.UsageTransactionId == txId).ToListAsync());
+            Assert.Equal(row.ChargedAmount, rowAfterReplay.ChargedAmount);
+            Assert.Equal(row.ReversedAmount, rowAfterReplay.ReversedAmount);
+            Assert.Equal(0m, rowAfterReplay.NetChargedAmount);
         }
         finally
         {
-            await using var admin = new NpgsqlConnection(adminBuilder.ConnectionString);
-            await admin.OpenAsync();
-            await using var drop = admin.CreateCommand();
-            drop.CommandText = $"DROP SCHEMA IF EXISTS \"{schema}\" CASCADE";
-            await drop.ExecuteNonQueryAsync();
+            await DropPostgresSchemaAsync(adminConnectionString, schema);
         }
+    }
+
+    /// <summary>Creates one per-test schema inside the disposable PostgreSQL database.</summary>
+    private static async Task CreatePostgresSchemaAsync(string adminConnectionString, string schema)
+    {
+        await using var admin = new NpgsqlConnection(adminConnectionString);
+        await admin.OpenAsync();
+        await using var create = admin.CreateCommand();
+        create.CommandText = $"CREATE SCHEMA \"{schema}\"";
+        await create.ExecuteNonQueryAsync();
+    }
+
+    /// <summary>Drops the per-test schema. Nothing outside it is touched.</summary>
+    private static async Task DropPostgresSchemaAsync(string adminConnectionString, string schema)
+    {
+        await using var admin = new NpgsqlConnection(adminConnectionString);
+        await admin.OpenAsync();
+        await using var drop = admin.CreateCommand();
+        drop.CommandText = $"DROP SCHEMA IF EXISTS \"{schema}\" CASCADE";
+        await drop.ExecuteNonQueryAsync();
     }
 }
