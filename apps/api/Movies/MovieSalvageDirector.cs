@@ -137,6 +137,7 @@ public sealed class MovieSalvageDirector : IMovieSalvageDirector
     {
         ArgumentNullException.ThrowIfNull(request);
         ArgumentNullException.ThrowIfNull(request.Context);
+        ValidateNestedEvidence(request.QcFindings);
 
         var issueType = ResolveIssueType(request.IssueType, request.QcFindings);
         var issueDescription = NormalizeDescription(request.IssueDescription);
@@ -272,15 +273,47 @@ public sealed class MovieSalvageDirector : IMovieSalvageDirector
             return normalized;
         foreach (var finding in findings ?? [])
         {
+            if (finding is null) continue;
             if (finding.ReasonCode is MovieProductionQcReasonCodes.DurationMissing or MovieProductionQcReasonCodes.DurationOutOfTolerance)
                 return MovieSalvageIssueTypes.Duration;
             if (finding.ReasonCode == MovieProductionQcReasonCodes.AspectRatioMismatch)
                 return MovieSalvageIssueTypes.Composition;
-            if (finding.Category.Equals("continuity", StringComparison.OrdinalIgnoreCase)
+            if (finding.Category?.Equals("continuity", StringComparison.OrdinalIgnoreCase) == true
                 || finding.ReasonCode is MovieProductionQcReasonCodes.ContinuityEvidenceMissing or MovieProductionQcReasonCodes.ContinuityHashMismatch or MovieProductionQcReasonCodes.HardContinuityConflict or MovieProductionQcReasonCodes.ContinuityWarningsExceeded)
                 return MovieSalvageIssueTypes.Continuity;
         }
         return MovieSalvageIssueTypes.Supported.Contains(normalized) ? normalized : MovieSalvageIssueTypes.Generic;
+    }
+
+    /// <summary>
+    /// Fail-closed admission for the nested QC-finding evidence carried beside a present edit
+    /// context. The plan-level guards only prove the request and its context object exist, so
+    /// without this pass a JSON body can deliver a null finding element, or a finding whose
+    /// required members are null, and have it dereferenced deeper in planning as a raw
+    /// <see cref="NullReferenceException"/>. Malformed evidence is rejected as an
+    /// <see cref="ArgumentException"/> whose message names no member, parameter, or CLR type,
+    /// so the public endpoint answers its curated rejection envelope like every other
+    /// malformed salvage-plan shape. Validation runs before issue-type resolution because an
+    /// explicit issue type short-circuits the findings scan and must not smuggle the same
+    /// malformed evidence through unexamined.
+    /// </summary>
+    private static void ValidateNestedEvidence(IReadOnlyList<MovieProductionQcFinding>? findings)
+    {
+        const string MalformedMessage = "The salvage plan request contains malformed QC evidence.";
+        if (findings is null)
+        {
+            throw new ArgumentException(MalformedMessage);
+        }
+        foreach (var finding in findings)
+        {
+            if (finding is null
+                || string.IsNullOrWhiteSpace(finding.ReasonCode)
+                || string.IsNullOrWhiteSpace(finding.Category)
+                || string.IsNullOrWhiteSpace(finding.Severity))
+            {
+                throw new ArgumentException(MalformedMessage);
+            }
+        }
     }
 
     private static string? NormalizeDescription(string? description) =>
