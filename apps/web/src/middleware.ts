@@ -49,7 +49,9 @@ export const config = {
   // the `?_rsc=` document variant. A top-level segment such as `/search.rsc`
   // or `/chat.rsc` otherwise satisfied `[^/]+\.[\w-]+` and kept only the
   // framework default, while the deeper `/create/image.rsc` was guarded: an
-  // asymmetry, not a design decision. The second entry closes it, and because
-  // both `api/` and `_next/` stay excluded it cannot capture a real asset.
-  matcher: ["/((?!api/|_next/|[^/]+\\.[\\w-]+).*)", "/((?!api/|_next/).+\\.rsc)"],
+  // asymmetry, not a design decision. The second entry closes it. The first
+  // entry exempts only terminal dotted files (not `/favicon.ico/../chat`), and
+  // the second admits mixed-case RSC-like document suffixes. API and framework
+  // assets remain excluded from both entries.
+  matcher: ["/((?!api/|_next/|[^/]+\\.[\\w-]+$).*)", "/((?!api/|_next/).+\\.[rR][sS][cC])"],
 };
