@@ -12,6 +12,7 @@ import { ProjectContextEditor } from "@/components/ProjectContextEditor";
 import { ProjectFilesSection } from "@/components/ProjectFilesSection";
 import { ProjectAssetsSection } from "@/components/ProjectAssetsSection";
 import { resolveProjectDetailSnapshotAfterFailure } from "@/lib/projectDetailAccessState";
+import { canApplyProjectDetailSnapshot, hasProjectDetailAccessEnded } from "@/lib/projectDetailAccessOrdering";
 
 const projectActions = [
   ["/chat", "projects.newConversation", MessageSquare, "project-action-chat"],
@@ -29,26 +30,55 @@ export function ProjectDetailView() {
   const [formOpen, setFormOpen] = useState(false);
   const [error, setError] = useState("");
   const [loadAttempt, setLoadAttempt] = useState(0);
-  const overviewRequest = useRef<{ key: string; promise: Promise<ProjectOverview> } | null>(null);
+  const overviewRequest = useRef<{ key: string; promise: Promise<ProjectOverview>; epoch: number } | null>(null);
+  // How many definitive "access ended" answers this mount has seen. It is the
+  // ordering marker behind the role badge: every overview read records the
+  // value it was issued under and may only commit while that value still
+  // holds, so a membership snapshot the server captured before a revocation
+  // can never re-pin the badge after one. A read issued afterwards sees the
+  // new value and paints normally, which is what keeps the retry, the
+  // language-pack refresh and a re-admitted role working.
+  const accessEndedEpoch = useRef(0);
+  // The message that answer carried. A retired response must leave the page
+  // exactly where the revocation left it: the effect that re-issued it has
+  // already cleared the banner, so without this the member would land on the
+  // not-found branch, which has no retry affordance at all.
+  const accessEndedMessage = useRef("");
 
   useEffect(() => {
     let active = true;
     const requestKey = `${params.projectId}:${loadAttempt}`;
-    const cachedRequest = overviewRequest.current?.key === requestKey ? overviewRequest.current.promise : null;
+    const cachedRequest = overviewRequest.current?.key === requestKey ? overviewRequest.current : null;
+    // The access-ended epoch this read was issued under. It is taken when the
+    // request is created and kept with it in the single-slot cache, so a
+    // refresh re-issued after a revocation still carries the epoch of the
+    // membership it asked for, not the epoch of the answer that superseded it.
+    const accessEpoch = cachedRequest ? cachedRequest.epoch : accessEndedEpoch.current;
     // Loading remote project state is an external synchronization.
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setLoading(true); setError("");
-    const request = cachedRequest ?? api.getProjectOverview(params.projectId);
-    if (!cachedRequest) overviewRequest.current = { key: requestKey, promise: request };
+    const request = cachedRequest ? cachedRequest.promise : api.getProjectOverview(params.projectId);
+    if (!cachedRequest) overviewRequest.current = { key: requestKey, promise: request, epoch: accessEpoch };
     void request
-      .then((next) => { if (active) setOverview(next); })
+      .then((next) => {
+        if (!active) return;
+        if (canApplyProjectDetailSnapshot(accessEpoch, accessEndedEpoch.current)) { setOverview(next); return; }
+        // Retired: the page stays exactly where the definitive answer left it.
+        setError((current) => current || accessEndedMessage.current);
+      })
       .catch((caught) => {
         if (!active) return;
+        const message = caught instanceof Error ? caught.message : t("projects.loadError");
+        // Ordering, not disposition: a definitive access answer also retires
+        // every snapshot issued before it, so the one on screen and the ones
+        // still on the wire are dropped by the same event that clears this
+        // read's own result. Transient failures leave the epoch untouched.
+        if (hasProjectDetailAccessEnded(caught)) { accessEndedEpoch.current += 1; accessEndedMessage.current = message; }
         // A definitive access answer outranks the cached membership snapshot:
         // clear it so the workspace member role badge fails closed with the
         // retry affordance, while a transient load keeps the last view.
         if (resolveProjectDetailSnapshotAfterFailure(caught) === "invalidate") setOverview(null);
-        setError(caught instanceof Error ? caught.message : t("projects.loadError"));
+        setError(message);
       })
       .finally(() => {
         if (overviewRequest.current?.promise === request) overviewRequest.current = null;
@@ -67,8 +97,12 @@ export function ProjectDetailView() {
     catch (caught) {
       // 401/403/404 here means the server no longer resolves this project for
       // this principal; a "removed" member must not keep a live role badge.
+      // This is also the answer that usually confirms the revocation, so it
+      // must retire the overview read that was still in flight at the time.
+      const message = caught instanceof Error ? caught.message : t("projects.saveError");
+      if (hasProjectDetailAccessEnded(caught)) { accessEndedEpoch.current += 1; accessEndedMessage.current = message; }
       if (resolveProjectDetailSnapshotAfterFailure(caught) === "invalidate") setOverview(null);
-      setError(caught instanceof Error ? caught.message : t("projects.saveError"));
+      setError(message);
     }
   }
 
@@ -76,8 +110,10 @@ export function ProjectDetailView() {
     if (!overview) return;
     try { replaceProject(await api.restoreProject(overview.project.id)); }
     catch (caught) {
+      const message = caught instanceof Error ? caught.message : t("projects.saveError");
+      if (hasProjectDetailAccessEnded(caught)) { accessEndedEpoch.current += 1; accessEndedMessage.current = message; }
       if (resolveProjectDetailSnapshotAfterFailure(caught) === "invalidate") setOverview(null);
-      setError(caught instanceof Error ? caught.message : t("projects.saveError"));
+      setError(message);
     }
   }
 
