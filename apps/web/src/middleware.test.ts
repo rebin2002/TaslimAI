@@ -170,4 +170,27 @@ describe("SSR cache isolation middleware", () => {
       expect(matcherAdmits(guarded), guarded).toBe(true);
     }
   });
+
+  it("admits traversal-shaped private documents behind a dotted first segment", () => {
+    // A file-looking prefix must not exempt a path with additional segments:
+    // Next or an upstream edge may normalize the dots before routing.
+    for (const path of [
+      "/favicon.ico/../chat",
+      "/robots.txt/../projects",
+      "/manifest.webmanifest/../account/billing",
+      "/login.rsc/../projects",
+      "/favicon.ico/%2E%2E/chat",
+    ]) {
+      expect(matcherAdmits(path), path).toBe(true);
+    }
+  });
+
+  it("admits mixed-case RSC-shaped private documents, not public files", () => {
+    for (const path of ["/chat.RSC", "/projects.RSC", "/activity.Rsc"]) {
+      expect(matcherAdmits(path), path).toBe(true);
+    }
+    for (const path of ["/favicon.ico", "/robots.txt", "/manifest.webmanifest", "/api/x.RSC", "/_next/example.RSC"]) {
+      expect(matcherAdmits(path), path).toBe(false);
+    }
+  });
 });
