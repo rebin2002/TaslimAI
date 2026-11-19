@@ -12,9 +12,16 @@ concurrency:
   # Batch CI/release runs so one commit stream cannot start two simultaneous
   # production builds or release manifests. Each workflow keeps its own lane
   # (independent gates never cancel one another) keyed by the source branch or
-  # pull request; supersede only on non-main lanes, while every integrated main
-  # commit keeps a serialized, non-cancelled run.
-  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  # pull request; supersede only on non-main lanes. Integrated main pushes
+  # resolve to a run-unique group here on purpose: under GitHub's documented
+  # default queue: single, a third main push REPLACES an already-pending main
+  # run even when cancel-in-progress is false, so a shared column-0 lane
+  # cannot retain every integrated commit. Main retention plus serialization
+  # for the production path is carried by the job-level queue: max release
+  # lanes in container-health-smoke.yml and release-evidence.yml (queue: max
+  # is only valid while cancel-in-progress is false and must never combine
+  # with cancel-in-progress: true). PR/branch lanes keep supersession.
+  group: ${{ github.workflow }}-${{ github.ref == 'refs/heads/main' && github.run_id || github.head_ref || github.ref }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 env:
@@ -41,6 +48,10 @@ jobs:
         run: |
           bash -n scripts/ci-release-policy.test.sh
           bash scripts/ci-release-policy.test.sh
+      - name: Enforce main-run retention queue policy
+        run: |
+          bash -n scripts/ci-release-queue-retention.test.sh
+          bash scripts/ci-release-queue-retention.test.sh
 
   frontend:
     name: Frontend checks

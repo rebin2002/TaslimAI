@@ -13,15 +13,29 @@ concurrency:
   # simultaneous Docker builds of the Railway Web/API release images. Each
   # workflow keeps its own lane (independent gates never cancel one another)
   # keyed by the source branch or pull request; supersede only on non-main
-  # lanes, while every integrated main commit keeps a serialized,
-  # non-cancelled run.
-  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  # lanes. Integrated main pushes resolve to a run-unique group here on
+  # purpose: under GitHub's documented default queue: single, a third main
+  # push REPLACES an already-pending main run even when cancel-in-progress
+  # is false, so a shared column-0 lane cannot retain every integrated
+  # commit. The serialized, non-cancelled main run lives on the job-level
+  # release lane below (queue: max + cancel-in-progress: false; queue: max
+  # must never combine with cancel-in-progress: true).
+  group: ${{ github.workflow }}-${{ github.ref == 'refs/heads/main' && github.run_id || github.head_ref || github.ref }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
   container-health:
     name: Build production images and smoke-test API
     runs-on: ubuntu-latest
+    # Retention + serialization lane for integrated main commits: queue: max
+    # keeps every pending main build (up to 100) instead of GitHub's default
+    # of replacing the oldest pending run, and is valid only with
+    # cancel-in-progress: false. Non-main runs resolve to a run-unique group
+    # here and are superseded by the workflow-level policy above.
+    concurrency:
+      group: ${{ github.ref == 'refs/heads/main' && github.workflow || github.run_id }}
+      queue: max
+      cancel-in-progress: false
     services:
       postgres:
         image: postgres:15@sha256:e27d24a29acce1b554771ba68c43afa55446069d228310451bb8c96c1531d2cb
