@@ -225,7 +225,19 @@ public sealed class PasswordResetEmailOutboxMigrationSchemaTests : IClassFixture
         }
 
         await Schema.InitializeAsync();
+
+        // The class shares one throwaway database and xunit does not guarantee test order, so this case
+        // first returns the database to the pre-Up state whose history it compares against: the sibling
+        // Up_... case legitimately leaves the outbox step applied, which would otherwise make this
+        // baseline one history row too high and the revert look like it lost a migration.
+        if ((await Schema.CaptureAsync()).Tables.Contains(OutboxTable))
+        {
+            await Schema.ExecuteScriptAsync(Schema.GenerateScript(OutboxMigrationId, Schema.PreviousMigrationId));
+        }
+
         var before = await Schema.CaptureAsync();
+        Assert.DoesNotContain(OutboxTable, before.Tables);
+        Assert.Equal(Schema.PreviousMigrationId, before.HistoryTail);
 
         await Schema.MigrateToOutboxAsync();
         var upgraded = await Schema.CaptureAsync();
