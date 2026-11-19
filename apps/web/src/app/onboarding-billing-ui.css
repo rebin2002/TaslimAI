@@ -1123,6 +1123,33 @@
   }
 }
 
+/*
+ * #700: browser zoom expressed as device width divided by the zoom factor.
+ * A 320 CSS px phone at 200% zoom presents a 160 CSS px layout viewport, yet
+ * the document still enforces its own minimum canvas (`html { min-width: 320px }`,
+ * globals.css) and documentElement.scrollWidth stays 320. Laying the blocking
+ * dialog out against the 160px visual viewport sized it to 136px, collapsed
+ * every workflow tile into one-character-per-line runs taller than the
+ * viewport, and stranded the focused choice outside any scroll box. Below the
+ * floor the card is instead laid out at the full 320px minimum canvas the page
+ * guarantees, and the backdrop becomes a horizontally pannable scroll box
+ * anchored at the inline start so every control stays reachable by pointer,
+ * keyboard and focus reveal; Escape, the focus trap and inner scroll are
+ * component behavior and untouched. Above 320 CSS px this rule never engages:
+ * phone (320/375), tablet, desktop and their 125%/200% zoomed states keep the
+ * exact geometry pinned by the #846 lane specs.
+ */
+@media (max-width: 319.98px) {
+  .modal-backdrop.onboarding-backdrop {
+    place-items: start start;
+    overflow-x: auto;
+  }
+
+  .onboarding-card {
+    min-width: 320px;
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .onboarding-skip,
   .onboarding-back,
