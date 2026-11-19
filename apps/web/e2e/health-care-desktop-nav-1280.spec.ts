@@ -188,7 +188,7 @@ async function expectLocalizedDesktopEntry(
   expect(box, `the Health Care entry is measurable at ${DESKTOP_VIEWPORT}px`).not.toBeNull();
   if (!box) throw new Error("the Health Care entry is missing");
   expect(box.x).toBeGreaterThanOrEqual(0);
-  expect(box.x + box.width).lessThanOrEqual(DESKTOP_VIEWPORT.width + 1);
+  expect(box.x + box.width).toBeLessThanOrEqual(DESKTOP_VIEWPORT.width + 1);
   const overflow = await page.evaluate(
     () => document.documentElement.scrollWidth - document.documentElement.clientWidth,
   );
