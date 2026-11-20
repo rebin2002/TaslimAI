@@ -135,21 +135,6 @@ function formatCreatedAt(value: string, locale: string) {
   return new Intl.DateTimeFormat(localeTag(locale), { month: "short", day: "numeric", year: "numeric" }).format(date);
 }
 
-/**
- * The in-flight status poll failed. Backoff keeps retrying on its own, but the
- * member has to be told: this asserts the localized copy over the polite
- * progress region and never echoes the provider's own message, which is
- * English and server-facing ("Something went wrong.").
- */
-export function VoiceStudioPollingNoticeView({ t }: { t: (key: string) => string }) {
-  return (
-    <p className="voice-alert" role="alert" aria-live="assertive">
-      <AlertCircle size={15} aria-hidden="true" />
-      <span>{t("voice.pollError")}</span>
-    </p>
-  );
-}
-
 export function VoiceStudioView() {
   const { workspace } = useAuth();
   const { locale, t } = useLocale();
@@ -222,13 +207,10 @@ export function VoiceStudioView() {
           setPollRetry(0);
           setError("");
         }
-      } catch {
-        // The provider's own message is deliberately not surfaced: it is English
-        // and server-facing, and the localized copy below is what the member
-        // needs. Backoff keeps retrying on its own.
+      } catch (caught) {
         if (active) {
           setPollRetry((attempt) => attempt + 1);
-          setError(t("voice.pollError"));
+          setError(caught instanceof Error ? caught.message : t("voice.pollError"));
         }
       }
     }, nextVoicePollDelay(current, pollRetry) ?? 650);
@@ -348,7 +330,6 @@ export function VoiceStudioView() {
           <div className="voice-generating-icon"><LoaderCircle size={27} aria-hidden="true" /></div><p className="section-eyebrow">{t("voice.progressEyebrow")}</p><h2 id="voice-generation-title">{progressStatus}</h2><p>{t("voice.progressText")}</p>
           <p className="sr-only" role="status" aria-live="polite" aria-atomic="true">{progressAnnouncement}</p>
           <div className="generation-progress-label"><span>{t("jobs.progress")}</span><strong>{progress}%</strong></div><div className="generation-progress-track" role="progressbar" aria-label={t("jobs.progress")} aria-valuemin={0} aria-valuemax={100} aria-valuenow={progress} aria-valuetext={progressAnnouncement}><span style={{ width: `${progress}%` }} /></div>
-          {error && <VoiceStudioPollingNoticeView t={t} />}
           {canCancelVoiceJob(current) && <button className="voice-secondary-action voice-cancel-action" type="button" onClick={() => void cancel()} disabled={working}><XCircle size={15} /> {t("voice.cancel")}</button>}
         </section>
       ) : (
