@@ -25,6 +25,14 @@ describe("music studio state", () => {
     expect(result).not.toHaveProperty("model");
   });
 
+  it("rejects a succeeded result whose asset identity is empty or whitespace-only", () => {
+    for (const assetId of ["", "   ", "\t", "\n "]) {
+      const malformed = job({ status: "Succeeded", resultJson: JSON.stringify({ assetId, assetType: "music" }) });
+      expect(parseMusicJobResult(malformed)).toBeNull();
+      expect(safeMusicJobView(malformed)?.result).toBeNull();
+    }
+  });
+
   it("exposes a safe failed view and ignores malformed results", () => {
     const failed = job({ status: "Failed", errorCode: "MUSIC_PROVIDER_UNAVAILABLE", errorMessage: "Music generation is temporarily unavailable. Please try again later." });
     expect(safeMusicJobView(failed)).toMatchObject({ status: "Failed", errorCode: "MUSIC_PROVIDER_UNAVAILABLE" });
