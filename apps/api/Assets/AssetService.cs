@@ -88,7 +88,9 @@ public sealed class AssetService(TaslimDbContext db, WorkspaceAccessService acce
             .Skip(ApiPagination.GetOffset(page, pageSize))
             .Take(pageSize)
             .ToListAsync(cancellationToken);
-        return new AssetListDto(items.Select(AssetContractMapper.ToDto).ToArray(), page, pageSize, totalCount, (int)Math.Ceiling(totalCount / (double)pageSize));
+        // The read model needs the viewer to answer "can *this* member download it", the same
+        // question GetDownloadAsync asks (#1030 guard parity).
+        return new AssetListDto(items.Select(item => AssetContractMapper.ToDto(item, userId)).ToArray(), page, pageSize, totalCount, (int)Math.Ceiling(totalCount / (double)pageSize));
     }
 
     public async Task<Asset?> UpdateAsync(Guid userId, Guid assetId, UpdateAssetRequest request, CancellationToken cancellationToken = default)
@@ -127,10 +129,11 @@ public sealed class AssetService(TaslimDbContext db, WorkspaceAccessService acce
             var representationFile = await db.StoredFiles.AsNoTracking()
                 .Include(file => file.Project)
                 .FirstOrDefaultAsync(file => file.Id == representation.StoredFileId, cancellationToken);
-            if (representationFile is not { Status: StoredFileStatus.Ready }
-                || !CanReadStoredFile(representationFile, userId, asset.WorkspaceId)
-                || (string.Equals(asset.AssetType, AssetTypes.Document, StringComparison.OrdinalIgnoreCase)
-                    && !IsDocumentRepresentationConsistent(representation, representationFile)))
+            // One predicate now decides both the download this route serves and the download the
+            // read model advertises (AssetContractMapper.ToDto), so a Ready-but-unreadable or
+            // Ready-but-inconsistent row can never be promised by one path and refused by the
+            // other (#1030 invariant; QA observation A on #1041). Behavior is unchanged here.
+            if (representationFile is null || !CanDownloadRepresentation(asset, representation, representationFile, userId))
                 throw new AssetValidationException("ASSET_FILE_UNAVAILABLE", "This document format is not available.");
             return new AssetDownload(asset, representationFile, representation.FileName, representation.ContentType);
         }
@@ -163,6 +166,9 @@ public sealed class AssetService(TaslimDbContext db, WorkspaceAccessService acce
             // representation's own stored file (#1030), so the navigation has to be loaded by the
             // same query that feeds AssetContractMapper.ToDto for both the list and the detail.
             .ThenInclude(representation => representation.StoredFile)
+            // ...and the file's project, because the readability guard this flag mirrors
+            // (CanReadStoredFile) grants project members access through that navigation.
+            .ThenInclude(file => file!.Project)
             .AsQueryable();
         return tracking ? query : query.AsNoTracking();
     }
@@ -170,7 +176,23 @@ public sealed class AssetService(TaslimDbContext db, WorkspaceAccessService acce
     private static IQueryable<Asset> VisibleTo(IQueryable<Asset> query, Guid userId) =>
         query.Where(AssetVisibility.ForWorkspaceMember(userId));
 
-    private static bool CanReadStoredFile(StoredFile file, Guid userId, Guid workspaceId) =>
+    /// <summary>
+    /// The single source of truth for "this representation can be downloaded by this member":
+    /// AssetService.GetDownloadAsync throws ASSET_FILE_UNAVAILABLE on exactly the negation of it,
+    /// and AssetContractMapper.ToDto reports it as the advertised <c>canDownload</c> flag. Internal
+    /// so the two paths cannot drift apart again (QA observation A on #1041).
+    /// </summary>
+    internal static bool CanDownloadRepresentation(
+        Asset asset,
+        AssetRepresentation representation,
+        StoredFile? file,
+        Guid viewerUserId) =>
+        file is { Status: StoredFileStatus.Ready }
+        && CanReadStoredFile(file, viewerUserId, asset.WorkspaceId)
+        && (!string.Equals(asset.AssetType, AssetTypes.Document, StringComparison.OrdinalIgnoreCase)
+            || IsDocumentRepresentationConsistent(representation, file));
+
+    internal static bool CanReadStoredFile(StoredFile file, Guid userId, Guid workspaceId) =>
         file.WorkspaceId == workspaceId
         && (file.UserId == userId
             || (file.ProjectId.HasValue
@@ -178,7 +200,7 @@ public sealed class AssetService(TaslimDbContext db, WorkspaceAccessService acce
                 && file.Project is not null
                 && file.Project.WorkspaceId == workspaceId));
 
-    private static bool IsDocumentRepresentationConsistent(AssetRepresentation representation, StoredFile file)
+    internal static bool IsDocumentRepresentationConsistent(AssetRepresentation representation, StoredFile file)
     {
         var expected = representation.RepresentationType.Trim().ToLowerInvariant() switch
         {

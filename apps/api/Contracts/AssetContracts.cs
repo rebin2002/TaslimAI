@@ -1,4 +1,5 @@
 using System.ComponentModel.DataAnnotations;
+using Taslim.Api.Assets;
 using Taslim.Api.Domain;
 
 namespace Taslim.Api.Contracts;
@@ -41,10 +42,12 @@ public sealed record AssetRepresentationDto(
     string ContentType,
     long SizeBytes,
     DateTime CreatedAt,
-    // Advertised-download fact: the representation route answers 409 ASSET_FILE_UNAVAILABLE for
-    // any row whose own stored file is not Ready (AssetService.GetDownloadAsync), so the read
-    // model reports availability from the same fact and the list/detail never promise a download
-    // that dead-ends (#1030). Identity and metadata above are retained regardless.
+    // Advertised-download fact: it is computed by AssetService.CanDownloadRepresentation, the very
+    // predicate AssetService.GetDownloadAsync enforces before it answers 409 ASSET_FILE_UNAVAILABLE
+    // (file Ready *and* readable by this member *and*, for documents, representation/file metadata
+    // consistent). The read model therefore never promises a download the route would refuse, on
+    // any of the three branches (#1030 invariant; QA observation A on #1041). Identity and
+    // metadata above are retained regardless, so the format row stays visible.
     bool CanDownload);
 
 public sealed record AssetListDto(
@@ -66,7 +69,7 @@ public sealed record AssetFilter(
 
 public static class AssetContractMapper
 {
-    public static AssetDto ToDto(Asset asset) => new(
+    public static AssetDto ToDto(Asset asset, Guid viewerUserId) => new(
         asset.Id,
         asset.WorkspaceId,
         asset.ProjectId,
@@ -94,7 +97,7 @@ public static class AssetContractMapper
         asset.ArchivedAt,
         asset.Representations.OrderBy(item => item.RepresentationType)
             .Select(item => new AssetRepresentationDto(item.Id, item.RepresentationType, item.FileName, item.ContentType, item.SizeBytes, item.CreatedAt,
-                item.StoredFile is { Status: StoredFileStatus.Ready }))
+                AssetService.CanDownloadRepresentation(asset, item, item.StoredFile, viewerUserId)))
             .ToArray());
 
     private static string? SourceStudioKey(string? jobType) => jobType?.ToLowerInvariant() switch

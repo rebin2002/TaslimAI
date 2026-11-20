@@ -92,7 +92,7 @@ public sealed class AssetRepresentationDownloadAvailabilityTests : IClassFixture
         // Scenario: original pruned + representation Ready. The representation has its own stored
         // file and its own availability fact; the asset-level fallback must not bleed into it.
         var fixture = BuildFixture(original: StoredFileStatus.Deleted, representation: StoredFileStatus.Ready);
-        var dto = Serialize(AssetContractMapper.ToDto(fixture.Asset));
+        var dto = Serialize(AssetContractMapper.ToDto(fixture.Asset, fixture.Asset.CreatedByUserId));
 
         Assert.False(dto.GetProperty("hasFile").GetBoolean());
         Assert.True(dto.GetProperty("representations")[0].GetProperty("canDownload").GetBoolean());
@@ -219,7 +219,10 @@ public sealed class AssetRepresentationDownloadAvailabilityTests : IClassFixture
                     RepresentationType = AssetRepresentationTypes.Pdf,
                     FileName = "report.pdf",
                     ContentType = "application/pdf",
-                    SizeBytes = 8,
+                    // SizeBytes mirrors the representation file below, so this row is genuinely
+                    // downloadable: #1041's follow-up parity gate (AssetService.CanDownloadRepresentation)
+                    // also refuses a document row whose representation/file metadata disagrees.
+                    SizeBytes = 10,
                     CreatedAt = now,
                 },
             },
@@ -228,7 +231,7 @@ public sealed class AssetRepresentationDownloadAvailabilityTests : IClassFixture
     }
 
     private static JsonElement MapRepresentation(Fixture fixture) =>
-        Serialize(AssetContractMapper.ToDto(fixture.Asset)).GetProperty("representations")[0];
+        Serialize(AssetContractMapper.ToDto(fixture.Asset, fixture.Asset.CreatedByUserId)).GetProperty("representations")[0];
 
     private static JsonElement Serialize(AssetDto dto) =>
         JsonSerializer.SerializeToElement(dto, new JsonSerializerOptions(JsonSerializerDefaults.Web));
