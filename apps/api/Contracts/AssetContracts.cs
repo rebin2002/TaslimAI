@@ -40,7 +40,12 @@ public sealed record AssetRepresentationDto(
     string FileName,
     string ContentType,
     long SizeBytes,
-    DateTime CreatedAt);
+    DateTime CreatedAt,
+    // Advertised-download fact: the representation route answers 409 ASSET_FILE_UNAVAILABLE for
+    // any row whose own stored file is not Ready (AssetService.GetDownloadAsync), so the read
+    // model reports availability from the same fact and the list/detail never promise a download
+    // that dead-ends (#1030). Identity and metadata above are retained regardless.
+    bool CanDownload);
 
 public sealed record AssetListDto(
     IReadOnlyList<AssetDto> Items,
@@ -88,7 +93,8 @@ public static class AssetContractMapper
         asset.UpdatedAt,
         asset.ArchivedAt,
         asset.Representations.OrderBy(item => item.RepresentationType)
-            .Select(item => new AssetRepresentationDto(item.Id, item.RepresentationType, item.FileName, item.ContentType, item.SizeBytes, item.CreatedAt))
+            .Select(item => new AssetRepresentationDto(item.Id, item.RepresentationType, item.FileName, item.ContentType, item.SizeBytes, item.CreatedAt,
+                item.StoredFile is { Status: StoredFileStatus.Ready }))
             .ToArray());
 
     private static string? SourceStudioKey(string? jobType) => jobType?.ToLowerInvariant() switch
