@@ -208,13 +208,19 @@ export function buildProductAdPreviewAnnouncement(
  * no hint that the file the user chose earlier is gone. Both facts belong to the
  * control, so each is referenced only while its element is actually rendered -
  * a described-by list that points at a missing id is worse than a shorter one.
+ *
+ * `attached` is the same rule applied to the confirmation a file *is* attached:
+ * the wizard paints the chosen name under the control, but that paragraph is
+ * only a relationship once the control names it, which is what lets a screen
+ * reader answer "which logo did I pick?" without visual confirmation.
  */
 export function productAdFileDescriptionIds(
   id: string,
   field: "photo" | "logo",
-  flags: Readonly<{ noticeKind: ProductAdDraftAssetNoticeKind; error: boolean }> = { noticeKind: "none", error: false },
+  flags: Readonly<{ noticeKind: ProductAdDraftAssetNoticeKind; error: boolean; attached?: boolean }> = { noticeKind: "none", error: false, attached: false },
 ): string {
   const ids = [`${id}-${field}-help`];
+  if (flags.attached) ids.push(`${id}-${field}-file`);
   const noticeRelevant = field === "photo" ? flags.noticeKind !== "none" : flags.noticeKind === "photoLogo";
   if (noticeRelevant) ids.push(`${id}-draft-notice`);
   if (flags.error) ids.push(`${id}-${field}-error`);
@@ -445,13 +451,14 @@ export function ProductAdInputWizard({ locale = "en", principal = null }: Readon
               className={styles.fileInput}
               type="file"
               accept="image/jpeg,image/png,image/webp"
-              aria-describedby={productAdFileDescriptionIds(id, "photo", { noticeKind: pendingAssetKind, error: photoError.length > 0 })}
+              aria-describedby={productAdFileDescriptionIds(id, "photo", { noticeKind: pendingAssetKind, error: photoError.length > 0, attached: productPhoto !== null })}
               aria-invalid={photoError ? true : undefined}
               required
               onChange={updateProductPhoto}
             />
             <small id={`${id}-photo-help`} className={styles.helpText}>{copy.photoHelp}</small>
-            {productPhoto && <small className={styles.fileName} dir="auto">{productPhoto.name}</small>}
+            {/* The name is the only proof of what is attached, so it is also the control's description. */}
+            {productPhoto && <small id={`${id}-photo-file`} className={styles.fileName} dir="auto">{productPhoto.name}</small>}
             {photoError && <small id={`${id}-photo-error`} className={styles.errorText} role="alert">{photoError}</small>}
           </div>
 
@@ -462,12 +469,13 @@ export function ProductAdInputWizard({ locale = "en", principal = null }: Readon
               className={styles.fileInput}
               type="file"
               accept="image/jpeg,image/png,image/webp"
-              aria-describedby={productAdFileDescriptionIds(id, "logo", { noticeKind: pendingAssetKind, error: logoError.length > 0 })}
+              aria-describedby={productAdFileDescriptionIds(id, "logo", { noticeKind: pendingAssetKind, error: logoError.length > 0, attached: brandLogo !== null })}
               aria-invalid={logoError ? true : undefined}
               onChange={updateBrandLogo}
             />
             <small id={`${id}-logo-help`} className={styles.helpText}>{copy.logoHelp}</small>
-            {brandLogo && <small className={styles.fileName} dir="auto">{brandLogo.name}</small>}
+            {/* Optional by contract: the name row is what distinguishes "no logo" from "this logo". */}
+            {brandLogo && <small id={`${id}-logo-file`} className={styles.fileName} dir="auto">{brandLogo.name}</small>}
             {logoError && <small id={`${id}-logo-error`} className={styles.errorText} role="alert">{logoError}</small>}
           </div>
 
