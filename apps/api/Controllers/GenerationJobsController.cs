@@ -34,8 +34,16 @@ public sealed class GenerationJobsController(IGenerationJobService jobs, IOption
     [HttpGet("api/generation/jobs/{id:guid}")]
     public async Task<IActionResult> Get(Guid id, CancellationToken cancellationToken)
     {
-        var job = await jobs.GetAsync(GetUserId(), id, cancellationToken);
-        return job is null ? ApiResults.Error(this, 404, GenerationJobErrorCodes.NotFound, "Job not found.") : Ok(GenerationJobContractMapper.ToDto(job));
+        // The published ResultJson snapshot stays exactly as stored; the live per-representation
+        // download promise rides beside it, so a rendition whose file a retention prune has taken
+        // stops being advertised as downloadable instead of dead-ending in
+        // 409 ASSET_FILE_UNAVAILABLE (issue #1049). Authorization is unchanged: availability is
+        // resolved only after this caller has been allowed to read the job, and a job whose
+        // snapshot advertises no rendition is served byte-for-byte as before.
+        var read = await jobs.GetPublishedAsync(GetUserId(), id, cancellationToken);
+        return read is null
+            ? ApiResults.Error(this, 404, GenerationJobErrorCodes.NotFound, "Job not found.")
+            : Ok(GenerationJobContractMapper.ToDtoWithRepresentationAvailability(read.Job, read.RepresentationAvailability));
     }
 
     [HttpPost("api/generation/jobs/{id:guid}/retry")]
