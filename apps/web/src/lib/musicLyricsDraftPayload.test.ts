@@ -8,6 +8,7 @@ import {
   MUSIC_REFERENCES_MAX_ASSETS,
   buildMusicLyricsDraft,
   splitLyricsDraftLines,
+  safeDraftSectionId,
   type MusicLyricsDraftInput,
 } from "./musicLyricsDraftPayload";
 
@@ -405,6 +406,255 @@ describe("buildMusicLyricsDraft scope guard", () => {
         expect(payload.creationMode).toBe("song_with_vocals");
         expect(payload.vocalPreference).toBe("vocal");
       }
+    }
+  });
+});
+
+describe("buildMusicLyricsDraft issue payloads never echo draft-local identifiers as content", () => {
+  // The module documents `id` as a draft-local identifier that "never leaves the
+  // payload", and the issue array as containing "never ... lyric text, dialect
+  // copy or reference file names". The rest of the Music Studio family builds
+  // identifiers straight out of private user content — `localReferenceAudioId`
+  // is `local:<size>:<file name>` and `localReferenceVideoId` is
+  // `local-video:<size>:<file name>` — and the guided handoff copies a caller's
+  // `id` verbatim, so an unbounded identifier is a content channel into the
+  // failure payload. Only opaque tokens may survive.
+  const rejects = (sections: unknown[]) =>
+    buildMusicLyricsDraft({ sections, vocalLanguage: "ku", lyricsRightsConfirmed: true } as MusicLyricsDraftInput).issues;
+
+  it("drops an identifier shaped like a private reference file name", () => {
+    const issues = rejects([{ id: "local:2048:MySecretStudioTake.mp3", type: "hook", text: "[TEST ONLY] ڕۆژ ئاوا دەبێت" }]);
+    expect(issues).toEqual([{ code: "section_type_invalid", params: { sectionOrdinal: 1 } }]);
+    expect(JSON.stringify(issues)).not.toContain("MySecretStudioTake");
+    expect(JSON.stringify(issues)).not.toContain(".mp3");
+  });
+
+  it("drops an identifier derived from the lyric text itself", () => {
+    const lyric = "[TEST ONLY] ئەڵێم بگەڕێمەوە";
+    const issues = rejects([{ id: lyric, type: "hook", text: lyric }]);
+    expect(issues).toEqual([{ code: "section_type_invalid", params: { sectionOrdinal: 1 } }]);
+    expect(JSON.stringify(issues)).not.toContain("ئەڵێم");
+  });
+
+  it("drops an over-long identifier instead of truncating it into the payload", () => {
+    const longId = `s-${"k".repeat(120)}`;
+    const issues = rejects([{ id: longId, type: "verse", text: "x".repeat(201) }]);
+    expect(issues.map((issue) => issue.code)).toContain("line_too_long");
+    for (const issue of issues) expect(JSON.stringify(issue)).not.toContain(longId);
+  });
+
+  it("drops identifiers carrying control, zero-width or bidi format characters", () => {
+    for (const id of ["s1\u0000s2", "ho\u200BKst", "verse\u202E", "s1\ns2", "s1\t"]) {
+      for (const issue of rejects([{ id, type: "hook", text: "[TEST ONLY] line" }]))
+        expect(JSON.stringify(issue)).not.toContain(id);
+    }
+  });
+
+  it("keeps opaque draft-local tokens so existing rows still address their section", () => {
+    const issues = rejects([
+      { id: "a", type: "verse", text: "x".repeat(201) },
+      { id: "hook1", type: "hook", text: "[TEST ONLY] line" },
+      { id: "section-3", type: "chorus", text: "   \n\t " },
+      { id: "row_7", type: "hook", text: "[TEST ONLY] unsupported type" },
+    ]);
+    expect(issues.map((issue) => issue.sectionId)).toEqual(["a", "hook1", "section-3", "row_7"]);
+  });
+
+  it("mirrors the reference channel, which already refuses to echo the offending value", () => {
+    const outcome = buildMusicLyricsDraft({
+      sections: [{ id: "local:2048:MySecretStudioTake.mp3", type: "hook", text: "[TEST ONLY] line" }],
+      vocalLanguage: "ku",
+      lyricsRightsConfirmed: true,
+      references: [{ mediaType: "audio", assetId: "https://private.example/MySecretStudioTake.mp3" }],
+      referenceRightsConfirmed: true,
+    } as MusicLyricsDraftInput);
+    const serialized = JSON.stringify(outcome.issues);
+    expect(serialized).not.toContain("private.example");
+    expect(serialized).not.toContain("MySecretStudioTake");
+  });
+
+  it("keeps the guarantee in the source, not only in the assertion", () => {
+    expect(source).toMatch(/isSafeDraftSectionId|safeDraftSectionId/);
+    expect(source).toMatch(/export const MUSIC_LYRICS_MAX_SECTION_ID_CHARACTERS = 64/);
+  });
+});
+
+describe("buildMusicLyricsDraft Arabic and Sorani synthetic rejection payloads stay content-free", () => {
+  // The rejection payload's privacy claim is script-independent, but the corpus
+  // that exercises it was Latin-only plus one incidental Sorani line. Arabic and
+  // Sorani are the two RTL contract languages (#708) and the realistic private
+  // content in this product's lyric drafts, so an identifier formed from them —
+  // with diacritics, Sorani-only letters or bidi embeds — needs its own lock:
+  // every one of these words must reach the payload as zero bytes. All material
+  // here is synthetic test copy; it quotes no user data.
+  const arabicLine = "[TEST ONLY] لَا تُعِدْ كِتَابَةَ هَذَا السَّطْر";
+  const soraniLine = "[TEST ONLY] ئەم دێڕە تەنها بۆ تاقیکردنەوەیە";
+  const soraniGlyphLine = "[TEST ONLY] ڕەڵاڤۆژێ کێشچەرەپگ"; // ڕ ڵ ۆ ژ ێ ە چ پ گ
+  const arabicDialectCopy = "عِرَاقِي";
+  const arabicFileName = "أغنية_السر";
+  const soraniFileName = "نهێنی_ستۆدیۆ";
+
+  const rejects = (input: Partial<MusicLyricsDraftInput>) =>
+    buildMusicLyricsDraft({ lyricsRightsConfirmed: true, vocalLanguage: "ku", ...input } as MusicLyricsDraftInput)
+      .issues;
+
+  const containsNonAscii = (value: string) => Array.from(value).some((ch) => ch.codePointAt(0)! > 0x7f);
+
+  it("drops an Arabic lyric line used as the section identifier", () => {
+    const issues = rejects({ sections: [{ id: arabicLine, type: "hook", text: soraniLine }] });
+    expect(issues.length).toBeGreaterThan(0);
+    for (const issue of issues) {
+      expect(issue.sectionId).toBeUndefined();
+      expect(JSON.stringify(issue)).not.toContain("تُعِدْ");
+    }
+  });
+
+  it("drops a Sorani identifier built from the script's own letters", () => {
+    const issues = rejects({
+      sections: [
+        { id: soraniGlyphLine.replace("[TEST ONLY] ", ""), type: "chorus", text: soraniGlyphLine },
+        { id: "بەیانی_نەهێشتن", type: "bridge", text: "   " },
+      ],
+    });
+    expect(issues.map((issue) => issue.code)).toEqual(["section_empty"]);
+    for (const issue of issues) expect(JSON.stringify(issue)).not.toContain("نەهێشتن");
+  });
+
+  it("drops identifiers shaped like private Arabic or Sorani reference file names", () => {
+    const issues = rejects({
+      sections: [
+        { id: `local:4096:${arabicFileName}.mp3`, type: "hook", text: arabicLine },
+        { id: `local-video:8192:${soraniFileName}.mp4`, type: "hook", text: soraniLine },
+      ],
+    });
+    const serialized = JSON.stringify(issues);
+    expect(issues.map((issue) => issue.code)).toEqual(["section_type_invalid", "section_type_invalid"]);
+    expect(serialized).not.toContain(arabicFileName);
+    expect(serialized).not.toContain(soraniFileName);
+    expect(serialized).not.toContain(".mp3");
+    expect(serialized).not.toContain(".mp4");
+  });
+
+  it("drops identifiers carrying bidi embeds or overrides around Arabic words", () => {
+    for (const id of [`\u202b${arabicFileName}\u202c`, `\u202eڕۆژ\u202c`, `s1\u200f\u2026${soraniFileName}`]) {
+      for (const issue of rejects({ sections: [{ id, type: "hook", text: "x" }] }))
+        expect(JSON.stringify(issue)).not.toContain(id.trim());
+    }
+  });
+
+  it("reports dialect failures without the dialect copy itself", () => {
+    const unknown = rejects({ vocalLanguage: "ar", dialect: arabicDialectCopy, sections: [{ id: "s1", type: "verse", text: "x" }] });
+    expect(unknown.map((issue) => issue.code)).toContain("dialect_unknown");
+    expect(JSON.stringify(unknown)).not.toContain(arabicDialectCopy);
+
+    // Arabic has no default dialect by design; the requirement is reported as a
+    // code, never as Arabic-script prose.
+    const required = rejects({ vocalLanguage: "ar", sections: [{ id: "s1", type: "verse", text: "x" }] });
+    expect(required.map((issue) => issue.code)).toContain("dialect_required");
+    expect(JSON.stringify(required)).not.toMatch(/[؀-ۿ]/);
+  });
+
+  it("keeps every issue record pure ASCII across a full Arabic/Sorani violation sweep", () => {
+    // Structural lock, independent of any single word list: an issue may carry
+    // codes, ordinals, numeric limits and opaque ASCII tokens — nothing else.
+    // Non-ASCII inside `params` values is excluded by codepoint, so no lyric,
+    // dialect or file-name fragment in any script can ride along.
+    const sections = [
+      { id: arabicLine, type: "verse", text: "x".repeat(201) },
+      { id: soraniLine, type: "chorus", text: Array.from({ length: 31 }, (_, i) => `l${i} ${soraniGlyphLine}`).join("\n") },
+      { id: "local:4096:" + arabicFileName + ".mp3", type: "hook", text: soraniLine },
+      { id: "بەیانی", type: "bridge", text: arabicLine },
+    ];
+    const issues = [
+      ...rejects({ sections, vocalLanguage: "ckb" }),
+      ...rejects({ sections, vocalLanguage: "ar", dialect: arabicDialectCopy }),
+      ...rejects({ sections, vocalLanguage: "nope" }),
+    ];
+    expect(issues.length).toBeGreaterThan(8);
+    for (const issue of issues) expect(containsNonAscii(JSON.stringify(issue))).toBe(false);
+    for (const word of ["تُعِدْ", "دێڕە", "ڕەڵاڤۆژێ", "السر", "ستۆدیۆ", arabicDialectCopy])
+      expect(JSON.stringify(issues)).not.toContain(word);
+  });
+
+  it("leaves legitimate Arabic/Sorani payload content untouched — the filter guards identifiers, not lyrics", () => {
+    const arabic = buildMusicLyricsDraft({
+      sections: [{ id: "s1", type: "verse", text: arabicLine }],
+      vocalLanguage: "ar",
+      dialect: "iraqi_baghdadi",
+      lyricsRightsConfirmed: true,
+    } as MusicLyricsDraftInput);
+    expect(arabic.issues).toEqual([]);
+    expect(arabic.submittable).toBe(true);
+    expect(arabic.payload!.lyrics[0].lines).toEqual([arabicLine]);
+    expect(arabic.payload!.lyricsLanguage).toBe("ar");
+    expect(arabic.payload!.lyricsDialect).toBe("iraqi_baghdadi");
+
+    const sorani = buildMusicLyricsDraft({
+      sections: [{ id: "s1", type: "verse", text: soraniGlyphLine }],
+      vocalLanguage: "ckb",
+      lyricsRightsConfirmed: true,
+    } as MusicLyricsDraftInput);
+    expect(sorani.issues).toEqual([]);
+    expect(sorani.payload!.lyricsLanguage).toBe("ku");
+    expect(sorani.payload!.lyricsDialect).toBe("sorani");
+    expect(sorani.payload!.lyrics[0].lines).toEqual([soraniGlyphLine]);
+  });
+});
+
+describe("safeDraftSectionId whitespace normalisation is a normaliser, not a dropper", () => {
+  // `String.prototype.trim()` also strips U+00A0 and the other White_Space
+  // codepoints, so a padded token normalises instead of being dropped. Padded
+  // whitespace is not content, and the behaviour is deliberate; this lock exists
+  // so a future reader does not "fix" the normaliser into a dropper and silently
+  // break every padded row label. All input is synthetic.
+  it("keeps a token padded with ordinary and no-break spaces", () => {
+    expect(safeDraftSectionId("  s1  ")).toBe("s1");
+    expect(safeDraftSectionId("\u00a0s1\u00a0")).toBe("s1");
+    expect(safeDraftSectionId("\u2007s_1\u202f")).toBe("s_1");
+  });
+
+  it("still drops a padded identifier that carries content after trimming", () => {
+    expect(safeDraftSectionId("\u00a0local:4096:نهێنی.wav\u00a0")).toBeUndefined();
+    expect(safeDraftSectionId(" \u00a0يا قلبُ الوطنِ \u00a0")).toBeUndefined();
+    expect(safeDraftSectionId(`\u00a0${"k".repeat(65)}`)).toBeUndefined();
+  });
+
+  it("treats whitespace-only and non-string input as absent, never as an empty echo", () => {
+    for (const value of ["", "   ", "\u00a0\u2003", "\t\n"]) expect(safeDraftSectionId(value)).toBeUndefined();
+    for (const value of [undefined, null, 42, {}, [], true]) expect(safeDraftSectionId(value)).toBeUndefined();
+  });
+});
+
+describe("safeDraftSectionId is exported as the shared primitive for every issue producer", () => {
+  // `sectionId` is a field on the issue type, so any present or future producer
+  // of issue records inherits the same obligation as this mapper. The one known
+  // producer that does not route through it today is the preflight panel's own
+  // `lyrics_invisible_only` gate issue (owned by open PR #847, whose file this
+  // lane deliberately does not edit) — see docs/MUSIC_STUDIO_LOG_PRIVACY.md.
+  // These cases pin the exact shapes that channel still echoes, so the shared
+  // rule is already correct and testable for whoever fixes it, and the export is
+  // locked so it cannot be un-exported back into a private helper.
+  it("exposes the primitive on the module's public surface", () => {
+    expect(typeof safeDraftSectionId).toBe("function");
+    expect(source).toMatch(/export function safeDraftSectionId/);
+    expect(source).toMatch(/The claim is deliberately scoped to this module/);
+  });
+
+  it("rejects every identifier shape the unfiltered gate channel leaks", () => {
+    const leakedShapes = [
+      "local:4096:گۆرانی_سۆران_کۆتایی.wav", // Sorani reference file name
+      "local-video:8192:أغنية_السر.mp4", // Arabic reference file name
+      "https://cdn.invalid/signed/PRIVATE-TOKEN?t=1", // signed asset URL
+      "يا قلبُ الوطنِ", // Arabic lyric line used as a row id
+      "ڕەنگێکی_نهێنی", // Sorani letters only
+      "verse\u202e", // bidi override
+    ];
+    for (const shape of leakedShapes) expect(safeDraftSectionId(shape)).toBeUndefined();
+  });
+
+  it("accepts the opaque ids the panel already uses, so routing the gate costs no addressability", () => {
+    for (const opaque of ["s1", "a", "hook1", "blank", "section-3", "row_7", "S12_x-z"]) {
+      expect(safeDraftSectionId(opaque)).toBe(opaque);
     }
   });
 });
