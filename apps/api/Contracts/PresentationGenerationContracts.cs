@@ -206,7 +206,13 @@ public static class PresentationDraftValidator
                 throw new PresentationOutputValidationException();
             if (block.Text?.Length > options.MaxBlockCharacters || block.Label?.Length > options.MaxBlockCharacters || block.Value?.Length > options.MaxBlockCharacters)
                 throw new PresentationOutputValidationException();
-            if (block.Items.Count > options.MaxItemsPerBlock || block.Columns.Count > 4 || block.Rows.Count > options.MaxRowsPerBlock || block.Metrics.Count > 6)
+            // Columns and metrics have no options-level knob: the renderer's own capacity is the
+            // only bound. Admitting more than PresentationRendererLimits can draw lets a
+            // structurally valid draft reach Render() and fail there instead, so a paid provider
+            // round-trip is reported as PRESENTATION_RENDER_FAILED rather than
+            // PRESENTATION_OUTPUT_INVALID. Rows and slide-level blocks stay on the option
+            // because PresentationGenerationOptionsValidator already clamps them to the renderer.
+            if (block.Items.Count > options.MaxItemsPerBlock || block.Columns.Count > PresentationRendererLimits.MaxColumnsPerBlock || block.Rows.Count > options.MaxRowsPerBlock || block.Metrics.Count > PresentationRendererLimits.MaxMetricsPerBlock)
                 throw new PresentationOutputValidationException();
             if (block.Items.Any(item => string.IsNullOrWhiteSpace(item) || item.Length > options.MaxBlockCharacters)
                 || block.Columns.Any(column => column is null
