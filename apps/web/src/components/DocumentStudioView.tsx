@@ -52,10 +52,6 @@ import {
   type DocumentStudioListLoad,
   type DocumentStudioListStatus,
 } from "@/lib/documentStudioListState";
-import {
-  filterStudioDownloadableRepresentations,
-  readStudioRepresentationDownloadability,
-} from "@/lib/studioRepresentationAvailability";
 
 const extensions = [".pdf", ".docx", ".txt", ".md", ".csv", ".xlsx"];
 type DocumentType = "auto" | "report" | "proposal" | "business_letter" | "company_profile" | "meeting_minutes" | "article" | "general";
@@ -503,11 +499,6 @@ export function DocumentStudioView() {
   }
 
   const result = parseDocumentJobResult(current);
-  // #1049: the published ResultJson snapshot is immutable, so a rendition can be pruned
-  // after completion while the snapshot still advertises it. Honor the live per-representation
-  // facts the API half of #1117 attaches as the optional `representationDownloads` companion
-  // field; when absent (older read models, list payloads) every advertised button stays put.
-  const representationDownloadability = readStudioRepresentationDownloadability(current);
   const presentation = documentPresentationState(current, result);
   const readyFiles = files.filter((file) => isDocumentSourceReady(file));
   const sourcesStatus = documentStudioListStatus(sourcesLoad, readyFiles.length);
@@ -584,7 +575,7 @@ export function DocumentStudioView() {
         <div className="document-inspector-header"><div className="document-inspector-icon"><FileText size={17} /></div><div><p className="document-card-kicker">{t("document.readingView")}</p><h2 id="document-inspector-title">{t("document.documentLabel")}</h2></div></div>
         <div className="document-inspector-meta"><div><span>{t("document.contextLabel")}</span><strong>{projects.find((project) => project.id === current.projectId)?.name || t("document.noProject")}</strong></div><div><span>{t("document.type")}</span><strong>{result.documentType || t("document.typeGeneral")}</strong></div><div><span>{t("document.sources")}</span><strong>{selected.length ? `${selected.length}/5` : t("document.noSources")}</strong></div></div>
         {downloadError && <div className="form-error" role="alert"><XCircle size={15} /> {downloadError}</div>}
-        <div className="document-action-stack"><button className="document-action-button is-primary" type="button" onClick={() => void copyDocument()}><Clipboard size={16} /> {copyState === "copied" ? t("document.copied") : t("document.copy")}</button>{filterStudioDownloadableRepresentations(result.representations, representationDownloadability).map((representation) => <button className="document-action-button" key={representation.id} type="button" onClick={() => void downloadRepresentation(representation.id, representation.fileName)} disabled={working} aria-busy={working} aria-label={`${t("document.downloadLabel")} ${representation.type.toUpperCase()}`}><Download size={16} /> {representation.type.toUpperCase()}</button>)}<Link className="document-action-button" href={`/assets?search=${encodeURIComponent(resultTitle)}`}><FolderOpen size={16} /> {t("document.openAsset")}</Link><button className="document-action-button" type="button" onClick={refineDocument}><WandSparkles size={16} /> {t("document.refine")}</button><button className="document-action-button" type="button" onClick={createAnother}><RefreshCw size={16} /> {t("document.regenerate")}</button></div>
+        <div className="document-action-stack"><button className="document-action-button is-primary" type="button" onClick={() => void copyDocument()}><Clipboard size={16} /> {copyState === "copied" ? t("document.copied") : t("document.copy")}</button>{result.representations?.map((representation) => <button className="document-action-button" key={representation.id} type="button" onClick={() => void downloadRepresentation(representation.id, representation.fileName)} disabled={working} aria-busy={working} aria-label={`${t("document.downloadLabel")} ${representation.type.toUpperCase()}`}><Download size={16} /> {representation.type.toUpperCase()}</button>)}<Link className="document-action-button" href={`/assets?search=${encodeURIComponent(resultTitle)}`}><FolderOpen size={16} /> {t("document.openAsset")}</Link><button className="document-action-button" type="button" onClick={refineDocument}><WandSparkles size={16} /> {t("document.refine")}</button><button className="document-action-button" type="button" onClick={createAnother}><RefreshCw size={16} /> {t("document.regenerate")}</button></div>
         <p className="sr-only" role="status" aria-live="polite" aria-atomic="true">{copyState === "copied" ? t("document.copied") : copyState === "error" ? t("document.copyError") : ""}</p>
         <div className="document-inspector-footer"><button type="button" className="document-back-button" onClick={refineDocument}><ArrowLeft size={14} /> {t("document.backToBrief")}</button><span>{t("document.savedToAssets")}</span></div>
       </aside>
