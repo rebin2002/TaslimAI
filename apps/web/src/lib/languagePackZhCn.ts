@@ -8,13 +8,8 @@ import type { LanguagePackResource } from "./languagePackTypes";
  * authoritative key universe for the shared `t()` boundary. The registry verifies
  * these figures at install time, so the pack can never claim more translated copy
  * than it actually ships. Movie Studio is the widest surface and only partly
- * covered: `movieBody`, `movieModule`, `movieShell`, `movieAudio`, `movieTeam`,
- * `movieExports` and `movieQc` are still served entirely by the English fallback.
- *
- * `reviewFlags` is the only ledger for an all-fallback namespace. The registry
- * measures coverage per namespace and reports a zero-translated row as drift, so
- * an untranslated module never appears in `coverage`; a flag is the sole place it
- * can be disclosed, and an omitted one silently understates that surface.
+ * covered: `movieModule`, `movieShell`, `movieAudio`, `movieTeam`, `movieExports`
+ * and `movieQc` are still served entirely by the English fallback.
  */
 export const simplifiedChineseLanguagePack: LanguagePackResource = {
   manifest: {
@@ -36,10 +31,6 @@ export const simplifiedChineseLanguagePack: LanguagePackResource = {
       { code: "priority-module-draft", scope: "module", module: "account" },
       { code: "priority-module-draft", scope: "module", module: "movie", note: "36 of 151 keys; brief, workspace and guide copy only." },
       { code: "priority-module-draft", scope: "module", module: "movieDeep", note: "10 of 92 keys; room sheet and take-review copy only." },
-      // The widest fully untranslated Movie surface: the guided-step static
-      // guidance. Classified rather than translated, so the disclosure names the
-      // English fallback instead of implying the copy had been reviewed.
-      { code: "module-untranslated", scope: "module", module: "movieBody", note: "0 of 120 keys; served by the English fallback." },
       { code: "module-untranslated", scope: "module", module: "movieModule", note: "0 of 56 keys; served by the English fallback." },
       { code: "module-untranslated", scope: "module", module: "movieShell", note: "0 of 14 keys; served by the English fallback." },
       { code: "module-untranslated", scope: "module", module: "movieAudio", note: "0 of 10 keys; served by the English fallback." },
