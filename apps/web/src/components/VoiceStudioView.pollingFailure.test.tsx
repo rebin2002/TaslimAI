@@ -63,6 +63,35 @@ describe("Voice Studio in-flight polling failure state", () => {
     expect(generatingBranch).toContain("VoiceStudioPollingNoticeView");
   });
 
+  it("feeds the polling notice the status-read slot, not the action slot", () => {
+    // One string held four claims, so a refused cancel was announced with the
+    // "could not refresh" copy: an alert that reads as true about the wrong
+    // request. The two claims now live in two slots and render as two views.
+    expect(generatingBranch).toContain("{pollError && <VoiceStudioPollingNoticeView t={t} />}");
+    expect(generatingBranch).toContain("{error && <VoiceStudioActionNoticeView message={error} />}");
+    expect(voiceSource).toContain('const [pollError, setPollError] = useState("");');
+    expect(generatingBranch).not.toContain("{error && <VoiceStudioPollingNoticeView");
+  });
+
+  it("keeps a refused cancel out of the polling copy", () => {
+    // The cancel handler owns its own localized claim. It no longer forwards the
+    // rejection's English text either, because this message now renders inside
+    // the in-flight panel as well as the compose form.
+    const cancelArm = sliceBetween("await api.cancelGenerationJob(current.id);", "function createAnother()");
+    expect(cancelArm).toContain('setError(t("voice.cancelError"))');
+    expect(cancelArm).not.toContain("caught.message");
+    expect(cancelArm).not.toContain('t("voice.pollError")');
+  });
+
+  it("clears only its own notice on a good read", () => {
+    // A successful status read says nothing about whether an earlier cancel was
+    // accepted, so it must not withdraw that claim - and it must not have to
+    // guess which claim it holds by comparing translated strings.
+    expect(pollEffect).toContain('setPollError("")');
+    expect(pollEffect).not.toContain("setError(");
+    expect(pollEffect).not.toContain("=== t(");
+  });
+
   it("announces the failure without discarding the progress status region", () => {
     // The polite progress live region stays correct for status changes; the
     // alert is the assertive layer that must not be swallowed by it.

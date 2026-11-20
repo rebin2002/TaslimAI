@@ -398,7 +398,69 @@ describe("Music Studio in-flight status poll failure", () => {
     expect(branch).toContain("{t(`jobs.status${current.status}`)}");
     expect(branch).toContain('aria-live="polite"');
     expect(branch.indexOf('aria-live="polite"')).toBeLessThan(branch.indexOf("MusicStudioPollingNoticeView"));
-    expect(branch).toContain("{error && <MusicStudioPollingNoticeView message={error} />}");
+    // The polling notice is fed the status-read slot only. `error` is the
+    // member-action slot and renders through its own component, so a refused
+    // cancel can never be announced as a failed status read.
+    expect(branch).toContain("{pollError && <MusicStudioPollingNoticeView message={pollError} />}");
+    expect(branch).toContain("{error && <MusicStudioActionNoticeView message={error} />}");
+    expect(branch).not.toContain("<MusicStudioPollingNoticeView message={error}");
+  });
+
+  it("names a refused cancel as a cancel, never as a polling failure", async () => {
+    // The two claims share one panel and one visual shape. Before the slots were
+    // split they shared one string too, so a cancel the server refused was
+    // announced with the polling copy - a false statement about a different
+    // request, in every locale.
+    await mountWithInFlightJob();
+
+    h.cancelGenerationJob.mockRejectedValue(new Error(rawProviderMessage));
+    const cancel = findByClass(panel(), "music-action-button").find((node) => node.nodeName === "BUTTON");
+    if (!cancel) throw new Error("the cancel action is not mounted");
+    await act(async () => {
+      cancel.dispatchEvent({ type: "click", bubbles: true });
+      await drain();
+    });
+
+    const alerts = findByRole(panel(), "alert");
+    expect(alerts, "one claim, one alert").toHaveLength(1);
+    expect(alerts[0].textContent).toContain(translate("en", "music.cancelError"));
+    expect(alerts[0].textContent, "a failed cancel must not borrow the poll copy")
+      .not.toContain(translate("en", "music.pollError"));
+    expect(panel().textContent).not.toContain(rawProviderMessage);
+  });
+
+  it("holds a polling failure and a refused cancel as two claims", async () => {
+    // Both can be true at once: the read is failing and the cancel was refused.
+    // One slot could only ever spell one of them, and it silently replaced the
+    // other; two slots say both.
+    h.getGenerationJob.mockRejectedValueOnce(new Error(rawProviderMessage));
+    await mountWithInFlightJob();
+    await runQueuedTimers();
+    expect(findByRole(panel(), "alert")).toHaveLength(1);
+
+    h.cancelGenerationJob.mockRejectedValue(new Error(rawProviderMessage));
+    const cancel = findByClass(panel(), "music-action-button").find((node) => node.nodeName === "BUTTON");
+    if (!cancel) throw new Error("the cancel action is not mounted");
+    await act(async () => {
+      cancel.dispatchEvent({ type: "click", bubbles: true });
+      await drain();
+    });
+
+    const text = panel().textContent ?? "";
+    expect(text).toContain(translate("en", "music.cancelError"));
+    expect(text, "the still-failing read keeps its own claim on screen").toContain(translate("en", "music.pollError"));
+    expect(findByRole(panel(), "alert")).toHaveLength(2);
+  });
+
+  it("withdraws only its own notice from a good read", () => {
+    // The status read must not reach into the member-action slot, and the
+    // dismissal must not be a string comparison against translated copy: two
+    // locales that happen to share a wording would clear the wrong claim.
+    const effect = pollingEffect(musicSource);
+    expect(effect).toContain("setPollError(\"\")");
+    expect(effect).not.toContain("setError(");
+    expect(effect).not.toContain("=== t(");
+    expect(musicSource).toContain("const [pollError, setPollError] = useState(\"\");");
   });
 
   it("backs off within the studio cadence", () => {

@@ -56,9 +56,10 @@ export function nextMusicPollDelay(retryAttempt = 0): number {
  * own message, which is English and server-facing (`ApiError.message` is
  * "Something went wrong." for any unlabeled failure, src/lib/api.ts).
  *
- * `message` is the localized failure the panel is holding - a failed poll and a
- * failed cancel are the same shape but not the same claim, so the notice repeats
- * the studio's copy rather than relabelling one as the other.
+ * It is fed `pollError`, the status-read slot, and nothing else. A refused
+ * cancel is a claim about a different request, so it renders through
+ * `MusicStudioActionNoticeView` with its own copy rather than being relabelled
+ * as a polling failure.
  */
 export function MusicStudioPollingNoticeView({ message }: { message: string }) {
   return (
@@ -68,6 +69,22 @@ export function MusicStudioPollingNoticeView({ message }: { message: string }) {
     </div>
   );
 }
+
+/**
+ * A member-initiated action failed while the job was still in flight - today a
+ * refused cancel. Rendered identically, because both are one localized line
+ * above the action row, but a separate component fed by a separate slot so the
+ * two claims cannot be conflated by state or withdrawn by a later status read.
+ */
+export function MusicStudioActionNoticeView({ message }: { message: string }) {
+  return (
+    <div className="music-inline-error" role="alert" aria-live="assertive">
+      <XCircle size={15} aria-hidden="true" />
+      <span>{message}</span>
+    </div>
+  );
+}
+
 
 
 type AudioPlayerProps = {
@@ -309,6 +326,15 @@ function WorkspaceMusicStudio({ workspace }: { workspace: ReturnType<typeof useA
   // dependency unchanged, the effect never re-runs and the studio stops
   // updating while still announcing an in-flight generation.
   const [pollRetry, setPollRetry] = useState(0);
+  // The status-read failure is its own slot, separate from `error`. One string
+  // cannot hold two claims: `error` belongs to member actions (submit, cancel)
+  // and is replaced only by the next action, while `pollError` belongs to the
+  // background read and is withdrawn by the next good read. Sharing the slot
+  // made a refused cancel announce itself as a polling failure, and forced the
+  // good-read cleanup to guess which claim it held by comparing translated copy
+  // - a check that silently stops working wherever two locales happen to share
+  // a string.
+  const [pollError, setPollError] = useState("");
   const [referenceAudio, setReferenceAudio] = useState<ReferenceAudioState>({ candidate: null, previewObjectUrl: null, rejectedReasonKey: null });
   const [referenceAudioAssets, setReferenceAudioAssets] = useState<Asset[]>([]);
   const [loadingReferenceLibrary, setLoadingReferenceLibrary] = useState(true);
@@ -377,11 +403,9 @@ function WorkspaceMusicStudio({ workspace }: { workspace: ReturnType<typeof useA
         if (active) {
           setCurrent(next);
           setPollRetry(0);
-          // Only the stale polling notice is dismissed by a good read. A failed
-          // cancel stays on screen, because this read says nothing about whether
-          // the cancel request itself worked, and clearing it would silently
-          // withdraw a claim the member still needs.
-          setError((previous) => (previous === t("music.pollError") ? "" : previous));
+          // A good read says nothing about whether an earlier cancel was
+          // accepted, so it dismisses only its own notice.
+          setPollError("");
         }
       } catch {
         if (active) {
@@ -390,7 +414,7 @@ function WorkspaceMusicStudio({ workspace }: { workspace: ReturnType<typeof useA
           // visible and say only what the studio can claim, in the member's own
           // locale. The rejection's own text is deliberately not surfaced,
           // because ApiError carries the server's English message.
-          setError(t("music.pollError"));
+          setPollError(t("music.pollError"));
         }
       }
     }, nextMusicPollDelay(pollRetry));
@@ -455,6 +479,7 @@ function WorkspaceMusicStudio({ workspace }: { workspace: ReturnType<typeof useA
     // A fresh job starts on the base cadence: a backoff accumulated by the
     // previous job must not delay the first read of this one.
     setPollRetry(0);
+    setPollError("");
     const input: MusicGenerationInput = {
       workspaceId,
       projectId: projectId || null,
@@ -494,6 +519,7 @@ function WorkspaceMusicStudio({ workspace }: { workspace: ReturnType<typeof useA
   function createAnother() {
     setCurrent(null);
     setError("");
+    setPollError("");
   }
 
   const result = useMemo(() => parseMusicJobResult(current), [current]);
@@ -538,7 +564,7 @@ function WorkspaceMusicStudio({ workspace }: { workspace: ReturnType<typeof useA
       <div className="music-result-heading"><div><p className="music-overline">{t("music.resultEyebrow")}</p><h2>{t("music.resultTitle")}</h2></div><span className="music-success-badge"><CheckCircle2 size={15} /> {t("music.savedToAssets")}</span></div>
       <div className="music-result-hero"><MusicArtwork large /><div className="music-result-copy"><h3>{result.title ?? current.title ?? t("music.generatedTitle")}</h3><p>{result.format?.toUpperCase() ?? "AUDIO"}{result.durationSeconds ? ` · ${t("music.durationValue", { seconds: String(result.durationSeconds) })}` : ""}</p><AudioPlayer assetId={result.assetId} title={result.title ?? t("music.generatedTitle")} durationSeconds={result.durationSeconds} /></div></div>
       <div className="music-result-actions"><MediaJobArtifactDownload href={api.assetFileUrl(result.assetId)} state={resultArtifactState} className="music-action-button is-primary" label={t("music.download")} unavailableLabel={t("assets.fileUnavailable")} />{current.projectId && <Link className="music-action-button" href={`/projects/${current.projectId}`}><FolderOpen size={15} /> {t("music.openProject")}</Link>}<Link className="music-action-button" href={`/assets?search=${encodeURIComponent(result.title ?? t("music.generatedTitle"))}`}><Music2 size={15} /> {t("music.openAssets")}</Link><button className="music-action-button is-quiet" type="button" onClick={createAnother}><RefreshCw size={15} /> {t("music.createAnother")}</button></div>
-    </section> : isFailure ? <section className="music-state-panel is-failure" aria-live="polite"><div className="music-state-icon"><AlertCircle size={24} /></div><p className="music-overline">{isMusicProviderUnavailable(current) ? t("music.providerStatus") : t("music.progressEyebrow")}</p><h2>{failureCopy.title}</h2><p>{failureCopy.text}</p><button className="music-action-button is-primary" type="button" onClick={createAnother}><RefreshCw size={15} /> {t("music.retry")}</button></section> : <section className="music-state-panel" aria-live="polite"><div className="music-state-icon is-active"><LoaderCircle size={24} className="music-spin" aria-hidden="true" /></div><p className="music-overline">{t("music.progressEyebrow")}</p><h2>{t(`jobs.status${current.status}`)}</h2><p>{t("music.progressText")}</p><div className="music-progress-meta"><span>{t("jobs.progress")}</span><strong>{current.progressPercent}%</strong></div><AccessibleProgressBar className="music-progress-track" label={t("jobs.progress")} value={current.progressPercent} />{error && <MusicStudioPollingNoticeView message={error} />}{canCancelMusicJob(current) && <button className="music-action-button" type="button" onClick={() => void cancel()} disabled={working}><XCircle size={15} /> {t("music.cancel")}</button>}</section>}
+    </section> : isFailure ? <section className="music-state-panel is-failure" aria-live="polite"><div className="music-state-icon"><AlertCircle size={24} /></div><p className="music-overline">{isMusicProviderUnavailable(current) ? t("music.providerStatus") : t("music.progressEyebrow")}</p><h2>{failureCopy.title}</h2><p>{failureCopy.text}</p><button className="music-action-button is-primary" type="button" onClick={createAnother}><RefreshCw size={15} /> {t("music.retry")}</button></section> : <section className="music-state-panel" aria-live="polite"><div className="music-state-icon is-active"><LoaderCircle size={24} className="music-spin" aria-hidden="true" /></div><p className="music-overline">{t("music.progressEyebrow")}</p><h2>{t(`jobs.status${current.status}`)}</h2><p>{t("music.progressText")}</p><div className="music-progress-meta"><span>{t("jobs.progress")}</span><strong>{current.progressPercent}%</strong></div><AccessibleProgressBar className="music-progress-track" label={t("jobs.progress")} value={current.progressPercent} />{pollError && <MusicStudioPollingNoticeView message={pollError} />}{error && <MusicStudioActionNoticeView message={error} />}{canCancelMusicJob(current) && <button className="music-action-button" type="button" onClick={() => void cancel()} disabled={working}><XCircle size={15} /> {t("music.cancel")}</button>}</section>}
 
     <RecentMusicLibrary assets={recentMusic} loading={loadingLibrary} error={libraryError} locale={locale} t={t} />
     <p className="music-studio-footnote">{t("music.safetyNote")}</p>
