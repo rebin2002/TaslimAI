@@ -99,9 +99,16 @@ public sealed class GeneratedMediaSecurityTests
     [Theory]
     [InlineData("https://127.0.0.1/media.mp3")]
     [InlineData("https://10.0.0.8/media.mp3")]
+    [InlineData("https://100.64.0.1/media.mp3")]
     [InlineData("https://169.254.169.254/latest/meta-data/")]
+    [InlineData("https://192.0.0.1/media.mp3")]
+    [InlineData("https://192.0.2.1/media.mp3")]
+    [InlineData("https://198.18.0.1/media.mp3")]
+    [InlineData("https://198.51.100.1/media.mp3")]
+    [InlineData("https://203.0.113.1/media.mp3")]
     [InlineData("https://[::1]/media.mp3")]
-    public async Task Provider_url_policy_blocks_private_and_metadata_targets(string value)
+    [InlineData("https://[2001:db8::1]/media.mp3")]
+    public async Task Provider_url_policy_blocks_private_metadata_and_reserved_targets(string value)
     {
         var policy = new ProviderUrlPolicy();
 
