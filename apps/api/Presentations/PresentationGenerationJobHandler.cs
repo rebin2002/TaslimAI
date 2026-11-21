@@ -82,18 +82,10 @@ public sealed class PresentationGenerationJobHandler(
         }
         catch (PresentationGenerationStageException)
         {
-            // A user cancellation is durable but observed asynchronously: it can land
-            // while the late provider response is still being parsed or validated,
-            // not only at the instant the response arrives. This exception shape is
-            // the one the worker harvests provider spend from, so surfacing it for a
-            // cancelled attempt would finalize a cancellation as a usage-bearing
-            // failure. Re-assert cancellation first; the sites below do the same.
-            cancellationToken.ThrowIfCancellationRequested();
             throw;
         }
         catch (Exception exception) when (exception is not OperationCanceledException)
         {
-            cancellationToken.ThrowIfCancellationRequested();
             var code = exception switch
             {
                 AiProviderException providerException => PresentationGenerationFailureCodes.ForProvider(providerException),
@@ -108,7 +100,6 @@ public sealed class PresentationGenerationJobHandler(
         }
         catch (PresentationOutputValidationException exception)
         {
-            cancellationToken.ThrowIfCancellationRequested();
             throw new PresentationGenerationStageException(PresentationGenerationStages.DraftValidation, GenerationJobErrorCodes.PresentationOutputInvalid, "The presentation draft did not satisfy the required structure.", generated.Usage, exception);
         }
         progress.Report(65);
@@ -120,7 +111,6 @@ public sealed class PresentationGenerationJobHandler(
         }
         catch (Exception exception) when (exception is not OperationCanceledException)
         {
-            cancellationToken.ThrowIfCancellationRequested();
             throw new PresentationGenerationStageException(PresentationGenerationStages.PptxRender, GenerationJobErrorCodes.PresentationRenderFailed, "The presentation could not be rendered.", generated.Usage, exception);
         }
         try
@@ -131,7 +121,6 @@ public sealed class PresentationGenerationJobHandler(
         }
         catch (PresentationOutputIntegrityException exception)
         {
-            cancellationToken.ThrowIfCancellationRequested();
             throw new PresentationGenerationStageException(PresentationGenerationStages.PptxRender, GenerationJobErrorCodes.PresentationRenderFailed, "The presentation renderer returned an invalid file.", generated.Usage, exception);
         }
 
