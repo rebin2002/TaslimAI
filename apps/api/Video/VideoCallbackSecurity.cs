@@ -32,7 +32,10 @@ public static class VideoCallbackSecurity
         DateTimeOffset signedAt;
         try { signedAt = DateTimeOffset.FromUnixTimeSeconds(unixSeconds); }
         catch (ArgumentOutOfRangeException) { return false; }
-        if (maximumAge <= TimeSpan.Zero || (receivedAt - signedAt).Duration() > maximumAge) return false;
+        // A future-dated valid signature must not be accepted as if it were a
+        // recent callback. That would let a signed event pass before its
+        // provider timestamp, even though the replay window is otherwise valid.
+        if (maximumAge <= TimeSpan.Zero || signedAt > receivedAt || receivedAt - signedAt > maximumAge) return false;
         var expected = ComputeHmacSha256(body, secret, timestamp);
         return CryptographicOperations.FixedTimeEquals(
             Encoding.ASCII.GetBytes(expected), Encoding.ASCII.GetBytes(signature.Trim()));
