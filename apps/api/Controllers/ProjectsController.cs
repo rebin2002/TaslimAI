@@ -88,12 +88,18 @@ public sealed class ProjectsController(TaslimDbContext db, WorkspaceAccessServic
         var files = db.StoredFiles.AsNoTracking()
             .Where(file => file.ProjectId == projectId && file.WorkspaceId == project.WorkspaceId && file.Status != StoredFileStatus.Deleted)
             .Where(file => file.ConversationId == null || file.UserId == userId);
+        // Research execution records and report assets can contain private
+        // report text or source-derived metadata. They remain visible in a
+        // project overview only to their creator; other asset types retain
+        // the existing workspace-level sharing behavior.
         var assets = db.Assets.AsNoTracking()
-            .Where(asset => asset.ProjectId == projectId && asset.WorkspaceId == project.WorkspaceId && asset.Status == AssetStatus.Active);
+            .Where(asset => asset.ProjectId == projectId && asset.WorkspaceId == project.WorkspaceId && asset.Status == AssetStatus.Active)
+            .Where(asset => asset.AssetType != AssetTypes.Research || asset.CreatedByUserId == userId);
         var conversations = db.Conversations.AsNoTracking()
             .Where(conversation => conversation.ProjectId == projectId && conversation.WorkspaceId == project.WorkspaceId && conversation.UserId == userId);
         var activity = db.GenerationJobs.AsNoTracking()
-            .Where(job => job.ProjectId == projectId && job.WorkspaceId == project.WorkspaceId);
+            .Where(job => job.ProjectId == projectId && job.WorkspaceId == project.WorkspaceId)
+            .Where(job => job.JobType != GenerationJobTypes.ResearchGenerate || job.CreatedByUserId == userId);
 
         var counts = new ProjectOverviewCountsDto(
             await files.CountAsync(cancellationToken),
