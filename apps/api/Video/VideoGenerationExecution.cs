@@ -259,6 +259,16 @@ public sealed class VideoGenerationAdapterExecutionService(
         try
         {
             VideoGenerationContract.ValidateRequest(request);
+            ValidateDeclaredCapabilities(adapter.Capabilities);
+            // Cost is a function of the priced resolution. A concrete requested
+            // resolution is admissible only when the provider explicitly declared it;
+            // an empty declared set carries no pricing evidence and admits none. A null
+            // requested resolution keeps the provider-decides semantics unchanged.
+            if (request.RequestedResolution is { } requestedResolution
+                && !adapter.Capabilities.SupportedResolutions.Contains(requestedResolution))
+                throw new VideoGenerationAdapterExecutionException(
+                    VideoGenerationFailureCategory.UnsupportedCapability,
+                    new(VideoGenerationErrorCode.UnsupportedCapability, false, "The requested video capability is not available."));
             if (!adapter.Capabilities.Supports(request))
                 throw new VideoGenerationAdapterExecutionException(
                     VideoGenerationFailureCategory.UnsupportedCapability,
@@ -282,6 +292,27 @@ public sealed class VideoGenerationAdapterExecutionService(
             throw new VideoGenerationAdapterExecutionException(
                 VideoGenerationFailureCategory.InvalidRequest,
                 new(VideoGenerationErrorCode.InvalidRequest, false, "The video request is invalid."));
+        }
+    }
+
+    /// <summary>
+    /// The capability envelope is provider-declared duration/resolution metadata and it
+    /// gates the pre-submission cost preflight. A malformed declaration must fail closed
+    /// as a deterministic, non-transient malformed-response rejection before any paid
+    /// submission is attempted, and the raw contract exception must never surface the
+    /// declared values or reach the worker unhandled.
+    /// </summary>
+    private static void ValidateDeclaredCapabilities(VideoGenerationCapabilities capabilities)
+    {
+        try
+        {
+            VideoGenerationContract.ValidateCapabilities(capabilities);
+        }
+        catch (Exception exception) when (exception is ArgumentException or NullReferenceException)
+        {
+            throw new VideoGenerationAdapterExecutionException(
+                VideoGenerationFailureCategory.MalformedResponse,
+                new(VideoGenerationErrorCode.MalformedResponse, false, "The video adapter capability declaration is invalid."));
         }
     }
 
