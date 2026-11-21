@@ -25,6 +25,7 @@ public sealed class ChatController(
     TaslimDbContext db,
     WorkspaceAccessService access,
     IChatCompletionService completion,
+    IAiModelRouter modelRouter,
     AiContextBuilder contextBuilder,
     IUsageLedgerService usageLedger,
     IOptions<Microsoft.AspNetCore.Mvc.JsonOptions> mvcJsonOptions,
@@ -236,11 +237,21 @@ public sealed class ChatController(
                     return;
                 }
 
+                if (!modelRouter.IsChatGenerationAvailable())
+                {
+                    await WriteEventAsync("message.failed", new { code = ProviderUnavailableCode, message = ProviderUnavailableMessage }, cancellationToken);
+                    return;
+                }
                 assistant = existing;
                 ResetAssistantForRetry(assistant);
             }
             else
             {
+                if (!modelRouter.IsChatGenerationAvailable())
+                {
+                    await WriteEventAsync("message.failed", new { code = ProviderUnavailableCode, message = ProviderUnavailableMessage }, cancellationToken);
+                    return;
+                }
                 assistant = new ChatMessage
                 {
                     Id = Guid.NewGuid(),
@@ -493,6 +504,8 @@ public sealed class ChatController(
                 return PreparedChat.Failure(ApiResults.Error(this, StatusCodes.Status409Conflict, "MESSAGE_IN_PROGRESS", "That message is already being generated."));
             if (existingAssistant.Status == ChatMessageStatus.Failed)
             {
+                // A failed turn needs fresh generation, unlike a completed idempotent replay.
+                if (!modelRouter.IsChatGenerationAvailable()) return PreparedChat.Failure(ProviderUnavailable());
                 existingAssistant.Status = ChatMessageStatus.Pending;
                 existingAssistant.Content = string.Empty;
                 existingAssistant.ProviderKey = null;
@@ -502,6 +515,10 @@ public sealed class ChatController(
             }
             return PreparedChat.FromExisting(new SendMessageResponse(ToDto(conversation), ToMessageDto(existingUser), ToMessageDto(existingAssistant, string.Equals(existingAssistant.ProviderKey, "mock", StringComparison.OrdinalIgnoreCase))));
         }
+
+        // Authorization and completed-request replay precede provider readiness.
+        // New turns must fail before messages or usage reservations are persisted.
+        if (!modelRouter.IsChatGenerationAvailable()) return PreparedChat.Failure(ProviderUnavailable());
 
         var now = DateTime.UtcNow;
         if (conversation.Title == "New chat") conversation.Title = BuildTitle(content);
@@ -746,6 +763,12 @@ public sealed class ChatController(
     private static object ErrorData(IActionResult result) => result is ObjectResult { Value: ErrorEnvelope envelope }
         ? new { code = envelope.Error.Code, message = envelope.Error.Message }
         : new { code = "CHAT_REQUEST_FAILED", message = "Taslim could not process that chat request." };
+
+    private const string ProviderUnavailableCode = "AI_PROVIDER_UNAVAILABLE";
+
+    private const string ProviderUnavailableMessage = "Taslim Chat is not available right now. Please try again later.";
+
+    private IActionResult ProviderUnavailable() => ApiResults.Error(this, StatusCodes.Status503ServiceUnavailable, ProviderUnavailableCode, ProviderUnavailableMessage);
 
     private IActionResult GenerationFailure() => ApiResults.Error(this, StatusCodes.Status503ServiceUnavailable, "AI_GENERATION_FAILED", "Taslim could not generate a response right now. Your message was saved.");
 
