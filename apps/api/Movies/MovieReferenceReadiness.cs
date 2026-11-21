@@ -86,6 +86,27 @@ public static class MovieReferenceReadinessPolicy
 
     public static bool IsOverrideAllowed(IReadOnlyCollection<MovieReferenceReadinessItemDto> items) =>
         items.Any(item => item.BlocksGeneration) && items.Where(item => item.BlocksGeneration).All(item => item.OverrideAllowed);
+
+    public static MovieReferenceReadinessItemDto EvaluatePropReference(
+        string? shotText,
+        IReadOnlyCollection<MovieProductionPropReferenceDto> props,
+        bool important)
+    {
+        var text = shotText ?? string.Empty;
+        var matched = props.FirstOrDefault(prop => ContainsWord(text, prop.Name));
+        var propMentioned = ContainsAny(text, "prop", "object", "notebook", "compass", "key", "seed", "weapon");
+
+        if (!propMentioned && matched is null)
+            return new("props", "Prop references", MovieReferenceReadinessItemStates.Complete, false, false, true, "No prop reference is applicable to this shot.");
+        if (matched is not null)
+            return new("props", "Prop references", MovieReferenceReadinessItemStates.Complete, true, false, true, $"Canonical prop reference '{matched.Name}' is attached to this shot.", "world_prop", matched.PropId);
+        return new("props", "Prop references", MovieReferenceReadinessItemStates.Missing, important, important, !important, "The shot calls for a prop, but no named canonical World prop reference matches the shot.", "world_prop");
+    }
+
+    private static bool ContainsWord(string? text, string? value) =>
+        !string.IsNullOrWhiteSpace(text) && !string.IsNullOrWhiteSpace(value) && text.Contains(value.Trim(), StringComparison.OrdinalIgnoreCase);
+
+    private static bool ContainsAny(string? text, params string[] terms) => terms.Any(term => ContainsWord(text, term));
 }
 
 public sealed class MovieReferenceReadinessOverrideRequest
@@ -360,10 +381,10 @@ public sealed class MovieReferenceReadinessService(
 
     private static MovieReferenceReadinessItemDto EvaluateProps(MovieShot shot, MovieProductionReferencePackageDto package, bool important)
     {
-        var propMentioned = package.Props.Count > 0 || ContainsAny(string.Join(" ", shot.Description, shot.Subjects, shot.ProductionRequirements), "prop", "object", "notebook", "compass", "key", "seed", "weapon");
-        if (!propMentioned) return Complete("props", "Prop references", false, "No prop reference is applicable to this shot.");
-        if (package.Props.Count > 0) return Complete("props", "Prop references", true, $"{package.Props.Count} canonical prop reference{(package.Props.Count == 1 ? " is" : "s are")} attached.", "world_prop");
-        return Item("props", "Prop references", MovieReferenceReadinessItemStates.Missing, important, important, !important, "The shot calls for a prop, but no canonical World prop usage is attached.");
+        return MovieReferenceReadinessPolicy.EvaluatePropReference(
+            string.Join(" ", shot.Description, shot.Subjects, shot.Purpose, shot.ProductionRequirements),
+            package.Props,
+            important);
     }
 
     private static MovieReferenceReadinessItemDto EvaluateSpatialOrientation(MovieShot shot, CinematographyShotPlan? plan, bool important)
