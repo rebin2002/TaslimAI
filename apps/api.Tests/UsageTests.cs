@@ -182,6 +182,33 @@ public sealed class UsageTests : IClassFixture<TaslimApiFactory>
         Assert.Equal(0m, summary.CustomerChargedAmount);
     }
 
+    [Fact]
+    public async Task Usage_history_clamps_over_reversed_legacy_rows_to_zero_net_charge()
+    {
+        using var client = factory.CreateClient();
+        var auth = await Register(client, "Usage History Over Reversed");
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            db.UsageTransactions.Add(CreateTransaction(
+                auth,
+                UsageTransactionStatus.Refunded,
+                null,
+                null,
+                null,
+                1m,
+                2m,
+                DateTime.UtcNow));
+            await db.SaveChangesAsync();
+        }
+
+        var history = await client.GetFromJsonAsync<UsageHistoryDto>($"/api/workspaces/{auth.PersonalWorkspace.Id}/usage?page=1&pageSize=10");
+
+        Assert.NotNull(history);
+        var item = Assert.Single(history.Items);
+        Assert.Equal(0m, item.ChargedAmount);
+    }
+
     private static UsageTransaction CreateTransaction(
         AuthResponse auth,
         UsageTransactionStatus status,
