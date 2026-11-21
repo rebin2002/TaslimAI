@@ -59,9 +59,18 @@ public sealed class AssetService(TaslimDbContext db, WorkspaceAccessService acce
         {
             var search = filter.Search.Trim();
             if (search.Length > 120) throw new AssetValidationException("ASSET_SEARCH_TOO_LONG", "Search must be 120 characters or fewer.");
-            query = db.Database.ProviderName?.Contains("Npgsql", StringComparison.OrdinalIgnoreCase) == true
-                ? query.Where(asset => EF.Functions.ILike(asset.Name, $"%{search}%") || (asset.Description != null && EF.Functions.ILike(asset.Description, $"%{search}%")))
-                : query.Where(asset => asset.Name.ToLower().Contains(search.ToLower()) || (asset.Description != null && asset.Description.ToLower().Contains(search.ToLower())));
+            // The provider branch stays split because only PostgreSQL runs this through LIKE
+            // pattern syntax; every other provider already matches the term as plain text.
+            if (db.Database.ProviderName?.Contains("Npgsql", StringComparison.OrdinalIgnoreCase) == true)
+            {
+                var pattern = AssetSearchPattern.Contains(search);
+                query = query.Where(asset => EF.Functions.ILike(asset.Name, pattern, AssetSearchPattern.EscapeCharacter)
+                    || (asset.Description != null && EF.Functions.ILike(asset.Description, pattern, AssetSearchPattern.EscapeCharacter)));
+            }
+            else
+            {
+                query = query.Where(asset => asset.Name.ToLower().Contains(search.ToLower()) || (asset.Description != null && asset.Description.ToLower().Contains(search.ToLower())));
+            }
         }
 
         var sort = string.IsNullOrWhiteSpace(filter.Sort) ? AssetSorts.Recent : filter.Sort.Trim().ToLowerInvariant();
