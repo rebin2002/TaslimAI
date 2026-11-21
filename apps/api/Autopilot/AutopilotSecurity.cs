@@ -36,7 +36,16 @@ public sealed class AutopilotEventAuthenticator(AutopilotOptions options) : IAut
         if (!long.TryParse(timestampHeader, out var unixSeconds))
             return AutopilotSignatureResult.Invalid("timestamp_missing");
 
-        var signedAt = DateTimeOffset.FromUnixTimeSeconds(unixSeconds).UtcDateTime;
+        DateTime signedAt;
+        try
+        {
+            signedAt = DateTimeOffset.FromUnixTimeSeconds(unixSeconds).UtcDateTime;
+        }
+        catch (ArgumentOutOfRangeException)
+        {
+            return AutopilotSignatureResult.Invalid("timestamp_invalid");
+        }
+
         var skew = (nowUtc - signedAt).Duration();
         if (skew > TimeSpan.FromSeconds(Math.Max(30, settings.SignatureToleranceSeconds)))
             return AutopilotSignatureResult.Invalid("timestamp_out_of_tolerance");
