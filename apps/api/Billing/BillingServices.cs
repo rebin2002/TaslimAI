@@ -231,7 +231,33 @@ public sealed class CreditLedgerService(TaslimDbContext db, IOptions<BillingOpti
         if (availableCredits < credits)
             throw new InvalidOperationException("The workspace does not have enough credits for this usage debit.");
 
-        var entry = NewEntry(workspaceId, null, CreditLedgerEntryType.Debit, -credits, normalizedKey, normalizedReason, actorUserId, now);
+        // Issue #330: a debit written without an entitlement link silently charged
+        // every later grant, so a debit that belonged to a since-expired period
+        // kept rejecting valid new-period usage. Bind the debit to the lot it
+        // consumed whenever attribution is unambiguous: exactly one active lot
+        // can cover the full amount. When no single lot covers it (a split) or
+        // more than one could (spend order is the deferred lot-priority policy),
+        // the row stays unallocated instead of guessing, and the serializable
+        // admission sum above still forbids overdrawing eligible grants. The
+        // ledger remains append-only; existing unallocated rows are never
+        // reattributed from timestamps, per the deferred backfill decision.
+        var lotBalances = await db.CreditLedgerEntries.AsNoTracking()
+            .Where(item => item.WorkspaceId == workspaceId && item.CreditEntitlementId != null)
+            .GroupBy(item => item.CreditEntitlementId!.Value)
+            .Select(group => new { EntitlementId = group.Key, Balance = group.Sum(item => item.Amount) })
+            .ToListAsync(cancellationToken);
+        var activeLotIds = await db.CreditEntitlements.AsNoTracking()
+            .Where(entitlement => entitlement.WorkspaceId == workspaceId &&
+                (!entitlement.ExpiresAt.HasValue || entitlement.ExpiresAt > now))
+            .Select(entitlement => entitlement.Id)
+            .ToListAsync(cancellationToken);
+        var coveringLotIds = lotBalances
+            .Where(item => activeLotIds.Contains(item.EntitlementId) && item.Balance >= credits)
+            .Select(item => item.EntitlementId)
+            .ToArray();
+        var attributedEntitlementId = coveringLotIds.Length == 1 ? coveringLotIds[0] : (Guid?)null;
+
+        var entry = NewEntry(workspaceId, attributedEntitlementId, CreditLedgerEntryType.Debit, -credits, normalizedKey, normalizedReason, actorUserId, now);
         entry.UsageTransactionId = usageTransactionId;
         db.CreditLedgerEntries.Add(entry);
         try
