@@ -1,4 +1,5 @@
-import { test, expect, type Page, type Route } from "@playwright/test";
+import type { Page, Route } from "@playwright/test";
+import { test, expect } from "./fixtures";
 import { appendFileSync, copyFileSync, mkdirSync } from "node:fs";
 
 /**
@@ -8,6 +9,13 @@ import { appendFileSync, copyFileSync, mkdirSync } from "node:fs";
  * mocks only: session and billing payloads are fulfilled via `page.route`,
  * so the spec touches no real user, provider, charge, database or migration
  * and requires no API backend.
+ *
+ * Exception: the cross-route collision walk visits the server-gated
+ * `/account` route and therefore runs on the shared `authenticatedPage`
+ * fixture (a real disposable test user registered against the local E2E
+ * API), the same pattern used by the server-gated Billing suites in
+ * #652/#753 and by billing-tablet-navigation-overflow.spec.ts. No
+ * browser-only fake session is injected there.
  *
  * Head mode (default) asserts the fixed layout: zero text-box collisions,
  * zero page-level horizontal overflow, viewport containment, disabled plan
@@ -333,10 +341,15 @@ test.describe(`Billing route visual acceptance${BASELINE ? " (baseline control: 
     expect(narrowDetected, "the historical 320/375 run-together symptom must reproduce without the route CSS").toBeGreaterThanOrEqual(6);
   });
 
-  test("cross-route CSS collision walk: /account geometry is unchanged by the billing route", async ({ page }, testInfo) => {
-    test.skip(BASELINE, "cross-route walk only applies to the fixed head build");
+  // /account is server-gated (requireAuthenticatedPage evaluates the real
+  // session during SSR, before any browser route mock can exist), so this
+  // walk runs on the shared `authenticatedPage` fixture: a real disposable
+  // test user registered against the local API, exactly like the prior
+  // server-gated Billing acceptance suites (#652/#753 pattern, matching
+  // billing-tablet-navigation-overflow.spec.ts). No fake client-side session
+  // is injected and the gate is never failed open.
+  test("cross-route CSS collision walk: /account geometry is unchanged by the billing route", async ({ authenticatedPage: page }, testInfo) => {
     await page.addInitScript(() => window.localStorage.setItem("taslim-locale", "en"));
-    await mockBillingSurface(page);
     await page.setViewportSize({ width: 1440, height: 900 });
     const snapshot = async () => page.evaluate(() => {
       const serialize = (el: Element) => {
