@@ -182,21 +182,74 @@ public sealed class AutopilotOrchestrator(
 
         // A wave whose tasks are all terminal but whose run never advanced means the
         // completion event was lost. Re-drive the run state machine from evidence.
+        // The pass is bounded twice over: a run is only re-driven until the documented
+        // watchdog budget is spent, and the pending-event test is evaluated against a
+        // materialized status list, because membership of a set-shaped constant cannot
+        // be translated to SQL, and an untranslatable predicate aborts this whole cycle.
+        var terminalEventStatuses = AutopilotEventStatuses.Terminal.ToArray();
+        var maxRunReconciliations = Math.Max(1, settings.MaxWatchdogReconciliations);
         var stalledRuns = await db.AutopilotRuns
             .Where(item => item.State == AutopilotRunStates.AwaitingEvents || item.State == AutopilotRunStates.InProgress)
             .Where(item => item.LastEventAt != null && item.LastEventAt < staleBefore)
+            .Where(item => item.ReconciliationCount < maxRunReconciliations)
             .OrderBy(item => item.UpdatedAt)
             .Take(100)
             .ToListAsync(cancellationToken);
 
         foreach (var run in stalledRuns)
         {
+            // Persisted statuses are only ever written from these same constants, so the
+            // translated membership test matches the set it is derived from.
             var hasPendingEvent = await db.AutopilotEvents.AsNoTracking()
                 .AnyAsync(item => item.WaveKey == run.WaveKey
-                    && !AutopilotEventStatuses.Terminal.Contains(item.Status), cancellationToken);
+                    && !terminalEventStatuses.Contains(item.Status), cancellationToken);
             if (hasPendingEvent) continue;
 
-            await AdvanceRunAsync(run, context, recovered: true, cancellationToken);
+            // Recovery re-drives the same run row the event path writes, so it must
+            // hold the same exclusive wave lease: without it, a watchdog pass and a
+            // completion event applied by any controller instance can rewrite one run
+            // state machine concurrently, which is exactly what the fencing lease (and
+            // its documented single-writer contract) exists to prevent. A contended
+            // wave is left untouched for the next pass and spends no recovery budget.
+            var lease = await locks.AcquireAsync(EfAutopilotLockService.WaveResource(run.WaveKey), "autopilot-watchdog", cancellationToken);
+            if (!lease.IsAcquired)
+            {
+                Record(context, AutopilotAuditFactory.Create(
+                    AutopilotAuditActions.LockContended,
+                    AutopilotAuditOutcomes.Contended,
+                    reason: "watchdog_wave_lease_contended",
+                    waveKey: run.WaveKey,
+                    runState: run.State,
+                    targetId: run.Id,
+                    dryRun: settings.DryRun));
+                context.EventsSkipped++;
+                await FlushAsync(context, cancellationToken);
+                continue;
+            }
+
+            try
+            {
+                await AdvanceRunAsync(run, context, recovered: true, cancellationToken);
+                if (run.ReconciliationCount >= maxRunReconciliations)
+                {
+                    // Budget spent: the run stays where a human can see it, and the stop is
+                    // surfaced once instead of the watchdog re-driving it on every pass.
+                    Record(context, AutopilotAuditFactory.Create(
+                        AutopilotAuditActions.WatchdogReconciled,
+                        AutopilotAuditOutcomes.Failed,
+                        reason: "watchdog_reconciliation_exhausted",
+                        statusDetail: $"run_reconciliations:{run.ReconciliationCount}",
+                        waveKey: run.WaveKey,
+                        runState: run.State,
+                        targetId: run.Id,
+                        dryRun: settings.DryRun));
+                }
+            }
+            finally
+            {
+                await locks.ReleaseAsync(lease, CancellationToken.None);
+            }
+
             await FlushAsync(context, cancellationToken);
         }
 
@@ -336,7 +389,11 @@ public sealed class AutopilotOrchestrator(
             return false;
         }
 
-        var lockHandle = await locks.AcquireAsync(EfAutopilotLockService.WaveResource(signal.WaveKey!), "autopilot-controller", cancellationToken);
+        // The run row is keyed by the trimmed wave key (see ApplySignalAsync), so the
+        // exclusive lease must cover that same trimmed resource. Leasing the raw signal
+        // spelling lets two paddings of one wave - and the watchdog, which only ever
+        // sees the trimmed run key - hold different leases while writing the same run.
+        var lockHandle = await locks.AcquireAsync(EfAutopilotLockService.WaveResource(signal.WaveKey!.Trim()), "autopilot-controller", cancellationToken);
         if (!lockHandle.IsAcquired)
         {
             intakeEvent.Status = AutopilotEventStatuses.Queued;
@@ -580,6 +637,10 @@ public sealed class AutopilotOrchestrator(
         intakeEvent.WaveTaskRecordId = task.Id;
 
         run.LastEventAt = now;
+        // Real evidence ends the stall episode, so the watchdog budget is spent per
+        // episode rather than per run lifetime. Only a fresh event re-arms it: the
+        // calendar never does.
+        run.ReconciliationCount = 0;
         run.UpdatedAt = now;
         if (run.Branch.Length == 0 && !string.IsNullOrWhiteSpace(signal.Branch)) run.Branch = signal.Branch!;
         if (run.BaseSha.Length == 0 && !string.IsNullOrWhiteSpace(signal.BaseSha)) run.BaseSha = signal.BaseSha!;
