@@ -16,10 +16,15 @@ public static class ImageGenerationPersistenceGuards
     public static bool IsActiveJobConflict(DbUpdateException exception)
     {
         var details = exception.ToString();
-        return details.Contains(ActiveJobIndexName, StringComparison.OrdinalIgnoreCase)
-            || details.Contains("GenerationJobs", StringComparison.OrdinalIgnoreCase)
-                && details.Contains("WorkspaceId", StringComparison.OrdinalIgnoreCase)
-                && details.Contains("CreatedByUserId", StringComparison.OrdinalIgnoreCase)
-                && details.Contains("JobType", StringComparison.OrdinalIgnoreCase);
+        if (details.Contains(ActiveJobIndexName, StringComparison.OrdinalIgnoreCase)) return true;
+
+        var isUniqueViolation = details.Contains("UNIQUE constraint failed", StringComparison.OrdinalIgnoreCase)
+            || details.Contains("duplicate key", StringComparison.OrdinalIgnoreCase)
+            || details.Contains("violates unique constraint", StringComparison.OrdinalIgnoreCase);
+        return isUniqueViolation
+            && details.Contains("GenerationJobs", StringComparison.OrdinalIgnoreCase)
+            && details.Contains("WorkspaceId", StringComparison.OrdinalIgnoreCase)
+            && details.Contains("CreatedByUserId", StringComparison.OrdinalIgnoreCase)
+            && details.Contains("JobType", StringComparison.OrdinalIgnoreCase);
     }
 }
