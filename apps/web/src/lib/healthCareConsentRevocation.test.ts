@@ -1,201 +1,142 @@
-import { existsSync, readFileSync } from "node:fs";
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
+import { HealthPlaceholderPage } from "@/components/HealthPlaceholderPage";
+import { LocaleProvider } from "@/components/LocaleProvider";
+import { healthCareCopy } from "@/lib/healthCareI18n";
+import { locales, translations, type Locale } from "@/lib/i18n";
 
 /**
- * Issue #714 — synthetic Health Care consent-revocation UI contract.
+ * Issue #714 — Health Care consent-revocation fence, stated against the placeholder
+ * the application actually ships.
  *
- * Owner-path audit (2026-11-13, this task):
- * - #715 owns apps/web/e2e/health-care.spec.ts, apps/web/src/app/create/health/{page,error}.tsx,
- *   HealthCarePage.module.css, HealthPlaceholderPage.{tsx,test.tsx}, healthCareI18n.{ts,test.ts}.
- * - #780 owns apps/web/src/lib/healthCareCreateMenuSmoke.test.ts (Create-menu truthfulness).
- * - #793 owns apps/web/src/app/create/health/page.tsx and StudioChooser.tsx (chooser visibility).
- * - #749 owns apps/web/src/app/personal/health/error.{tsx,recovery-focus.test.tsx}.
- * - #729 owns apps/api.Tests/HealthCareReportAuthorizationTests.cs: SERVER-side revocation of
- *   workspace membership denying synthetic report attachment reads. It proves the API responds
- *   404; it does not cover the client UI state a user sees on the mobile Health Care route.
- * - #717 owns apps/web/e2e/studios-revoked-session-integration.spec.ts: revoked SESSION, not
- *   revoked consent, and no Health Care content.
+ * Review 6005763472 (2026-11-21) found that the previous version of this file defined
+ * its own `HealthCareUiState` and its own `revokeConsent()`, so its transition
+ * assertions could not catch a regression in the application, and that its screen
+ * guard rejected generic form controls (`<input`, `<form`, `<select`, checkboxes,
+ * switches) even when they were unrelated to document previews. Both parts are
+ * removed. This file now drives the real component and the real dictionaries and
+ * keeps only assertions that are true of the shipped UI, described as a placeholder.
  *
- * Gap: no open PR or main-branch test pins the UI-level transition "consent is revoked while
- * the user is viewing Health Care → preview actions are hidden AND the private document
- * selection is cleared". Per the #714 owner disposition the Health Care screen is currently
- * information-only, so this contract is stated as a deterministic synthetic state machine and
- * is also verified vacuously against the shipped screens: a half-implemented consent switch,
- * document picker, or preview affordance that could leak private state past revocation must
- * not appear without this transition being wired.
+ * What exists on main (audited at 7322c561cc83222627aa3512a59a3b4ca2ed747f):
+ * - `HealthPlaceholderPage` is the only Health Care surface. `/personal/health` renders
+ *   it as `entry="personal"` and `/create/health` as `entry="create"`.
+ * - It is informational: no consent control, no document picker and no preview
+ *   affordance exists in it, and no consent state exists in `apps/web` at all.
+ *   There is therefore no private UI state that a revocation could fail to clear.
  *
- * Test-only and independent: it edits no source file and touches no owner-claimed path.
- * Only synthetic fixture identifiers are used — no real health data, no model or provider
- * calls, no API calls, no network.
+ * Pinned here, against that real UI:
+ * 1. Every control the placeholder renders is disabled and self-labels as unavailable,
+ *    so no health-document action — the action revocation would have to guard —
+ *    can be taken from it.
+ * 2. The placeholder claims no consent surface: nothing it renders reads as a consent
+ *    grant, revocation or toggle.
+ * 3. Its rendered privacy note denies collecting, uploading, storing or analyzing
+ *    health information, which is the current truth revocation must not contradict.
+ * 4. In every shipped locale the planned actions stay labelled unavailable over an
+ *    unchanged feature set, so no locale ships a half-enabled revocable surface.
+ * 5. The shipped product promise that a future health feature requires explicit
+ *    consent and clear workspace ownership controls is still present in the real
+ *    translation dictionary — the requirement a future revocation flow must satisfy.
+ *
+ * Intentional future failure: assertion 2 fails the moment a consent control is added
+ * to this surface, at which point the revocation transition must be tested through
+ * that component or shared state rather than through a model living in this file.
+ *
+ * Test-only, one path, synthetic-free: edits no source file, claims no owner-held
+ * path, and makes no API, provider, model, storage or network call.
  */
 
-type ConsentDecision = "granted" | "revoked";
-type Screen = "away" | "viewing-health-care";
-
-type HealthCareUiState = {
-  consent: ConsentDecision;
-  screen: Screen;
-  selectedPrivateDocumentId: string | null;
-  previewActionsVisible: boolean;
-};
-
-const INITIAL: HealthCareUiState = {
-  consent: "revoked",
-  screen: "away",
-  selectedPrivateDocumentId: null,
-  previewActionsVisible: false,
-};
-
-/** Grants consent — a prerequisite for selecting a private document or previewing it. */
-function grantConsent(state: HealthCareUiState): HealthCareUiState {
-  return { ...state, consent: "granted" };
+function renderPlaceholder(entry?: "create" | "personal"): string {
+  return renderToStaticMarkup(
+    createElement(
+      LocaleProvider,
+      null,
+      createElement(HealthPlaceholderPage, entry === undefined ? {} : { entry }),
+    ),
+  );
 }
 
-/** The user opens the Health Care mobile route. */
-function openHealthCare(state: HealthCareUiState): HealthCareUiState {
-  return { ...state, screen: "viewing-health-care" };
+function renderedButtons(html: string): { tag: string; body: string }[] {
+  const out: { tag: string; body: string }[] = [];
+  const re = /<button\b([^>]*)>([\s\S]*?)<\/button>/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(html)) !== null) out.push({ tag: m[1], body: m[2] });
+  return out;
 }
 
-/** Selecting a private document (synthetic id) reveals the preview actions. */
-function selectPrivateDocument(state: HealthCareUiState, documentId: string): HealthCareUiState {
-  if (state.consent !== "granted") return state;
-  return { ...state, selectedPrivateDocumentId: documentId, previewActionsVisible: true };
-}
+const visibleText = (markup: string) => markup.replace(/<[^>]*>/g, "").replace(/\s+/g, " ").trim();
 
-/**
- * The pinned regression transition: revoking consent — whether or not the user is
- * currently viewing Health Care — must hide preview actions and clear the private
- * document selection immediately.
- */
-function revokeConsent(state: HealthCareUiState): HealthCareUiState {
-  return {
-    ...state,
-    consent: "revoked",
-    selectedPrivateDocumentId: null,
-    previewActionsVisible: false,
-  };
-}
-
-/**
- * Fail-closed resume: navigating away and back while consent stays revoked must not
- * resurrect the hidden preview actions or the cleared selection.
- */
-function resumeViewing(state: HealthCareUiState): HealthCareUiState {
-  return { ...state, screen: "viewing-health-care" };
-}
-
-/** Re-granting consent starts clean: prior private selections are not implicitly restored. */
-function regrantAfterRevocation(state: HealthCareUiState): HealthCareUiState {
-  return { ...state, consent: "granted", selectedPrivateDocumentId: null, previewActionsVisible: false };
-}
-
-/** Shared invariant guard, mirroring the #780 truthfulness-guard style. */
-function consentRevocationViolations(state: HealthCareUiState): string[] {
-  const violations: string[] = [];
-  if (state.consent === "revoked" && state.previewActionsVisible) {
-    violations.push("preview actions remain visible after consent revocation");
-  }
-  if (state.consent === "revoked" && state.selectedPrivateDocumentId !== null) {
-    violations.push(`private document selection survives consent revocation (${state.selectedPrivateDocumentId})`);
-  }
-  return violations;
-}
-
-describe("issue #714 synthetic Health Care consent-revocation UI contract", () => {
-  it("hides preview actions and clears the private document selection when consent is revoked while viewing Health Care", () => {
-    const viewing = selectPrivateDocument(
-      openHealthCare(grantConsent(INITIAL)),
-      "synthetic-doc-7A91C5",
-    );
-    expect(viewing.screen).toBe("viewing-health-care");
-    expect(viewing.previewActionsVisible).toBe(true);
-
-    const afterRevocation = revokeConsent(viewing);
-
-    expect(afterRevocation.previewActionsVisible).toBe(false);
-    expect(afterRevocation.selectedPrivateDocumentId).toBeNull();
-    expect(consentRevocationViolations(afterRevocation)).toEqual([]);
+describe("issue #714 Health Care consent-revocation fence on the shipped placeholder", () => {
+  it("renders no enabled action for health documents, in either entry surface", () => {
+    for (const entry of ["personal", "create"] as const) {
+      const html = renderPlaceholder(entry);
+      expect(html).toContain('id="health-care-title"');
+      const buttons = renderedButtons(html);
+      // The planned actions are exactly the feature list; none is an enabled control.
+      expect(buttons.length, `${entry}: every planned action is rendered`).toBe(
+        healthCareCopy("en").features.length,
+      );
+      for (const { tag, body } of buttons) {
+        expect(tag, "planned action must not be actionable").toContain("disabled");
+        expect(body).toContain(healthCareCopy("en").actionUnavailable);
+      }
+      expect(html).not.toMatch(/<button\b(?![^>]*\bdisabled)/);
+    }
   });
 
-  it("is fail-closed across navigate-away and resume while consent stays revoked", () => {
-    const revoked = revokeConsent(
-      selectPrivateDocument(openHealthCare(grantConsent(INITIAL)), "synthetic-doc-4F2B77"),
-    );
-
-    const resumed = resumeViewing({ ...revoked, screen: "away" });
-
-    expect(resumed.previewActionsVisible).toBe(false);
-    expect(resumed.selectedPrivateDocumentId).toBeNull();
-    expect(consentRevocationViolations(resumed)).toEqual([]);
+  it("labels the documents-and-reports action as unavailable instead of a preview affordance", () => {
+    const html = renderPlaceholder("create");
+    const en = healthCareCopy("en");
+    const documents = en.features.find((feature) => feature.id === "reports");
+    expect(documents, "the health-document action is the surface revocation would guard").toBeDefined();
+    const button = renderedButtons(html).find(({ body }) => visibleText(body).includes(documents!.label));
+    expect(button, "the health-document action is rendered").toBeDefined();
+    expect(button!.tag).toContain("disabled");
+    expect(button!.tag).toContain('aria-describedby="health-coming-soon"');
+    expect(visibleText(button!.body)).toContain(en.actionUnavailable);
   });
 
-  it("does not implicitly restore a prior private selection when consent is re-granted", () => {
-    const regranted = regrantAfterRevocation(
-      revokeConsent(selectPrivateDocument(openHealthCare(grantConsent(INITIAL)), "synthetic-doc-9C31A0")),
-    );
-
-    expect(regranted.consent).toBe("granted");
-    expect(regranted.selectedPrivateDocumentId).toBeNull();
-    expect(regranted.previewActionsVisible).toBe(false);
-    expect(consentRevocationViolations(regranted)).toEqual([]);
-  });
-
-  it("only reveals preview actions for an explicitly selected document under granted consent", () => {
-    const grantedNoSelection = selectPrivateDocument(
-      openHealthCare(grantConsent(INITIAL)),
-      "synthetic-doc-BE01",
-    );
-    const blocked = selectPrivateDocument(INITIAL, "synthetic-doc-BE01");
-
-    expect(grantedNoSelection.previewActionsVisible).toBe(true);
-    expect(blocked.selectedPrivateDocumentId).toBeNull();
-    expect(blocked.previewActionsVisible).toBe(false);
-    expect(consentRevocationViolations(blocked)).toEqual([]);
-  });
-
-  it("flags a synthetic leak instead of passing it silently", () => {
-    const leaked: HealthCareUiState = {
-      consent: "revoked",
-      screen: "viewing-health-care",
-      selectedPrivateDocumentId: "synthetic-doc-LEAK",
-      previewActionsVisible: true,
-    };
-
-    const violations = consentRevocationViolations(leaked);
-    expect(violations).toHaveLength(2);
-    expect(violations.join("\n")).toMatch(/preview actions remain visible after consent revocation/);
-    expect(violations.join("\n")).toMatch(/private document selection survives consent revocation/);
-  });
-
-  it("keeps the shipped Health Care screens free of half-wired consent or document surfaces", () => {
-    // The screens that would host the future consent UI. On main only the personal
-    // Health route exists; the #715 create route joins once its owner hold resolves.
-    const screens = [
-      new URL("../app/personal/health/page.tsx", import.meta.url),
-      new URL("../app/create/health/page.tsx", import.meta.url),
-      new URL("../components/HealthPlaceholderPage.tsx", import.meta.url),
-    ];
-    // Surfaces that would make consent revocation observable in the UI. If any appears
-    // without the revokeConsent transition above wired, private state can survive revocation.
-    const revocableSurfaces = ["<input", "<form", "<select", "type=\"file\"", "checkbox", "aria-checked", "switch\""];
-
-    let audited = 0;
-    for (const screen of screens) {
-      if (!existsSync(screen)) continue;
-      audited += 1;
-      const source = readFileSync(screen, "utf8");
-      for (const surface of revocableSurfaces) {
-        expect(source, `Health Care screen must not expose a ${surface} consent or document surface`).not.toContain(surface);
+  it("presents no consent grant, toggle or revocation surface in the real UI", () => {
+    for (const entry of ["personal", "create"] as const) {
+      const text = visibleText(renderPlaceholder(entry)).toLowerCase();
+      for (const affordance of ["consent", "grant", "revoke", "allow access"]) {
+        expect(text, `${entry}: placeholder must not imply a ${affordance} control`).not.toContain(affordance);
       }
     }
-    expect(audited, "at least the personal Health Care screen is auditable").toBeGreaterThan(0);
   });
 
-  it("keeps the consent precondition truthful in every shipped Health Care locale note", () => {
-    // i18n.ts is owner-claimed (#714 hold, five claimants) — read-only assertion:
-    // the shipped privacy note must keep promising explicit consent for any future
-    // health feature, which is exactly what the revocation contract above enforces.
-    const i18n = readFileSync(new URL("./i18n.ts", import.meta.url), "utf8");
-    expect(i18n).toContain("it will require explicit consent and clear workspace ownership controls");
+  it("keeps the rendered privacy note a denial of health-data handling", () => {
+    const html = renderPlaceholder("personal");
+    const note = healthCareCopy("en").privacyNote;
+    expect(html).toContain(note);
+    expect(note).toMatch(/does not collect, upload, store, or analyze health information/);
+    expect(note).toMatch(/sends no health information to external services/);
+  });
+
+  it("ships no half-enabled revocable surface in any supported locale", () => {
+    const enIds = healthCareCopy("en").features.map((feature) => feature.id).sort();
+    for (const locale of locales as readonly Locale[]) {
+      const copy = healthCareCopy(locale);
+      expect(copy.features.map((feature) => feature.id).sort(), `${locale}: same planned surfaces`).toEqual(enIds);
+      expect(copy.actionUnavailable.trim().length, `${locale}: actions are labelled unavailable`).toBeGreaterThan(0);
+      expect(copy.status.trim().length, `${locale}: the not-yet-available status is stated`).toBeGreaterThan(0);
+      for (const feature of copy.features) {
+        expect(feature.label.trim().length, `${locale}: ${feature.id} label is present`).toBeGreaterThan(0);
+      }
+    }
+  });
+
+  it("keeps the explicit-consent precondition of a future health feature truthful in the real dictionary", () => {
+    const enNote = translations.en["health.privacyNote"];
+    expect(enNote, "shipped health privacy note exists").toBeTruthy();
+    expect(enNote).toContain("No health information is requested or saved");
+    expect(enNote).toContain("it will require explicit consent and clear workspace ownership controls");
+    for (const locale of locales as readonly Locale[]) {
+      expect(
+        translations[locale]["health.privacyNote"]?.trim().length,
+        `${locale}: the consent precondition is not dropped`,
+      ).toBeGreaterThan(0);
+    }
   });
 });
