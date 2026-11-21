@@ -20,6 +20,10 @@ const rooms: { id: Room; label: string; icon: typeof MapPin; hint: string }[] = 
 
 const emptyForm: FormState = { name: "", description: "", visualContinuityNotes: "", category: "", environmentType: "practical", movieLocationId: "", visualDescription: "", timeOfDay: "", weather: "", continuityNotes: "", referenceAssetId: "" };
 
+export function isMovieWorldForProject(data: Pick<WorldData, "movieProjectId"> | null, requestedMovieProjectId: string): boolean {
+  return data?.movieProjectId === requestedMovieProjectId;
+}
+
 export function movieWorldProjectSwitchReset() {
   return {
     data: null as WorldData | null,
@@ -145,7 +149,7 @@ export function MovieWorldWorkspace({ projectId }: { projectId: string }) {
     finally { setSaving(false); }
   }
 
-  if (!data || (data.projectId ?? data.movieProjectId) !== projectId) return <div className="movie-world-loading"><span className="loading-spinner" /><p>{error || t("movieBody.loading")}</p></div>;
+  if (!data || !isMovieWorldForProject(data, projectId)) return <div className="movie-world-loading"><span className="loading-spinner" /><p>{error || t("movieBody.loading")}</p></div>;
 
   const usages = data.usageDetails.filter((usage) => usage.entityType === (room === "locations" ? "location" : room === "sets" ? "set" : "prop") && usage.entityId === selected?.id);
   const refs = data.world.references;
