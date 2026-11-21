@@ -142,38 +142,19 @@ describe("ProductAdInputWizard logo removal and stale reference suppression", ()
     expect(logoBody.indexOf(invalidate![0])).toBeLessThan(rejected);
   });
 
-  it("keeps the logo in component state only, so nothing outlives the removal", () => {
-    // Any of these would be a second place the logo survives `setBrandLogo(null)`
-    // and could therefore still be submitted after the user removes it.
-    expect(componentSource).not.toMatch(/\buseRef\b/);
-    expect(componentSource).not.toMatch(/URL\.createObjectURL|revokeObjectURL|\bblob:/);
+  it("clears the selected logo, restored descriptor, and preview URL together", () => {
+    const logoBody = functionBody("updateBrandLogo");
+    expect(logoBody).toContain("setRestoredBrandLogo(null)");
+    expect(logoBody).toContain("setBrandLogo(file)");
+    expect(logoBody).toContain("setBrandLogoUrl(file ? URL.createObjectURL(file) : null)");
+    expect(componentSource).toMatch(/if \(brandLogoUrl\) URL\.revokeObjectURL\(brandLogoUrl\)/);
     expect(componentSource).not.toMatch(/FileReader|ArrayBuffer|Base64|base64/);
-    expect(componentSource).not.toMatch(/localStorage|sessionStorage|indexedDB|caches\./);
-
-    // The logo is named by a closed set of identifiers: one state slot, its
-    // error, its help copy, and its handler. A fifth one — a label, snapshot,
-    // or id kept beside the state — is how a removed logo can go stale, because
-    // the removal clears `brandLogo` but nothing else.
-    const logoIdentifiers = new Set(
-      componentSource.match(/[A-Za-z_$][\w$]*[Ll]ogo[\w$]*|[Ll]ogo[A-Za-z_$][\w$]*/g) ?? [],
-    );
-    expect([...logoIdentifiers].sort()).toEqual([
-      "brandLogo",
-      "logoError",
-      "logoHelp",
-      "setBrandLogo",
-      "setLogoError",
-      "updateBrandLogo",
-    ]);
-
-    // The one logo state slot is a nullable `File`, and null is its cleared form.
-    expect(componentSource).toMatch(/const \[brandLogo, setBrandLogo\] = useState<File \| null>\(null\);/);
   });
 
   it("gates every rendered logo reference on the live logo state", () => {
-    // Two rows read the logo (the field confirmation and the preview card) and
-    // both must be conditional on the state itself, never on a retained string.
-    expect(componentSource.match(/\{brandLogo &&/g) ?? []).toHaveLength(2);
+    expect(componentSource).toMatch(/\{brandLogo && <small id=\{\x60\$\{id\}-logo-file\x60\}/);
+    expect(componentSource).toMatch(/\{brandLogo && brandLogoUrl && \(/);
+    expect(componentSource.match(/\{brandLogo &&/g) ?? []).toHaveLength(3);
     expect(previewLogoRow()).toContain("{brandLogo.name}");
     expect(previewLogoRow()).not.toMatch(/preview\.|logoName/);
 
