@@ -1,5 +1,7 @@
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Diagnostics;
+using System.Data.Common;
 using Taslim.Api.Authorization;
 using Taslim.Api.Contracts;
 using Taslim.Api.Domain;
@@ -12,6 +14,85 @@ namespace Taslim.Api.Tests;
 
 public sealed class MovieSoundtrackWorkflowTests
 {
+    [Fact]
+    public async Task Concurrent_version_creation_retries_the_losing_version_number_allocation()
+    {
+        var databasePath = Path.Combine(Path.GetTempPath(), $"taslim-movie-soundtrack-{Guid.NewGuid():N}.db");
+        var barrier = new VersionNumberMaxBarrier();
+        try
+        {
+            var seedOptions = new DbContextOptionsBuilder<TaslimDbContext>()
+                .UseSqlite($"Data Source={databasePath};Default Timeout=30")
+                .Options;
+            await using var seedDb = new TaslimDbContext(seedOptions);
+            await seedDb.Database.EnsureCreatedAsync();
+            var seed = await SeedAsync(seedDb);
+            var seedService = CreateService(seedDb, new FakeSoundtrackMediaService());
+            var cue = await seedService.CreateCueAsync(seed.UserId, seed.MovieProjectId, new MovieSoundtrackCueRequest
+            {
+                MovieActId = seed.ActId,
+                MovieSceneId = seed.SceneId,
+                Title = "Concurrent cue",
+                Mood = "calm",
+                Intensity = 40,
+                ActStartSeconds = 0,
+                SceneStartSeconds = 0,
+                TimelineStartSeconds = 0,
+                DurationSeconds = 10,
+            }, CancellationToken.None);
+            Assert.NotNull(cue);
+
+            async Task<MovieSoundtrackCueDto?> CreateVersionAsync(string label)
+            {
+                var options = new DbContextOptionsBuilder<TaslimDbContext>()
+                    .UseSqlite($"Data Source={databasePath};Default Timeout=30")
+                    .AddInterceptors(barrier)
+                    .Options;
+                await using var db = new TaslimDbContext(options);
+                var service = CreateService(db, new FakeSoundtrackMediaService());
+                return await service.CreateVersionAsync(seed.UserId, cue!.Id, new MovieSoundtrackCueVersionRequest
+                {
+                    Label = label,
+                    Mood = "calm",
+                    Intensity = 40,
+                }, CancellationToken.None);
+            }
+
+            var results = await Task.WhenAll(CreateVersionAsync("Concurrent A"), CreateVersionAsync("Concurrent B"));
+            Assert.All(results, result => Assert.NotNull(result));
+
+            await using var verifyDb = new TaslimDbContext(seedOptions);
+            var versions = await verifyDb.MovieSoundtrackCueVersions.AsNoTracking()
+                .Where(item => item.MovieSoundtrackCueId == cue.Id)
+                .OrderBy(item => item.VersionNumber)
+                .ToListAsync();
+            Assert.Equal(new[] { 1, 2 }, versions.Select(item => item.VersionNumber));
+            Assert.Equal(new[] { "Concurrent A", "Concurrent B" }, versions.Select(item => item.Label).OrderBy(label => label));
+        }
+        finally
+        {
+            if (File.Exists(databasePath)) File.Delete(databasePath);
+        }
+    }
+
+    [Fact]
+    public void Version_number_retry_classifier_does_not_swallow_unrelated_unique_errors()
+    {
+        var versionConflict = new DbUpdateException(
+            "soundtrack version conflict",
+            new InvalidOperationException("SQLite Error 19: 'UNIQUE constraint failed: MovieSoundtrackCueVersions.MovieSoundtrackCueId, MovieSoundtrackCueVersions.VersionNumber'."));
+        var postgresVersionConflict = new DbUpdateException(
+            "soundtrack PostgreSQL version conflict",
+            new InvalidOperationException("23505: duplicate key value violates unique constraint \"IX_MovieSoundtrackCueVersions_MovieSoundtrackCueId_VersionNumb~\""));
+        var otherConflict = new DbUpdateException(
+            "other conflict",
+            new InvalidOperationException("SQLite Error 19: 'UNIQUE constraint failed: MovieSoundtrackCueVersions.MovieSoundtrackCueId, MovieSoundtrackCueVersions.Id'."));
+
+        Assert.True(MovieSoundtrackService.IsVersionNumberUniqueViolation(versionConflict));
+        Assert.True(MovieSoundtrackService.IsVersionNumberUniqueViolation(postgresVersionConflict));
+        Assert.False(MovieSoundtrackService.IsVersionNumberUniqueViolation(otherConflict));
+    }
+
     [Fact]
     public async Task Disabled_media_service_never_executes_external_work()
     {
@@ -266,6 +347,32 @@ public sealed class MovieSoundtrackWorkflowTests
         });
         await db.SaveChangesAsync();
         return new Seed(userId, movieProjectId, actId, sceneId, storedFileId, assetId);
+    }
+
+    private sealed class VersionNumberMaxBarrier : DbCommandInterceptor
+    {
+        private readonly TaskCompletionSource<bool> released = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private int arrivals;
+
+        public override async ValueTask<InterceptionResult<object>> ScalarExecutingAsync(
+            DbCommand command,
+            CommandEventData eventData,
+            InterceptionResult<object> result,
+            CancellationToken cancellationToken = default)
+        {
+            if (IsVersionNumberMax(command))
+            {
+                if (Interlocked.Increment(ref arrivals) >= 2) released.TrySetResult(true);
+                await released.Task.WaitAsync(TimeSpan.FromSeconds(10), cancellationToken);
+            }
+
+            return result;
+        }
+
+        private static bool IsVersionNumberMax(DbCommand command) =>
+            command.CommandText.Contains("MAX", StringComparison.OrdinalIgnoreCase)
+            && command.CommandText.Contains("MovieSoundtrackCueVersions", StringComparison.OrdinalIgnoreCase)
+            && command.CommandText.Contains("VersionNumber", StringComparison.OrdinalIgnoreCase);
     }
 
     private sealed record Seed(Guid UserId, Guid MovieProjectId, Guid ActId, Guid SceneId, Guid StoredFileId, Guid AssetId);
