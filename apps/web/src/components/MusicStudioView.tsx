@@ -272,12 +272,19 @@ export function MusicGenerationAction({ decision, working, noticeId, t }: MusicG
 }
 
 function RecentMusicLibrary({ assets, loading, error, locale, t }: { assets: Asset[]; loading: boolean; error: string; locale: string; t: (key: string, values?: Record<string, string>) => string }) {
+  // The error card keeps this component's two-line shape, but the bold line is
+  // the panel's own label and `error` is the message slot, so the failure is
+  // stated once and always in the member's language. Before this change the
+  // slot carried `ApiError.message` - English server prose, src/lib/api.ts -
+  // under the localized `music.libraryLoadError` heading, so a Kurdish member
+  // read one claim in ku and the same claim again in English. The apostrophe
+  // free wording keeps this lane clear of react/no-unescaped-entities.
   return <section className="music-library-panel" aria-labelledby="music-library-title">
     <div className="music-section-heading">
       <div><p className="music-overline">{t("music.libraryEyebrow")}</p><h2 id="music-library-title">{t("music.libraryTitle")}</h2><p>{t("music.librarySubtitle")}</p></div>
       <Link className="music-text-link" href="/assets?type=music">{t("music.openAssets")} <span aria-hidden="true">↗</span></Link>
     </div>
-    {loading ? <div className="music-library-loading"><LoaderCircle size={18} className="music-spin" /> <span>{t("music.libraryLoading")}</span></div> : error ? <div className="music-library-empty is-error"><AlertCircle size={20} /><div><strong>{t("music.libraryLoadError")}</strong><p>{error}</p></div></div> : assets.length === 0 ? <div className="music-library-empty"><Music2 size={24} /><div><strong>{t("music.libraryEmpty")}</strong><p>{t("music.libraryEmptyDescription")}</p></div></div> : <div className="music-library-list">{assets.map((asset) => <article className="music-library-row" key={asset.id}>
+    {loading ? <div className="music-library-loading"><LoaderCircle size={18} className="music-spin" /> <span>{t("music.libraryLoading")}</span></div> : error ? <div className="music-library-empty is-error"><AlertCircle size={20} /><div><strong>{t("music.libraryTitle")}</strong><p>{error}</p></div></div> : assets.length === 0 ? <div className="music-library-empty"><Music2 size={24} /><div><strong>{t("music.libraryEmpty")}</strong><p>{t("music.libraryEmptyDescription")}</p></div></div> : <div className="music-library-list">{assets.map((asset) => <article className="music-library-row" key={asset.id}>
       <MusicArtwork />
       <div className="music-library-main">
         <div className="music-library-title"><div><h3>{asset.name}</h3><p>{asset.projectName ?? t("music.workspaceTrack")}</p></div><time dateTime={asset.createdAt}>{formatAssetDate(asset.createdAt, locale)}</time></div>
@@ -366,9 +373,17 @@ function WorkspaceMusicStudio({ workspace }: { workspace: ReturnType<typeof useA
     try {
       const result = await api.listAssets(workspace.id, { assetType: "music", status: "Active", sort: "recent", page: 1, pageSize: 5 });
       setRecentMusic(result.items);
-    } catch (caught) {
+    } catch {
+      // Localized copy, never the rejection's own text, for the same reason as
+      // the Voice compose form: `ApiError.message` is the server's English
+      // string (`src/lib/api.ts`: `body?.error?.message ?? "Something went
+      // wrong."`) and this slot renders inside the library panel, which a ku
+      // or ar member reads in their own language. Listing recent music
+      // involves no provider, so the raw text would carry no information the
+      // member could act on. `error` stays the message slot and the bold line
+      // keeps the panel's own label, so the card states the failure once.
       setRecentMusic([]);
-      setLibraryError(caught instanceof Error ? caught.message : t("music.libraryLoadError"));
+      setLibraryError(t("music.libraryLoadError"));
     } finally {
       setLoadingLibrary(false);
     }

@@ -565,6 +565,39 @@ describe("Music Studio in-flight status poll failure", () => {
     expect(musicSource).toContain('<div className="music-inline-error" role="alert"');
     const styles = readFileSync(new URL("../app/globals.css", import.meta.url), "utf8");
     expect(styles).toContain(".music-inline-error");
-    expect(readFileSync(new URL("./VoiceStudioView.tsx", import.meta.url), "utf8")).toContain("caught.message");
+    // This lane boundary used to be proved by the Voice studio's *open*
+    // localization leak - `VoiceStudioView.tsx` containing `caught.message` -
+    // which pinned a defect instead of a boundary and would have failed the
+    // moment anyone fixed the Voice create path. It now names the boundary
+    // itself: neither studio borrows the other's notice view, alert class or
+    // stylesheet hook.
+    const voiceLane = readFileSync(new URL("./VoiceStudioView.tsx", import.meta.url), "utf8");
+    expect(voiceLane).not.toContain("MusicStudioPollingNoticeView");
+    expect(voiceLane).not.toContain("music-inline-error");
+    expect(musicSource).not.toContain("voice-alert");
+    // And the invariant that assertion was standing in for: after #1166/#1182
+    // took the status-poll slot and this batch took the remaining action slots,
+    // neither studio may render the rejection's own text at all.
+    expect(voiceLane).not.toContain("caught.message");
+    expect(musicSource).not.toContain("caught.message");
+  });
+
+  it("states the library load failure in the member's own language", () => {
+    // The recent-music loader carried the same raw-provider catch the poll
+    // effect had: `ApiError.message` is English server prose, so the localized
+    // `music.libraryLoadError` copy was unreachable for the failures that
+    // actually happen, and it rendered under an already-localized heading.
+    const start = musicSource.indexOf('const result = await api.listAssets(workspace.id, { assetType: "music"');
+    expect(start, "the recent-music loader must exist").toBeGreaterThan(-1);
+    const end = musicSource.indexOf("}, [t, workspace]);", start);
+    expect(end, "the recent-music loader must own its dependencies").toBeGreaterThan(start);
+    const loader = musicSource.slice(start, end);
+    expect(loader).toContain('setLibraryError(t("music.libraryLoadError"))');
+    expect(loader).not.toContain("caught.message");
+    // One statement of the failure, in the slot, under the panel's own label.
+    expect(musicSource).toContain('<strong>{t("music.libraryTitle")}</strong><p>{error}</p>');
+    const texts = locales.map((locale) => translate(locale, "music.libraryLoadError"));
+    expect(new Set(texts).size).toBe(3);
+    expect(texts).not.toContain("Something went wrong.");
   });
 });
