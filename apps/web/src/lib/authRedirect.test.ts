@@ -11,7 +11,9 @@ describe("auth success redirect", () => {
     expect(authSuccessPath(null)).toBeNull();
     expect(authSuccessPath("https://evil.example/collect")).toBeNull();
     expect(authSuccessPath("//evil.example/collect")).toBeNull();
-    expect(authSuccessPath("/\\\\evil.example/collect")).toBeNull();
+    expect(authSuccessPath(`/\\${"evil.example/collect"}`)).toBeNull();
+    expect(authSuccessPath("/\\evil.example/collect")).toBeNull();
     expect(authSuccessPath(`/personal/health${String.fromCharCode(0)}`)).toBeNull();
+    expect(authSuccessPath(`/personal/health${String.fromCharCode(13, 10)}Location: https://evil.example`)).toBeNull();
   });
 });
