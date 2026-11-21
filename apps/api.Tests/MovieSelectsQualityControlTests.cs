@@ -49,6 +49,31 @@ public sealed class MovieSelectsQualityControlTests
     }
 
     [Fact]
+    public void Positive_coalesce_gap_never_rejoins_ranges_split_by_a_blocking_issue()
+    {
+        var configuredQc = new MovieSelectsQualityControlService(
+            Options.Create(new MovieSelectsQualityControlOptions { CoalesceGapSeconds = 1m }));
+        var segment = Segment(
+            "shot-1",
+            new(0m, 5m),
+            new MovieSelectsQcIssue(
+                MovieSelectsQcIssueCategories.FaceIdentity,
+                MovieSelectsQcSeverities.Blocking,
+                "FACE_IDENTITY_UNSTABLE",
+                new(2m, 3m)));
+
+        var decision = configuredQc.Evaluate(Request(segment));
+
+        Assert.Equal(MovieSelectsQcActions.RecommendSelects, decision.Action);
+        Assert.Equal(
+            [
+                new MovieSelectsQcSelect("shot-1", new(0m, 2m)),
+                new MovieSelectsQcSelect("shot-1", new(3m, 5m)),
+            ],
+            decision.RecommendedSelects);
+    }
+
+    [Fact]
     public void Warning_issue_keeps_a_select_recommendation_but_requires_human_review()
     {
         var segment = Segment(
