@@ -106,6 +106,56 @@ public sealed class ActivityCenterTests : IClassFixture<GenerationJobsNoWorkerFa
         Assert.Empty(list.Items);
     }
 
+    [Fact]
+    public async Task Concurrent_mark_read_requests_are_idempotent_at_the_unique_boundary()
+    {
+        using var client = factory.CreateClient();
+        var auth = await Register(client, $"activity-read-race-{Guid.NewGuid():N}@example.com");
+        var created = await SendWithCsrf<GenerationJobDto>(client, HttpMethod.Post, "/api/generation/jobs", new
+        {
+            workspaceId = auth.PersonalWorkspace.Id,
+            jobType = GenerationJobTypes.DocumentGenerate,
+            title = "Concurrent read marker",
+            inputJson = "{}",
+        });
+        var token = await GetCsrfToken(client);
+
+        var responses = await Task.WhenAll(Enumerable.Range(0, 16).Select(_ =>
+            SendWithToken(client, HttpMethod.Post, $"/api/activity/{created.Id}/read", token, new { workspaceId = auth.PersonalWorkspace.Id })));
+
+        Assert.All(responses, response => Assert.Equal(HttpStatusCode.OK, response.StatusCode));
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        Assert.Equal(1, await db.ActivityReadStates.CountAsync(item => item.UserId == auth.User.Id && item.GenerationJobId == created.Id));
+    }
+
+    [Fact]
+    public async Task Concurrent_mark_all_read_requests_are_idempotent_at_the_unique_boundary()
+    {
+        using var client = factory.CreateClient();
+        var auth = await Register(client, $"activity-read-all-race-{Guid.NewGuid():N}@example.com");
+        for (var index = 0; index < 8; index++)
+        {
+            await SendWithCsrf<GenerationJobDto>(client, HttpMethod.Post, "/api/generation/jobs", new
+            {
+                workspaceId = auth.PersonalWorkspace.Id,
+                jobType = GenerationJobTypes.DocumentGenerate,
+                title = $"Concurrent read-all marker {index}",
+                inputJson = "{}",
+            });
+        }
+        var token = await GetCsrfToken(client);
+
+        var responses = await Task.WhenAll(Enumerable.Range(0, 16).Select(_ =>
+            SendWithToken(client, HttpMethod.Post, "/api/activity/read-all", token, new { workspaceId = auth.PersonalWorkspace.Id })));
+
+        Assert.All(responses, response => Assert.Equal(HttpStatusCode.OK, response.StatusCode));
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        var jobIds = await db.GenerationJobs.Where(item => item.WorkspaceId == auth.PersonalWorkspace.Id).Select(item => item.Id).ToListAsync();
+        Assert.Equal(jobIds.Count, await db.ActivityReadStates.CountAsync(item => item.UserId == auth.User.Id && jobIds.Contains(item.GenerationJobId)));
+    }
+
     private static async Task<AuthResponse> Register(HttpClient client, string email)
     {
         var response = await SendWithCsrf(client, HttpMethod.Post, "/api/auth/register", new { displayName = "Activity Tester", email, password = "StrongPassword!123", preferredLanguage = "en" });
@@ -127,5 +177,19 @@ public sealed class ActivityCenterTests : IClassFixture<GenerationJobsNoWorkerFa
         request.Headers.Add("X-CSRF-TOKEN", csrf.GetProperty("token").GetString());
         if (payload is not null) request.Content = JsonContent.Create(payload);
         return await client.SendAsync(request);
+    }
+
+    private static async Task<HttpResponseMessage> SendWithToken(HttpClient client, HttpMethod method, string path, string token, object? payload)
+    {
+        using var request = new HttpRequestMessage(method, path);
+        request.Headers.Add("X-CSRF-TOKEN", token);
+        if (payload is not null) request.Content = JsonContent.Create(payload);
+        return await client.SendAsync(request);
+    }
+
+    private static async Task<string> GetCsrfToken(HttpClient client)
+    {
+        var response = await client.GetFromJsonAsync<JsonElement>("/api/auth/csrf");
+        return response.GetProperty("token").GetString()!;
     }
 }
