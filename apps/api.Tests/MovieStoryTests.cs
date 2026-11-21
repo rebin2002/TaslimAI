@@ -125,6 +125,44 @@ public sealed class MovieStoryTests : IClassFixture<TaslimApiFactory>
     }
 
     [Fact]
+    public async Task Story_revision_rejects_parent_revision_from_another_movie_or_unknown_revision()
+    {
+        using var owner = factory.CreateClient();
+        var auth = await Register(owner, $"story-parent-owner-{Guid.NewGuid():N}@example.com");
+        var targetMovie = await CreateMovie(owner, auth.PersonalWorkspace.Id, "Target Story Movie");
+        var foreignMovie = await CreateMovie(owner, auth.PersonalWorkspace.Id, "Foreign Story Movie");
+        var foreignRevision = await CreateRevision(owner, foreignMovie.Project.Id, MovieStoryAuthorship.Human);
+
+        async Task AssertRejected(Guid parentRevisionId)
+        {
+            var response = await SendWithCsrf(owner, HttpMethod.Post, $"/api/movie-studio/projects/{targetMovie.Project.Id}/story/revisions", new
+            {
+                premise = "A target premise.",
+                logline = "A target logline.",
+                synopsis = "A target synopsis.",
+                treatment = "A target treatment.",
+                authorship = MovieStoryAuthorship.Human,
+                parentRevisionId,
+                scenes = Array.Empty<object>(),
+            });
+
+            Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+            var body = await response.Content.ReadFromJsonAsync<JsonElement>();
+            Assert.Equal("MOVIE_STORY_INVALID", body.GetProperty("error").GetProperty("code").GetString());
+        }
+
+        await AssertRejected(foreignRevision.CurrentRevisionId!.Value);
+        await AssertRejected(Guid.NewGuid());
+
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        var targetRevisions = await db.MovieStoryRevisions
+            .Where(item => item.MovieStory.MovieProjectId == targetMovie.Project.Id)
+            .ToListAsync();
+        Assert.DoesNotContain(targetRevisions, item => item.ParentRevisionId == foreignRevision.CurrentRevisionId || item.ParentRevisionId.HasValue);
+    }
+
+    [Fact]
     public async Task Draft_can_be_saved_without_overwriting_the_approved_revision()
     {
         using var client = factory.CreateClient();
