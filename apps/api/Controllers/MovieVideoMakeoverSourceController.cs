@@ -1,0 +1,208 @@
+using System.Security.Claims;
+using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.Mvc;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Configuration;
+using Taslim.Api.Domain;
+using Taslim.Api.Files;
+using Taslim.Api.Infrastructure;
+using Taslim.Api.Movies;
+using Taslim.Api.Persistence;
+
+namespace Taslim.Api.Controllers;
+
+/// <summary>
+/// Authenticated, workspace-private, read-only source catalogue for AI Video
+/// Makeover input selection (issue #698 slice; the server-side descriptor that
+/// #811 identified as the missing half of safe attach). Exposes only facts that
+/// are persisted authoritatively today; every unprovable fact is reported as
+/// unverified so the #775 draft admission can fail closed. No provider call, no
+/// cost admission, no mutation of any other slice's files or routes.
+/// Both endpoints sit behind <see cref="MovieVideoMakeoverSourceFeatureGate"/>:
+/// default-off, fail-closed production admission - until an operator opts the
+/// feature in via configuration, every request receives the same opaque 404 as
+/// an inaccessible project, before any database read.
+/// </summary>
+[ApiController]
+[Authorize]
+[Route("api/movie-studio/projects/{projectId:guid}/video-makeover-sources")]
+public sealed class MovieVideoMakeoverSourceController(
+    TaslimDbContext db,
+    MovieCollaborationAccess collaboration,
+    IConfiguration configuration) : ControllerBase
+{
+    /// <summary>
+    /// Defensive page bound: Makeover drafts attach exactly one source, so a
+    /// bounded catalogue is sufficient and keeps the response budget predictable.
+    /// </summary>
+    private const int MaxRows = 200;
+
+    [HttpGet]
+    public async Task<IActionResult> List(Guid projectId, CancellationToken cancellationToken)
+    {
+        // Default-off feature admission (#698 release gate): while unconfigured,
+        // this read model does not exist. Answer before resolving identity or
+        // touching the database, with the same opaque 404 an inaccessible
+        // project gets (see ProjectNotFound), and set no marker header.
+        if (!MovieVideoMakeoverSourceFeatureGate.IsEnabled(configuration))
+            return ProjectNotFound();
+
+        var access = await ResolveProjectAccessAsync(projectId, cancellationToken);
+        if (access is null) return ProjectNotFound();
+
+        var (requesterUserId, workspaceId) = access.Value;
+        var visibleToRequester = StoredFileVisibility.ForWorkspaceMember(requesterUserId).Compile();
+
+        // Filter visibility before computing totals/paging: the number of
+        // foreign/invisible file links must never be disclosed indirectly.
+        // Scan fixed-size database batches; only retain MaxRows source details.
+        // This also finds eligible clips beyond a page of withheld rows.
+        var sources = new List<MovieVideoMakeoverSourceDto>(MaxRows);
+        var visibleCount = 0;
+        var offset = 0;
+        while (true)
+        {
+            var clips = await db.MovieClips.AsNoTracking()
+                .Where(clip => clip.MovieProjectId == projectId)
+                .OrderBy(clip => clip.CreatedAt)
+                .ThenBy(clip => clip.Id)
+                .Skip(offset)
+                .Take(MaxRows)
+                .ToListAsync(cancellationToken);
+            if (clips.Count == 0) break;
+            offset += clips.Count;
+
+            var (assetsByClip, filesByClip) = await LoadEvidenceAsync(clips, cancellationToken);
+            foreach (var clip in clips)
+            {
+                var asset = assetsByClip.GetValueOrDefault(clip.Id);
+                var storedFile = filesByClip.GetValueOrDefault(clip.Id);
+                if (MovieVideoMakeoverSourceEvaluator.ShouldWithhold(workspaceId, asset, storedFile, visibleToRequester))
+                    continue; // no IDs, existence, or counts for inaccessible links
+
+                visibleCount++;
+                if (sources.Count < MaxRows)
+                    sources.Add(MovieVideoMakeoverSourceEvaluator.Evaluate(
+                        clip, projectId, asset, storedFile, requesterUserId, DateTime.UtcNow));
+            }
+            if (clips.Count < MaxRows) break;
+        }
+
+        Response.Headers["X-Movie-Read-Model"] = MovieVideoMakeoverSourceCodes.ReadModel;
+        return Ok(new MovieVideoMakeoverSourceResponse(
+            "video-makeover-sources",
+            projectId,
+            workspaceId,
+            DateTime.UtcNow,
+            visibleCount,
+            sources.Count,
+            visibleCount > MaxRows,
+            sources));
+    }
+
+    [HttpGet("{clipId:guid}")]
+    public async Task<IActionResult> Get(Guid projectId, Guid clipId, CancellationToken cancellationToken)
+    {
+        // Same default-off gate as List: no clip-, asset-, or file-scoped
+        // database read happens until the feature is explicitly admitted.
+        if (!MovieVideoMakeoverSourceFeatureGate.IsEnabled(configuration))
+            return ProjectNotFound();
+
+        var access = await ResolveProjectAccessAsync(projectId, cancellationToken);
+        if (access is null) return ProjectNotFound();
+
+        var (requesterUserId, workspaceId) = access.Value;
+        var clip = await db.MovieClips.AsNoTracking()
+            .FirstOrDefaultAsync(item => item.Id == clipId && item.MovieProjectId == projectId, cancellationToken);
+        if (clip is null) return SourceNotFound();
+
+        var (assetsByClip, filesByClip) = await LoadEvidenceAsync([clip], cancellationToken);
+        var asset = assetsByClip.GetValueOrDefault(clip.Id);
+        var storedFile = filesByClip.GetValueOrDefault(clip.Id);
+        var visibleToRequester = StoredFileVisibility.ForWorkspaceMember(requesterUserId).Compile();
+        if (MovieVideoMakeoverSourceEvaluator.ShouldWithhold(workspaceId, asset, storedFile, visibleToRequester))
+            return SourceNotFound();
+
+        Response.Headers["X-Movie-Read-Model"] = MovieVideoMakeoverSourceCodes.ReadModel;
+        return Ok(MovieVideoMakeoverSourceEvaluator.Evaluate(
+            clip, projectId, asset, storedFile, requesterUserId, DateTime.UtcNow));
+    }
+
+    /// <summary>
+    /// Opaque 404 shared by the inaccessible-project path and the feature-off
+    /// path of both endpoints: an unadmitted deployment must not disclose that
+    /// this read model exists, so the disabled answer is byte-identical in
+    /// shape to a request for a project the caller cannot see.
+    /// </summary>
+    private IActionResult ProjectNotFound() =>
+        ApiResults.Error(this, StatusCodes.Status404NotFound, "MOVIE_PROJECT_NOT_FOUND", "Movie project not found.");
+
+    /// <summary>
+    /// Requires the established Movie collaboration View permission over the project
+    /// (workspace membership + project team), identical to the existing read models.
+    /// Returns null - never a partial answer - when the project or access is absent.
+    /// </summary>
+    private async Task<(Guid RequesterUserId, Guid WorkspaceId)?> ResolveProjectAccessAsync(
+        Guid projectId, CancellationToken cancellationToken)
+    {
+        var requester = Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier)
+            ?? throw new InvalidOperationException("Authenticated user identifier is missing."));
+        var project = await db.MovieProjects.AsNoTracking()
+            .FirstOrDefaultAsync(item => item.Id == projectId, cancellationToken);
+        if (project is null) return null;
+        if (!await collaboration.HasPermissionAsync(requester, projectId, MoviePermissions.View, cancellationToken))
+            return null;
+        return (requester, project.WorkspaceId);
+    }
+
+    /// <summary>
+    /// Batch-resolves the referenced asset and stored-file rows per clip. A clip may
+    /// link its file directly or through its asset; both id sets are fetched once so
+    /// the endpoint is two queries beyond the clip page regardless of row count.
+    /// </summary>
+    private async Task<(Dictionary<Guid, Asset> Assets, Dictionary<Guid, StoredFile> Files)> LoadEvidenceAsync(
+        IReadOnlyList<MovieClip> clips, CancellationToken cancellationToken)
+    {
+        var assetIds = clips
+            .Where(clip => clip.AssetId.HasValue)
+            .Select(clip => clip.AssetId!.Value)
+            .Distinct()
+            .ToList();
+        var assetsById = assetIds.Count == 0
+            ? new Dictionary<Guid, Asset>()
+            : await db.Assets.AsNoTracking()
+                .Where(asset => assetIds.Contains(asset.Id))
+                .ToDictionaryAsync(asset => asset.Id, cancellationToken);
+
+        var fileIds = clips
+            .Select(clip => clip.StoredFileId
+                ?? (clip.AssetId is { } assetIdForFile && assetsById.TryGetValue(assetIdForFile, out var linkedAsset)
+                    ? linkedAsset.StoredFileId
+                    : null))
+            .Where(id => id.HasValue)
+            .Select(id => id!.Value)
+            .Distinct()
+            .ToList();
+        var filesById = fileIds.Count == 0
+            ? new Dictionary<Guid, StoredFile>()
+            : await db.StoredFiles.AsNoTracking()
+                .Where(file => fileIds.Contains(file.Id))
+                .ToDictionaryAsync(file => file.Id, cancellationToken);
+
+        var assetsByClip = new Dictionary<Guid, Asset>(clips.Count);
+        var filesByClip = new Dictionary<Guid, StoredFile>(clips.Count);
+        foreach (var clip in clips)
+        {
+            Asset? asset = clip.AssetId is { } assetId && assetsById.TryGetValue(assetId, out var foundAsset) ? foundAsset : null;
+            if (asset is not null) assetsByClip[clip.Id] = asset;
+            var fileId = clip.StoredFileId ?? asset?.StoredFileId;
+            if (fileId is { } id && filesById.TryGetValue(id, out var file))
+                filesByClip[clip.Id] = file;
+        }
+
+        return (assetsByClip, filesByClip);
+    }
+
+    private IActionResult SourceNotFound() =>
+        ApiResults.Error(this, StatusCodes.Status404NotFound, "MOVIE_MAKEOVER_SOURCE_NOT_FOUND", "Movie Makeover source not found.");
+}
