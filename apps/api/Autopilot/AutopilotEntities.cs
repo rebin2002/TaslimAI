@@ -412,6 +412,7 @@ public static class AutopilotAuditActions
     public const string LockAcquired = "lock.acquired";
     public const string WatchdogReconciled = "watchdog.reconciled";
     public const string ControlChanged = "control.changed";
+    public const string ManualReconciliationRequested = "manual.reconciliation_requested";
     public const string SafetyStop = "safety.stop";
     public const string ControllerDisabled = "controller.disabled";
 }
