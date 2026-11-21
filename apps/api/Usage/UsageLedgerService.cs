@@ -329,6 +329,99 @@ public sealed class UsageLedgerService(
     public async Task CancelAsync(UsageTransaction transaction, string cancellationCode, CancellationToken cancellationToken = default)
     {
         if (transaction.Status is UsageTransactionStatus.Completed or UsageTransactionStatus.Refunded or UsageTransactionStatus.Failed or UsageTransactionStatus.Cancelled) return;
+        // The guard above reads this context's copy, which a worker may have loaded at
+        // reservation time and held across the whole provider window. While that copy says
+        // Pending, the charge leg and the refund leg can both have committed elsewhere, and
+        // assigning the cancellation onto the stale copy lets Entity Framework write back
+        // exactly the columns that differ from it - Status and FailureCode - restating a
+        // committed Refunded row as Cancelled while leaving the durable ChargedAmount,
+        // ReversedAmount, RefundedAt and the paid-out Refund adjustment untouched. That is the
+        // asymmetry PR #1077 closed for GenerationProviderAttempt with an atomic
+        // UPDATE ... WHERE Status = Started: the attempt row got a compare-and-set, the
+        // charge/refund leg it fences did not.
+        // Cancel is now the same shape: one durable compare-and-set that lands only while the
+        // row in the database still carries the status this context read. On PostgreSQL the
+        // losing finalizer blocks on the row lock, re-evaluates the predicate against the
+        // committed row and matches zero rows; on SQLite it simply matches zero rows.
+        // Zero rows is fail-closed: the cancellation is not applied, the durable terminal
+        // outcome is adopted instead, so a Cancelled row can never disagree with its ledger.
+        var expectedStatus = transaction.Status;
+        if (db.Entry(transaction).State == EntityState.Added)
+        {
+            // A reservation this context has not saved yet has no durable row to race, so there
+            // is nothing to guard: stage the cancellation on the pending insert as before.
+            ApplyCancellation(transaction, cancellationCode);
+            await db.SaveChangesAsync(cancellationToken);
+            logger.LogInformation("Usage transaction cancelled before its reservation was saved. TransactionId={TransactionId}; Feature={Feature}; FailureCode={FailureCode}", transaction.Id, transaction.Feature, cancellationCode);
+            return;
+        }
+
+        var settled = await db.UsageTransactions
+            .Where(item => item.Id == transaction.Id && item.Status == expectedStatus)
+            .ExecuteUpdateAsync(setters => setters
+                .SetProperty(item => item.Status, UsageTransactionStatus.Cancelled)
+                .SetProperty(item => item.ProviderCostUsd, 0m)
+                .SetProperty(item => item.ProviderCostKnown, false)
+                .SetProperty(item => item.ChargedAmount, 0m)
+                .SetProperty(item => item.ReversedAmount, 0m)
+                .SetProperty(item => item.IsBillable, false)
+                .SetProperty(item => item.BillableAt, (DateTime?)null)
+                .SetProperty(item => item.ActualRecordedAt, (DateTime?)null)
+                .SetProperty(item => item.CompletedAt, (DateTime?)null)
+                .SetProperty(item => item.FailureCode, cancellationCode),
+                cancellationToken);
+        if (settled == 1)
+        {
+            ApplyCancellation(transaction, cancellationCode);
+            AcceptDurableCancellation(transaction);
+            await db.SaveChangesAsync(cancellationToken);
+            logger.LogInformation("Usage transaction cancelled. TransactionId={TransactionId}; Feature={Feature}; FailureCode={FailureCode}", transaction.Id, transaction.Feature, cancellationCode);
+            return;
+        }
+
+        // Zero rows: this copy is behind the durable row, or the row is gone. Neither case may
+        // write a cancellation, so the committed outcome is adopted onto the caller's object.
+        var committed = await db.UsageTransactions
+            .AsNoTracking()
+            .Where(item => item.Id == transaction.Id)
+            .Select(item => new
+            {
+                item.Status,
+                item.ProviderCostUsd,
+                item.ProviderCostKnown,
+                item.ChargedAmount,
+                item.ReversedAmount,
+                item.IsBillable,
+                item.BillableAt,
+                item.ActualRecordedAt,
+                item.CompletedAt,
+                item.RefundedAt,
+                item.FailureCode,
+            })
+            .SingleOrDefaultAsync(cancellationToken);
+        if (committed is null)
+        {
+            logger.LogWarning("Usage transaction cancellation matched no durable row. TransactionId={TransactionId}; Feature={Feature}; ObservedStatus={ObservedStatus}; CancellationCode={CancellationCode}", transaction.Id, transaction.Feature, expectedStatus, cancellationCode);
+            return;
+        }
+
+        logger.LogWarning("Usage transaction cancellation lost the terminal-status race; adopting the committed outcome. TransactionId={TransactionId}; Feature={Feature}; CommittedStatus={CommittedStatus}; SupersededCancellationCode={CancellationCode}; CommittedChargedAmount={ChargedAmount}; CommittedReversedAmount={ReversedAmount}", transaction.Id, transaction.Feature, committed.Status, cancellationCode, committed.ChargedAmount, committed.ReversedAmount);
+        transaction.Status = committed.Status;
+        transaction.ProviderCostUsd = committed.ProviderCostUsd;
+        transaction.ProviderCostKnown = committed.ProviderCostKnown;
+        transaction.ChargedAmount = committed.ChargedAmount;
+        transaction.ReversedAmount = committed.ReversedAmount;
+        transaction.IsBillable = committed.IsBillable;
+        transaction.BillableAt = committed.BillableAt;
+        transaction.ActualRecordedAt = committed.ActualRecordedAt;
+        transaction.CompletedAt = committed.CompletedAt;
+        transaction.RefundedAt = committed.RefundedAt;
+        transaction.FailureCode = committed.FailureCode;
+        AcceptDurableCancellation(transaction);
+    }
+
+    private static void ApplyCancellation(UsageTransaction transaction, string cancellationCode)
+    {
         transaction.Status = UsageTransactionStatus.Cancelled;
         transaction.ProviderCostUsd = 0m;
         transaction.ProviderCostKnown = false;
@@ -337,10 +430,23 @@ public sealed class UsageLedgerService(
         transaction.IsBillable = false;
         transaction.BillableAt = null;
         transaction.ActualRecordedAt = null;
-        transaction.FailureCode = cancellationCode;
         transaction.CompletedAt = null;
-        await db.SaveChangesAsync(cancellationToken);
-        logger.LogInformation("Usage transaction cancelled. TransactionId={TransactionId}; Feature={Feature}; FailureCode={FailureCode}", transaction.Id, transaction.Feature, cancellationCode);
+        transaction.FailureCode = cancellationCode;
+    }
+
+    /// <summary>
+    /// Keeps the cancellation to exactly one durable write. The compare-and-set above already
+    /// persisted the row, and the local copy was just brought in line with it, so the tracking
+    /// snapshot is advanced over the same values: a later SaveChangesAsync of this context must
+    /// not re-send them, because another finalizer may have moved the row again since the
+    /// compare-and-set landed. Marking the individual properties unmodified is not enough here -
+    /// that reverts the current value to the old snapshot - so the whole snapshot is advanced.
+    /// </summary>
+    private void AcceptDurableCancellation(UsageTransaction transaction)
+    {
+        var entry = db.Entry(transaction);
+        if (entry.State is not (EntityState.Modified or EntityState.Unchanged)) return;
+        entry.OriginalValues.SetValues(entry.CurrentValues);
     }
 
     public Task<UsageAdjustmentResult?> RefundAsync(UsageTransaction transaction, CancellationToken cancellationToken = default) =>
