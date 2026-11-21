@@ -164,6 +164,11 @@ function AccountProfileForm() {
           <p>{t("account.subtitle")}</p>
         </div>
         <div className="account-identity-mark"><span className="account-avatar">{initials}</span><div><strong>{user?.displayName}</strong><span>{user?.email}</span></div></div>
+        {user?.isAdmin === true && (
+          <Link className="secondary-button" href="/account/admin">
+            <ShieldCheck size={16} aria-hidden="true" /> {t("admin.center")}
+          </Link>
+        )}
       </div>
 
       <div className="account-settings-grid">
