@@ -45,4 +45,26 @@ public sealed class MovieLocationGeographySheetTests
 
         Assert.NotEqual(first, MovieLocationGeographyContinuity.Hash(sheet.MovieLocationId, sheet, guide));
     }
+
+    [Fact]
+    public void Malformed_persisted_geography_json_fails_closed_instead_of_throwing()
+    {
+        var sheet = new MovieLocationGeographySheet
+        {
+            Id = Guid.NewGuid(),
+            MovieLocationId = Guid.NewGuid(),
+            EntrancesExitsJson = "{not-json",
+            WindowsJson = "{}",
+            PathsJson = "[]",
+            MajorObjectsJson = "null",
+            LightSourcesJson = "[]",
+            OrientationAnchorsJson = "[]",
+        };
+
+        var result = MovieLocationGeographySheetMapper.ToDto(sheet);
+
+        Assert.Empty(result.EntrancesExits);
+        Assert.Empty(result.Windows);
+        Assert.Empty(result.MajorObjects);
+    }
 }
