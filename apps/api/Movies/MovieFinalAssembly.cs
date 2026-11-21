@@ -339,7 +339,9 @@ public sealed class MovieFinalAssemblyService(
                 WorkspaceId = movie.WorkspaceId,
                 ProjectId = movie.ProjectId,
                 JobType = GenerationJobTypes.MovieAssembly,
-                Title = $"{movie.Title} master export",
+                // The manifest export label is bounded to the persisted job-title column,
+                // so a project admitted at the full title bound still queues.
+                Title = MovieExportManifestNaming.ComposeExportLabel(movie.Title),
                 // Movie generation job payloads use the default System.Text.Json contract.
                 // Every worker-side reader (GenerationJobExecution target validation and
                 // MovieFinalAssemblyJobHandler) deserializes with default options, so the
