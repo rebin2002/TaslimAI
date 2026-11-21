@@ -159,6 +159,10 @@ public sealed class AssetService(TaslimDbContext db, WorkspaceAccessService acce
             .ThenInclude(file => file!.Project)
             .Include(asset => asset.SourceGenerationJob)
             .Include(asset => asset.Representations)
+            // The read model now reports per-representation download availability from each
+            // representation's own stored file (#1030), so the navigation has to be loaded by the
+            // same query that feeds AssetContractMapper.ToDto for both the list and the detail.
+            .ThenInclude(representation => representation.StoredFile)
             .AsQueryable();
         return tracking ? query : query.AsNoTracking();
     }
