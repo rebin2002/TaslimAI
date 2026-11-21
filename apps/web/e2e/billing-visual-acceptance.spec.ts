@@ -1,13 +1,14 @@
-import { test, expect, type Page, type Route } from "@playwright/test";
+import { type Page, type Route } from "@playwright/test";
+import { test, expect } from "./fixtures";
 import { appendFileSync, copyFileSync, mkdirSync } from "node:fs";
 
 /**
- * PR #732 visual acceptance gate for authenticated /account/billing.
+ * Integrated #732/#652/#753 visual acceptance for authenticated /account/billing.
  *
- * Runs the real protected billing route against deterministic in-browser
- * mocks only: session and billing payloads are fulfilled via `page.route`,
- * so the spec touches no real user, provider, charge, database or migration
- * and requires no API backend.
+ * Uses the disposable E2E authenticatedPage fixture for a valid real API
+ * session cookie, required by the server-side route authorization guard.
+ * Billing payloads and rendered credits remain deterministic in-browser
+ * mocks; no real user, provider, charge, migration or paid generation is used.
  *
  * Head mode (default) asserts the fixed layout: zero text-box collisions,
  * zero page-level horizontal overflow, viewport containment, disabled plan
@@ -230,7 +231,7 @@ test.describe(`Billing route visual acceptance${BASELINE ? " (baseline control: 
   for (const testCase of cases) {
     const { locale, width, height } = testCase;
     const strings = localized[locale];
-    test(`/account/billing renders ${locale} at ${width}px`, async ({ page }, testInfo) => {
+    test(`/account/billing renders ${locale} at ${width}px`, async ({ authenticatedPage: page }, testInfo) => {
       await page.addInitScript((value) => window.localStorage.setItem("taslim-locale", value), locale);
       await mockBillingSurface(page);
       await page.setViewportSize({ width, height });
@@ -258,11 +259,12 @@ test.describe(`Billing route visual acceptance${BASELINE ? " (baseline control: 
       await expect(page.locator(".billing-plan-option").nth(1).locator("button")).toHaveText(strings.upgrade);
       await expect(page.locator(".billing-credit-card").locator("strong")).toHaveText(await formatInPage(billingFixture.credits.totalRemaining));
       await expect(page.locator(".billing-credit-card")).toContainText(
-        strings.includedRemaining.replace("{count}", await formatInPage(billingFixture.credits.includedRemaining)),
+        strings.includedCredits.replace("{count}", await formatInPage(billingFixture.credits.includedRemaining)),
       );
       await expect(page.getByText(billingFixture.actions.disabledReason, { exact: true })).toBeVisible();
 
       const metrics = await measureBillingPage(page);
+      const bodyScrollWidth = await page.evaluate(() => document.body.scrollWidth);
       detectedCollisionsByCase.set(`${locale}@${width}`, metrics.collisions.length);
 
       expect(metrics.lang, "document lang").toBe(strings.tag);
@@ -274,6 +276,7 @@ test.describe(`Billing route visual acceptance${BASELINE ? " (baseline control: 
       } else {
         expect(metrics.collisions, `text-box collisions: ${JSON.stringify(metrics.collisions.slice(0, 8))}`).toHaveLength(0);
         expect(metrics.pageOverflow, "page-level horizontal overflow").toBe(false);
+        expect(bodyScrollWidth, "body scrollWidth must fit viewport").toBeLessThanOrEqual(width + 1);
         expect(metrics.cardsOutsideViewport, "plan/summary cards inside viewport").toBe(0);
         expect(metrics.enabledButtons, "all plan change / checkout controls stay disabled").toBe(0);
         expect(metrics.totalButtons).toBe(plans.length + 3);
@@ -294,7 +297,11 @@ test.describe(`Billing route visual acceptance${BASELINE ? " (baseline control: 
 
       const screenshotName = `billing-${locale}-${width}px${BASELINE ? "-baseline" : ""}`;
       const shotPath = testInfo.outputPath(`${screenshotName}.png`);
-      await page.screenshot({ path: shotPath, fullPage: true });
+      const screenshot = await page.screenshot({ path: shotPath, fullPage: true });
+      if (!BASELINE) {
+        // html.scrollWidth missed #816 tablet overflow; verify the actual bitmap.
+        expect(screenshot.readUInt32BE(16), "fullPage screenshot width").toBeLessThanOrEqual(width + 1);
+      }
       await testInfo.attach(screenshotName, { path: shotPath, contentType: "image/png" });
       if (process.env.BILLING_SHOTS_DIR) {
         mkdirSync(process.env.BILLING_SHOTS_DIR, { recursive: true });
@@ -333,7 +340,7 @@ test.describe(`Billing route visual acceptance${BASELINE ? " (baseline control: 
     expect(narrowDetected, "the historical 320/375 run-together symptom must reproduce without the route CSS").toBeGreaterThanOrEqual(6);
   });
 
-  test("cross-route CSS collision walk: /account geometry is unchanged by the billing route", async ({ page }, testInfo) => {
+  test("cross-route CSS collision walk: /account geometry is unchanged by the billing route", async ({ authenticatedPage: page }, testInfo) => {
     test.skip(BASELINE, "cross-route walk only applies to the fixed head build");
     await page.addInitScript(() => window.localStorage.setItem("taslim-locale", "en"));
     await mockBillingSurface(page);
