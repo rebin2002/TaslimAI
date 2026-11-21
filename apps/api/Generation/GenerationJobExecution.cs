@@ -173,9 +173,42 @@ public interface IGenerationJobService
     Task<bool> AbortPendingMovieProductionAsync(Guid userId, Guid jobId, CancellationToken cancellationToken = default);
     Task<GenerationJob?> RetryAsync(Guid userId, Guid jobId, CancellationToken cancellationToken = default, string? idempotencyKey = null, string? requestId = null);
     Task<GenerationJob?> GetAsync(Guid userId, Guid jobId, CancellationToken cancellationToken = default);
+    /// <summary>
+    /// <see cref="GetAsync"/> plus the live downloadability of exactly the renditions this job's
+    /// published <c>ResultJson</c> snapshot advertises, so the studio read path can answer each
+    /// advertised format from the current stored-file state instead of from the immutable
+    /// publication-time record (issue #1049).
+    ///
+    /// The production service resolves the live facts. The default keeps the historical payload
+    /// byte-for-byte intact for implementations that carry no availability data of their own: it
+    /// performs the same authorized read and pairs it with <c>null</c>, which the contract mapper
+    /// renders as the contract exactly as it is served today.
+    /// </summary>
+    Task<GenerationJobPublishedReadModel?> GetPublishedAsync(Guid userId, Guid jobId, CancellationToken cancellationToken = default) =>
+        ToReadModelWithoutAvailabilityAsync(GetAsync(userId, jobId, cancellationToken));
+
+    private static async Task<GenerationJobPublishedReadModel?> ToReadModelWithoutAvailabilityAsync(Task<GenerationJob?> read)
+    {
+        var job = await read;
+        return job is null ? null : new GenerationJobPublishedReadModel(job, null);
+    }
     Task<GenerationJobListDto?> ListAsync(Guid userId, GenerationJobFilter filter, CancellationToken cancellationToken = default);
     Task<GenerationJobCancelResult> CancelAsync(Guid userId, Guid jobId, CancellationToken cancellationToken = default);
 }
+
+/// <summary>
+/// An authorized generation-job read paired with the live availability of the renditions its
+/// published snapshot advertises.
+///
+/// The dictionary maps representation identity to "the download route would serve this rendition
+/// right now", the same fact <c>AssetService.GetDownloadAsync</c> enforces with
+/// <c>representation.StoredFile is { Status: StoredFileStatus.Ready }</c>. It is <c>null</c> when the
+/// snapshot advertises no renditions at all, which keeps the served contract byte-for-byte what it
+/// was before this seam existed, and is populated - failing closed per identity - as soon as the
+/// snapshot promises at least one download. The job's <c>ResultJson</c> is never rewritten here.
+/// </summary>
+public sealed record GenerationJobPublishedReadModel(GenerationJob Job, IReadOnlyDictionary<Guid, bool>? RepresentationAvailability);
+
 
 internal static class GenerationJobPublicationContract
 {
@@ -698,6 +731,52 @@ public sealed class GenerationJobService(
         var job = await db.GenerationJobs.AsNoTracking().Include(item => item.Outputs).FirstOrDefaultAsync(item => item.Id == jobId, cancellationToken);
         if (job is null || !await access.IsMemberAsync(userId, job.WorkspaceId, cancellationToken) || IsPrivateExecutionRecord(job, userId)) return null;
         return job;
+    }
+
+    public async Task<GenerationJobPublishedReadModel?> GetPublishedAsync(Guid userId, Guid jobId, CancellationToken cancellationToken = default)
+    {
+        // Authorization stays exactly where it was: the availability half below only ever runs on a
+        // job this caller has already been allowed to read.
+        var job = await GetAsync(userId, jobId, cancellationToken);
+        if (job is null) return null;
+        return new GenerationJobPublishedReadModel(job, await ReadPublishedRepresentationAvailabilityAsync(job, cancellationToken));
+    }
+
+    /// <summary>
+    /// Answers every rendition the published <c>ResultJson</c> snapshot advertises with the state its
+    /// own stored file has right now, in ONE projected query regardless of how many renditions the
+    /// snapshot names (issue #1049: the snapshot is baked at completion and is never rewritten, so
+    /// after a retention prune it still promises a download the route refuses with
+    /// <c>409 ASSET_FILE_UNAVAILABLE</c>).
+    ///
+    /// The set is bounded by construction: the identities come from this authorized job's snapshot and
+    /// nothing else is asked for, only <c>Id</c> and the stored file's <c>Status</c> are read (no
+    /// bytes, keys, hashes or neighbouring rows), and each identity is additionally pinned to the
+    /// authorized job's own workspace so a stale or foreign identity inside a snapshot fails closed
+    /// instead of reporting another workspace's file state.
+    ///
+    /// Returns <c>null</c> when the snapshot advertises no rendition at all, which leaves the served
+    /// contract byte-for-byte unchanged; a job that promises downloads gets a complete, fail-closed
+    /// answer for each of them.
+    /// </summary>
+    private async Task<IReadOnlyDictionary<Guid, bool>?> ReadPublishedRepresentationAvailabilityAsync(GenerationJob job, CancellationToken cancellationToken)
+    {
+        var advertised = GenerationJobContractMapper.AdvertisedRepresentationIds(job.ResultJson);
+        if (advertised.Count == 0) return null;
+        var advertisedIds = advertised.ToList();
+        var workspaceId = job.WorkspaceId;
+        var rows = await db.AssetRepresentations.AsNoTracking()
+            .Where(representation => advertisedIds.Contains(representation.Id)
+                && representation.Asset.WorkspaceId == workspaceId)
+            .Select(representation => new { representation.Id, State = representation.StoredFile.Status })
+            .ToListAsync(cancellationToken);
+
+        // Seeded unavailable, then confirmed from the loaded state: an advertised rendition whose row
+        // is gone entirely is a rendition the route cannot serve either.
+        var availability = new Dictionary<Guid, bool>(advertisedIds.Count);
+        foreach (var id in advertisedIds) availability[id] = false;
+        foreach (var row in rows) availability[row.Id] = row.State == StoredFileStatus.Ready;
+        return availability;
     }
 
     public async Task<GenerationJobListDto?> ListAsync(Guid userId, GenerationJobFilter filter, CancellationToken cancellationToken = default)
