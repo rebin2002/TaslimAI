@@ -92,9 +92,14 @@ public sealed class UsageCostControl(
             .Where(item => item.WorkspaceId == workspaceId && item.CreatedAt >= start && item.CreatedAt < end)
             .Select(item => new { item.Status, item.ProviderCostUsd, item.ProviderCostKnown, item.EstimatedProviderCostUsd })
             .ToListAsync(cancellationToken);
+        // Cancelled work never reached a provider, so it is neither usable exposure nor spend.
         var hasUnknown = rows.Any(item => item.Status != UsageTransactionStatus.Cancelled
             && (item.Status == UsageTransactionStatus.Pending ? !item.EstimatedProviderCostUsd.HasValue : !item.ProviderCostKnown));
-        var cost = rows.Sum(item => item.Status == UsageTransactionStatus.Completed || item.Status == UsageTransactionStatus.Failed
+        // A refund returns the customer charge, not the provider spend. Refunded work therefore
+        // stays counted exactly like completed and failed work, which is how the internal
+        // GenerationCostGuardrailService reader already treats it; dropping it here would let a
+        // workspace re-spend refunded provider cost against its own daily and monthly ceilings.
+        var cost = rows.Sum(item => item.Status is UsageTransactionStatus.Completed or UsageTransactionStatus.Failed or UsageTransactionStatus.Refunded
             ? item.ProviderCostKnown ? item.ProviderCostUsd : 0m
             : item.Status == UsageTransactionStatus.Pending
                 ? item.EstimatedProviderCostUsd ?? 0m
