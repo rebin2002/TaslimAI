@@ -51,6 +51,10 @@ import {
   shouldResetPresentationWorkspaceState,
   shouldPollPresentationJob,
 } from "@/lib/presentationStudioState";
+import {
+  filterStudioDownloadableRepresentations,
+  readStudioRepresentationDownloadability,
+} from "@/lib/studioRepresentationAvailability";
 
 const extensions = [".pdf", ".docx", ".txt", ".md", ".csv", ".xlsx"];
 type PresentationType = "auto" | "business" | "company_profile" | "sales" | "investor" | "proposal" | "training" | "project_update" | "report" | "educational" | "general";
@@ -357,6 +361,10 @@ function IdentityScopedPresentationStudioView({ userId }: { userId: string }) {
   }, [current, pollRetry, t, workspace, userId, revokeSession]);
 
   const result = parsePresentationJobResult(current);
+  // #1049: gate the export menu on the live per-representation facts delivered beside the
+  // immutable ResultJson snapshot (`representationDownloads`, the #1117 API contract). No
+  // field, no change: legacy payloads keep advertising every rendition exactly as before.
+  const representationDownloadability = readStudioRepresentationDownloadability(current);
   const state = presentationStudioState(current, result);
   const readyFiles = files.filter((file) => isPresentationSourceReady(file));
   const progress = displayPresentationProgress(current);
@@ -559,7 +567,7 @@ function IdentityScopedPresentationStudioView({ userId }: { userId: string }) {
            * the control through `aria-busy` / `aria-disabled` and refused by the click handler, and the
            * accessible name states the action plus the specific file, because the bare format token could
            * not tell two PowerPoint renditions apart. presentationExportAccess.ts owns both decisions.
-           */}{selectPresentationExports(result.representations).map((representation) => {
+           */}{filterStudioDownloadableRepresentations(selectPresentationExports(result.representations), representationDownloadability).map((representation) => {
              const exportControl = resolvePresentationExportControl({ working, pendingExportId, exportId: representation.id });
              return <button className="secondary-button" key={representation.id} type="button" onClick={() => { if (canActivatePresentationExport(exportControl)) void downloadRepresentation(representation.id, representation.fileName); }} aria-busy={exportControl.busy || undefined} aria-disabled={exportControl.blocked || undefined} aria-label={presentationExportAccessibleName({ action: t("presentation.downloadLabel"), caption: presentationExportCaption(representation.type), fileName: representation.fileName })}><Download size={15} /> {presentationExportCaption(representation.type)}</button>;
            })}<Link className="secondary-button" href="/assets"><ExternalLink size={15} /> {t("presentation.openAssets")}</Link></div></div><div className="presentation-active-slide" role="region" aria-label={selectedSlide ? `${t("presentation.selectedSlide")}: ${selectedSlide.title}` : t("presentation.resultTitle")}><span className="sr-only" aria-live="polite">{selectedSlide ? `${t("presentation.selectedSlide")}: ${selectedSlide.title}` : t("presentation.resultTitle")}</span>{selectedSlide ? <SlideArtwork slide={selectedSlide} /> : <EmptySlideCanvas title={t("presentation.resultTitle")} description={t("presentation.completedLoadHint")} />}<button className="slide-nav-button slide-nav-prev" onClick={() => setActiveSlide((index) => Math.max(0, index - 1))} disabled={activeSlide === 0} aria-label={t("presentation.previousSlide")}><ArrowLeft size={17} /></button><button className="slide-nav-button slide-nav-next" onClick={() => setActiveSlide((index) => Math.min(Math.max(0, slides.length - 1), index + 1))} disabled={activeSlide >= slides.length - 1} aria-label={t("presentation.nextSlide")}><ArrowRight size={17} /></button></div><div className="presentation-output-footer"><span><CheckCircle2 size={15} /> {t("presentation.savedToAssets")}</span><span>{t("presentation.safetyNote")}</span></div>{downloadError && <div className="form-error" role="alert"><XCircle size={15} /> {downloadError}</div>}</section>
