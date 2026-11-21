@@ -24,7 +24,7 @@ export function DepartmentSection({ department, index }: Readonly<{ department: 
           {t("home.viewAll")} <ArrowUpLeft size={15} />
         </Link>
       </div>
-      <div className="feature-row" aria-label={t(department.titleKey)}>
+      <div className="feature-row" role="group" aria-label={t(department.titleKey)}>
         {department.features.map((feature) => {
           const FeatureIcon = feature.icon;
           return (

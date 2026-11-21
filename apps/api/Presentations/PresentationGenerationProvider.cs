@@ -33,6 +33,11 @@ public sealed class AiPresentationGenerationProvider(IChatCompletionService comp
         {
             throw new AiProviderTimeoutException();
         }
+        // Presentation Studio cancellation is durable: once the caller has been
+        // cancelled, a provider response that arrives afterwards is a late
+        // completion, not a success. Re-assert cancellation before the response
+        // is parsed, validated, rendered or handed to generated-file publication.
+        cancellationToken.ThrowIfCancellationRequested();
         if (string.IsNullOrWhiteSpace(result.Content))
             throw new PresentationGenerationStageException(PresentationGenerationStages.DraftParse, GenerationJobErrorCodes.PresentationOutputInvalid, "The presentation response was empty.", result.Usage);
 

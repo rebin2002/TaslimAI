@@ -52,4 +52,19 @@ public sealed class MovieProductionWorkflowTests
         Assert.False(MovieProductionWorkflow.IsGenerationJobTypeAllowed(MovieProductionStages.ProductionKeyframe, GenerationJobTypes.SystemTest));
         Assert.True(MovieProductionWorkflow.IsGenerationJobTypeAllowed(MovieProductionStages.ProductionRender, GenerationJobTypes.MovieClipGenerate));
     }
+
+    [Fact]
+    public void Motion_and_render_versions_only_accept_per_shot_movie_jobs()
+    {
+        foreach (var stage in new[] { MovieProductionStages.MotionPreview, MovieProductionStages.ProductionRender })
+        {
+            Assert.True(MovieProductionWorkflow.IsGenerationJobTypeAllowed(stage, GenerationJobTypes.MovieClipGenerate));
+            Assert.True(MovieProductionWorkflow.IsGenerationJobTypeAllowed(stage, GenerationJobTypes.MovieQuickGenerate));
+            Assert.False(MovieProductionWorkflow.IsGenerationJobTypeAllowed(stage, GenerationJobTypes.MovieAssembly));
+            Assert.False(MovieProductionWorkflow.IsGenerationJobTypeAllowed(stage, GenerationJobTypes.ImageGenerate));
+        }
+
+        Assert.False(MovieProductionWorkflow.IsGenerationJobTypeAllowed(MovieProductionStages.ApprovedKeyframe, GenerationJobTypes.MovieClipGenerate));
+        Assert.False(MovieProductionWorkflow.IsGenerationJobTypeAllowed(MovieProductionStages.ShotPlan, GenerationJobTypes.MovieAssembly));
+    }
 }

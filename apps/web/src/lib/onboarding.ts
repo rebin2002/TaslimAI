@@ -1,3 +1,5 @@
+import { defaultLanguagePackRegistry } from "./languagePackRegistry";
+
 export const onboardingWorkflowDefinitions = [
   { intent: "project", href: "/projects?create=1", titleKey: "onboarding.workflow.project.title", descriptionKey: "onboarding.workflow.project.description", icon: "project" },
   { intent: "chat", href: "/chat", titleKey: "onboarding.workflow.chat.title", descriptionKey: "onboarding.workflow.chat.description", icon: "chat" },
@@ -10,12 +12,12 @@ export const onboardingWorkflowDefinitions = [
 export type OnboardingIntent = (typeof onboardingWorkflowDefinitions)[number]["intent"];
 
 export function onboardingFormDefaults(
-  user: { displayName: string; preferredLanguage: "en" | "ar" | "ku"; defaultGenerationLanguage: "en" | "ar" | "ku" },
+  user: { displayName: string; preferredLanguage: string; defaultGenerationLanguage: "en" | "ar" | "ku" },
   locale: "en" | "ar" | "ku",
 ) {
   return {
     displayName: user.displayName,
-    preferredLanguage: user.preferredLanguage || locale,
+    preferredLanguage: defaultLanguagePackRegistry.has(user.preferredLanguage) ? user.preferredLanguage : locale,
     defaultGenerationLanguage: user.defaultGenerationLanguage || locale,
   };
 }

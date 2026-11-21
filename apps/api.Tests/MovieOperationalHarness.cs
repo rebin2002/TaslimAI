@@ -435,6 +435,7 @@ public sealed class MovieOperationalE2ETests : IClassFixture<MovieOperationalApi
         Assert.NotNull(persistedClip);
         Assert.Equal(generated.Job.Id, persistedClip.GenerationJobId);
         Assert.NotNull(persistedClip.AssetId);
+        Assert.Equal(1, persistedClip.DurationSeconds);
 
         var take = await MovieOperationalFixtures.PostAsync<MovieV2TakeDto>(client,
             $"/api/movie-studio/shots/{fixture.Shot.Id}/takes", new

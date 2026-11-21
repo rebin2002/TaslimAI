@@ -9,9 +9,13 @@ import { ApiError, api, type ChatMessage, type Conversation, type Project, type 
 import { applyChatStreamEvent, createChatStreamState, failChatStream, stopChatStream } from "@/lib/chatStreamState";
 import { chatStreamAnnouncementKey, type ChatStreamAnnouncement } from "@/lib/chatStreamAnnouncement";
 import { beginChatStreamSession, invalidateChatStreamSessions, isCurrentChatStreamSession } from "@/lib/chatStreamSession";
+import { chatThreadAriaCurrent, resolveChatThreadListMount } from "@/lib/chatThreadFocus";
+import { chatComposerFailureDescriptionId, resolveChatComposerFailure } from "@/lib/chatComposerRecovery";
+import { restoreRecoveryFocus } from "@/lib/recoveryFocus";
 import { resolveChatAttachmentScope } from "@/lib/chatAttachmentScope";
 import { beginChatAttachmentUpload, invalidateChatAttachmentUploads, isCurrentChatAttachmentUpload } from "@/lib/chatAttachmentLifecycle";
 import { claimSubmission, conversationPath, createChatRequestId, createRegenerateRetryRequest, createSendRetryRequest, createSubmission, isAbortError, releaseSubmission, shouldReplaceConversationUrl, studioTransitionPath, type ChatRetryRequest, type RegenerateRetryRequest, type SendRetryRequest } from "@/lib/chatLifecycle";
+import { isHomeCreationSubmitKey } from "@/lib/homeCreation";
 import { ProtectedPage } from "@/components/ProtectedPage";
 import { ChatMessageContent } from "@/components/ChatMessageContent";
 
@@ -53,6 +57,11 @@ export function ChatView({ conversationId }: Readonly<ChatViewProps>) {
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [projects, setProjects] = useState<Project[]>([]);
   const [selected, setSelected] = useState<Conversation | null>(null);
+  // The conversation this ChatView session created for the draft it is composing.
+  // Rewriting the address bar after a send does not republish the Next.js route
+  // parameter, so follow-up uploads need this binding to stay scoped to the
+  // conversation that owns them instead of falling back to project-only scope.
+  const [sessionConversationId, setSessionConversationId] = useState<string | null>(null);
   const [selectedProjectId, setSelectedProjectId] = useState("");
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [search, setSearch] = useState("");
@@ -70,6 +79,8 @@ export function ChatView({ conversationId }: Readonly<ChatViewProps>) {
   const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const sendingRef = useRef(false);
+  const composerRef = useRef<HTMLTextAreaElement | null>(null);
+  const inlineErrorRef = useRef<HTMLDivElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const streamAbortRef = useRef<AbortController | null>(null);
   const activeRetryRef = useRef<ChatRetryRequest | null>(null);
@@ -125,11 +136,15 @@ export function ChatView({ conversationId }: Readonly<ChatViewProps>) {
           const [conversation, history] = await Promise.all([api.getConversation(conversationId, controller.signal), api.getMessages(conversationId, controller.signal)]);
           if (!active) return;
           setSelected(conversation);
+          setSessionConversationId(conversation.id);
           setSelectedProjectId(conversation.projectId ?? "");
           setMessages(history);
           if (!items?.some(item => item.id === conversation.id)) setConversations(current => [conversation, ...current]);
         } else {
           setSelected(null);
+          // A new-chat route owns no conversation until this session creates one, so a
+          // binding left behind by an earlier draft must not scope the next upload.
+          setSessionConversationId(null);
           setSelectedProjectId(requestedProjectId);
           setMessages([]);
         }
@@ -158,6 +173,31 @@ export function ChatView({ conversationId }: Readonly<ChatViewProps>) {
     return ["today", "yesterday", "week", "older"].map(key => ({ label: labels[key], items: filteredConversations.filter(item => dateGroup(item.updatedAt) === key) })).filter(group => group.items.length > 0);
   }, [filteredConversations, t]);
   const streamAnnouncementKey = chatStreamAnnouncementKey(streamAnnouncement);
+  // A thread switch raises `loading` for the whole view. Once rows are on
+  // screen the sidebar keeps them, so the activated row is never unmounted and
+  // keyboard focus survives the switch; progress is reported on the list
+  // instead. Only a first load, which has nothing rendered, shows the skeleton.
+  const threadMount = resolveChatThreadListMount(filteredConversations.length, loading);
+  // The inline failure alert and the retry action it carries are decided in
+  // one pure place, so the focus restoration below, the alert markup and the
+  // editor's failure description cannot drift apart.
+  const composerFailure = resolveChatComposerFailure(error, retryRequest, selected !== null);
+  // Failure focus restoration. Activating send disables the textarea and
+  // activating regenerate unmounts its button, so by the time the retry
+  // alert mounts after a failed request, focus has already fallen back to
+  // document.body. The alert renders below the message list, so a keyboard
+  // or screen-reader user would have to re-traverse the app shell to reach
+  // the retry action and the assertive failure message is easy to miss. The
+  // shared decision used by the route recovery boundaries moves focus onto
+  // the alert panel - but only while the failed request owns the retry
+  // action, so a copy or rename error leaves the user on the control they
+  // are on. It is keyed on the retry state and the error value because a
+  // retry that fails again reports the same message, which must still
+  // restore focus on exactly the attempt the user retried.
+  useEffect(() => {
+    if (!composerFailure.retryOffered) return;
+    restoreRecoveryFocus(inlineErrorRef.current, typeof document === "undefined" ? null : document.activeElement);
+  }, [composerFailure.retryOffered, error, retryRequest]);
 
   const canRegenerate = useCallback((message: ChatMessage) => {
     const latestAssistant = [...messages].reverse().find((item) => item.role === "Assistant" && item.status === "Completed");
@@ -177,6 +217,7 @@ export function ChatView({ conversationId }: Readonly<ChatViewProps>) {
     setStreamAnnouncement("idle");
     setRetryRequest(null);
     setSelected(null);
+    setSessionConversationId(null);
     setMessages([]);
     setContent("");
     setRenaming(false);
@@ -189,7 +230,7 @@ export function ChatView({ conversationId }: Readonly<ChatViewProps>) {
     if (!files || !workspace) return;
     const queue = Array.from(files);
     const uploadGeneration = beginChatAttachmentUpload(attachmentUploadGenerationRef);
-    const scope = resolveChatAttachmentScope(conversationId, selected, selectedProjectId);
+    const scope = resolveChatAttachmentScope(conversationId, selected, selectedProjectId, sessionConversationId);
     setUploadProgress({ complete: 0, total: queue.length, fileName: queue[0]?.name ?? "" });
     setError("");
     try {
@@ -279,6 +320,9 @@ export function ChatView({ conversationId }: Readonly<ChatViewProps>) {
         if (!isCurrentStream()) return;
         activeConversationId = conversation.id;
         setSelected(conversation);
+        // From here on this composer is inside a real conversation even though the
+        // route parameter still reports the new-chat route.
+        setSessionConversationId(conversation.id);
         setConversations(current => [conversation!, ...current]);
       }
       if (!isCurrentStream()) return;
@@ -446,8 +490,8 @@ export function ChatView({ conversationId }: Readonly<ChatViewProps>) {
       <div className="chat-sidebar-header"><div><p className="section-eyebrow">{t("chat.eyebrow")}</p><h1>{t("chat.title")}</h1></div><button type="button" className="chat-icon-button" onClick={startNewChat} aria-label={t("chat.newChat")}><Plus size={18} /></button></div>
       <button type="button" className="chat-new-button" onClick={startNewChat} disabled={generating}><Plus size={15} />{t("chat.newChat")}</button>
       <label className="chat-search"><Search size={15} /><input value={search} onChange={event => setSearch(event.target.value)} placeholder={t("chat.searchPlaceholder")} aria-label={t("chat.searchPlaceholder")} /></label>
-      <div className="chat-history" aria-label={t("chat.history")}>
-        {loading ? <div className="chat-sidebar-loading"><span className="loading-spinner" /></div> : groups.length === 0 ? <p className="chat-sidebar-empty">{t("chat.noConversations")}</p> : groups.map(group => <section key={group.label} className="chat-history-group"><span className="chat-history-label">{group.label}</span>{group.items.map(item => <button type="button" key={item.id} className={`chat-history-item ${selected?.id === item.id ? "is-active" : ""}`} onClick={() => selectConversation(item)} disabled={generating}><MessageCircle size={14} /><span>{item.title}</span>{item.projectId && <i aria-label={t("chat.projectContextActive")} />}</button>)}</section>)}
+      <div className="chat-history" role="region" aria-label={t("chat.history")} aria-busy={threadMount.revalidating}>
+        {threadMount.renderThreads ? groups.length === 0 ? <p className="chat-sidebar-empty">{t("chat.noConversations")}</p> : groups.map(group => <section key={group.label} className="chat-history-group"><span className="chat-history-label">{group.label}</span>{group.items.map(item => <button type="button" key={item.id} className={`chat-history-item ${selected?.id === item.id ? "is-active" : ""}`} aria-current={chatThreadAriaCurrent(selected?.id, item.id)} onClick={() => selectConversation(item)} disabled={generating}><MessageCircle size={14} /><span>{item.title}</span>{item.projectId && <i aria-label={t("chat.projectContextActive")} />}</button>)}</section>) : <div className="chat-sidebar-loading"><span className="loading-spinner" /></div>}
       </div>
       <div className="chat-sidebar-footer"><Sparkles size={15} /><span>{t("chat.providerNotice")}</span></div>
     </aside>
@@ -463,12 +507,12 @@ export function ChatView({ conversationId }: Readonly<ChatViewProps>) {
         {loading ? <div className="chat-empty"><span className="loading-spinner" /></div> : error && !selected ? <div className="chat-empty"><CircleMessage /><h3>{error}</h3><button type="button" className="secondary-button" onClick={startNewChat}>{t("chat.newChat")}</button></div> : messages.length === 0 ? <div className="chat-empty"><span className="chat-empty-icon"><Sparkles size={22} /></span><h3>{t("chat.emptyTitle")}</h3><p>{t("chat.emptyDescription")}</p></div> : <>{messages.map(message => <article dir="auto" className={`chat-message chat-message-${message.role.toLowerCase()} ${message.status === "Failed" ? "is-failed" : ""}`} key={message.id}><div className="chat-message-avatar">{message.role.toLowerCase() === "user" ? "T" : <Sparkles size={15} />}</div><div className="chat-message-copy"><span className="chat-message-role">{message.role.toLowerCase() === "user" ? t("chat.you") : t("chat.taslim")}</span><ChatMessageContent role={message.role} status={message.status} content={message.content} />{message.role === "Assistant" && message.content && <div className="chat-message-tools"><button type="button" onClick={() => void copyResponse(message)} aria-label={t("chat.copyResponse")}><Copy size={13} />{copiedMessageId === message.id ? t("chat.copied") : t("chat.copyResponse")}</button>{canRegenerate(message) && <button type="button" onClick={() => void regenerate(message)}><RefreshCw size={13} />{t("chat.regenerate")}</button>}</div>}{message.status === "Failed" && retryRequest && <button type="button" className="chat-retry-button" onClick={() => void retryFailed()} disabled={generating}><RefreshCw size={13} />{t("chat.retry")}</button>}{message.isTestResponse && <small className="chat-test-badge">{t("chat.testResponse")}</small>}</div></article>)}<div ref={messagesEndRef} /></>}
       </div>
       <div className="sr-only" role="status" aria-live="polite" aria-atomic="true">{streamAnnouncementKey ? t(streamAnnouncementKey) : ""}</div>
-      {error && selected && <div className="chat-inline-error" role="alert"><span>{error}</span><div>{retryRequest && <button type="button" className="chat-inline-retry" onClick={() => void retryFailed()} disabled={generating}>{t("chat.retry")}</button>}<button type="button" className="chat-inline-dismiss" onClick={() => { setError(""); setRetryRequest(null); }} aria-label={t("chat.dismissError")}><X size={14} /></button></div></div>}
+      {error && selected && <div ref={inlineErrorRef} className="chat-inline-error" tabIndex={-1} role="alert" aria-live="assertive" aria-labelledby="chat-error-message"><span id="chat-error-message">{error}</span><div>{retryRequest && <button type="button" className="chat-inline-retry" aria-describedby="chat-error-message" onClick={() => void retryFailed()} disabled={generating}>{t("chat.retry")}</button>}<button type="button" className="chat-inline-dismiss" onClick={() => { setError(""); setRetryRequest(null); composerRef.current?.focus(); }} aria-label={t("chat.dismissError")}><X size={14} /></button></div></div>}
       <div className="chat-creator-handoff"><span>{t("chat.handoffHint")}</span><div>{creatorActions.map((creator) => { const Icon = creator.icon; return <button type="button" key={creator.id} onClick={() => openCreator(creator.id)}><Icon size={13} />{t(creator.label)}</button>; })}</div></div>
       <form className="chat-composer" onSubmit={send}>
         {attachments.length > 0 && <div className="chat-attachment-list" aria-label={t("chat.attachments")}><div className="chat-attachment-heading"><span>{t("chat.attachments")}</span><button type="button" onClick={() => void clearAttachments()} disabled={generating}>{t("chat.clearAttachments")}</button></div>{attachments.map(file => <span className="chat-attachment-chip" key={file.id}><Paperclip size={12} /><span><strong>{file.originalFileName}</strong><small>{formatFileSize(file.sizeBytes)}</small></span><button type="button" onClick={() => void removeAttachment(file)} aria-label={`${t("chat.removeAttachment")}: ${file.originalFileName}`} disabled={generating}><X size={12} /></button></span>)}</div>}
         {uploadProgress && <div className="chat-upload-progress" role="status"><span>{t("chat.uploadProgress", { complete: String(uploadProgress.complete), total: String(uploadProgress.total), file: uploadProgress.fileName })}</span><i><b style={{ width: `${Math.max(8, (uploadProgress.complete / uploadProgress.total) * 100)}%` }} /></i></div>}
-        <textarea dir="auto" value={content} onChange={event => { setContent(event.target.value); if (error) { setError(""); setRetryRequest(null); } }} onKeyDown={event => { if (event.key === "Enter" && !event.shiftKey) void send(event); }} placeholder={t("chat.composerPlaceholder")} maxLength={20000} disabled={generating || !!uploadProgress} aria-label={t("chat.composerPlaceholder")} />
+        <textarea dir="auto" ref={composerRef} value={content} onChange={event => { setContent(event.target.value); if (error) { setError(""); setRetryRequest(null); } }} onKeyDown={event => { if (isHomeCreationSubmitKey({ key: event.key, shiftKey: event.shiftKey, isComposing: event.nativeEvent.isComposing, keyCode: event.nativeEvent.keyCode })) void send(event); }} placeholder={t("chat.composerPlaceholder")} maxLength={20000} disabled={generating || !!uploadProgress} aria-label={t("chat.composerPlaceholder")} aria-describedby={chatComposerFailureDescriptionId(composerFailure)} />
         <div className="chat-composer-footer"><span>{uploadProgress ? t("chat.fileUploading") : t("chat.composerHint")}</span><div className="chat-composer-actions"><input ref={fileInputRef} type="file" className="visually-hidden" multiple accept=".pdf,.docx,.txt,.md,.csv,.xlsx,.jpg,.jpeg,.png,.webp" onChange={event => void uploadSelectedFiles(event.target.files)} /><button type="button" className="chat-attach-button" onClick={() => fileInputRef.current?.click()} disabled={generating || !!uploadProgress} aria-label={t("chat.attachFile")}><Paperclip size={16} /></button>{generating ? <button type="button" className="chat-stop-button" onClick={stopGeneration} aria-label={t("chat.stopGeneration")}><Square size={13} />{t("chat.stop")}</button> : <button type="submit" className="chat-send-button" disabled={!!uploadProgress || !content.trim()} aria-label={t("chat.send")}><Send size={16} /></button>}</div></div>
       </form>
     </main>
