@@ -16,6 +16,9 @@ public static class AssetVisibility
                 && asset.Project != null
                 && asset.Project.WorkspaceId == asset.WorkspaceId)
             || (!asset.ProjectId.HasValue && asset.CreatedByUserId == userId))
+            // Research project context is an input boundary, not a sharing grant.
+            // Reports and their source-backed representations remain private to the creator.
+            && (asset.AssetType != AssetTypes.Research || asset.CreatedByUserId == userId)
             && (asset.CreatedByUserId == userId
                 || !asset.StoredFileId.HasValue
                 || (asset.StoredFile!.WorkspaceId == asset.WorkspaceId
