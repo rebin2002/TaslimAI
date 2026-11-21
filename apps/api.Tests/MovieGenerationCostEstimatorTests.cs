@@ -99,6 +99,31 @@ public sealed class MovieGenerationCostEstimatorTests
     }
 
     [Fact]
+    public async Task Extreme_pricing_math_returns_unknown_instead_of_throwing()
+    {
+        await using var connection = new SqliteConnection("DataSource=:memory:");
+        await connection.OpenAsync();
+        await using var db = CreateDb(connection);
+        await db.Database.EnsureCreatedAsync();
+        db.ProviderCapabilityPricings.Add(Route(
+            baseMin: 100000000000000000000m,
+            baseMax: 100000000000000000000m,
+            maxDuration: int.MaxValue));
+        await db.SaveChangesAsync();
+
+        var estimator = new MovieGenerationCostEstimator(db, Options.Create(new MovieGenerationCostEstimatorOptions
+        {
+            MaxDurationSeconds = int.MaxValue,
+            MaxEstimateUsd = 10_000m,
+        }));
+        var result = await estimator.EstimateAsync(Request(duration: int.MaxValue), "test-provider");
+
+        Assert.Equal(MovieGenerationCostEstimateStates.Unknown, result.State);
+        Assert.Equal(MovieGenerationCostEstimateReasons.EstimateCapExceeded, result.Reason);
+        Assert.Null(result.MaximumAmountUsd);
+    }
+
+    [Fact]
     public async Task No_matching_persisted_capability_is_unevaluated()
     {
         await using var connection = new SqliteConnection("DataSource=:memory:");
@@ -134,7 +159,8 @@ public sealed class MovieGenerationCostEstimatorTests
         decimal? upscaleMax = null,
         int retryLimit = 8,
         int upscaleLimit = 3,
-        bool supportsUpscale = false) => new()
+        bool supportsUpscale = false,
+        int maxDuration = 3600) => new()
     {
         Id = Guid.NewGuid(),
         CapabilityKey = "movie.video",
@@ -145,7 +171,7 @@ public sealed class MovieGenerationCostEstimatorTests
         QualityTier = "Standard",
         ProcessingPath = upscaleMin.HasValue ? "upscale" : "native",
         SupportsUpscaling = supportsUpscale,
-        MaxDurationSeconds = 3600,
+        MaxDurationSeconds = maxDuration,
         MaxRetryAttempts = retryLimit,
         MaxUpscalePasses = upscaleLimit,
         BasePriceUsdPerSecondMin = baseMin,
