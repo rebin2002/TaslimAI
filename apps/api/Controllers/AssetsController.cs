@@ -109,6 +109,12 @@ public sealed class AssetsController(
 
     private async Task<IActionResult> StreamDownloadAsync(AssetDownload download, bool inline, CancellationToken cancellationToken)
     {
+        // Private asset bytes, and the Content-Disposition carrying the owner's original file
+        // name, are served from a workspace- and user-independent URL under cookie
+        // authentication. The endpoint claims its own cache fence here instead of inheriting
+        // one from the authentication pipeline, so the privacy property cannot be lost by an
+        // unrelated change to cookie re-issue behaviour.
+        AssetDownloadResponsePolicy.ApplyPrivateNoStore(Response);
         try
         {
             var stream = await storage.OpenReadAsync(download.StoredFile.StorageKey, cancellationToken);
@@ -127,6 +133,11 @@ public sealed class AssetsController(
         catch (FileStorageOperationException)
         {
             logger.LogWarning("Asset download failed because the configured private storage provider rejected the operation. AssetId={AssetId}; WorkspaceId={WorkspaceId}", download.Asset.Id, download.Asset.WorkspaceId);
+            return ApiResults.Error(this, StatusCodes.Status503ServiceUnavailable, "FILE_STORAGE_OPERATION_FAILED", "We couldn't open this asset. Please try again.");
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidOperationException)
+        {
+            logger.LogWarning("Asset download failed because the local private storage operation could not open the file. AssetId={AssetId}; WorkspaceId={WorkspaceId}", download.Asset.Id, download.Asset.WorkspaceId);
             return ApiResults.Error(this, StatusCodes.Status503ServiceUnavailable, "FILE_STORAGE_OPERATION_FAILED", "We couldn't open this asset. Please try again.");
         }
     }

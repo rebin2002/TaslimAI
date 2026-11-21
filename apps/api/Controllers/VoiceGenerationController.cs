@@ -33,6 +33,9 @@ public sealed class VoiceGenerationController(
                 return ApiResults.Error(this, StatusCodes.Status503ServiceUnavailable, "VOICE_STUDIO_UNAVAILABLE", "Voice generation is not available right now.");
             var input = VoiceGenerationContractMapper.ToInput(request);
             VoiceGenerationRequestValidator.Validate(input, options.Value);
+            // Refuse a request the configured provider can never synthesise before the cost
+            // guard, the durable job, or the usage reservation exist.
+            VoiceGenerationAdmissionPolicy.ValidateProviderSupport(input, options.Value);
             var preflight = await costControl.CheckPreflightAsync(request.WorkspaceId, UsageFeature.Voice, null, cancellationToken);
             if (!preflight.Allowed)
                 return ApiResults.Error(this, StatusCodes.Status429TooManyRequests, preflight.RejectionCode ?? "COST_GUARDRAIL_REJECTED", preflight.RejectionMessage ?? "This operation exceeds a configured safety limit.");

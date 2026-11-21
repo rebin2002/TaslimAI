@@ -56,7 +56,7 @@ public sealed class PresentationRenderer : IPresentationRenderer
         shapeId = 1;
         var requestedLanguage = input.Language.Trim().ToLowerInvariant();
         var resolvedLanguage = requestedLanguage == "auto" ? draftLanguage : requestedLanguage;
-        var rtl = resolvedLanguage is "ar" or "ku" || slide.Title.Any(character => character >= '\u0600' && character <= '\u08ff');
+        var rtl = resolvedLanguage is "ar" or "ku" || SlideRequiresRtl(slide);
         var language = rtl ? (resolvedLanguage == "ku" ? "ku-Arab" : "ar-SA") : "en-US";
         var body = new StringBuilder();
         body.Append(ShapeTreeStart());
@@ -201,6 +201,30 @@ public sealed class PresentationRenderer : IPresentationRenderer
         }
     }
 
+    // The provider decides where the Arabic script lands in a draft, so the bidi/layout decision cannot read
+    // the slide title alone. A slide whose body, subtitle, table cell, column heading or metric carries Arabic
+    // script while its title stays Latin would otherwise export every one of those runs in the Latin fallback
+    // typeface with a left-to-right base direction, which PowerPoint draws unshaped and reversed. The package
+    // still passes PresentationOutputIntegrityValidator, because that validator checks parts and relationships
+    // rather than run fonts, so nothing downstream notices. Scan the whole slide instead.
+    private static bool SlideRequiresRtl(PresentationSlide slide) =>
+        ContainsArabicScript(slide.Title)
+        || ContainsArabicScript(slide.Subtitle)
+        || slide.Blocks.Any(BlockRequiresRtl);
+
+    private static bool BlockRequiresRtl(PresentationContentBlock block) =>
+        ContainsArabicScript(block.Text)
+        || ContainsArabicScript(block.Label)
+        || ContainsArabicScript(block.Value)
+        || block.Items.Any(ContainsArabicScript)
+        || block.Columns.Any(column => ContainsArabicScript(column.Heading) || column.Items.Any(ContainsArabicScript))
+        || block.Rows.Any(row => row.Cells.Any(ContainsArabicScript))
+        || block.Metrics.Any(metric => ContainsArabicScript(metric.Label) || ContainsArabicScript(metric.Value) || ContainsArabicScript(metric.Detail));
+
+    private static bool ContainsArabicScript(string? value) => value?.Any(IsArabicScriptCharacter) == true;
+
+    private static bool IsArabicScriptCharacter(char character) => character >= '\u0600' && character <= '\u08ff';
+
     private string ShapeTreeStart() => "<p:spTree><p:nvGrpSpPr><p:cNvPr id=\"1\" name=\"\"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/>";
     private string Card(int id, int x, int y, int cx, int cy, string fill, string line) => Rectangle(id, x, y, cx, cy, fill, line, 12_000);
     private string Rectangle(int id, int x, int y, int cx, int cy, string fill, string line, int lineWidth) => $"<p:sp><p:nvSpPr><p:cNvPr id=\"{id}\" name=\"Shape {id}\"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x=\"{x}\" y=\"{y}\"/><a:ext cx=\"{cx}\" cy=\"{cy}\"/></a:xfrm><a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom><a:solidFill><a:srgbClr val=\"{fill}\"/></a:solidFill><a:ln w=\"{lineWidth}\"><a:solidFill><a:srgbClr val=\"{line}\"/></a:solidFill></a:ln></p:spPr><p:txBody><a:bodyPr/><a:lstStyle/><a:p/></p:txBody></p:sp>";
@@ -238,5 +262,34 @@ public sealed class PresentationRenderer : IPresentationRenderer
     private static string SlideRelationships() => $"<?xml version=\"1.0\" encoding=\"UTF-8\"?><Relationships xmlns=\"{Rel}\"><Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout\" Target=\"../slideLayouts/slideLayout1.xml\"/></Relationships>";
     private static string SlideMaster() => $"<?xml version=\"1.0\" encoding=\"UTF-8\"?><p:sldMaster xmlns:a=\"{A}\" xmlns:r=\"{R}\" xmlns:p=\"{P}\"><p:cSld name=\"Taslim Master\"><p:spTree><p:nvGrpSpPr><p:cNvPr id=\"1\" name=\"\"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/></p:spTree></p:cSld><p:clrMap bg1=\"lt1\" tx1=\"dk1\" bg2=\"lt2\" tx2=\"dk2\" accent1=\"accent1\" accent2=\"accent2\" accent3=\"accent3\" accent4=\"accent4\" accent5=\"accent5\" accent6=\"accent6\" hlink=\"hlink\" folHlink=\"folHlink\"/><p:sldLayoutIdLst><p:sldLayoutId id=\"1\" r:id=\"rId2\"/></p:sldLayoutIdLst><p:txStyles><p:titleStyle/><p:bodyStyle/><p:otherStyle/></p:txStyles></p:sldMaster>";
     private static string SlideLayout() => $"<?xml version=\"1.0\" encoding=\"UTF-8\"?><p:sldLayout xmlns:a=\"{A}\" xmlns:r=\"{R}\" xmlns:p=\"{P}\" type=\"blank\"><p:cSld name=\"Blank\"><p:spTree><p:nvGrpSpPr><p:cNvPr id=\"1\" name=\"\"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/></p:spTree></p:cSld><p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr></p:sldLayout>";
-    private static string Theme() => $"<?xml version=\"1.0\" encoding=\"UTF-8\"?><a:theme xmlns:a=\"{A}\" name=\"Taslim Professional\"><a:themeElements><a:clrScheme name=\"Taslim Navy\"><a:dk1><a:sysClr val=\"windowText\" lastClr=\"000000\"/></a:dk1><a:lt1><a:sysClr val=\"window\" lastClr=\"FFFFFF\"/></a:lt1><a:dk2><a:srgbClr val=\"12304A\"/></a:dk2><a:lt2><a:srgbClr val=\"F8FAFC\"/></a:lt2><a:accent1><a:srgbClr val=\"087E8B\"/></a:accent1><a:accent2><a:srgbClr val=\"1D6FA5\"/></a:accent2><a:accent3><a:srgbClr val=\"E7A93B\"/></a:accent3><a:accent4><a:srgbClr val=\"60758A\"/></a:accent4><a:accent5><a:srgbClr val=\"B7DCE5\"/></a:accent5><a:accent6><a:srgbClr val=\"253B53\"/></a:accent6><a:hlink><a:srgbClr val=\"1D6FA5\"/></a:hlink><a:folHlink><a:srgbClr val=\"60758A\"/></a:folHlink></a:clrScheme><a:fontScheme name=\"Taslim Fonts\"><a:majorFont><a:latin typeface=\"Aptos Display\"/><a:ea typeface=\"\"/><a:cs typeface=\"Noto Sans Arabic\"/></a:majorFont><a:minorFont><a:latin typeface=\"Aptos\"/><a:ea typeface=\"\"/><a:cs typeface=\"Noto Sans Arabic\"/></a:minorFont></a:fontScheme><a:fmtScheme name=\"Taslim Format\"><a:fillStyleLst/><a:lnStyleLst/><a:effectStyleLst/><a:bgFillStyleLst/></a:fmtScheme></a:themeElements></a:theme>";
+    private static string Theme() => $"<?xml version=\"1.0\" encoding=\"UTF-8\"?><a:theme xmlns:a=\"{A}\" name=\"Taslim Professional\"><a:themeElements><a:clrScheme name=\"Taslim Navy\"><a:dk1><a:sysClr val=\"windowText\" lastClr=\"000000\"/></a:dk1><a:lt1><a:sysClr val=\"window\" lastClr=\"FFFFFF\"/></a:lt1><a:dk2><a:srgbClr val=\"12304A\"/></a:dk2><a:lt2><a:srgbClr val=\"F8FAFC\"/></a:lt2><a:accent1><a:srgbClr val=\"087E8B\"/></a:accent1><a:accent2><a:srgbClr val=\"1D6FA5\"/></a:accent2><a:accent3><a:srgbClr val=\"E7A93B\"/></a:accent3><a:accent4><a:srgbClr val=\"60758A\"/></a:accent4><a:accent5><a:srgbClr val=\"B7DCE5\"/></a:accent5><a:accent6><a:srgbClr val=\"253B53\"/></a:accent6><a:hlink><a:srgbClr val=\"1D6FA5\"/></a:hlink><a:folHlink><a:srgbClr val=\"60758A\"/></a:folHlink></a:clrScheme><a:fontScheme name=\"Taslim Fonts\"><a:majorFont><a:latin typeface=\"Aptos Display\"/><a:ea typeface=\"\"/><a:cs typeface=\"Noto Sans Arabic\"/></a:majorFont><a:minorFont><a:latin typeface=\"Aptos\"/><a:ea typeface=\"\"/><a:cs typeface=\"Noto Sans Arabic\"/></a:minorFont></a:fontScheme>{FormatScheme()}</a:themeElements></a:theme>";
+    // ECMA-376 Part 1 models a theme format scheme as CT_FormatScheme, which mandates four lists whose types
+    // (CT_FillStyleList, CT_LineStyleList, CT_EffectStyleList, CT_BackgroundFillStyleList) each pin
+    // minOccurs=maxOccurs=3. Self-closed empty lists therefore produced a schema-invalid theme part in every
+    // exported deck: PowerPoint reports such a package as damaged content and offers to repair it on open,
+    // which is exactly what the Presentation Studio release evidence promises not to ship. The entries below
+    // mirror the Office theme so every style resolves against the placeholder colour, and nothing here touches
+    // slide layout, geometry or run fonts.
+    private static string FormatScheme() => "<a:fmtScheme name=\"Taslim Format\">"
+        + "<a:fillStyleLst>"
+        + "<a:solidFill><a:schemeClr val=\"phClr\"/></a:solidFill>"
+        + "<a:gradFill rotWithShape=\"1\"><a:gsLst><a:gs pos=\"0\"><a:schemeClr val=\"phClr\"><a:lumMod val=\"110000\"/><a:satMod val=\"105000\"/><a:tint val=\"67000\"/></a:schemeClr></a:gs><a:gs pos=\"50000\"><a:schemeClr val=\"phClr\"><a:lumMod val=\"105000\"/><a:satMod val=\"103000\"/><a:tint val=\"73000\"/></a:schemeClr></a:gs><a:gs pos=\"100000\"><a:schemeClr val=\"phClr\"><a:lumMod val=\"105000\"/><a:satMod val=\"109000\"/><a:tint val=\"81000\"/></a:schemeClr></a:gs></a:gsLst><a:lin ang=\"5400000\" scaled=\"0\"/></a:gradFill>"
+        + "<a:gradFill rotWithShape=\"1\"><a:gsLst><a:gs pos=\"0\"><a:schemeClr val=\"phClr\"><a:satMod val=\"103000\"/><a:lumMod val=\"102000\"/><a:tint val=\"94000\"/></a:schemeClr></a:gs><a:gs pos=\"50000\"><a:schemeClr val=\"phClr\"><a:satMod val=\"110000\"/><a:lumMod val=\"100000\"/><a:shade val=\"100000\"/></a:schemeClr></a:gs><a:gs pos=\"100000\"><a:schemeClr val=\"phClr\"><a:lumMod val=\"99000\"/><a:satMod val=\"120000\"/><a:shade val=\"78000\"/></a:schemeClr></a:gs></a:gsLst><a:lin ang=\"5400000\" scaled=\"0\"/></a:gradFill>"
+        + "</a:fillStyleLst>"
+        + "<a:lnStyleLst>"
+        + "<a:ln w=\"6350\" cap=\"flat\" cmpd=\"sng\" algn=\"ctr\"><a:solidFill><a:schemeClr val=\"phClr\"/></a:solidFill><a:prstDash val=\"solid\"/><a:miter lim=\"800000\"/></a:ln>"
+        + "<a:ln w=\"12700\" cap=\"flat\" cmpd=\"sng\" algn=\"ctr\"><a:solidFill><a:schemeClr val=\"phClr\"/></a:solidFill><a:prstDash val=\"solid\"/><a:miter lim=\"800000\"/></a:ln>"
+        + "<a:ln w=\"19050\" cap=\"flat\" cmpd=\"sng\" algn=\"ctr\"><a:solidFill><a:schemeClr val=\"phClr\"/></a:solidFill><a:prstDash val=\"solid\"/><a:miter lim=\"800000\"/></a:ln>"
+        + "</a:lnStyleLst>"
+        + "<a:effectStyleLst>"
+        + "<a:effectStyle><a:effectLst/></a:effectStyle>"
+        + "<a:effectStyle><a:effectLst/></a:effectStyle>"
+        + "<a:effectStyle><a:effectLst><a:outerShdw blurRad=\"40000\" dist=\"20000\" dir=\"5400000\" rotWithShape=\"0\"><a:srgbClr val=\"000000\"><a:alpha val=\"35000\"/></a:srgbClr></a:outerShdw></a:effectLst></a:effectStyle>"
+        + "</a:effectStyleLst>"
+        + "<a:bgFillStyleLst>"
+        + "<a:solidFill><a:schemeClr val=\"phClr\"/></a:solidFill>"
+        + "<a:gradFill rotWithShape=\"1\"><a:gsLst><a:gs pos=\"0\"><a:schemeClr val=\"phClr\"><a:tint val=\"95000\"/><a:satMod val=\"104000\"/></a:schemeClr></a:gs><a:gs pos=\"100000\"><a:schemeClr val=\"phClr\"><a:lumMod val=\"105000\"/><a:satMod val=\"108000\"/></a:schemeClr></a:gs></a:gsLst><a:lin ang=\"5400000\" scaled=\"0\"/></a:gradFill>"
+        + "<a:gradFill rotWithShape=\"1\"><a:gsLst><a:gs pos=\"0\"><a:schemeClr val=\"phClr\"><a:satMod val=\"110000\"/><a:shade val=\"100000\"/><a:lumMod val=\"100000\"/></a:schemeClr></a:gs><a:gs pos=\"100000\"><a:schemeClr val=\"phClr\"><a:lumMod val=\"99000\"/><a:satMod val=\"120000\"/><a:shade val=\"78000\"/></a:schemeClr></a:gs></a:gsLst><a:lin ang=\"5400000\" scaled=\"0\"/></a:gradFill>"
+        + "</a:bgFillStyleLst>"
+        + "</a:fmtScheme>";
 }

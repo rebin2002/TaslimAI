@@ -28,6 +28,18 @@ public sealed class DocumentRenderer : IDocumentRenderer
         if (Interlocked.Exchange(ref questPdfConfigured, 1) == 0)
         {
             QuestPDF.Settings.License = LicenseType.Community;
+            // QuestPDF 2026.9 aborts GeneratePdf() on the first glyph no configured font can draw.
+            // PDF text here is user titles and AI-written report content, which legitimately carry
+            // characters outside the shipped Latin/Arabic coverage (emoji, arrows, CJK), and
+            // DocumentDraftValidator admits every one of them on purpose - the DOCX representation
+            // renders them with the reader's own fonts. So the strict default fails a whole Document
+            // export - or a Research report, after its provider spend - at the last percent of the
+            // job, permanently, on a draft that admission and validation both accepted. Uncovered
+            // glyphs now degrade to blanks while the export still produces a valid, readable file.
+            // Settings.ThrowOnMissingFontFamilies deliberately stays enabled: a misconfigured font
+            // family is a deployment error that must keep failing loudly instead of silently
+            // rendering every page in a fallback font.
+            QuestPDF.Settings.ThrowOnMissingTextGlyphs = false;
             var fontPath = Path.Combine(AppContext.BaseDirectory, "Fonts", "NotoSansArabic-Regular.ttf");
             if (File.Exists(fontPath)) FontManager.RegisterFontFromFile(fontPath);
         }
@@ -39,7 +51,7 @@ public sealed class DocumentRenderer : IDocumentRenderer
         using (var document = WordprocessingDocument.Create(stream, WordprocessingDocumentType.Document, true))
         {
             var main = document.AddMainDocumentPart();
-            main.Document = new WordprocessingDocumentModelBuilder(draft, input).Build();
+            main.Document = new WordprocessingDocumentModelBuilder(draft, DocumentTextDirection.IsRtl(input.Language, draft), input.IncludeTableOfContents).Build();
             main.Document.Save();
         }
         return new RenderedDocument(AssetRepresentationTypes.Docx, SafeFileName(input.Title, ".docx"), "application/vnd.openxmlformats-officedocument.wordprocessingml.document", stream.ToArray());
@@ -47,7 +59,7 @@ public sealed class DocumentRenderer : IDocumentRenderer
 
     public RenderedDocument RenderPdf(DocumentDraft draft, DocumentGenerationInput input, DocumentGenerationOptions options)
     {
-        var rtl = IsRtl(input.Language);
+        var rtl = DocumentTextDirection.IsRtl(input.Language, draft);
         var bytes = QuestPDF.Fluent.Document.Create(container =>
         {
             container.Page(page =>
@@ -72,6 +84,13 @@ public sealed class DocumentRenderer : IDocumentRenderer
                 });
                 page.Footer().AlignCenter().Text(text => { text.Span("Taslim · "); text.CurrentPageNumber(); });
             });
+        }).WithMetadata(new DocumentMetadata
+        {
+            // The export's download name is derived from the requested title, so the PDF has to carry that same
+            // document identity inside it. Two different documents from one workspace could otherwise render
+            // byte-identical PDFs, and content-addressed generated-file storage then reuses the earlier file row
+            // for the later job - which drops the later asset's PDF representation and its download button.
+            Title = input.Title,
         }).GeneratePdf();
         return new RenderedDocument(AssetRepresentationTypes.Pdf, SafeFileName(input.Title, ".pdf"), "application/pdf", bytes);
     }
@@ -124,8 +143,6 @@ public sealed class DocumentRenderer : IDocumentRenderer
         });
     }
 
-    private static bool IsRtl(string language) => language is "ar" or "ku";
-
     private static string SafeFileName(string title, string extension)
     {
         // Host-independent, path-safe encoding: Path.GetInvalidFileNameChars() differs per OS and
@@ -134,14 +151,14 @@ public sealed class DocumentRenderer : IDocumentRenderer
     }
 }
 
-internal sealed class WordprocessingDocumentModelBuilder(DocumentDraft draft, DocumentGenerationInput input)
+internal sealed class WordprocessingDocumentModelBuilder(DocumentDraft draft, bool rtl, bool includeTableOfContents)
 {
     public DocumentFormat.OpenXml.Wordprocessing.Document Build()
     {
         var body = new Body();
         body.Append(Paragraph(draft.Title, "Title"));
         if (!string.IsNullOrWhiteSpace(draft.Summary)) body.Append(Paragraph(draft.Summary, null));
-        if (input.IncludeTableOfContents)
+        if (includeTableOfContents)
         {
             body.Append(Paragraph("Contents", "Heading1"));
             foreach (var section in draft.Sections) body.Append(Paragraph($"• {section.Heading}", null));
@@ -183,7 +200,7 @@ internal sealed class WordprocessingDocumentModelBuilder(DocumentDraft draft, Do
     private Paragraph Paragraph(string text, string? style)
     {
         var properties = new ParagraphProperties();
-        if (!string.Equals(input.Language, "en", StringComparison.OrdinalIgnoreCase) && input.Language is "ar" or "ku")
+        if (rtl)
             properties.Append(new BiDi());
         if (!string.IsNullOrWhiteSpace(style)) properties.Append(new ParagraphStyleId { Val = style });
         return new Paragraph(properties, new Run(new Text(text) { Space = SpaceProcessingModeValues.Preserve }));

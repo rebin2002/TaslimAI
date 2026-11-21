@@ -40,6 +40,7 @@ const textOnSurface: ReadonlyArray<Readonly<{ label: string; selector: string; s
   { label: "section eyebrow", selector: ".eyebrow", surface: "#f7fbff" },
   { label: "wizard heading", selector: ".header h1", surface: "#ffffff" },
   { label: "intro paragraph", selector: ".intro", surface: "#ffffff" },
+  { label: "restored draft notice", selector: ".draftNotice", surface: "#ffffff" },
   { label: "field label", selector: ".labelText", surface: "#ffffff" },
   { label: "required mark", selector: ".requiredMark", surface: "#ffffff" },
   { label: "typed input value", selector: '.field input[type="text"], .field textarea, .field select', surface: "#fbfcfe" },
