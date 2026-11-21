@@ -4,6 +4,7 @@ using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 using Taslim.Api.Authorization;
+using Taslim.Api.Assets;
 using Taslim.Api.Contracts;
 using Taslim.Api.Domain;
 using Taslim.Api.Infrastructure;
@@ -64,8 +65,10 @@ public sealed class UpscalingJobService(
             throw new UpscalingValidationException("PROJECT_NOT_IN_WORKSPACE", "The selected project is not in this workspace.");
 
         var source = await db.Assets
+            .Include(asset => asset.Project)
             .Include(asset => asset.StoredFile)
             .AsNoTracking()
+            .Where(AssetVisibility.ForWorkspaceMember(userId))
             .FirstOrDefaultAsync(asset => asset.Id == request.SourceAssetId && asset.WorkspaceId == request.WorkspaceId, cancellationToken);
         if (source is null)
             throw new UpscalingValidationException(UpscalingJobErrorCodes.SourceAssetNotFound, "The selected source asset could not be found.");

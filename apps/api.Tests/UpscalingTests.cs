@@ -106,6 +106,45 @@ public sealed class UpscalingTests : IClassFixture<GenerationJobsNoWorkerFactory
     }
 
     [Fact]
+    public async Task Workspace_member_cannot_submit_another_members_private_asset_for_upscaling()
+    {
+        using var ownerClient = factory.CreateClient();
+        var owner = await Register(ownerClient, $"upscale-private-owner-{Guid.NewGuid():N}@example.com");
+        var source = await CreateSourceAsset(owner);
+
+        using var memberClient = factory.CreateClient();
+        var member = await Register(memberClient, $"upscale-private-member-{Guid.NewGuid():N}@example.com");
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            db.WorkspaceMembers.Add(new WorkspaceMember
+            {
+                Id = Guid.NewGuid(),
+                WorkspaceId = owner.PersonalWorkspace.Id,
+                UserId = member.User.Id,
+                Role = WorkspaceRole.Member,
+                JoinedAt = DateTime.UtcNow,
+            });
+            await db.SaveChangesAsync();
+        }
+
+        var response = await SendWithCsrf(memberClient, HttpMethod.Post, "/api/upscaling/jobs", new
+        {
+            workspaceId = owner.PersonalWorkspace.Id,
+            sourceAssetId = source.Id,
+            targetResolution = "1080p",
+        });
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        var body = await response.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal(UpscalingJobErrorCodes.SourceAssetNotFound, body.GetProperty("error").GetProperty("code").GetString());
+
+        using var verifyScope = factory.Services.CreateScope();
+        var verifyDb = verifyScope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        Assert.False(await verifyDb.UpscalingJobs.AnyAsync(job => job.SourceAssetId == source.Id && job.CreatedByUserId == member.User.Id));
+    }
+
+    [Fact]
     public async Task Lifecycle_records_attempt_provenance_hands_off_to_qc_and_supports_rejected_retry()
     {
         using var client = factory.CreateClient();
