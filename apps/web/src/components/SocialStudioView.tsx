@@ -7,7 +7,7 @@ import { Check, CheckCircle2, Copy, FileText, Image as ImageIcon, LoaderCircle, 
 import { useAuth } from "@/components/AuthProvider";
 import { useLocale } from "@/components/LocaleProvider";
 import { ApiError, api, type Asset, type GenerationJob, type Project, type SocialJobResult, type SocialPost, type StoredFile } from "@/lib/api";
-import { canCancelSocialJob, clearSocialActiveJobId, clearSocialDraft, displaySocialProgress, formatSocialPostForCopy, isSocialAssetSelectable, isSocialJobForWorkspace, isSocialSourceReady, nextSocialPollDelay, nextSocialRestoreDelay, normalizeSocialPreviewPlatform, parseSocialJobResult, persistSocialActiveJobId, persistSocialDraft, readSocialActiveJobId, readSocialDraft, shouldPollSocialJob, socialStudioState, type SocialPreviewPlatform } from "@/lib/socialStudioState";
+import { canCancelSocialJob, clearSocialActiveJobId, clearSocialDraft, displaySocialProgress, formatSocialPostForCopy, isSocialAssetSelectable, isSocialJobForWorkspace, isSocialSourceReady, nextSocialPollDelay, nextSocialRestoreDelay, normalizeSocialPreviewPlatform, parseSocialJobResult, persistSocialActiveJobId, persistSocialDraft, purgeSocialDraftsOnAccountBoundary, readSocialActiveJobId, readSocialDraft, retireLegacySocialDraft, shouldPollSocialJob, socialDraftScopeToken, socialStudioState, type SocialPreviewPlatform } from "@/lib/socialStudioState";
 
 const extensions = [".pdf", ".docx", ".txt", ".md", ".csv", ".xlsx"];
 type Language = "auto" | "en" | "ar" | "ku";
@@ -133,6 +133,10 @@ export function SocialStudioView() {
   const sessionGeneration = useRef(0);
   const initializedDraftWorkspace = useRef<string | null>(null);
   const skipNextDraftSave = useRef(false);
+  // The (identity, workspace) scope whose draft is currently on screen. A workspace id alone cannot
+  // tell two accounts apart, so this token — not `initializedDraftWorkspace` — decides whether a
+  // hydration is allowed to render stored content, and whether an autosave belongs to this session.
+  const hydratedDraftScope = useRef<string | null>(null);
   const inputsRequest = useRef(0);
 
   const loadInputs = useCallback(async () => {
@@ -170,6 +174,10 @@ export function SocialStudioView() {
     workspaceIdRef.current = workspaceId;
     accountIdRef.current = accountId;
     if (previousWorkspaceId === workspaceId && previousAccountId === accountId) return;
+    // #688 account boundary: an identity that is leaving this tab's studio takes its persisted
+    // Social drafts with it. Only the departing identity is scrubbed, and only once its id is
+    // proven — a half-resolved session removes nothing, so a stranger's state is untouched.
+    if (previousAccountId !== accountId) purgeSocialDraftsOnAccountBoundary(previousAccountId);
     sessionGeneration.current += 1;
     restoreJobId.current = null;
     setCurrent(null);
@@ -198,17 +206,33 @@ export function SocialStudioView() {
     setRestoreRetry(0);
     setCopyState("");
   }, [workspaceId, accountId]);
-  // Hydrate the workspace-scoped draft after authentication/workspace changes.
+  // Hydrate the identity-and-workspace scoped draft after authentication/account/workspace changes.
   useEffect(() => {
     const workspaceId = workspace?.id ?? null;
-    if (!workspaceId) {
+    const draftScope = socialDraftScopeToken({ userId: accountId, workspaceId });
+    if (!workspaceId || !draftScope) {
+      // Signed out, or a session whose identity is not proven yet. The composer fields themselves
+      // are already blanked by the identity-change effect above, which observes the same transition;
+      // what this branch owns is the persistence fence: no scope token means nothing may come OUT of
+      // storage, and the skipped save means nothing already on screen may be written BACK under a
+      // half-resolved identity (which is how a draft would otherwise be re-attributed to a stranger).
+      hydratedDraftScope.current = null;
       initializedDraftWorkspace.current = null;
+      skipNextDraftSave.current = true;
+      restoreJobId.current = null;
       return;
     }
+    // The same workspace id arriving with a different account is a new draft session, so hydration
+    // always re-runs for it. The job pointer keeps its own workspace fence (#847/#1007 lane) and is
+    // deliberately not touched here.
+    hydratedDraftScope.current = draftScope;
     initializedDraftWorkspace.current = workspaceId;
     skipNextDraftSave.current = true;
     restoreJobId.current = null;
-    const draft = readSocialDraft(workspaceId);
+    // Retire any pre-#688 workspace-only entry before this identity could be shown its content:
+    // its owner cannot be proven, so it is removed rather than migrated (#688 criterion 5).
+    retireLegacySocialDraft({ userId: accountId, workspaceId });
+    const draft = readSocialDraft({ userId: accountId, workspaceId });
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setCurrent(null);
     setSelectedFiles(draft?.selectedFiles ?? []);
@@ -226,16 +250,17 @@ export function SocialStudioView() {
     setGenerateVariants(draft?.generateVariants ?? true);
     setProjectId(draft?.projectId || searchParams.get("projectId") || "");
     setError(""); setInputsError(false); setCopyState(""); setPollRetry(0);
-  }, [workspace?.id, searchParams]);
+  }, [workspace?.id, accountId, searchParams]);
   useEffect(() => {
     const workspaceId = workspace?.id;
-    if (!workspaceId || initializedDraftWorkspace.current !== workspaceId) return;
+    const draftScope = socialDraftScopeToken({ userId: accountId, workspaceId });
+    if (!workspaceId || !draftScope || initializedDraftWorkspace.current !== workspaceId || hydratedDraftScope.current !== draftScope) return;
     if (skipNextDraftSave.current) {
       skipNextDraftSave.current = false;
       return;
     }
-    persistSocialDraft(workspaceId, { projectId, selectedFiles, selectedAssets, prompt, socialType, platform, tone, language, audience, brandVoice, callToAction, includeHashtags, includeEmojis, generateVariants });
-  }, [workspace?.id, projectId, selectedFiles, selectedAssets, prompt, socialType, platform, tone, language, audience, brandVoice, callToAction, includeHashtags, includeEmojis, generateVariants]);
+    persistSocialDraft({ userId: accountId, workspaceId }, { projectId, selectedFiles, selectedAssets, prompt, socialType, platform, tone, language, audience, brandVoice, callToAction, includeHashtags, includeEmojis, generateVariants });
+  }, [workspace?.id, accountId, projectId, selectedFiles, selectedAssets, prompt, socialType, platform, tone, language, audience, brandVoice, callToAction, includeHashtags, includeEmojis, generateVariants]);
   useEffect(() => {
     if (!workspaceId || current) return;
     const storedJobId = readSocialActiveJobId(workspaceId);
@@ -345,7 +370,7 @@ export function SocialStudioView() {
     try { await navigator.clipboard.writeText(formatSocialPostForCopy(post)); setCopyState(String(post.order)); window.setTimeout(() => setCopyState(""), 1800); }
     catch { setError(t("social.copyError")); }
   }
-  function createAnother() { restoreJobId.current = null; if (workspaceIdRef.current) clearSocialActiveJobId(workspaceIdRef.current); if (workspaceIdRef.current) clearSocialDraft(workspaceIdRef.current); setCurrent(null); setError(""); setRestoreError(""); setRestoreRetry(0); setCopyState(""); setPollRetry(0); }
+  function createAnother() { restoreJobId.current = null; if (workspaceIdRef.current) clearSocialActiveJobId(workspaceIdRef.current); if (workspaceIdRef.current) clearSocialDraft({ userId: accountIdRef.current, workspaceId: workspaceIdRef.current }); setCurrent(null); setError(""); setRestoreError(""); setRestoreRetry(0); setCopyState(""); setPollRetry(0); }
 
   const visibleCurrent = isSocialJobForWorkspace(current, workspaceId) ? current : null;
   const result = parseSocialJobResult(visibleCurrent);
