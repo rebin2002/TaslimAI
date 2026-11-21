@@ -1,7 +1,20 @@
 import { readFileSync } from "node:fs";
-import { describe, expect, it } from "vitest";
+import { renderToStaticMarkup } from "react-dom/server";
+import { describe, expect, it, vi } from "vitest";
 import { authSuccessPath } from "@/lib/authRedirect";
-import { PROTECTED_PAGE_AUTH_TIMEOUT_MS, protectedPageLoginPath } from "./ProtectedPage";
+import { ProtectedPage, PROTECTED_PAGE_AUTH_TIMEOUT_MS, protectedPageLoginPath } from "./ProtectedPage";
+
+// Hydration harness: ProtectedPage reads the auth state through useAuth(), so
+// the gate can be exercised deterministically with every post-login hydration
+// state, without a transport, a browser, or a provider.
+const authHarness = vi.hoisted(() => ({ state: { user: null as unknown, loading: true } }));
+vi.mock("@/components/AuthProvider", () => ({
+  useAuth: () => authHarness.state,
+}));
+vi.mock("next/navigation", () => ({
+  useRouter: () => ({ push: vi.fn(), replace: vi.fn() }),
+  usePathname: () => "/projects",
+}));
 
 /**
  * Simulates the login page contract: the browser receives the redirect produced
@@ -78,6 +91,96 @@ describe("protected page loading boundary", () => {
       const redirects = source.match(/router\.replace\(protectedPageLoginPath\(/g) ?? [];
       expect(redirects).toHaveLength(2);
       expect(source).not.toMatch(/protectedPageLoginPath\(pathname\)/);
+    });
+  });
+
+  describe("post-login session hydration persistence", () => {
+    const hydratedUser = { id: "user-1", email: "owner@example.test", onboardingCompletedAt: null };
+
+    function renderGate(user: unknown, loading: boolean): string {
+      authHarness.state = { user, loading };
+      return renderToStaticMarkup(<ProtectedPage><div id="projects-view">projects</div></ProtectedPage>);
+    }
+
+    it("renders the authenticated content for a hydrated session even while the bootstrap flag is unresolved", () => {
+      // Reproduction of the eviction defect: completing sign-in (or
+      // registration) while the session read issued at mount is still in
+      // flight makes that transition the current one, so the stale read
+      // never clears the provider's `loading` flag. The page is then left
+      // with a hydrated session plus an unresolved bootstrap flag, and the
+      // first-run onboarding flow inside the protected content must stay
+      // mounted instead of collapsing into the bootstrap spinner.
+      const html = renderGate(hydratedUser, true);
+      expect(html).toContain("projects-view");
+      expect(html).not.toContain("loading-state");
+    });
+
+    it("still holds the bootstrap spinner until a session hydrates", () => {
+      const html = renderGate(null, true);
+      expect(html).toContain("loading-state");
+      expect(html).not.toContain("projects-view");
+    });
+
+    it("arms the bootstrap watchdog only while no session has hydrated", async () => {
+      const gate = await import("./ProtectedPage") as typeof import("./ProtectedPage");
+      expect(gate.shouldArmBootstrapWatchdog(true, false)).toBe(true);
+      // The defect: a stale bootstrap flag used to arm the recovery timer
+      // next to a hydrated session, evicting the signed-in user - mid
+      // onboarding for a first-login account - to /login after the timeout
+      // despite a valid session.
+      expect(gate.shouldArmBootstrapWatchdog(true, true)).toBe(false);
+      // Absence of a settled session is handled by the direct redirect.
+      expect(gate.shouldArmBootstrapWatchdog(false, false)).toBe(false);
+      expect(gate.shouldArmBootstrapWatchdog(false, true)).toBe(false);
+    });
+
+    it("recognizes only a resolved session object as hydrated", async () => {
+      const gate = await import("./ProtectedPage") as typeof import("./ProtectedPage");
+      expect(gate.protectedPageHasHydratedSession(null)).toBe(false);
+      expect(gate.protectedPageHasHydratedSession(undefined)).toBe(false);
+      expect(gate.protectedPageHasHydratedSession(hydratedUser)).toBe(true);
+    });
+
+    it("denies a malformed session payload instead of trusting any non-null value", async () => {
+      // Security contract: a missing, expired, malformed, or unhydrated
+      // session must deny - never allow. A truthy-but-malformed payload (a
+      // misrouted proxy body, a placeholder object, a non-string id) is not
+      // proof of a resolved session, so it must read as unhydrated and hold
+      // the bootstrap gate shut, exactly like a signed-out state.
+      const gate = await import("./ProtectedPage") as typeof import("./ProtectedPage");
+      for (const malformed of [
+        {}, // object without the stable identity field
+        { id: "" }, // empty id
+        { id: "   " }, // whitespace-only id
+        { id: 123 }, // non-string id
+        { id: null }, // null id
+        "session-token", // primitive masquerading as a session
+        42,
+        true,
+        [],
+      ]) {
+        expect(gate.protectedPageHasHydratedSession(malformed)).toBe(false);
+      }
+      expect(gate.protectedPageHasHydratedSession({ id: " user-1 " })).toBe(true);
+    });
+
+    it("holds the bootstrap gate for a malformed session, loading or settled", () => {
+      // The render gate must consult the hardened predicate, not the raw
+      // truthiness of `user`, so malformed payloads never mount protected
+      // children.
+      for (const loading of [true, false]) {
+        const html = renderGate({ email: "owner@example.test" }, loading);
+        expect(html).toContain("loading-state");
+        expect(html).not.toContain("projects-view");
+      }
+    });
+
+    it("wires the component render and watchdog through the session-aware gate", () => {
+      // The render guard must defer to the hydrated session rather than to
+      // the bootstrap flag, and the watchdog must consult the same
+      // session-aware predicate.
+      expect(protectedPageSource).toContain("if (!hasHydratedSession) return");
+      expect(protectedPageSource).toContain("shouldArmBootstrapWatchdog(loading, hasHydratedSession)");
     });
   });
 });
