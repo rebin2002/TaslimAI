@@ -3,6 +3,7 @@ namespace Taslim.Api.Ai;
 public sealed class AiOptions
 {
     public string DefaultChatTier { get; set; } = "Smart";
+    public int MaxChatOutputTokens { get; set; } = 2_048;
     public int ContextBudgetTokens { get; set; } = 12_000;
     public int ContextOutputReserveTokens { get; set; } = 2_048;
     public int ProjectContextBudgetTokens { get; set; } = 1_200;

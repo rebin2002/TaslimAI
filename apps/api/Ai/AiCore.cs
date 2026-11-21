@@ -214,7 +214,13 @@ public sealed class AiContextBuilder(IOptions<AiOptions> options)
         }
 
         selected.Reverse();
-        return new AiChatRequest(selected, systemInstruction, settings.DefaultChatTier, EnableStreaming: true, Attachments: files);
+        return new AiChatRequest(
+            selected,
+            systemInstruction,
+            settings.DefaultChatTier,
+            EnableStreaming: true,
+            Attachments: files,
+            MaxOutputTokens: Math.Clamp(settings.MaxChatOutputTokens, 256, 16_000));
     }
 
     private string BuildSystemInstruction(string? projectInstructions, string? projectContextNotes, IReadOnlyList<AiMemoryContext> personalMemories, IReadOnlyList<AiFileContext> files)
