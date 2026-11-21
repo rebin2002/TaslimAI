@@ -3,7 +3,7 @@ import { localeTag } from "@/lib/i18n";
 
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowLeft,
   Check,
@@ -21,12 +21,14 @@ import {
 import { useAuth } from "@/components/AuthProvider";
 import { useLocale } from "@/components/LocaleProvider";
 import { ApiError, api, type Asset, type GenerationJob, type Project, type StoredFile } from "@/lib/api";
+import { DocumentReaderBlock } from "./DocumentReaderBlock";
 import {
   canCancelDocumentJob,
   clearDocumentActiveJobId,
   displayDocumentProgress,
   documentPresentationState,
   isDocumentSourceReady,
+  isDocumentJobUnavailableError,
   isRestorableDocumentJob,
   nextDocumentPollDelay,
   parseDocumentJobResult,
@@ -37,6 +39,19 @@ import {
   shouldResetDocumentWorkspaceState,
   shouldPollDocumentJob,
 } from "@/lib/documentStudioState";
+import {
+  type DocumentDraftState,
+  persistDocumentDraftState,
+  readDocumentDraftState,
+  documentDraftStorageKey,
+  isDocumentDraftEmpty,
+} from "@/lib/documentStudioDraftState";
+import {
+  documentStudioListLoad,
+  documentStudioListStatus,
+  type DocumentStudioListLoad,
+  type DocumentStudioListStatus,
+} from "@/lib/documentStudioListState";
 
 const extensions = [".pdf", ".docx", ".txt", ".md", ".csv", ".xlsx"];
 type DocumentType = "auto" | "report" | "proposal" | "business_letter" | "company_profile" | "meeting_minutes" | "article" | "general";
@@ -45,8 +60,13 @@ type DocumentLanguage = "auto" | "en" | "ar" | "ku";
 type DocumentOutputFormat = "docx" | "pdf" | "both";
 type DocumentTone = "professional" | "formal" | "friendly" | "persuasive" | "neutral";
 
-function formatAssetDate(value: string, locale: string) {
-  return new Intl.DateTimeFormat(localeTag(locale), { month: "short", day: "numeric", year: "numeric" }).format(new Date(value));
+export function formatAssetDate(value: string, locale: string) {
+  const date = new Date(value);
+  // Degrade like the Research rail instead of throwing: Intl.DateTimeFormat.format raises
+  // RangeError on an invalid instant, which would take the whole Document Studio view,
+  // recent downloads included, down with it. The raw value is returned untouched.
+  if (Number.isNaN(date.getTime())) return value;
+  return new Intl.DateTimeFormat(localeTag(locale), { month: "short", day: "numeric", year: "numeric" }).format(date);
 }
 
 function assetSnippet(asset: Asset) {
@@ -67,15 +87,32 @@ export function DocumentProgressMeter({ progress, label, announcement }: Documen
     </div>
   </>;
 }
-type DocumentPreviewTableProps = Readonly<{
-  rows: ReadonlyArray<{ cells: ReadonlyArray<string> }>;
-  label: string;
+
+type DocumentStudioListNoticeProps = Readonly<{
+  status: Exclude<DocumentStudioListStatus, "populated">;
+  copy: { loading: string; empty: string; error: string; errorHint: string; retry: string };
+  onRetry: () => void;
 }>;
-export function DocumentPreviewTable({ rows, label }: DocumentPreviewTableProps) {
-  return <div className="document-preview-table" role="table" aria-label={label}>{rows.map((row, rowIndex) => <div className="document-preview-row" key={rowIndex} role="row">{row.cells.map((cell, cellIndex) => <span key={`${rowIndex}-${cellIndex}`} role="cell">{cell}</span>)}</div>)}</div>;
+
+/**
+ * The three non-populated states of a documents list, kept apart on purpose:
+ * a request still in flight, a request that failed and can be tried again, and
+ * a list that genuinely holds nothing. A failure never borrows the empty copy,
+ * because telling a member they have no documents when the read failed states
+ * something false about work that is still safely stored.
+ */
+export function DocumentStudioListNotice({ status, copy, onRetry }: DocumentStudioListNoticeProps) {
+  if (status === "loading") return <p className="document-empty-copy" role="status">{copy.loading}</p>;
+  if (status === "error") return <div role="status">
+    <div className="form-error"><XCircle size={15} /> {copy.error}</div>
+    <p className="document-empty-copy">{copy.errorHint}</p>
+    <button className="secondary-button" type="button" onClick={onRetry}><RefreshCw size={15} /> {copy.retry}</button>
+  </div>;
+  return <p className="document-empty-copy" role="status">{copy.empty}</p>;
 }
+
 export function DocumentStudioView() {
-  const { workspace } = useAuth();
+  const { user, workspace } = useAuth();
   const { locale, t } = useLocale();
   const searchParams = useSearchParams();
   const [projects, setProjects] = useState<Project[]>([]);
@@ -94,8 +131,8 @@ export function DocumentStudioView() {
   const [tone, setTone] = useState<DocumentTone>("professional");
   const [includeTableOfContents, setIncludeTableOfContents] = useState(true);
   const [current, setCurrent] = useState<GenerationJob | null>(null);
-  const [loadingSources, setLoadingSources] = useState(true);
-  const [loadingRecent, setLoadingRecent] = useState(true);
+  const [sourcesLoad, setSourcesLoad] = useState<DocumentStudioListLoad>("loading");
+  const [recentLoad, setRecentLoad] = useState<DocumentStudioListLoad>("loading");
   const [working, setWorking] = useState(false);
   const [retryingCompleted, setRetryingCompleted] = useState(false);
   const [pollRetry, setPollRetry] = useState(0);
@@ -106,21 +143,42 @@ export function DocumentStudioView() {
   const activeJobId = useRef<string | null>(null);
   const activeAssetId = useRef<string | null>(null);
   const observedWorkspaceId = useRef<string | null>(workspace?.id ?? null);
+  const observedUserId = useRef<string | null>(user?.id ?? null);
+  // A React state snapshot (not a ref read during render) fences stale fields until
+  // the user+workspace transition effect has cleared them atomically.
+  const [renderOwner, setRenderOwner] = useState(() => ({ userId: user?.id ?? null, workspaceId: workspace?.id ?? null }));
   const workspaceGeneration = useRef(0);
+  // The workspace whose unsaved brief is already represented by the mounted
+  // compose fields. Drafts are read once per workspace and mirrored on change.
+  const draftHydratedScope = useRef<string | null>(null);
+  // Set by the hydration pass so the very next mirror run is skipped: that run
+  // still closes over the pre-hydration fields and would otherwise store (or
+  // clear) a brief the restored draft has not reached yet.
+  const draftJustHydrated = useRef(false);
+  // A restored brief arrives with no visible transition, so the silent return
+  // of text the user never sent is hard to tell apart from an editor that was
+  // never emptied. This notice names the restoration in the language the user
+  // reads the studio in. It is earned by the hydration pass only: set when
+  // that pass actually brought user work back, and dropped whenever the
+  // composer resets or an ownership boundary moves - never mirrored as draft
+  // content itself.
+  const [restoredNotice, setRestoredNotice] = useState(false);
+
 
   const loadSources = useCallback(async () => {
-    if (!workspace) return;
+    if (!workspace || !user) return;
     const workspaceId = workspace.id;
+    const userId = user.id;
     const workspaceVersion = workspaceGeneration.current;
-    setLoadingSources(true);
-    setLoadingRecent(true);
+    setSourcesLoad("loading");
+    setRecentLoad("loading");
     const [projectsResult, archivedResult, filesResult, assetsResult] = await Promise.allSettled([
       api.listProjects(workspaceId, "Active"),
       api.listProjects(workspaceId, "Archived"),
       api.listFiles(workspaceId),
       api.listAssets(workspaceId, { assetType: "document", sort: "recent", pageSize: 4 }),
     ]);
-    if (observedWorkspaceId.current !== workspaceId || workspaceGeneration.current !== workspaceVersion) return;
+    if (observedWorkspaceId.current !== workspaceId || observedUserId.current !== userId || workspaceGeneration.current !== workspaceVersion) return;
     if (projectsResult.status === "fulfilled" && archivedResult.status === "fulfilled") {
       const loadedProjects = [...projectsResult.value, ...archivedResult.value];
       setProjects(loadedProjects);
@@ -137,22 +195,30 @@ export function DocumentStudioView() {
       setSelected([]);
     }
     setRecentAssets(assetsResult.status === "fulfilled" ? assetsResult.value.items : []);
-    setLoadingSources(false);
-    setLoadingRecent(false);
-  }, [workspace]);
+    // Each rail reports its own read: a failed list says it failed, an
+    // fulfilled one says the workspace really has nothing to list.
+    setSourcesLoad(documentStudioListLoad(filesResult));
+    setRecentLoad(documentStudioListLoad(assetsResult));
+  }, [workspace, user]);
 
   // Workspace-scoped jobs, briefs, selections, and source lists must not survive an ownership boundary.
   // The generation counter fences responses and actions that started in the previous workspace.
   useEffect(() => {
     const nextWorkspaceId = workspace?.id ?? null;
-    if (observedWorkspaceId.current === nextWorkspaceId) return;
+    const nextUserId = user?.id ?? null;
+    if (observedWorkspaceId.current === nextWorkspaceId && observedUserId.current === nextUserId) return;
     const previousWorkspaceId = observedWorkspaceId.current;
+    const previousUserId = observedUserId.current;
     observedWorkspaceId.current = nextWorkspaceId;
+    observedUserId.current = nextUserId;
+    setRenderOwner({ userId: nextUserId, workspaceId: nextWorkspaceId });
     workspaceGeneration.current += 1;
     restoreJobId.current = null;
     activeJobId.current = null;
     activeAssetId.current = null;
-    if (previousWorkspaceId === null && nextWorkspaceId !== null && !shouldResetDocumentWorkspaceState(current, nextWorkspaceId)) return;
+    draftHydratedScope.current = null;
+    draftJustHydrated.current = false;
+    if (previousWorkspaceId === null && previousUserId === null && nextWorkspaceId !== null && nextUserId !== null && !shouldResetDocumentWorkspaceState(current, nextWorkspaceId)) return;
     setCurrent(null);
     setSelected([]);
     setProjects([]);
@@ -172,16 +238,70 @@ export function DocumentStudioView() {
     setPollRetry(0);
     setRetryingCompleted(false);
     setWorking(false);
-    setLoadingSources(true);
-    setLoadingRecent(true);
+    setSourcesLoad("loading");
+    setRecentLoad("loading");
     setError("");
     setDownloadError("");
     setCopyState("idle");
-  }, [current, workspace?.id]);
+    setRestoredNotice(false);
+  }, [current, workspace?.id, user?.id]);
 
   // Synchronize source documents, projects, and recent document assets when the authenticated workspace changes.
   // eslint-disable-next-line react-hooks/set-state-in-effect
   useEffect(() => { void loadSources(); }, [loadSources]);
+
+  // A tab switch away from the document editor unmounts this view, and an
+  // unsent brief only ever lived in component state: coming back showed an
+  // empty editor with the work discarded. Restore the workspace's unsaved
+  // draft once per mount, and only while no generation job owns the surface.
+  useEffect(() => {
+    if (!workspace || !user || current) return;
+    const ownerKey = documentDraftStorageKey(user.id, workspace.id);
+    if (draftHydratedScope.current === ownerKey) return;
+    const draft = readDocumentDraftState(user.id, workspace.id);
+    setProjectId(searchParams.get("projectId") || draft.projectId);
+    setSelected(draft.selected);
+    setTitle(draft.title);
+    setPrompt(draft.prompt);
+    setDocumentType(draft.documentType as DocumentType);
+    setLength(draft.length as DocumentLength);
+    setAudience(draft.audience);
+    setAdditionalInstructions(draft.additionalInstructions);
+    setLanguage(draft.language as DocumentLanguage);
+    setOutputFormat(draft.outputFormat as DocumentOutputFormat);
+    setTone(draft.tone as DocumentTone);
+    setIncludeTableOfContents(draft.includeTableOfContents);
+    draftHydratedScope.current = ownerKey;
+    setRestoredNotice(!isDocumentDraftEmpty(draft));
+    // Even an empty incoming scope must skip the first mirror. This effect
+    // can run before React commits the cleared input state, and otherwise
+    // the outgoing account's brief is briefly persisted under the new owner.
+    draftJustHydrated.current = true;
+  }, [current, searchParams, user, workspace]);
+
+  const draft = useMemo<DocumentDraftState>(() => ({
+    projectId,
+    selected,
+    title,
+    prompt,
+    documentType,
+    length,
+    audience,
+    additionalInstructions,
+    language,
+    outputFormat,
+    tone,
+    includeTableOfContents,
+  }), [additionalInstructions, audience, documentType, includeTableOfContents, language, length, outputFormat, projectId, prompt, selected, title, tone]);
+
+  useEffect(() => {
+    if (!workspace || !user || current || draftHydratedScope.current !== documentDraftStorageKey(user.id, workspace.id)) return;
+    if (draftJustHydrated.current) {
+      draftJustHydrated.current = false;
+      return;
+    }
+    persistDocumentDraftState(user.id, workspace.id, draft);
+  }, [current, draft, user, workspace]);
 
   useEffect(() => {
     if (!workspace || current) return;
@@ -224,8 +344,18 @@ export function DocumentStudioView() {
         setCurrent(next);
         setError("");
         setPollRetry(0);
-      } catch {
+      } catch (cause) {
         if (!active || workspaceGeneration.current !== workspaceVersion || current.id !== jobId) return;
+        if (isDocumentJobUnavailableError(cause)) {
+          clearDocumentActiveJobId(current.workspaceId);
+          restoreJobId.current = null;
+          activeJobId.current = null;
+          activeAssetId.current = null;
+          setCurrent(null);
+          setPollRetry(0);
+          setError("");
+          return;
+        }
         setError(t("document.pollError"));
         // Keep polling after a transient request failure; the current job remains the source of truth.
         setPollRetry((attempt) => attempt + 1);
@@ -339,10 +469,16 @@ export function DocumentStudioView() {
     activeAssetId.current = null;
     if (workspace) clearDocumentActiveJobId(workspace.id);
     setCurrent(null);
+    // Abandoning this view also abandons any in-flight export download (or cancellation):
+    // their completion fences compare against the refs just nulled, so none of them can
+    // release the shared busy flag anymore. Without clearing it here, the compose form
+    // renders Generate permanently disabled until the page is reloaded.
+    setWorking(false);
     setError("");
     setDownloadError("");
     setCopyState("idle");
     setPollRetry(0);
+    setRestoredNotice(false);
   }
 
   function refineDocument() {
@@ -365,10 +501,33 @@ export function DocumentStudioView() {
   const result = parseDocumentJobResult(current);
   const presentation = documentPresentationState(current, result);
   const readyFiles = files.filter((file) => isDocumentSourceReady(file));
+  const sourcesStatus = documentStudioListStatus(sourcesLoad, readyFiles.length);
+  const recentStatus = documentStudioListStatus(recentLoad, recentAssets.length);
+  const sourceListCopy = {
+    loading: t("document.loadingSources"),
+    empty: t("document.noSources"),
+    error: t("document.sourcesLoadError"),
+    errorHint: t("document.sourcesLoadErrorHint"),
+    retry: t("document.retrySources"),
+  };
+  const recentListCopy = {
+    loading: t("assets.loading"),
+    empty: t("document.recentEmpty"),
+    error: t("document.recentLoadError"),
+    errorHint: t("document.recentLoadErrorHint"),
+    retry: t("document.retryRecent"),
+  };
+  const retryDocumentLists = useCallback(() => { void loadSources(); }, [loadSources]);
   const displayProgress = displayDocumentProgress(current);
   const statusKey = current?.status ?? "Queued";
   const statusLabel = t(`jobs.status${statusKey}`);
   const resultTitle = result?.title || t("document.resultTitle");
+
+  // An account/workspace transition may render before its state-reset effect.
+  // Never expose the previous principal's brief in that intermediate render.
+  if (!user || !workspace || renderOwner.userId !== user.id || renderOwner.workspaceId !== workspace.id) {
+    return <div className="document-studio-page"><p role="status" aria-live="polite">{t("document.loadingSources")}</p></div>;
+  }
 
   return <div className="document-studio-page">
     <header className="document-studio-header">
@@ -387,19 +546,20 @@ export function DocumentStudioView() {
             <div className="document-card-title"><span className="document-card-icon"><Sparkles size={16} /></span><div><p className="document-card-kicker">{t("document.createTitle")}</p><h2 id="document-create-title">{t("document.createSubtitle")}</h2></div></div>
             <span className="document-step-count">01</span>
           </div>
+          {restoredNotice && <p className="document-draft-note" role="status" aria-live="polite" data-document-draft-restored="true"><RefreshCw size={13} /> {t("document.draftRestored")}</p>}
           <label className="document-field document-field-primary"><span>{t("document.descriptionLabel")}</span><textarea id="document-brief" aria-describedby="document-brief-count" value={prompt} onChange={(event) => setPrompt(event.target.value)} maxLength={8000} placeholder={t("document.descriptionPlaceholder")} required /><small id="document-brief-count">{prompt.length}/8000</small></label>
           <div className="document-field-row"><label className="document-field"><span>{t("document.type")}</span><select value={documentType} onChange={(event) => setDocumentType(event.target.value as DocumentType)}><option value="auto">{t("document.typeAuto")}</option><option value="report">{t("document.typeReport")}</option><option value="proposal">{t("document.typeProposal")}</option><option value="business_letter">{t("document.typeLetter")}</option><option value="company_profile">{t("document.typeProfile")}</option><option value="meeting_minutes">{t("document.typeMinutes")}</option><option value="article">{t("document.typeArticle")}</option><option value="general">{t("document.typeGeneral")}</option></select></label><label className="document-field"><span>{t("document.length")}</span><select value={length} onChange={(event) => setLength(event.target.value as DocumentLength)}><option value="short">{t("document.lengthShort")}</option><option value="standard">{t("document.lengthStandard")}</option><option value="detailed">{t("document.lengthDetailed")}</option></select></label></div>
           <div className="document-field-row"><label className="document-field"><span>{t("document.tone")}</span><select value={tone} onChange={(event) => setTone(event.target.value as DocumentTone)}><option value="professional">{t("document.toneProfessional")}</option><option value="formal">{t("document.toneFormal")}</option><option value="friendly">{t("document.toneFriendly")}</option><option value="persuasive">{t("document.tonePersuasive")}</option><option value="neutral">{t("document.toneNeutral")}</option></select></label><label className="document-field"><span>{t("document.language")}</span><select value={language} onChange={(event) => setLanguage(event.target.value as DocumentLanguage)}><option value="auto">{t("document.languageAuto")}</option><option value="en">{t("document.languageEnglish")}</option><option value="ar">{t("document.languageArabic")}</option><option value="ku">{t("document.languageKurdish")}</option></select></label></div>
           <div className="document-field-row"><label className="document-field"><span>{t("document.outputFormat")}</span><select id="document-output-format" value={outputFormat} onChange={(event) => setOutputFormat(event.target.value as DocumentOutputFormat)}><option value="both">{t("document.outputBoth")}</option><option value="docx">{t("document.outputDocx")}</option><option value="pdf">{t("document.outputPdf")}</option></select></label></div>
-          <label className="document-field"><span>{t("document.project")}</span><select id="document-project" value={projectId} onChange={(event) => setProjectId(event.target.value)} disabled={loadingSources}><option value="">{t("document.noProject")}</option>{projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}</select></label>
+          <label className="document-field"><span>{t("document.project")}</span><select id="document-project" value={projectId} onChange={(event) => setProjectId(event.target.value)} disabled={sourcesLoad === "loading"}><option value="">{t("document.noProject")}</option>{projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}</select></label>
           <details className="document-advanced"><summary>{t("document.advanced")}</summary><div className="document-advanced-grid"><label className="document-field"><span>{t("document.titleLabel")}</span><input value={title} onChange={(event) => setTitle(event.target.value)} maxLength={160} placeholder={t("document.titlePlaceholder")} /></label><label className="document-field"><span>{t("document.audience")}</span><input value={audience} onChange={(event) => setAudience(event.target.value)} maxLength={400} placeholder={t("document.audiencePlaceholder")} /></label><label className="document-field document-advanced-wide"><span>{t("document.additionalInstructions")}</span><textarea value={additionalInstructions} onChange={(event) => setAdditionalInstructions(event.target.value)} maxLength={3000} placeholder={t("document.additionalInstructionsPlaceholder")} /></label></div></details>
           <div className="document-brief-footer"><label className="document-checkbox"><input type="checkbox" checked={includeTableOfContents} onChange={(event) => setIncludeTableOfContents(event.target.checked)} /> <span>{t("document.includeContents")}</span></label><button className="primary-button document-generate-button" type="submit" disabled={working || prompt.trim().length < 3} aria-busy={working}><Sparkles size={15} /> {working ? t("document.working") : t("document.generate")}</button></div>
           {error && <div className="form-error" role="alert"><XCircle size={15} /> {error}</div>}
         </form>
 
         <aside className="document-compose-rail">
-          <section className="document-rail-card document-context-card" aria-labelledby="document-sources-title"><div className="document-rail-icon"><FolderOpen size={17} /></div><p className="document-card-kicker">{t("document.sources")}</p><h2 id="document-sources-title">{t("document.sourcesHint")}</h2><div className="document-source-list">{loadingSources ? <p className="document-empty-copy">{t("document.loadingSources")}</p> : readyFiles.length === 0 ? <p className="document-empty-copy">{t("document.noSources")}</p> : readyFiles.map((file) => <label className={`document-source-option ${selected.includes(file.id) ? "is-selected" : ""}`} key={file.id}><input type="checkbox" checked={selected.includes(file.id)} disabled={!selected.includes(file.id) && selected.length >= 5} onChange={() => toggleFile(file)} /><FileText size={15} /><span><strong>{file.originalFileName}</strong><small>{file.extension.toUpperCase()} · {Math.ceil(file.sizeBytes / 1024)} KB</small></span>{selected.includes(file.id) && <Check size={14} />}</label>)}</div><div className="document-source-count" aria-live="polite">{selected.length}/5 {t("document.sourceLabel")}</div></section>
-          <section className="document-rail-card document-recent-card" aria-labelledby="document-recent-title"><div className="document-recent-heading"><div><p className="document-card-kicker">{t("document.recentTitle")}</p><h2 id="document-recent-title">{t("document.recentSubtitle")}</h2></div><Link href="/assets" className="document-rail-link" aria-label={t("document.openAssets")}><ArrowLeft size={15} /></Link></div>{loadingRecent ? <p className="document-empty-copy">{t("assets.loading")}</p> : recentAssets.length === 0 ? <p className="document-empty-copy">{t("document.recentEmpty")}</p> : <div className="document-recent-list">{recentAssets.map((asset) => <Link className="document-recent-item" key={asset.id} href={`/assets?search=${encodeURIComponent(asset.name)}`}><span className="document-recent-icon"><FileText size={16} /></span><span className="document-recent-copy"><strong>{asset.name}</strong><small>{assetSnippet(asset)}</small><em>{formatAssetDate(asset.createdAt, locale)}</em></span><ArrowLeft size={14} /></Link>)}</div>}</section>
+          <section className="document-rail-card document-context-card" aria-labelledby="document-sources-title"><div className="document-rail-icon"><FolderOpen size={17} /></div><p className="document-card-kicker">{t("document.sources")}</p><h2 id="document-sources-title">{t("document.sourcesHint")}</h2><div className="document-source-list">{sourcesStatus === "populated" ? readyFiles.map((file) => <label className={`document-source-option ${selected.includes(file.id) ? "is-selected" : ""}`} key={file.id}><input type="checkbox" checked={selected.includes(file.id)} disabled={!selected.includes(file.id) && selected.length >= 5} onChange={() => toggleFile(file)} /><FileText size={15} /><span><strong>{file.originalFileName}</strong><small>{file.extension.toUpperCase()} · {Math.ceil(file.sizeBytes / 1024)} KB</small></span>{selected.includes(file.id) && <Check size={14} />}</label>) : <DocumentStudioListNotice status={sourcesStatus} copy={sourceListCopy} onRetry={retryDocumentLists} />}</div><div className="document-source-count" aria-live="polite">{selected.length}/5 {t("document.sourceLabel")}</div></section>
+          <section className="document-rail-card document-recent-card" aria-labelledby="document-recent-title"><div className="document-recent-heading"><div><p className="document-card-kicker">{t("document.recentTitle")}</p><h2 id="document-recent-title">{t("document.recentSubtitle")}</h2></div><Link href="/assets" className="document-rail-link" aria-label={t("document.openAssets")}><ArrowLeft size={15} /></Link></div>{recentStatus === "populated" ? <div className="document-recent-list">{recentAssets.map((asset) => <Link className="document-recent-item" key={asset.id} href={`/assets?search=${encodeURIComponent(asset.name)}`}><span className="document-recent-icon"><FileText size={16} /></span><span className="document-recent-copy"><strong>{asset.name}</strong><small>{assetSnippet(asset)}</small><em>{formatAssetDate(asset.createdAt, locale)}</em></span><ArrowLeft size={14} /></Link>)}</div> : <DocumentStudioListNotice status={recentStatus} copy={recentListCopy} onRetry={retryDocumentLists} />}</section>
         </aside>
       </div>
       <p className="document-studio-footnote">{t("document.safetyNote")}</p>
@@ -409,7 +569,7 @@ export function DocumentStudioView() {
         <header className="document-reader-heading"><p className="section-eyebrow">{t("document.resultEyebrow")}</p><h2 id="document-reader-title">{resultTitle}</h2><p>{t("document.previewHint")}</p></header>
         {result.summary && <p className="document-reader-summary">{result.summary}</p>}
         <div className="document-reader-rule" />
-        {result.sections?.length ? <div className="document-reader-sections">{result.sections.map((section, sectionIndex) => <section className="document-reader-section" key={`${section.heading}-${sectionIndex}`}><h3><span>{String(sectionIndex + 1).padStart(2, "0")}</span>{section.heading}</h3>{section.blocks.map((block, index) => <div className="document-reader-block" key={`${section.heading}-${index}`}>{block.text && <p>{block.text}</p>}{block.items?.length ? <ul>{block.items.map((item) => <li key={item}>{item}</li>)}</ul> : null}{block.rows?.length ? <DocumentPreviewTable rows={block.rows} label={t("document.preview")} /> : null}</div>)}</section>)}</div> : <p className="document-empty-copy">{t("document.resultSummaryUnavailable")}</p>}
+        {result.sections?.length ? <div className="document-reader-sections">{result.sections.map((section, sectionIndex) => <section className="document-reader-section" key={`${section.heading}-${sectionIndex}`}><h3><span>{String(sectionIndex + 1).padStart(2, "0")}</span>{section.heading}</h3>{section.blocks.map((block, index) => <div className="document-reader-block" key={`${section.heading}-${index}`}><DocumentReaderBlock block={block} previewLabel={t("document.preview")} /></div>)}</section>)}</div> : <p className="document-empty-copy">{t("document.resultSummaryUnavailable")}</p>}
       </article>
       <aside className="document-inspector" aria-labelledby="document-inspector-title">
         <div className="document-inspector-header"><div className="document-inspector-icon"><FileText size={17} /></div><div><p className="document-card-kicker">{t("document.readingView")}</p><h2 id="document-inspector-title">{t("document.documentLabel")}</h2></div></div>

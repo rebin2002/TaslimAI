@@ -34,7 +34,17 @@ import {
   shotDesignerControlLabel,
   shotDesignerIntentLabel,
   shotDesignerText,
+  shotDraftIssueText,
 } from "@/lib/shotDesignerI18n";
+import {
+  issuesForField,
+  parseShotDurationInput,
+  shotDraftLimits,
+  validateShotDraft,
+  visibleShotDraftIssues,
+  type ShotDraftIssue,
+  type ShotDraftIssueField,
+} from "@/lib/shotDraftValidation";
 
 type ShotDesignerDraft = {
   description: string;
@@ -73,6 +83,12 @@ export function ShotDesigner({
   const [draft, setDraft] = useState<ShotDesignerDraft>(() =>
     blankDraft(presets.find((preset) => preset.intent === "natural")),
   );
+  // The duration control keeps its own text: an entry the shot contract cannot
+  // store must be named, not quietly dropped. The draft only ever holds a value
+  // the API accepts, so no save path can submit a rejected duration.
+  const [durationInput, setDurationInput] = useState("");
+  const [submitAttempted, setSubmitAttempted] = useState(false);
+  const [durationConfirmed, setDurationConfirmed] = useState(false);
   const didHydrate = useRef(Boolean(presets.length));
   const guideBible = guide.cinematographyBible;
   const guideBaseline = guidePreset(guideBible, presets);
@@ -81,6 +97,54 @@ export function ShotDesigner({
     [draft.cinematography.presetId, presets],
   );
   const guideIsLocked = guide.lockedRevisionNumber != null;
+
+  const durationParse = useMemo(() => parseShotDurationInput(durationInput), [durationInput]);
+  const draftIssues = useMemo(() => validateShotDraft(draft), [draft]);
+  const issues = useMemo(
+    () => [
+      ...draftIssues.filter((issue) => issue.field !== "duration"),
+      ...durationParse.issues,
+    ],
+    [draftIssues, durationParse],
+  );
+  const shownIssues = useMemo(
+    () => visibleShotDraftIssues(issues, { submitted: submitAttempted, durationConfirmed }),
+    [issues, submitAttempted, durationConfirmed],
+  );
+  // Advanced-only fields still gate the save, so when that panel is closed their
+  // messages move to the footer: nothing can block the shot silently.
+  const inlineFields = useMemo(
+    () =>
+      new Set<ShotDraftIssueField>([
+        "description",
+        "duration",
+        ...(mode === "advanced"
+          ? [...CINEMATOGRAPHY_CONTROL_KEYS, "continuityConstraints" as const]
+          : []),
+      ]),
+    [mode],
+  );
+  const detachedIssues = shownIssues.filter((issue) => !inlineFields.has(issue.field));
+  const issuesFor = (field: ShotDraftIssueField) => issuesForField(shownIssues, field);
+  const issueId = (field: ShotDraftIssueField) => `shot-${field}-issues-${scene.id}`;
+
+  function describedBy(field: ShotDraftIssueField, ...hints: string[]) {
+    const ids = issuesFor(field).length ? [issueId(field), ...hints] : hints;
+    return ids.length ? ids.join(" ") : undefined;
+  }
+
+  function invalid(field: ShotDraftIssueField) {
+    return issuesFor(field).length ? true : undefined;
+  }
+
+  function updateDuration(raw: string) {
+    const parsed = parseShotDurationInput(raw);
+    setDurationInput(raw);
+    setDraft((current) => ({
+      ...current,
+      durationSeconds: parsed.issues.length ? null : parsed.value,
+    }));
+  }
 
   useEffect(() => {
     if (didHydrate.current || !presets.length) return;
@@ -123,7 +187,10 @@ export function ShotDesigner({
   }
 
   async function saveShot() {
-    if (!draft.description.trim() || saving) return;
+    // Pressing "Add shot" is how a customer asks what is missing, so the click
+    // is never swallowed: it reveals the messages and only then decides.
+    setSubmitAttempted(true);
+    if (saving || issues.length) return;
     const saved = await onAddShot({
       ...draft,
       description: draft.description.trim(),
@@ -133,6 +200,9 @@ export function ShotDesigner({
       },
     });
     if (!saved) return;
+    setSubmitAttempted(false);
+    setDurationConfirmed(false);
+    setDurationInput("");
     setDraft((current) => ({
       ...blankDraft(
         selectedPreset ??
@@ -258,6 +328,9 @@ export function ShotDesigner({
       <label className="movie-shot-field movie-shot-description">
         <span>{text("shotDescription")}</span>
         <textarea
+          id={`shot-description-${scene.id}`}
+          aria-invalid={invalid("description")}
+          aria-describedby={describedBy("description")}
           value={draft.description}
           onChange={(event) =>
             setDraft((current) => ({
@@ -267,7 +340,12 @@ export function ShotDesigner({
           }
           placeholder={text("shotDescriptionPlaceholder")}
           rows={2}
-          maxLength={8000}
+          maxLength={shotDraftLimits.descriptionCharacters}
+        />
+        <ShotDraftIssues
+          locale={locale}
+          issues={issuesFor("description")}
+          id={issueId("description")}
         />
       </label>
 
@@ -330,22 +408,32 @@ export function ShotDesigner({
                 <span>{shotDesignerControlLabel(locale, key)}</span>
                 {key === "compositionNotes" ? (
                   <textarea
+                    id={`shot-${key}-${scene.id}`}
+                    aria-invalid={invalid(key)}
+                    aria-describedby={describedBy(key)}
                     value={draft.cinematography[key] ?? ""}
                     onChange={(event) => updateControl(key, event.target.value)}
                     rows={2}
                   />
                 ) : (
                   <input
+                    id={`shot-${key}-${scene.id}`}
+                    aria-invalid={invalid(key)}
+                    aria-describedby={describedBy(key)}
                     value={draft.cinematography[key] ?? ""}
                     onChange={(event) => updateControl(key, event.target.value)}
                   />
                 )}
+                <ShotDraftIssues locale={locale} issues={issuesFor(key)} id={issueId(key)} />
               </label>
             ))}
           </div>
           <label className="movie-shot-field movie-shot-wide">
             <span>{text("continuityConstraints")}</span>
             <textarea
+              id={`shot-continuityConstraints-${scene.id}`}
+              aria-invalid={invalid("continuityConstraints")}
+              aria-describedby={describedBy("continuityConstraints")}
               value={(draft.cinematography.continuityConstraints ?? []).join("\n")}
               onChange={(event) =>
                 setDraft((current) => ({
@@ -362,6 +450,11 @@ export function ShotDesigner({
               rows={3}
               placeholder={text("continuityConstraintsPlaceholder")}
             />
+            <ShotDraftIssues
+              locale={locale}
+              issues={issuesFor("continuityConstraints")}
+              id={issueId("continuityConstraints")}
+            />
           </label>
           <CapabilityTruth locale={locale} selection={draft.cinematography} />
         </div>
@@ -371,21 +464,37 @@ export function ShotDesigner({
         <label className="movie-shot-duration">
           <span>{text("duration")}</span>
           <input
+            id={`shot-duration-${scene.id}`}
             type="number"
-            min={1}
-            max={3600}
-            value={draft.durationSeconds ?? ""}
-            onChange={(event) =>
-              setDraft((current) => ({
-                ...current,
-                durationSeconds: event.target.value
-                  ? Number(event.target.value)
-                  : null,
-              }))
-            }
+            min={shotDraftLimits.durationSecondsMinimum}
+            max={shotDraftLimits.durationSecondsMaximum}
+            step={1}
+            inputMode="numeric"
+            aria-invalid={invalid("duration")}
+            aria-describedby={describedBy("duration", `shot-duration-hint-${scene.id}`)}
+            value={durationInput}
+            onChange={(event) => updateDuration(event.target.value)}
+            onBlur={() => setDurationConfirmed(true)}
             placeholder="—"
           />
           <em>{text("seconds")}</em>
+          <span className="movie-shot-duration-hint" id={`shot-duration-hint-${scene.id}`}>
+            {text("durationHint", {
+              minimum: formatShotDesignerNumber(
+                locale,
+                shotDraftLimits.durationSecondsMinimum,
+              ),
+              maximum: formatShotDesignerNumber(
+                locale,
+                shotDraftLimits.durationSecondsMaximum,
+              ),
+            })}
+          </span>
+          <ShotDraftIssues
+            locale={locale}
+            issues={issuesFor("duration")}
+            id={issueId("duration")}
+          />
         </label>
         <span className="movie-shot-save-note">
           {guideIsLocked ? text("guideLockedNote") : text("guideOverrideNote")}
@@ -393,12 +502,18 @@ export function ShotDesigner({
         <button
           type="button"
           className="movie-workspace-button is-primary"
-          disabled={saving || !draft.description.trim()}
+          disabled={saving}
           onClick={() => void saveShot()}
         >
           <Plus size={13} /> {saving ? text("saving") : text("addShot")}
         </button>
       </div>
+
+      <ShotDraftIssues
+        locale={locale}
+        issues={detachedIssues}
+        id={`shot-detached-issues-${scene.id}`}
+      />
 
       {scene.shots.length > 0 && (
         <div className="movie-shot-list" aria-label={text("savedShots")}>
@@ -425,6 +540,32 @@ export function ShotDesigner({
         </div>
       )}
     </section>
+  );
+}
+
+/**
+ * Renders the localized reason for every invalid draft entry. It is a span so it
+ * stays valid inside a `<label>`, and it announces itself because an entry can
+ * turn invalid while the customer is still typing. A valid entry shows nothing.
+ */
+export function ShotDraftIssues({
+  locale,
+  issues,
+  id,
+}: {
+  locale: Locale;
+  issues: ShotDraftIssue[];
+  id?: string;
+}) {
+  if (!issues.length) return null;
+  return (
+    <span id={id} className="movie-shot-issues" role="alert">
+      {issues.map((issue, index) => (
+        <span key={`${issue.field}-${issue.code}-${index}`} className="movie-shot-issue">
+          {shotDraftIssueText(locale, issue)}
+        </span>
+      ))}
+    </span>
   );
 }
 
