@@ -18,6 +18,9 @@ public sealed class MovieProductionCheckpointService(
     MovieCollaborationAccess collaboration,
     IGenerationJobService jobs) : IMovieProductionCheckpointService
 {
+    private const int MaxCheckpointPersistenceAttempts = 3;
+    private const string CheckpointProjectUniqueIndexName = "IX_MovieProductionCheckpoints_MovieProjectId";
+
     public async Task<MovieProductionCheckpointDto?> GetAsync(Guid userId, Guid movieProjectId, CancellationToken cancellationToken)
     {
         var movie = await db.MovieProjects.AsNoTracking().FirstOrDefaultAsync(item => item.Id == movieProjectId, cancellationToken);
@@ -98,41 +101,70 @@ public sealed class MovieProductionCheckpointService(
     internal static string BuildRecoveryIdempotencyKey(Guid movieProjectId, Guid sourceJobId) =>
         $"movie-recovery:{movieProjectId:N}:{sourceJobId:N}";
 
+    internal static bool IsCheckpointProjectUniqueViolation(DbUpdateException exception)
+    {
+        var details = exception.ToString();
+        var isUniqueViolation = details.Contains("duplicate key", StringComparison.OrdinalIgnoreCase)
+            || details.Contains("UNIQUE constraint failed", StringComparison.OrdinalIgnoreCase)
+            || details.Contains("Cannot insert duplicate key", StringComparison.OrdinalIgnoreCase);
+        return isUniqueViolation
+            && (details.Contains(CheckpointProjectUniqueIndexName, StringComparison.OrdinalIgnoreCase)
+                || details.Contains("MovieProductionCheckpoints.MovieProjectId", StringComparison.OrdinalIgnoreCase));
+    }
+
     private async Task<MovieProductionCheckpointDto> BuildAndPersistAsync(MovieProject movie, CancellationToken cancellationToken, DateTime? recoveredAt = null, Guid? recoveredByUserId = null)
     {
         var projection = await BuildProjectionAsync(movie, cancellationToken);
-        var checkpoint = await db.MovieProductionCheckpoints.FirstOrDefaultAsync(item => item.MovieProjectId == movie.Id, cancellationToken);
-        if (checkpoint is null)
+        for (var attempt = 0; attempt < MaxCheckpointPersistenceAttempts; attempt++)
         {
-            checkpoint = new MovieProductionCheckpoint
+            var checkpoint = await db.MovieProductionCheckpoints.FirstOrDefaultAsync(item => item.MovieProjectId == movie.Id, cancellationToken);
+            if (checkpoint is null)
             {
-                Id = Guid.NewGuid(),
-                MovieProjectId = movie.Id,
-                Version = 1,
-            };
-            db.MovieProductionCheckpoints.Add(checkpoint);
+                checkpoint = new MovieProductionCheckpoint
+                {
+                    Id = Guid.NewGuid(),
+                    MovieProjectId = movie.Id,
+                    Version = 1,
+                };
+                db.MovieProductionCheckpoints.Add(checkpoint);
+            }
+            else if (!string.Equals(checkpoint.SnapshotHash, projection.SnapshotHash(), StringComparison.Ordinal))
+            {
+                checkpoint.Version++;
+            }
+            checkpoint.State = projection.State;
+            checkpoint.ProgressPercent = projection.ProgressPercent;
+            checkpoint.TotalShots = projection.TotalShots;
+            checkpoint.CompletedShots = projection.CompletedShots;
+            checkpoint.RunningShots = projection.RunningShots;
+            checkpoint.BlockedShots = projection.BlockedShots;
+            checkpoint.RecoverableShots = projection.RecoverableShots;
+            checkpoint.PendingApprovalShots = projection.PendingApprovalShots;
+            checkpoint.SnapshotHash = projection.SnapshotHash();
+            checkpoint.ObservedAt = DateTime.UtcNow;
+            if (recoveredAt.HasValue)
+            {
+                checkpoint.LastRecoveredAt = recoveredAt;
+                checkpoint.LastRecoveredByUserId = recoveredByUserId;
+            }
+
+            try
+            {
+                await db.SaveChangesAsync(cancellationToken);
+                return ToDto(checkpoint, projection);
+            }
+            catch (DbUpdateException exception)
+                when (attempt + 1 < MaxCheckpointPersistenceAttempts && IsCheckpointProjectUniqueViolation(exception))
+            {
+                // The unique project index is the authoritative singleton boundary.
+                // Discard the losing Added entity, reload the winner, and replay the
+                // same projection. Unrelated database failures must still surface.
+                db.ChangeTracker.Clear();
+                await Task.Delay(TimeSpan.FromMilliseconds(25), cancellationToken);
+            }
         }
-        else if (!string.Equals(checkpoint.SnapshotHash, projection.SnapshotHash(), StringComparison.Ordinal))
-        {
-            checkpoint.Version++;
-        }
-        checkpoint.State = projection.State;
-        checkpoint.ProgressPercent = projection.ProgressPercent;
-        checkpoint.TotalShots = projection.TotalShots;
-        checkpoint.CompletedShots = projection.CompletedShots;
-        checkpoint.RunningShots = projection.RunningShots;
-        checkpoint.BlockedShots = projection.BlockedShots;
-        checkpoint.RecoverableShots = projection.RecoverableShots;
-        checkpoint.PendingApprovalShots = projection.PendingApprovalShots;
-        checkpoint.SnapshotHash = projection.SnapshotHash();
-        checkpoint.ObservedAt = DateTime.UtcNow;
-        if (recoveredAt.HasValue)
-        {
-            checkpoint.LastRecoveredAt = recoveredAt;
-            checkpoint.LastRecoveredByUserId = recoveredByUserId;
-        }
-        await db.SaveChangesAsync(cancellationToken);
-        return ToDto(checkpoint, projection);
+
+        throw new InvalidOperationException("Movie production checkpoint initialization did not converge after concurrent retries.");
     }
 
     private async Task<MovieProductionCheckpointProjection> BuildProjectionAsync(MovieProject movie, CancellationToken cancellationToken)
