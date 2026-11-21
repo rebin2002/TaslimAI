@@ -6,6 +6,7 @@ import { ArrowLeft, ArrowRight, Check, CircleAlert, Eye, EyeOff, Languages, Lock
 import { useLocale, localeNames, locales } from "@/components/LocaleProvider";
 import { useAuth } from "@/components/AuthProvider";
 import { api, ApiError, type PasswordPolicy } from "@/lib/api";
+import { getPasswordRecoveryAvailability } from "@/lib/passwordRecoveryAvailability";
 import { getAuthErrorTranslationKey } from "@/lib/authErrors";
 import { authSuccessPath } from "@/lib/authRedirect";
 import { BrandMark } from "@/components/BrandMark";
@@ -36,7 +37,17 @@ export function AuthForm({ mode, nextPath = null }: Readonly<{ mode: "login" | "
   const [error, setError] = useState("");
   const [passwordErrors, setPasswordErrors] = useState<string[]>([]);
   const [submitting, setSubmitting] = useState(false);
+  const [recoveryAvailable, setRecoveryAvailable] = useState(false);
   const isRegister = mode === "register";
+
+  useEffect(() => {
+    if (isRegister) return;
+    let active = true;
+    void getPasswordRecoveryAvailability()
+      .then(({ available }) => { if (active) setRecoveryAvailable(available === true); })
+      .catch(() => { if (active) setRecoveryAvailable(false); });
+    return () => { active = false; };
+  }, [isRegister]);
 
   useEffect(() => {
     let active = true;
@@ -104,6 +115,7 @@ export function AuthForm({ mode, nextPath = null }: Readonly<{ mode: "login" | "
           {error && <div className="form-error" role="alert">{error}</div>}
           <button className="auth-submit" disabled={submitting || (isRegister && !passwordValid)}>{submitting ? t("auth.working") : isRegister ? t("auth.createAccount") : t("auth.signIn")} {localeDirection(locale) === "ltr" ? <ArrowRight size={17} aria-hidden="true" /> : <ArrowLeft size={17} aria-hidden="true" />}</button>
         </form>
+        {!isRegister && recoveryAvailable && <p className="auth-forgot"><Link href="/forgot-password">{t("auth.forgotPassword")}</Link></p>}
         <p className="auth-switch">{isRegister ? t("auth.haveAccount") : t("auth.noAccount")} <Link href={isRegister ? "/login" : "/register"}>{isRegister ? t("auth.signIn") : t("auth.createAccount")}</Link></p>
       </div>
     </div>
