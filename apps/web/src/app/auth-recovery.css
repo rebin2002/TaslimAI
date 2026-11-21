@@ -1,0 +1,7 @@
+.auth-forgot { margin: -6px 0 0; text-align: end; font-size: 11px; }
+.auth-forgot a { color: #9fc0ff; font-weight: 700; text-decoration: underline; text-underline-offset: 3px; }
+.auth-forgot a:hover { color: #c5d8ff; }
+.auth-forgot a:focus-visible, .auth-recovery-message a:focus-visible { outline: 2px solid #9fc0ff; outline-offset: 3px; border-radius: 2px; }
+.auth-recovery-message { margin: 0; padding: 12px 14px; color: #d6e2ef; border: 1px solid rgba(255,255,255,.14); border-radius: 9px; background: rgba(255,255,255,.05); font-size: 12px; line-height: 1.65; }
+.auth-recovery-message.is-success { color: #bdf0dc; border-color: rgba(118,214,187,.3); background: rgba(55,190,153,.1); }
+.auth-recovery-message.is-error { color: #ffc0b2; border-color: rgba(241,127,104,.35); background: rgba(241,127,104,.09); }
