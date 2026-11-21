@@ -32,14 +32,18 @@ The API retains `/health` as a dependency-independent liveness endpoint and adds
 
 | Policy | Partition | Limit | Applied to |
 | --- | --- | --- | --- |
-| `authentication` | Anonymous client IP, or authenticated user, plus route | 60/minute | Registration and login |
-| `chat-generation` | Authenticated user, or client IP | 30 tokens/minute | Chat send, streaming send, and regeneration |
-| `generation-creation` | Authenticated user, or client IP | 12/minute | Generic generation-job creation |
-| `uploads` | Authenticated user, or client IP | 20/minute | Multipart file upload |
-| `search` | Authenticated user, or client IP | 120/minute | Global search |
-| `expensive-ai` | Authenticated user, or client IP | 10/minute | Image, document, presentation, research, social, music, voice, movie scene, and movie shot generation |
+| `authentication` | Authenticated user id, else keyed digest of the client address | 60/minute | Registration and login |
+| `chat-generation` | Authenticated user id, else keyed digest of the client address | 30 tokens/minute | Chat send, streaming send, and regeneration |
+| `generation-creation` | Authenticated user id, else keyed digest of the client address | 12/minute | Generic generation-job creation, and the anonymous completion-bridge intake |
+| `uploads` | Authenticated user id, else keyed digest of the client address | 20/minute | Multipart file upload |
+| `search` | Authenticated user id, else keyed digest of the client address | 120/minute | Global search |
+| `expensive-ai` | Authenticated user id, else keyed digest of the client address | 10/minute | Image, document, presentation, research, social, music, voice, movie scene, and movie shot generation |
 
 The policies are intentionally scoped to creation or expensive operations. Read-only job polling, ordinary asset/file reads, conversation listing, and movie-studio editing are not placed behind the expensive-operation policies. A rate-limit response is `429`, includes `Retry-After: 60`, and returns `RATE_LIMITED` with a generic message.
+
+Non-authenticated traffic is addressed by where it arrived from, and a limiter partition outlives the request that created it, so the partition key carries a per-process keyed digest of the client address rather than the address itself; an IPv4 client reached over a dual-stack listener keeps one budget in either address family. A transport that exposes no peer address at all (unix socket, in-memory host) is keyed by the server-assigned connection id, so unrelated callers behind that transport do not inherit each other's exhausted permits.
+
+Known limitation: the application consumes only `X-Forwarded-Proto`, never a forwarded client address (see `AUTHENTICATION.md`), so behind a single trusted ingress every non-authenticated caller shares one address-derived budget. Restoring per-client attribution on the public surface means trusting forwarded client IP, which is security-sensitive and deliberately not done here; it needs an independent review of the ingress trust model first.
 
 These limits do not activate charging, enable a provider, or change usage-ledger or pricing behavior. Queue/concurrency and cost guardrails remain separate product and capacity decisions.
 
