@@ -20,6 +20,14 @@ public sealed class SocialGenerationJobHandler(
 {
     private readonly SocialGenerationOptions settings = socialOptions.Value;
 
+    /// <summary>
+    /// Canonical naming for every published Social representation. The provider
+    /// structured-output schema, the persisted draft artifact and the Social Studio
+    /// state machine all read camelCase members, so the CLR member names of
+    /// <see cref="Taslim.Api.Contracts.SocialDraft"/> must never reach a payload.
+    /// </summary>
+    private static readonly JsonSerializerOptions CanonicalJsonOptions = new() { PropertyNamingPolicy = JsonNamingPolicy.CamelCase };
+
     public bool CanHandle(string jobType) => string.Equals(jobType, GenerationJobTypes.SocialGenerate, StringComparison.OrdinalIgnoreCase);
 
     public async Task<GenerationHandlerResult> ExecuteAsync(GenerationJob job, IProgress<int> progress, CancellationToken cancellationToken)
@@ -97,10 +105,13 @@ public sealed class SocialGenerationJobHandler(
             selectedSourceCount = input.AttachmentIds.Count,
             generatedAt = DateTime.UtcNow,
         });
-        var draftJson = JsonSerializer.Serialize(generated.Draft, new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase, WriteIndented = true });
+        var draftJson = JsonSerializer.Serialize(generated.Draft, new JsonSerializerOptions(CanonicalJsonOptions) { WriteIndented = true });
         var safeName = BuildFileName(generated.Draft.Title);
         var artifact = new GeneratedFileArtifact(safeName, "application/json", Encoding.UTF8.GetBytes(draftJson), metadata);
         var asset = new GeneratedAssetDescriptor(generated.Draft.Title, generated.Draft.Posts.FirstOrDefault()?.Hook, AssetTypes.Social, metadata);
+        // The preview posts are serialized from SocialPost objects, so this payload has
+        // to opt into the canonical naming policy explicitly; the default options emit
+        // PascalCase members that the Studio preview cannot read.
         var result = JsonSerializer.Serialize(new
         {
             socialType = generated.Draft.SocialType,
@@ -109,7 +120,7 @@ public sealed class SocialGenerationJobHandler(
             language,
             postCount = generated.Draft.Posts.Count,
             posts = generated.Draft.Posts,
-        });
+        }, CanonicalJsonOptions);
         progress.Report(92);
         return new GenerationHandlerResult(result, [new GenerationHandlerOutput(GenerationJobOutputTypes.StoredFile, null, metadata, artifact, asset)], generated.Usage);
     }
