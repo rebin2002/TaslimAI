@@ -1,3 +1,4 @@
+using System.Net;
 using System.Security.Claims;
 using System.Threading.RateLimiting;
 using Microsoft.AspNetCore.RateLimiting;
@@ -8,6 +9,7 @@ namespace Taslim.Api.Infrastructure;
 public static class RateLimiting
 {
     public const string Authentication = "authentication";
+    public const string Registration = "registration";
     public const string Chat = "chat-generation";
     public const string Generation = "generation-creation";
     public const string Upload = "uploads";
@@ -37,6 +39,7 @@ public static class RateLimiting
             var permitLimit = policyName switch
             {
                 Authentication => 4,
+                Registration => 2,
                 Chat => 2,
                 Generation => 4,
                 Upload => 2,
@@ -67,6 +70,31 @@ public static class RateLimiting
                 QueueLimit = 0,
                 AutoReplenishment = true,
             }));
+
+        options.AddPolicy(Registration, httpContext =>
+        {
+            // Registration provisions a workspace and billing ledger per
+            // account, so it must not ride the login-tuned 60/minute window:
+            // remote callers fail closed at a dedicated, far stricter budget.
+            // Same-host traffic (local tooling, container health checks, the
+            // CI browser suite that registers an account per test) can never
+            // arrive over the network; it keeps its own generous but still
+            // finite budget instead of an unbounded exemption. A missing peer
+            // address only exists on transports with no network at all
+            // (in-memory TestServer, unix sockets), never on a network
+            // listener, so it shares the same-host budget too.
+            var peerAddress = httpContext.Connection.RemoteIpAddress;
+            var sameHost = peerAddress is null || IPAddress.IsLoopback(peerAddress);
+            return RateLimitPartition.GetFixedWindowLimiter(
+                Partition("registration", httpContext),
+                _ => new FixedWindowRateLimiterOptions
+                {
+                    PermitLimit = sameHost ? 600 : 10,
+                    Window = TimeSpan.FromMinutes(15),
+                    QueueLimit = 0,
+                    AutoReplenishment = true,
+                });
+        });
 
         options.AddPolicy(Chat, httpContext => RateLimitPartition.GetTokenBucketLimiter(
             Partition("chat", httpContext),
