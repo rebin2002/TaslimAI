@@ -81,10 +81,18 @@ public sealed class DirectVideoHttpAdapter(
         if (status.Status != DirectVideoJobStatus.Succeeded)
             throw new DirectVideoProviderException(DirectVideoErrorCategory.InvalidOutput, DirectVideoErrorCodes.OutputInvalid);
         var id = NormalizeId(providerJobId);
-        var response = await SendAsync(HttpMethod.Get, $"generations/{Uri.EscapeDataString(id)}/output", null, cancellationToken);
-        var bytes = await response.Content.ReadAsByteArrayAsync(cancellationToken);
+        // The response is released on every path, including a rejected output: an output
+        // that cannot be stored must not keep its transport alive behind the failure.
+        using var response = await SendAsync(HttpMethod.Get, $"generations/{Uri.EscapeDataString(id)}/output", null, cancellationToken);
         var contentType = response.Content.Headers.ContentType?.MediaType ?? status.ContentType;
         var fileName = response.Content.Headers.ContentDisposition?.FileNameStar ?? response.Content.Headers.ContentDisposition?.FileName ?? status.FileName ?? $"video-{id}.mp4";
+        // Container, MIME agreement and declared size are known from headers alone, so an
+        // unstorable output is rejected before a single provider body byte is buffered. The
+        // same ceiling governs the declaration check and the read, so neither can drift.
+        var maximum = DirectVideoResultNormalizer.NormalizeOutputCeiling(configuration.MaxOutputBytes);
+        DirectVideoResultNormalizer.ValidateOutputDeclaration(
+            contentType, fileName, response.Content.Headers.ContentLength, maximum);
+        var bytes = await ReadBoundedAsync(response.Content, maximum, cancellationToken);
         var normalized = DirectVideoResultNormalizer.NormalizeOutput(contentType, fileName, bytes.LongLength,
             _ => Task.FromResult<Stream>(new MemoryStream(bytes, writable: false)), status.DurationSeconds,
             status.EstimatedCostUsd, status.ActualCostUsd, status.Currency, status.CostBasis, status.SafeMetadataJson,
@@ -118,6 +126,25 @@ public sealed class DirectVideoHttpAdapter(
         { throw new DirectVideoProviderException(DirectVideoErrorCategory.TimedOut, DirectVideoErrorCodes.ProviderTimeout); }
         catch (HttpRequestException)
         { throw new DirectVideoProviderException(DirectVideoErrorCategory.Unavailable, DirectVideoErrorCodes.ProviderUnavailable); }
+    }
+
+    /// <summary>
+    /// Reads at most <paramref name="maximum"/> bytes. A provider that omits or lies about
+    /// Content-Length cannot make this process buffer past the configured output ceiling.
+    /// </summary>
+    private static async Task<byte[]> ReadBoundedAsync(HttpContent content, long maximum, CancellationToken cancellationToken)
+    {
+        await using var input = await content.ReadAsStreamAsync(cancellationToken);
+        using var output = new MemoryStream();
+        var buffer = new byte[64 * 1024];
+        while (true)
+        {
+            var read = await input.ReadAsync(buffer.AsMemory(), cancellationToken);
+            if (read <= 0) break;
+            if (output.Length + read > maximum) throw new DirectVideoOutputNormalizationException();
+            output.Write(buffer, 0, read);
+        }
+        return output.ToArray();
     }
 
     private void EnsureAvailable()
