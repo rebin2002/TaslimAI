@@ -1,5 +1,7 @@
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Diagnostics;
+using System.Data.Common;
 using Taslim.Api.Authorization;
 using Taslim.Api.Contracts;
 using Taslim.Api.Domain;
@@ -109,7 +111,92 @@ public sealed class MovieTakeUpscaleEligibilityTests
         Assert.Equal(1, await db.MovieTakeUpscaleAudits.CountAsync());
     }
 
+    [Fact]
+    public async Task Concurrent_selected_requests_replay_one_active_audit()
+    {
+        var databasePath = Path.Combine(Path.GetTempPath(), $"taslim-movie-upscale-{Guid.NewGuid():N}.db");
+        var barrier = new ExistingUpscaleAuditBarrier();
+        try
+        {
+            var seedOptions = new DbContextOptionsBuilder<TaslimDbContext>()
+                .UseSqlite($"Data Source={databasePath};Default Timeout=30")
+                .Options;
+            await using (var seedDb = new TaslimDbContext(seedOptions))
+            {
+                await seedDb.Database.EnsureCreatedAsync();
+                var fixture = await SeedAsync(seedDb);
+                var take = await seedDb.MovieTakes.SingleAsync(item => item.MovieShotId == fixture.ShotId);
+                var shot = await seedDb.MovieShots.SingleAsync(item => item.Id == fixture.ShotId);
+                take.Status = MovieTakeStatuses.Approved;
+                shot.SelectedTakeId = take.Id;
+                await seedDb.SaveChangesAsync();
+
+                async Task<MovieTakeUpscaleEligibilityDto?> RequestAsync()
+                {
+                    var options = new DbContextOptionsBuilder<TaslimDbContext>()
+                        .UseSqlite($"Data Source={databasePath};Default Timeout=30")
+                        .AddInterceptors(barrier)
+                        .Options;
+                    await using var db = new TaslimDbContext(options);
+                    var service = new MovieTakeUpscaleEligibilityService(db, new WorkspaceAccessService(db));
+                    return await service.RequestAsync(fixture.UserId, take.Id, new MovieTakeUpscaleRequest
+                    {
+                        TargetMasterResolution = MovieUpscaleResolutionCatalog.P4K,
+                        SourceResolution = "1080p",
+                    }, CancellationToken.None);
+                }
+
+                var results = await Task.WhenAll(RequestAsync(), RequestAsync());
+                Assert.All(results, result => Assert.NotNull(result));
+                Assert.Equal(results[0]!.AuditId, results[1]!.AuditId);
+                Assert.Contains(results, result => result!.Code == MovieTakeUpscaleEligibilityCodes.AlreadyRequested);
+                Assert.Equal(1, await seedDb.MovieTakeUpscaleAudits.CountAsync(item => item.MovieTakeId == take.Id));
+            }
+        }
+        finally
+        {
+            if (File.Exists(databasePath)) File.Delete(databasePath);
+        }
+    }
+
+    [Fact]
+    public void Active_request_classifier_does_not_swallow_unrelated_unique_errors()
+    {
+        var activeConflict = new DbUpdateException(
+            "active upscale request conflict",
+            new InvalidOperationException("SQLite Error 19: 'UNIQUE constraint failed: MovieTakeUpscaleAudits.MovieTakeId, MovieTakeUpscaleAudits.TargetMasterResolution'."));
+        var unrelatedConflict = new DbUpdateException(
+            "unrelated conflict",
+            new InvalidOperationException("SQLite Error 19: 'UNIQUE constraint failed: MovieTakeUpscaleAudits.Id'."));
+
+        Assert.True(MovieTakeUpscaleEligibilityService.IsActiveRequestUniqueViolation(activeConflict));
+        Assert.False(MovieTakeUpscaleEligibilityService.IsActiveRequestUniqueViolation(unrelatedConflict));
+    }
+
     private static TaslimDbContext CreateDb(SqliteConnection connection) => new(new DbContextOptionsBuilder<TaslimDbContext>().UseSqlite(connection).Options);
+
+    private sealed class ExistingUpscaleAuditBarrier : DbCommandInterceptor
+    {
+        private readonly TaskCompletionSource<bool> released = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private int arrivals;
+
+        public override async ValueTask<InterceptionResult<DbDataReader>> ReaderExecutingAsync(
+            DbCommand command,
+            CommandEventData eventData,
+            InterceptionResult<DbDataReader> result,
+            CancellationToken cancellationToken = default)
+        {
+            if (command.CommandText.Contains("MovieTakeUpscaleAudits", StringComparison.OrdinalIgnoreCase)
+                && command.CommandText.Contains("TargetMasterResolution", StringComparison.OrdinalIgnoreCase)
+                && command.CommandText.Contains("Status", StringComparison.OrdinalIgnoreCase))
+            {
+                if (Interlocked.Increment(ref arrivals) >= 2) released.TrySetResult(true);
+                await released.Task.WaitAsync(TimeSpan.FromSeconds(10), cancellationToken);
+            }
+
+            return result;
+        }
+    }
 
     private static async Task<(Guid UserId, Guid ProjectId, Guid ShotId)> SeedAsync(TaslimDbContext db)
     {

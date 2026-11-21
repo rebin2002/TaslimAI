@@ -2213,14 +2213,14 @@ namespace Taslim.Api.Persistence.Migrations
                         .IsUnique()
                         .HasFilter("\"IdempotencyKey\" IS NOT NULL");
 
+                    b.HasIndex("WorkspaceId", "CreatedAt");
+
+                    b.HasIndex("Status", "QueuedAt", "CreatedAt");
+
                     b.HasIndex("WorkspaceId", "CreatedByUserId", "JobType")
                         .IsUnique()
                         .HasDatabaseName("IX_GenerationJobs_ImageActiveByUser")
                         .HasFilter("\"JobType\" = 'image.generate' AND \"RequestId\" LIKE 'image-studio:%' AND \"Status\" IN ('Pending', 'Queued', 'Running')");
-
-                    b.HasIndex("WorkspaceId", "CreatedAt");
-
-                    b.HasIndex("Status", "QueuedAt", "CreatedAt");
 
                     b.HasIndex("WorkspaceId", "Status", "CreatedAt");
 
@@ -8432,6 +8432,11 @@ namespace Taslim.Api.Persistence.Migrations
                     b.HasIndex("MovieProjectId", "CreatedAt");
 
                     b.HasIndex("MovieTakeId", "CreatedAt");
+
+                    b.HasIndex("MovieTakeId", "TargetMasterResolution")
+                        .IsUnique()
+                        .HasDatabaseName("UX_MovieTakeUpscaleAudit_Active")
+                        .HasFilter("\"Status\" IN ('PendingExecution', 'Completed')");
 
                     b.ToTable("MovieTakeUpscaleAudits");
                 });
