@@ -77,6 +77,33 @@ public sealed class MovieStudioV2Tests
     }
 
     [Fact]
+    public async Task Final_take_claim_rejects_replacing_an_existing_final_cut()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = CreateDb(connection);
+        var (userId, _, shotId) = await SeedAsync(db);
+        var service = new MovieV2Service(db, new WorkspaceAccessService(db));
+        var first = await service.AddTakeAsync(userId, shotId, new MovieV2TakeRequest { Label = "First final candidate" }, CancellationToken.None);
+        var second = await service.AddTakeAsync(userId, shotId, new MovieV2TakeRequest { Label = "Stale final candidate" }, CancellationToken.None);
+        await service.ApproveTakeAsync(userId, first!.Id, new MovieV2ApprovalRequest { Decision = MovieApprovalDecisions.Approved }, CancellationToken.None);
+        await service.ApproveTakeAsync(userId, second!.Id, new MovieV2ApprovalRequest { Decision = MovieApprovalDecisions.Approved }, CancellationToken.None);
+        await service.SelectTakeAsync(userId, first.Id, true, CancellationToken.None);
+
+        await using var competingDb = CreateDb(connection);
+        var competingService = new MovieV2Service(competingDb, new WorkspaceAccessService(competingDb));
+        var conflict = await Assert.ThrowsAsync<MovieV2ConflictException>(() => competingService.SelectTakeAsync(userId, second.Id, true, CancellationToken.None));
+
+        Assert.Contains("already committed", conflict.Message, StringComparison.OrdinalIgnoreCase);
+        var shot = await competingDb.MovieShots.AsNoTracking().SingleAsync(item => item.Id == shotId);
+        Assert.Equal(first.Id, shot.FinalTakeId);
+        Assert.Equal(first.Id, shot.SelectedTakeId);
+        var persistedSecond = await competingDb.MovieTakes.AsNoTracking().SingleAsync(item => item.Id == second.Id);
+        Assert.Equal(MovieTakeStatuses.Approved, persistedSecond.Status);
+        Assert.Null(persistedSecond.FinalizedAt);
+    }
+
+    [Fact]
     public async Task Direct_take_status_mutation_cannot_forge_approval_or_selection()
     {
         await using var connection = new SqliteConnection("Data Source=:memory:");

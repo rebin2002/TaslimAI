@@ -294,6 +294,21 @@ public sealed class MovieV2Service(TaslimDbContext db, WorkspaceAccessService ac
             if (selectedAsset is null || selectedAsset.Status != AssetStatus.Active || selectedAsset.ProjectId.HasValue && selectedAsset.ProjectId != take.MovieShot.Scene.MovieProject.ProjectId || selectedAsset.StoredFileId.HasValue && selectedAsset.StoredFile?.Status != StoredFileStatus.Ready)
                 throw new MovieV2ValidationException("A generated take must reference an active, ready asset before it can be selected.");
         }
+        await using var transaction = await db.Database.BeginTransactionAsync(cancellationToken);
+        if (finalize)
+        {
+            // Finalization is a one-writer boundary. Do not let two stale reviewers
+            // silently replace the canonical final take after both have read the shot.
+            // The predicate and update execute as one database statement, so the
+            // winner is provider-neutral and remains safe across multiple API instances.
+            var claimed = await db.MovieShots
+                .Where(item => item.Id == shot.Id && (item.FinalTakeId == null || item.FinalTakeId == take.Id))
+                .ExecuteUpdateAsync(setters => setters
+                    .SetProperty(item => item.FinalTakeId, take.Id)
+                    .SetProperty(item => item.UpdatedAt, now), cancellationToken);
+            if (claimed == 0)
+                throw new MovieV2ConflictException("A final take is already committed for this shot. Review it before requesting another finalization.");
+        }
         var previous = await db.MovieTakes.Where(item => item.MovieShotId == shot.Id && item.Id != takeId && (finalize ? item.FinalizedAt != null : item.SelectedAt != null)).ToListAsync(cancellationToken);
         foreach (var item in previous)
         {
@@ -329,6 +344,7 @@ public sealed class MovieV2Service(TaslimDbContext db, WorkspaceAccessService ac
         take.StatusChangedByUserId = userId;
         shot.UpdatedAt = now; take.UpdatedAt = now;
         await db.SaveChangesAsync(cancellationToken);
+        await transaction.CommitAsync(cancellationToken);
     }
 
     public async Task<MovieV2TakeDto?> ApproveTakeAsync(Guid userId, Guid takeId, MovieV2ApprovalRequest request, CancellationToken cancellationToken)
@@ -467,4 +483,5 @@ public sealed class MovieV2Service(TaslimDbContext db, WorkspaceAccessService ac
 }
 
 public sealed class MovieV2ValidationException(string message) : Exception(message);
+public sealed class MovieV2ConflictException(string message) : Exception(message);
 public sealed class MovieV2NotFoundException : Exception;
