@@ -213,7 +213,7 @@ public sealed class MovieExportManifestSemanticsTests
         var audioPath = "/tmp/taslim/|amp;.wav";
 
         var arguments = FfmpegMovieFinalAssemblyCommandBuilder.Build(
-            new MovieFinalAssemblyExecutionRequest(manifest, new Dictionary<Guid, string>
+            Probed(manifest, new Dictionary<Guid, string>
             {
                 [VideoAsset] = videoPath,
                 [AudioAsset] = audioPath,
@@ -268,7 +268,7 @@ public sealed class MovieExportManifestSemanticsTests
         // name; the title only labels the job.
         var manifest = Manifest(MovieAssemblyCaptionModes.None);
         var arguments = FfmpegMovieFinalAssemblyCommandBuilder.Build(
-            new MovieFinalAssemblyExecutionRequest(manifest, new Dictionary<Guid, string>
+            Probed(manifest, new Dictionary<Guid, string>
             {
                 [VideoAsset] = "/tmp/taslim/video.mp4",
                 [AudioAsset] = "/tmp/taslim/audio.wav",
@@ -323,7 +323,7 @@ public sealed class MovieExportManifestSemanticsTests
 
         var error = Assert.Throws<MovieFinalAssemblyExecutionException>(
             () => FfmpegMovieFinalAssemblyCommandBuilder.Build(
-                new MovieFinalAssemblyExecutionRequest(manifest, withoutCaptions), "/tmp/out.mp4"));
+                Probed(manifest, withoutCaptions), "/tmp/out.mp4"));
 
         Assert.Equal("ASSEMBLY_CAPTIONS_PATH_MISSING", error.Code);
     }
@@ -349,7 +349,7 @@ public sealed class MovieExportManifestSemanticsTests
         };
 
         var arguments = FfmpegMovieFinalAssemblyCommandBuilder.Build(
-            new MovieFinalAssemblyExecutionRequest(manifest, paths), "/tmp/out.mp4");
+            Probed(manifest, paths), "/tmp/out.mp4");
 
         Assert.Equal(3, arguments.Count(item => item == "-i"));
         Assert.Equal(2, arguments.Count(item => item == "/tmp/taslim/video.mp4"));
@@ -372,7 +372,7 @@ public sealed class MovieExportManifestSemanticsTests
         };
 
         var arguments = FfmpegMovieFinalAssemblyCommandBuilder.Build(
-            new MovieFinalAssemblyExecutionRequest(manifest, paths), "/tmp/out.mp4");
+            Probed(manifest, paths), "/tmp/out.mp4");
 
         var inputPositions = new List<int>();
         for (var index = 0; index < arguments.Count - 1; index++)
@@ -402,6 +402,20 @@ public sealed class MovieExportManifestSemanticsTests
             "assembly:manifest-semantics",
             3);
     }
+
+    // The builder refuses to emit any [i:v]/[i:a] reference without probe evidence
+    // for every distinct timeline source (MovieFinalAssemblyExecutionRequest.VideoProbes),
+    // because only the real executor probes each input before rendering. A manifest
+    // semantics test therefore has to supply that evidence to reach the behaviour it
+    // asserts. The fail-closed lanes above deliberately omit it: a missing source path
+    // is rejected before the probe gate is ever reached.
+    private static MovieFinalAssemblyExecutionRequest Probed(
+        MovieFinalAssemblyInput manifest,
+        IReadOnlyDictionary<Guid, string> paths) =>
+        new(manifest, paths, manifest.Timeline
+            .Select(item => item.AssetId)
+            .Distinct()
+            .ToDictionary(id => id, _ => new MovieFinalAssemblyVideoProbe(600m, true)));
 }
 
 /// <summary>
