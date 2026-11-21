@@ -31,7 +31,7 @@ public sealed class AiDocumentGenerationProvider(IChatCompletionService completi
                     StructuredOutput: DocumentDraftStructuredOutput.Spec),
                 timeout.Token);
         }
-        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        catch (OperationCanceledException) when (timeout.IsCancellationRequested && !cancellationToken.IsCancellationRequested)
         {
             throw new AiProviderTimeoutException();
         }
