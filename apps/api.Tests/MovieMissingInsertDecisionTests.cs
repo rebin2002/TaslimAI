@@ -1,6 +1,7 @@
 using System.Text.Json;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
+using Npgsql;
 using Taslim.Api.Authorization;
 using Taslim.Api.Contracts;
 using Taslim.Api.Domain;
@@ -10,8 +11,41 @@ using Xunit;
 
 namespace Taslim.Api.Tests;
 
-public sealed class MovieMissingInsertDecisionTests
+public sealed class MovieMissingInsertDecisionTests : IAsyncLifetime
 {
+    // PostgreSQL-backed cases get their own schema, exactly like the other isolated suites in this
+    // project, so their EnsureCreated() cannot leave tables in the shared CI database's public
+    // schema and make a later suite believe the schema already exists.
+    private readonly string schema = $"movie_insert_decision_{Guid.NewGuid():N}";
+
+    public async Task InitializeAsync()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("ConnectionStrings__Postgres");
+        if (string.IsNullOrWhiteSpace(connectionString))
+        {
+            // SQLite-only run: the PostgreSQL case below returns early, so there is nothing to isolate.
+            return;
+        }
+
+        await using var admin = new NpgsqlConnection(connectionString);
+        await admin.OpenAsync();
+        await using var create = admin.CreateCommand();
+        create.CommandText = $"CREATE SCHEMA \"{schema}\"";
+        await create.ExecuteNonQueryAsync();
+    }
+
+    public async Task DisposeAsync()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("ConnectionStrings__Postgres");
+        if (string.IsNullOrWhiteSpace(connectionString)) return;
+
+        await using var admin = new NpgsqlConnection(connectionString);
+        await admin.OpenAsync();
+        await using var drop = admin.CreateCommand();
+        drop.CommandText = $"DROP SCHEMA IF EXISTS \"{schema}\" CASCADE";
+        await drop.ExecuteNonQueryAsync();
+    }
+
     [Fact]
     public void Fresh_schema_contains_only_the_additive_durable_decision_record()
     {
@@ -174,8 +208,10 @@ public sealed class MovieMissingInsertDecisionTests
     private static TaslimDbContext CreateDb(SqliteConnection connection) =>
         new(new DbContextOptionsBuilder<TaslimDbContext>().UseSqlite(connection).Options);
 
-    private static TaslimDbContext CreateApplyDb(string connectionString) =>
-        new(new DbContextOptionsBuilder<TaslimDbContext>().UseNpgsql(connectionString).Options);
+    private TaslimDbContext CreateApplyDb(string connectionString) =>
+        new(new DbContextOptionsBuilder<TaslimDbContext>()
+            .UseNpgsql(new NpgsqlConnectionStringBuilder(connectionString) { SearchPath = schema }.ConnectionString)
+            .Options);
 
     private static async Task<ApplyFixture> SeedApplyFixtureAsync(TaslimDbContext db)
     {
