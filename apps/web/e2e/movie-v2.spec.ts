@@ -39,7 +39,11 @@ test.describe("Movie Studio V2 browser smoke", () => {
     for (const room of ["Story", "Cast", "World", "Scenes", "Storyboard", "Production", "Team"]) {
       await page.getByRole("link", { name: room, exact: true }).click();
       await expect(page).toHaveURL(new RegExp(`/create/movie/${projectId}/${room.toLowerCase()}$`));
-      await expect(page.getByRole("heading", { name: "E2E Movie V2 Workspace", level: 1 })).toBeVisible({ timeout: 20_000 });
+      if (room === "World") {
+        await expect(page.getByRole("heading", { name: "World room", level: 2 })).toBeVisible({ timeout: 20_000 });
+      } else {
+        await expect(page.getByRole("heading", { name: "E2E Movie V2 Workspace", level: 1 })).toBeVisible({ timeout: 20_000 });
+      }
       await expect(page.locator("main.movie-workspace-main")).toBeVisible();
     }
 
