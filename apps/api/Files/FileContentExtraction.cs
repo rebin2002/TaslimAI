@@ -23,6 +23,7 @@ public interface IFileContentExtractor
 
 public sealed class FileContentExtractor(IOptions<FileOptions> options) : IFileContentExtractor
 {
+    private const long MaxPdfParserInputBytes = 256 * 1024;
     private readonly int maxCharacters = Math.Clamp(options.Value.MaxExtractedTextCharacters, 1_000, 1_000_000);
     private readonly long maxStagingBytes = Math.Min(options.Value.MaxFileSizeBytes, 25 * 1_048_576);
     private readonly int maxArchiveEntries = Math.Clamp(options.Value.MaxArchiveEntries, 1, 10_000);
@@ -141,6 +142,9 @@ public sealed class FileContentExtractor(IOptions<FileOptions> options) : IFileC
 
     private static string ExtractPdf(Stream content)
     {
+        if (!content.CanSeek || content.Length > MaxPdfParserInputBytes)
+            throw new InvalidDataException("PDF extraction input exceeds the parser safety budget.");
+
         using var document = PdfDocument.Open(content);
         var builder = new StringBuilder();
         foreach (var page in document.GetPages())
