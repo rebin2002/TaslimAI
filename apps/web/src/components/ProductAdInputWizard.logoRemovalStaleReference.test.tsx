@@ -49,7 +49,7 @@ function functionBody(name: string): string {
 
 /** The JSX element that renders the logo row of the generated preview card. */
 function previewLogoRow(): string {
-  const start = componentSource.indexOf("{brandLogo &&", componentSource.indexOf("previewCard"));
+  const start = componentSource.indexOf("{brandLogo && <small className={styles.previewAsset}", componentSource.indexOf("previewCard"));
   const end = componentSource.indexOf("</small>", start);
   if (start === -1 || end === -1) throw new Error("missing preview-card logo row in ProductAdInputWizard.tsx");
   return componentSource.slice(start, end + "</small>".length);
