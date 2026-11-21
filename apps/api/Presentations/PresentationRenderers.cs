@@ -119,19 +119,21 @@ public sealed class PresentationRenderer : IPresentationRenderer
         var columns = block.Columns.ToArray();
         if (columns.Length == 0) return;
         var width = 10_200_000 / columns.Length;
-        // The card keeps the designed 130_000 gap below the block, then the remaining space is
-        // split between the heading and the body. The inset constants below only fit a full-height
-        // block: a title, section or closing slide shares its 2_250_000 content area with up to four
-        // blocks, leaving as little as 562_500, where the fixed 160_000 + 420_000 + 100_000 insets
-        // made the body height negative. A non-positive <a:ext cy> violates the DrawingML positive
-        // coordinate type and puts the text outside its card, so the insets scale down with the card
-        // and both text heights are clamped to stay inside it.
-        var cardHeight = Math.Max(MinColumnTextHeight * 3, height - 130_000);
-        var topInset = Math.Min(160_000, cardHeight / 6);
-        var headingGap = Math.Min(100_000, cardHeight / 12);
-        var bottomInset = Math.Min(40_000, cardHeight / 12);
-        var textHeight = cardHeight - topInset - headingGap - bottomInset;
-        var headingHeight = Math.Min(420_000, Math.Clamp(textHeight * 2 / 5, MinColumnTextHeight, textHeight - MinColumnTextHeight));
+        var cardHeight = height - 130_000;
+        var topInset = 160_000;
+        var headingHeight = 420_000;
+        var headingGap = 100_000;
+        var bottomInset = 40_000;
+        if (cardHeight < topInset + headingHeight + headingGap + bottomInset + MinColumnTextHeight)
+        {
+            // Compact title, section, and closing blocks need smaller insets and heading space.
+            topInset = cardHeight / 6;
+            headingGap = cardHeight / 12;
+            bottomInset = Math.Min(bottomInset, cardHeight / 12);
+            var textHeight = cardHeight - topInset - headingGap - bottomInset;
+            headingHeight = Math.Clamp(textHeight * 2 / 5, MinColumnTextHeight, textHeight - MinColumnTextHeight);
+        }
+
         var bodyTop = topInset + headingHeight + headingGap;
         var bodyHeight = cardHeight - bodyTop - bottomInset;
         for (var index = 0; index < columns.Length; index++)
