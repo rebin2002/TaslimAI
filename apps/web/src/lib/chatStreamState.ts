@@ -31,17 +31,31 @@ export function reduceChatStream(state: ChatStreamState, event: ChatStreamEvent)
   }
 
   if (event.type === "message.delta" && event.data.delta) {
-    const targetId = event.data.messageId ?? state.assistantId;
-    if (!targetId) return state;
+    // A delta is scoped to the assistant announced by message.started. Never
+    // let an omitted, stale, or malformed target mutate another visible row.
+    if (!state.assistantId || (event.data.messageId && event.data.messageId !== state.assistantId)) return state;
+    const targetId = state.assistantId;
     return {
       ...state,
-      messages: state.messages.map(message => message.id === targetId
+      // Only a completed assistant snapshot can be an idempotent replay. A
+      // pending stream may legitimately emit two identical incremental chunks,
+      // so content equality alone must not discard either one. ChatController replays
+      // message.started with the settled content and then a single
+      // message.delta carrying that same content when a retry reuses the
+      // requestId of an already-settled stream. Appending that frame onto the
+      // snapshot delivered by message.started would render the settled answer
+      // twice, and a later message.completed replaces the content anyway.
+      messages: state.messages.map(message => message.id === targetId && !(message.status === "Completed" && message.content === event.data.delta)
         ? { ...message, status: "Pending", content: message.content + event.data.delta }
         : message),
     };
   }
 
   if (event.type === "message.completed" && event.data.assistantMessage && event.data.userMessage) {
+    // Completion is also scoped to the assistant announced by message.started.
+    // A stale or misrouted terminal frame must not replace visible content or
+    // release the generating state for another assistant.
+    if (!state.assistantId || event.data.assistantMessage.id !== state.assistantId) return state;
     return {
       ...state,
       messages: upsertMessages(state.messages, [event.data.userMessage, event.data.assistantMessage]),

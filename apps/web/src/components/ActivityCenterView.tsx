@@ -9,6 +9,7 @@ import { useLocale } from "@/components/LocaleProvider";
 import { api, type ActivityItem, type ActivityList } from "@/lib/api";
 import { activityStatuses, applyActivityRead, applyAllActivityRead, type ActivityStatusFilter } from "@/lib/activityCenter";
 import { isActivityRequestCurrent, startActivityRequest } from "@/lib/activityRequest";
+import { assetDestination } from "@/lib/searchNavigation";
 
 function formatTime(value: string | null, locale: Locale, fallback: string) {
   if (!value) return fallback;
@@ -135,7 +136,7 @@ export function ActivityCenterView() {
 
 function ActivityCard({ item, locale, t, working, onRead }: { item: ActivityItem; locale: "en" | "ar" | "ku"; t: (key: string, variables?: Record<string, string>) => string; working: boolean; onRead: () => void }) {
   const terminal = item.status === "Completed" || item.status === "Failed" || item.status === "Cancelled";
-  const assetHref = item.assetId ? `/assets?search=${encodeURIComponent(item.title)}` : null;
+  const assetHref = item.assetId ? assetDestination(item.assetId) : null;
   return <article className={`activity-card ${item.isRead ? "is-read" : "is-unread"}`}>
     <div className="activity-card-mark" aria-hidden="true" />
     <div className="activity-card-icon"><Activity size={17} /></div>
