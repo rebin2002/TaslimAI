@@ -171,6 +171,16 @@ public sealed class ChatController(
             return;
         }
 
+        var requestId = request.RequestId.Trim();
+        var existingRequest = await db.ChatMessages.AsNoTracking().FirstOrDefaultAsync(message =>
+            message.ConversationId == conversationId && message.RequestId == requestId,
+            cancellationToken);
+        if (existingRequest is not null && (existingRequest.Role != ChatMessageRole.Assistant || existingRequest.RegenerationTargetMessageId != messageId))
+        {
+            await WriteEventAsync("message.failed", new { code = "REQUEST_ID_REUSED", message = "That regeneration request cannot be reused for a different response." }, cancellationToken);
+            return;
+        }
+
         var assistant = await db.ChatMessages.FirstOrDefaultAsync(message =>
             message.Id == messageId &&
             message.ConversationId == conversationId &&
@@ -183,7 +193,7 @@ public sealed class ChatController(
             return;
         }
 
-        var laterUserMessageExists = await db.ChatMessages.AnyAsync(message =>
+        var laterUserMessageExists = existingRequest is null && await db.ChatMessages.AnyAsync(message =>
             message.ConversationId == conversationId &&
             message.Role == ChatMessageRole.User &&
             message.Sequence > assistant.Sequence,
@@ -204,10 +214,10 @@ public sealed class ChatController(
             return;
         }
 
-        await StreamRegenerationAsync(conversation, sourceUser, request.RequestId.Trim(), cancellationToken);
+        await StreamRegenerationAsync(conversation, sourceUser, messageId, requestId, cancellationToken);
     }
 
-    private async Task StreamRegenerationAsync(Conversation conversation, ChatMessage sourceUser, string requestId, CancellationToken cancellationToken)
+    private async Task StreamRegenerationAsync(Conversation conversation, ChatMessage sourceUser, Guid targetMessageId, string requestId, CancellationToken cancellationToken)
     {
         ChatMessage? assistant = null;
         UsageTransaction? usageTransaction = null;
@@ -220,6 +230,11 @@ public sealed class ChatController(
                 if (existing.Role != ChatMessageRole.Assistant)
                 {
                     await WriteEventAsync("message.failed", new { code = "REQUEST_ID_REUSED", message = "That regeneration request cannot be reused." }, cancellationToken);
+                    return;
+                }
+                if (existing.RegenerationTargetMessageId != targetMessageId)
+                {
+                    await WriteEventAsync("message.failed", new { code = "REQUEST_ID_REUSED", message = "That regeneration request cannot be reused for a different response." }, cancellationToken);
                     return;
                 }
                 if (existing.Status == ChatMessageStatus.Completed)
@@ -246,6 +261,7 @@ public sealed class ChatController(
                     Id = Guid.NewGuid(),
                     ConversationId = conversation.Id,
                     RequestId = requestId,
+                    RegenerationTargetMessageId = targetMessageId,
                     Role = ChatMessageRole.Assistant,
                     Content = string.Empty,
                     Status = ChatMessageStatus.Pending,
