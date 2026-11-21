@@ -1,0 +1,60 @@
+name: Taslim Migration Safety
+
+on:
+  push:
+    branches: [main, "parallel/**"]
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  DOTNET_VERSION: "8.0.x"
+  MIGRATION_DATABASE_URL: Host=localhost;Port=5432;Database=taslim_migrations;Username=taslim;Password=change-me
+
+jobs:
+  migration-safety:
+    name: Migration safety
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:15@sha256:e27d24a29acce1b554771ba68c43afa55446069d228310451bb8c96c1531d2cb # postgres:15 linux/amd64
+        env:
+          POSTGRES_USER: taslim
+          POSTGRES_PASSWORD: change-me
+          POSTGRES_DB: taslim_migrations
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U taslim -d taslim_migrations"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: Restore EF tooling
+        run: dotnet tool restore
+
+      - name: Restore API dependencies
+        run: dotnet restore apps/api/Taslim.Api.csproj
+
+      - name: Build API for design-time migration checks
+        run: dotnet build apps/api/Taslim.Api.csproj --configuration Release --no-restore
+
+      - name: Run migration safety gate
+        env:
+          MIGRATION_SCRIPT_PATH: ${{ runner.temp }}/taslim-migrations.sql
+        run: bash scripts/migration-safety.sh
+
+      - name: Upload idempotent migration script
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: taslim-migrations-${{ github.run_id }}
+          path: ${{ runner.temp }}/taslim-migrations.sql
+          if-no-files-found: ignore
