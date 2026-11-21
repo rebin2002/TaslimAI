@@ -191,14 +191,14 @@ public sealed class ManusMovieVideoProvider(
             if (!IsVideoContentType(responseType)
                 || responseLength is <= 0
                 || responseLength > MaxOutputBytes()
-                || responseLength != sizeBytes)
+                || responseLength is not null && responseLength != sizeBytes)
             {
                 response.Dispose();
                 throw new MovieVideoProviderOutputException();
             }
 
             var stream = await response.Content.ReadAsStreamAsync(token);
-            return new ResponseOwnedStream(stream, response);
+            return new ResponseOwnedStream(stream, response, sizeBytes);
         }
 
         return new MovieVideoProviderOutput(
@@ -615,8 +615,48 @@ public sealed class ManusMovieVideoProvider(
         [property: JsonPropertyName("sizeBytes")] long? SizeBytes,
         [property: JsonPropertyName("durationSeconds")] int? DurationSeconds);
 
-    private sealed class ResponseOwnedStream(Stream inner, IDisposable response) : Stream
+    private sealed class ResponseOwnedStream(Stream inner, IDisposable response, long expectedLength) : Stream
     {
+        private long bytesRead;
+        private bool completed;
+
+        private int ReadBounded(Span<byte> buffer)
+        {
+            if (buffer.Length == 0 || completed) return 0;
+            if (bytesRead == expectedLength)
+            {
+                Span<byte> probe = stackalloc byte[1];
+                if (inner.Read(probe) != 0) throw new MovieVideoProviderOutputException();
+                completed = true;
+                return 0;
+            }
+
+            var requested = (int)Math.Min(buffer.Length, expectedLength - bytesRead);
+            var read = inner.Read(buffer[..requested]);
+            if (read == 0) throw new MovieVideoProviderOutputException();
+            bytesRead += read;
+            return read;
+        }
+
+        private async ValueTask<int> ReadBoundedAsync(Memory<byte> buffer, CancellationToken cancellationToken)
+        {
+            if (buffer.Length == 0 || completed) return 0;
+            if (bytesRead == expectedLength)
+            {
+                var probe = new byte[1];
+                if (await inner.ReadAsync(probe.AsMemory(), cancellationToken) != 0)
+                    throw new MovieVideoProviderOutputException();
+                completed = true;
+                return 0;
+            }
+
+            var requested = (int)Math.Min(buffer.Length, expectedLength - bytesRead);
+            var read = await inner.ReadAsync(buffer[..requested], cancellationToken);
+            if (read == 0) throw new MovieVideoProviderOutputException();
+            bytesRead += read;
+            return read;
+        }
+
         protected override void Dispose(bool disposing)
         {
             if (disposing) { inner.Dispose(); response.Dispose(); }
@@ -626,15 +666,31 @@ public sealed class ManusMovieVideoProvider(
         public override bool CanRead => inner.CanRead;
         public override bool CanSeek => inner.CanSeek;
         public override bool CanWrite => false;
-        public override long Length => inner.Length;
-        public override long Position { get => inner.Position; set => inner.Position = value; }
+        public override long Length => expectedLength;
+        public override long Position
+        {
+            get => bytesRead;
+            set
+            {
+                if (!inner.CanSeek) throw new NotSupportedException();
+                inner.Position = value;
+                bytesRead = value;
+                completed = false;
+            }
+        }
         public override void Flush() => inner.Flush();
         public override Task FlushAsync(CancellationToken cancellationToken) => inner.FlushAsync(cancellationToken);
-        public override int Read(byte[] buffer, int offset, int count) => inner.Read(buffer, offset, count);
-        public override int Read(Span<byte> buffer) => inner.Read(buffer);
-        public override Task<int> ReadAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken) => inner.ReadAsync(buffer, offset, count, cancellationToken);
-        public override ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default) => inner.ReadAsync(buffer, cancellationToken);
-        public override long Seek(long offset, SeekOrigin origin) => inner.Seek(offset, origin);
+        public override int Read(byte[] buffer, int offset, int count) => ReadBounded(buffer.AsSpan(offset, count));
+        public override int Read(Span<byte> buffer) => ReadBounded(buffer);
+        public override Task<int> ReadAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken) => ReadBoundedAsync(buffer.AsMemory(offset, count), cancellationToken).AsTask();
+        public override ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default) => ReadBoundedAsync(buffer, cancellationToken);
+        public override long Seek(long offset, SeekOrigin origin)
+        {
+            var position = inner.Seek(offset, origin);
+            bytesRead = position;
+            completed = false;
+            return position;
+        }
         public override void SetLength(long value) => throw new NotSupportedException();
         public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
         public override void Write(ReadOnlySpan<byte> buffer) => throw new NotSupportedException();
