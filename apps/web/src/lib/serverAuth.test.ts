@@ -122,6 +122,13 @@ describe("server-side page authentication", () => {
     expect(fetch).not.toHaveBeenCalled();
   });
 
+  it("rejects backslash-prefixed return paths that browsers normalize into external URLs", async () => {
+    cookiesMock.mockRejectedValueOnce(new Error("private cookie-store detail"));
+
+    await expect(requireAuthenticatedPage("/\\evil.example/collect")).rejects.toThrow("REDIRECT:/login?next=%2F");
+    expect(redirectMock).toHaveBeenCalledWith("/login?next=%2F");
+  });
+
   it("bounds a hanging session check and keeps the return path local", async () => {
     vi.useFakeTimers();
     try {
