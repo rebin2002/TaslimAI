@@ -1,12 +1,19 @@
 import { createSseParser, type TaslimSseEvent } from "./sse";
 import { API_URL, assetFileUrl, assetRepresentationUrl } from "./apiBase";
 import { awaitWithChatStreamWatchdog, CHAT_STREAM_WATCHDOG_TIMEOUT_MS, ChatStreamTransportError } from "./chatStreamTransport";
-
+import { collectAllProjectPages } from "./projectListPagination";
+import {
+  isIdempotentRead,
+  isThrottleRetryStatus,
+  MAX_THROTTLE_RETRY_WAIT_MS,
+  parseRetryAfterSeconds,
+  waitBeforeRetry,
+} from "./apiRetryAfter";
 export type User = {
   id: string;
   email: string;
   displayName: string;
-  preferredLanguage: "en" | "ar" | "ku";
+  preferredLanguage: string;
   personalWorkspaceId: string;
   createdAt: string;
   defaultGenerationLanguage: "en" | "ar" | "ku";
@@ -63,7 +70,7 @@ export type LoginInput = { email: string; password: string };
 export type OnboardingIntent = "project" | "chat" | "image" | "document" | "presentation" | "research";
 export type OnboardingInput = {
   displayName?: string;
-  preferredLanguage: "en" | "ar" | "ku";
+  preferredLanguage: string;
   defaultGenerationLanguage: "en" | "ar" | "ku";
   intent?: OnboardingIntent;
 };
@@ -792,12 +799,31 @@ async function parseError(response: Response) {
   return await response.json().catch(() => null) as ErrorBody | null;
 }
 
-async function request<T>(path: string, init: RequestInit = {}, withCsrf = false, retryCsrf = true): Promise<T> {
+async function request<T>(path: string, init: RequestInit = {}, withCsrf = false, retryCsrf = true, retryThrottled = true): Promise<T> {
   const headers = new Headers(init.headers);
   headers.set("Content-Type", "application/json");
   if (withCsrf) headers.set("X-CSRF-TOKEN", csrfToken ?? await csrf());
   const response = await fetch(`${API_URL}${path}`, { ...init, headers, credentials: "include" });
   if (response.status === 204) return undefined as T;
+
+  // Parsed once per response: the same instruction drives the repeat below and
+  // the failure that reports it, so a caller never has to re-read a header that
+  // the fetch layer may already have released.
+  const retryAfterSeconds = isThrottleRetryStatus(response.status)
+    ? parseRetryAfterSeconds(response.headers.get("Retry-After"), Date.now())
+    : null;
+
+  // A throttle that names its own recovery time is the one failure an
+  // idempotent read can act on by itself: repeating a GET with no body has no
+  // server-visible effect to duplicate. The repeat happens once, at the
+  // advertised moment rather than an earlier guess, and a hint too far out to
+  // wait for is reported to the caller instead of hanging the view.
+  if (retryThrottled && isIdempotentRead(init) && retryAfterSeconds !== null && retryAfterSeconds * 1000 <= MAX_THROTTLE_RETRY_WAIT_MS) {
+    await response.body?.cancel().catch(() => undefined);
+    await waitBeforeRetry(retryAfterSeconds * 1000, init.signal);
+    return request<T>(path, init, withCsrf, retryCsrf, false);
+  }
+
   const body = await response.json().catch(() => null) as T & ErrorBody | null;
   if (!response.ok) {
     if (response.status === 400 && withCsrf && retryCsrf && body?.error?.code === "CSRF_VALIDATION_FAILED") {
@@ -805,7 +831,7 @@ async function request<T>(path: string, init: RequestInit = {}, withCsrf = false
       await csrf(true);
       return request<T>(path, init, true, false);
     }
-    throw new ApiError(response.status, body?.error?.message ?? "Something went wrong.", body?.error?.fields, body?.error?.code);
+    throw new ApiError(response.status, body?.error?.message ?? "Something went wrong.", body?.error?.fields, body?.error?.code, retryAfterSeconds ?? undefined);
   }
   return body as T;
 }
@@ -903,7 +929,14 @@ async function streamRequest(path: string, payload: unknown, onEvent: (event: Ch
 }
 
 export class ApiError extends Error {
-  constructor(public status: number, message: string, public fields?: Record<string, string[]>, public code?: string) { super(message); }
+  constructor(
+    public status: number,
+    message: string,
+    public fields?: Record<string, string[]>,
+    public code?: string,
+    /** The `Retry-After` instruction the server sent, in whole seconds. */
+    public retryAfterSeconds?: number,
+  ) { super(message); }
 }
 
 const movieWorkspaceRequests = new Map<string, Promise<MovieProject>>;
@@ -1169,6 +1202,10 @@ export const api = {
   changePassword: (input: ChangePasswordInput) => request<{ success: boolean }>("/api/auth/password", { method: "POST", body: JSON.stringify(input) }, true),
   revokeOtherSessions: async () => { const result = await request<{ success: boolean }>("/api/auth/sessions/revoke", { method: "POST" }, true); csrfToken = null; await csrf(true); return result; },
   listProjects: (workspaceId: string, status: "Active" | "Archived", signal?: AbortSignal) => request<Project[]>(`/api/workspaces/${workspaceId}/projects?status=${status}`, { signal }),
+  // The server pages this list and clamps every request to its own page size,
+  // so surfaces that render the complete list (the projects index tabs and
+  // their counts) must walk all pages instead of showing only page one.
+  listAllProjects: (workspaceId: string, status: "Active" | "Archived", signal?: AbortSignal) => collectAllProjectPages((page, pageSize) => request<Project[]>(`/api/workspaces/${workspaceId}/projects?status=${status}&page=${page}&pageSize=${pageSize}`, { signal })),
   listWorkspaces: () => request<Workspace[]>('/api/workspaces'),
   getWorkspace: (workspaceId: string) => request<Workspace>(`/api/workspaces/${workspaceId}`),
   createProject: (workspaceId: string, input: ProjectInput) => request<Project>(`/api/workspaces/${workspaceId}/projects`, { method: "POST", body: JSON.stringify(input) }, true),

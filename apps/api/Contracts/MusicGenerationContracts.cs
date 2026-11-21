@@ -10,6 +10,35 @@ public static class MusicGenerationValues
     public const string Vocal = "vocal";
     public const string Either = "either";
 
+    public const string InstrumentalMode = "instrumental";
+    public const string SongWithVocalsMode = "song_with_vocals";
+    public static readonly IReadOnlySet<string> CreationModes = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+    {
+        InstrumentalMode, SongWithVocalsMode,
+    };
+
+    public static readonly IReadOnlySet<string> LyricsSectionTypes = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+    {
+        "intro", "verse", "pre_chorus", "chorus", "post_chorus", "bridge", "outro", "refrain",
+    };
+
+    public static readonly IReadOnlySet<string> LyricsLanguages = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+    {
+        "en", "ar", "ku",
+    };
+
+    public static readonly IReadOnlyDictionary<string, string> LyricsDialectLanguages = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+    {
+        ["sorani"] = "ku",
+        ["sorani_erbil"] = "ku",
+        ["sorani_sulaymaniyah"] = "ku",
+        ["iraqi_baghdadi"] = "ar",
+        ["iraqi_mosul"] = "ar",
+        ["iraqi_basra"] = "ar",
+        ["gulf_arabic"] = "ar",
+        ["levantine_arabic"] = "ar",
+    };
+
     public static readonly IReadOnlySet<string> Genres = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
     {
         Auto, "ambient", "cinematic", "classical", "electronic", "folk", "hip_hop", "jazz", "lofi", "pop", "rock", "world", "other",
@@ -48,11 +77,28 @@ public sealed class MusicGenerationRequest
     [Range(15, 600)]
     public int DurationSeconds { get; set; } = 60;
 
+    [Required, StringLength(32)]
+    public string CreationMode { get; set; } = MusicGenerationValues.InstrumentalMode;
+
     [Required, StringLength(20)]
     public string VocalPreference { get; set; } = MusicGenerationValues.Instrumental;
 
     [Required, StringLength(10)]
     public string Language { get; set; } = MusicGenerationValues.Auto;
+
+    public IReadOnlyList<MusicLyricsSection?>? Lyrics { get; set; }
+
+    [StringLength(10)]
+    public string? LyricsLanguage { get; set; }
+
+    [StringLength(40)]
+    public string? LyricsDialect { get; set; }
+
+    public bool LyricsRightsConfirmed { get; set; }
+
+    public IReadOnlyList<MusicReferenceAsset?>? ReferenceAssets { get; set; }
+
+    public bool ReferenceRightsConfirmed { get; set; }
 
     [StringLength(160)]
     public string? Title { get; set; }
@@ -65,6 +111,14 @@ public sealed class MusicGenerationRequest
 
 public sealed record CreateMusicGenerationResponse(GenerationJobDto Job);
 
+public sealed record MusicLyricsSection(
+    string? Section,
+    IReadOnlyList<string?>? Lines);
+
+public sealed record MusicReferenceAsset(
+    string? MediaType,
+    Guid AssetId);
+
 public sealed record MusicGenerationInput(
     string Description,
     string Purpose,
@@ -75,7 +129,14 @@ public sealed record MusicGenerationInput(
     string Language,
     string? Title,
     string? AdditionalInstructions,
-    Guid? ProjectId);
+    Guid? ProjectId,
+    string? CreationMode = MusicGenerationValues.InstrumentalMode,
+    IReadOnlyList<MusicLyricsSection?>? Lyrics = null,
+    string? LyricsLanguage = null,
+    bool LyricsRightsConfirmed = false,
+    string? LyricsDialect = null,
+    IReadOnlyList<MusicReferenceAsset?>? ReferenceAssets = null,
+    bool ReferenceRightsConfirmed = false);
 
 public sealed record MusicProviderUsage(
     int? InputTokens,
@@ -106,7 +167,14 @@ public static class MusicGenerationContractMapper
         request.Language.Trim().ToLowerInvariant(),
         Normalize(request.Title, 160),
         Normalize(request.AdditionalInstructions, 2_000),
-        request.ProjectId);
+        request.ProjectId,
+        request.CreationMode?.Trim().ToLowerInvariant(),
+        request.Lyrics,
+        Normalize(request.LyricsLanguage, 10)?.ToLowerInvariant(),
+        request.LyricsRightsConfirmed,
+        Normalize(request.LyricsDialect, 40)?.ToLowerInvariant(),
+        request.ReferenceAssets,
+        request.ReferenceRightsConfirmed);
 
     private static string? Normalize(string? value, int maxLength)
     {

@@ -48,6 +48,9 @@ public sealed class MovieIntercutPlannerTests
         Assert.Equal(5, first.ProposedTimeline.Version);
         Assert.Equal(10m, first.ProposedTimeline.Clips.Sum(item => item.DurationSeconds));
         Assert.Equal(3, first.ProposedTimeline.Transitions.Count);
+        // Review-only plans have not checked whether supplied shot/clip IDs exist
+        // in the movie DB. Do not misrepresent them as canonically verified.
+        Assert.Contains("canonical_clip_and_shot_ownership_not_verified_in_review_only_proposal", first.Findings);
         Assert.DoesNotContain("provider", JsonSerializer.Serialize(first), StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("model", JsonSerializer.Serialize(first), StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("prompt", JsonSerializer.Serialize(first), StringComparison.OrdinalIgnoreCase);
@@ -83,6 +86,88 @@ public sealed class MovieIntercutPlannerTests
     }
 
     [Fact]
+    public void Reordering_only_reaction_and_insert_coverage_requires_explicit_approval()
+    {
+        // The primary story order is unchanged, but the editor explicitly requested
+        // a different cut. Review-only planning must not silently ignore that edit.
+        var request = new MovieIntercutPlanRequest
+        {
+            BaseTimelineVersion = 3,
+            Clips =
+            [
+                Coverage(PrimaryOne, ShotOne, SceneOne, 1, 1, 4m, MovieIntercutCoverageKinds.Primary),
+                Coverage(Reaction, ShotThree, SceneOne, 1, 2, 2m, MovieIntercutCoverageKinds.Reaction, ShotOne),
+                Coverage(Insert, ShotTwo, SceneOne, 1, 3, 1m, MovieIntercutCoverageKinds.Insert, ShotOne),
+            ],
+            RequestedClipOrder = [PrimaryOne, Insert, Reaction],
+        };
+
+        var proposal = MovieIntercutPlanner.Build(ProjectId, request);
+        var replay = MovieIntercutPlanner.Build(ProjectId, request);
+
+        Assert.True(proposal.StoryOrderPreserved);
+        Assert.True(proposal.RequiresUserApproval);
+        Assert.Contains("requested_coverage_order_change_requires_explicit_user_approval", proposal.Findings);
+        Assert.Equal(new[] { PrimaryOne, Reaction, Insert }, proposal.ProposedTimeline.Clips.Select(item => item.ClipId));
+        Assert.Equal(proposal.ProposalId, replay.ProposalId);
+        Assert.Equal(proposal.ProvenanceHash, replay.ProvenanceHash);
+
+        var denied = MovieIntercutPlanner.ApplyUserApproval(proposal, new MovieIntercutApproval(false, "Retain the original edit."));
+        Assert.Equal(proposal.ProposedTimeline, denied);
+
+        var approved = MovieIntercutPlanner.ApplyUserApproval(proposal, new MovieIntercutApproval(true, "Approved insert before reaction for pacing."));
+        Assert.Equal(new[] { PrimaryOne, Insert, Reaction }, approved.Clips.Select(item => item.ClipId));
+        Assert.Equal(7m, approved.Clips.Sum(item => item.DurationSeconds));
+        Assert.Equal(proposal.ProposedTimeline.Version + 1, approved.Version);
+        Assert.Equal(approved.Clips.Count - 1, approved.Transitions.Count);
+
+        var missingApprovalReason = Assert.Throws<MovieIntercutPlanningException>(() =>
+            MovieIntercutPlanner.ApplyUserApproval(proposal, new MovieIntercutApproval(true, " ")));
+        Assert.Equal(MovieIntercutPlanCodes.ApprovalRequired, missingApprovalReason.Code);
+
+        // If a proposal is subsequently tampered with, approval still cannot
+        // introduce duplicate or missing canonical clips into the final cut.
+        var tampered = proposal with { RequestedClipOrder = new[] { PrimaryOne, Insert, Insert } };
+        var tamperedApproval = Assert.Throws<MovieIntercutPlanningException>(() =>
+            MovieIntercutPlanner.ApplyUserApproval(tampered, new MovieIntercutApproval(true, "Approve this cut.")));
+        Assert.Equal(MovieIntercutPlanCodes.StoryOrderInvalid, tamperedApproval.Code);
+
+        // Re-submitting canonical ordering is not a changed edit and must not
+        // demand needless user approval.
+        request.RequestedClipOrder = [PrimaryOne, Reaction, Insert];
+        var unchanged = MovieIntercutPlanner.Build(ProjectId, request);
+        Assert.True(unchanged.StoryOrderPreserved);
+        Assert.False(unchanged.RequiresUserApproval);
+    }
+
+    [Fact]
+    public void Different_primary_shots_cannot_claim_the_same_canonical_story_position()
+    {
+        // A deterministic clip-ID tie breaker is not a valid editorial story order.
+        // Reject duplicated (scene sequence, shot sequence) slots even if shot IDs differ.
+        var request = new MovieIntercutPlanRequest
+        {
+            Clips =
+            [
+                Coverage(PrimaryOne, ShotOne, SceneOne, 1, 1, 2m, MovieIntercutCoverageKinds.Primary),
+                Coverage(PrimaryTwo, ShotTwo, SceneOne, 1, 1, 2m, MovieIntercutCoverageKinds.Primary),
+            ],
+        };
+
+        var invalid = Assert.Throws<MovieIntercutPlanningException>(() => MovieIntercutPlanner.Build(ProjectId, request));
+        Assert.Equal(MovieIntercutPlanCodes.StoryOrderInvalid, invalid.Code);
+
+        // Shot sequence numbers repeat legitimately across distinct scenes.
+        request.Clips =
+        [
+            Coverage(PrimaryOne, ShotOne, SceneOne, 1, 1, 2m, MovieIntercutCoverageKinds.Primary),
+            Coverage(PrimaryTwo, ShotTwo, SceneTwo, 2, 1, 2m, MovieIntercutCoverageKinds.Primary),
+        ];
+        var valid = MovieIntercutPlanner.Build(ProjectId, request);
+        Assert.Equal(new[] { PrimaryOne, PrimaryTwo }, valid.ProposedTimeline.Clips.Select(item => item.ClipId));
+    }
+
+    [Fact]
     public void Invalid_anchor_and_duplicate_primary_are_blocked_before_a_proposal_is_created()
     {
         var invalidAnchor = new MovieIntercutPlanRequest
@@ -100,6 +185,258 @@ public sealed class MovieIntercutPlannerTests
         var duplicateException = Assert.Throws<MovieIntercutPlanningException>(() => MovieIntercutPlanner.Build(ProjectId, duplicatePrimary));
         Assert.Equal(MovieIntercutPlanCodes.AnchorInvalid, anchorException.Code);
         Assert.Equal(MovieIntercutPlanCodes.StoryOrderInvalid, duplicateException.Code);
+    }
+
+    [Fact]
+    public void Intercut_anchor_must_target_primary_story_coverage()
+    {
+        // Anchoring to another reaction is syntactically a known shot, but the
+        // planner only aligns non-primary coverage to primary story beats.
+        // It must reject the request instead of silently putting an insert elsewhere.
+        var request = new MovieIntercutPlanRequest
+        {
+            Clips =
+            [
+                Coverage(PrimaryOne, ShotOne, SceneOne, 1, 1, 2m, MovieIntercutCoverageKinds.Primary),
+                Coverage(Reaction, ShotThree, SceneOne, 1, 2, 1m, MovieIntercutCoverageKinds.Reaction),
+                Coverage(Insert, ShotTwo, SceneOne, 1, 3, 1m, MovieIntercutCoverageKinds.Insert, ShotThree),
+            ],
+        };
+
+        var exception = Assert.Throws<MovieIntercutPlanningException>(() => MovieIntercutPlanner.Build(ProjectId, request));
+        Assert.Equal(MovieIntercutPlanCodes.AnchorInvalid, exception.Code);
+    }
+
+    [Fact]
+    public void Intercut_without_a_primary_story_beat_is_rejected()
+    {
+        var request = new MovieIntercutPlanRequest
+        {
+            Clips =
+            [
+                Coverage(Reaction, ShotThree, SceneOne, 1, 1, 1m, MovieIntercutCoverageKinds.Reaction),
+                Coverage(Insert, ShotTwo, SceneOne, 1, 2, 1m, MovieIntercutCoverageKinds.Insert),
+            ],
+        };
+
+        var exception = Assert.Throws<MovieIntercutPlanningException>(() => MovieIntercutPlanner.Build(ProjectId, request));
+        Assert.Equal(MovieIntercutPlanCodes.StoryOrderInvalid, exception.Code);
+    }
+
+    [Fact]
+    public void Two_hour_intercut_timeline_keeps_all_short_clips_and_deterministic_provenance()
+    {
+        // Planning 720 ten-second clips must not be confused with one 7,200-second
+        // provider submission; this pure planner never queues a video generation.
+        var request = new MovieIntercutPlanRequest
+        {
+            Clips = Enumerable.Range(1, 720).Select(index =>
+                Coverage(Guid.NewGuid(), Guid.NewGuid(), SceneOne, 1, index, 10m, MovieIntercutCoverageKinds.Primary)).ToArray(),
+        };
+
+        var proposal = MovieIntercutPlanner.Build(ProjectId, request);
+        var replay = MovieIntercutPlanner.Build(ProjectId, request);
+
+        Assert.Equal(720, proposal.ProposedTimeline.Clips.Count);
+        Assert.Equal(7_200m, proposal.ProposedTimeline.Clips.Sum(clip => clip.DurationSeconds));
+        Assert.Equal(7_190m, proposal.ProposedTimeline.Clips.Last().StartSeconds);
+        Assert.Equal(719, proposal.ProposedTimeline.Transitions.Count);
+        Assert.Equal(proposal.ProvenanceHash, replay.ProvenanceHash);
+        Assert.Equal(proposal.ProposedTimeline.Clips, replay.ProposedTimeline.Clips);
+    }
+
+    [Fact]
+    public void Two_hour_intercut_primary_reorder_requires_approval_and_retains_every_clip()
+    {
+        // Exercises the requested-order membership check, primary-order detection,
+        // and explicit approval path at the supported long-film scale. These
+        // operations must not repeatedly scan the entire coverage collection.
+        var clips = Enumerable.Range(1, 720).Select(index =>
+            Coverage(Guid.NewGuid(), Guid.NewGuid(), SceneOne, 1, index, 10m, MovieIntercutCoverageKinds.Primary)).ToArray();
+        var approvedOrder = clips.Select(item => item.ClipId).Reverse().ToArray();
+        var request = new MovieIntercutPlanRequest
+        {
+            BaseTimelineVersion = 1,
+            Clips = clips,
+            RequestedClipOrder = approvedOrder,
+        };
+
+        var proposal = MovieIntercutPlanner.Build(ProjectId, request);
+        var replay = MovieIntercutPlanner.Build(ProjectId, request);
+        Assert.True(proposal.RequiresUserApproval);
+        Assert.Equal(720, proposal.ProposedTimeline.Clips.Count);
+        Assert.Equal(clips[0].ClipId, proposal.ProposedTimeline.Clips[0].ClipId);
+        Assert.Equal(proposal.ProposalId, replay.ProposalId);
+
+        var approved = MovieIntercutPlanner.ApplyUserApproval(
+            proposal, new MovieIntercutApproval(true, "Explicitly approved reverse-story edit for the final cut."));
+        Assert.Equal(approvedOrder, approved.Clips.Select(item => item.ClipId));
+        Assert.Equal(7_200m, approved.Clips.Sum(item => item.DurationSeconds));
+        Assert.Equal(719, approved.Transitions.Count);
+        Assert.Equal(proposal.ProposedTimeline.Version + 1, approved.Version);
+    }
+
+    [Fact]
+    public void Requested_clip_order_rejects_duplicates_and_unknown_ids()
+    {
+        var request = new MovieIntercutPlanRequest
+        {
+            Clips =
+            [
+                Coverage(PrimaryOne, ShotOne, SceneOne, 1, 1, 2m, MovieIntercutCoverageKinds.Primary),
+                Coverage(PrimaryTwo, ShotTwo, SceneTwo, 2, 1, 2m, MovieIntercutCoverageKinds.Primary),
+            ],
+            RequestedClipOrder = [PrimaryOne, PrimaryOne],
+        };
+
+        var duplicate = Assert.Throws<MovieIntercutPlanningException>(() => MovieIntercutPlanner.Build(ProjectId, request));
+        Assert.Equal(MovieIntercutPlanCodes.StoryOrderInvalid, duplicate.Code);
+
+        request.RequestedClipOrder = [PrimaryOne, Reaction];
+        var unknown = Assert.Throws<MovieIntercutPlanningException>(() => MovieIntercutPlanner.Build(ProjectId, request));
+        Assert.Equal(MovieIntercutPlanCodes.StoryOrderInvalid, unknown.Code);
+    }
+
+    [Fact]
+    public void Intercut_rejects_more_than_two_hours_even_when_each_clip_is_short()
+    {
+        var request = new MovieIntercutPlanRequest
+        {
+            Clips = Enumerable.Range(1, 721).Select(index =>
+                Coverage(Guid.NewGuid(), Guid.NewGuid(), SceneOne, 1, index, 10m, MovieIntercutCoverageKinds.Primary)).ToArray(),
+        };
+
+        var exception = Assert.Throws<MovieIntercutPlanningException>(() => MovieIntercutPlanner.Build(ProjectId, request));
+
+        Assert.Equal(MovieIntercutPlanCodes.DurationInvalid, exception.Code);
+        Assert.Contains("7,200", exception.Message);
+    }
+
+    [Fact]
+    public void Two_hour_timeline_cap_does_not_relax_individual_coverage_duration()
+    {
+        var request = new MovieIntercutPlanRequest
+        {
+            Clips = [Coverage(PrimaryOne, ShotOne, SceneOne, 1, 1, 3_601m, MovieIntercutCoverageKinds.Primary)],
+        };
+
+        var exception = Assert.Throws<MovieIntercutPlanningException>(() => MovieIntercutPlanner.Build(ProjectId, request));
+
+        Assert.Equal(MovieIntercutPlanCodes.DurationInvalid, exception.Code);
+        Assert.Contains("3,600", exception.Message);
+    }
+
+    [Fact]
+    public void Distinct_timelines_with_identical_coverage_receive_distinct_proposal_ids()
+    {
+        // A review proposal must be bound to its canonical timeline identity, not
+        // just its movie project, base version and coverage candidates.
+        var firstTimelineId = Guid.Parse("50000000-0000-0000-0000-000000000101");
+        var secondTimelineId = Guid.Parse("50000000-0000-0000-0000-000000000102");
+        var request = new MovieIntercutPlanRequest
+        {
+            TimelineId = firstTimelineId,
+            BaseTimelineVersion = 1,
+            Clips = [Coverage(PrimaryOne, ShotOne, SceneOne, 1, 1, 2m, MovieIntercutCoverageKinds.Primary)],
+        };
+
+        var first = MovieIntercutPlanner.Build(ProjectId, request);
+        request.TimelineId = secondTimelineId;
+        var second = MovieIntercutPlanner.Build(ProjectId, request);
+        request.TimelineId = firstTimelineId;
+        var replay = MovieIntercutPlanner.Build(ProjectId, request);
+
+        Assert.NotEqual(first.ProposalId, second.ProposalId);
+        Assert.NotEqual(first.ProvenanceHash, second.ProvenanceHash);
+        Assert.Equal(first.ProposalId, replay.ProposalId);
+        Assert.Equal(first.ProvenanceHash, replay.ProvenanceHash);
+    }
+
+    [Fact]
+    public void Cut_transition_identity_changes_when_source_clip_changes()
+    {
+        // Two proposals for the same timeline revision can put a different source
+        // before the same destination. Their cut IDs must not identify the same edge.
+        var timelineId = Guid.Parse("50000000-0000-0000-0000-000000000103");
+        var firstRequest = new MovieIntercutPlanRequest
+        {
+            TimelineId = timelineId,
+            BaseTimelineVersion = 1,
+            Clips =
+            [
+                Coverage(PrimaryOne, ShotOne, SceneOne, 1, 1, 2m, MovieIntercutCoverageKinds.Primary),
+                Coverage(PrimaryTwo, ShotTwo, SceneOne, 1, 2, 2m, MovieIntercutCoverageKinds.Primary),
+                Coverage(Insert, ShotThree, SceneOne, 1, 3, 2m, MovieIntercutCoverageKinds.Primary),
+            ],
+        };
+        var secondRequest = new MovieIntercutPlanRequest
+        {
+            TimelineId = timelineId,
+            BaseTimelineVersion = 1,
+            Clips =
+            [
+                Coverage(PrimaryOne, ShotOne, SceneOne, 1, 3, 2m, MovieIntercutCoverageKinds.Primary),
+                Coverage(PrimaryTwo, ShotTwo, SceneOne, 1, 2, 2m, MovieIntercutCoverageKinds.Primary),
+                Coverage(Insert, ShotThree, SceneOne, 1, 1, 2m, MovieIntercutCoverageKinds.Primary),
+            ],
+        };
+
+        var first = MovieIntercutPlanner.Build(ProjectId, firstRequest);
+        var second = MovieIntercutPlanner.Build(ProjectId, secondRequest);
+        var replay = MovieIntercutPlanner.Build(ProjectId, firstRequest);
+        var firstCut = first.ProposedTimeline.Transitions.Single(item => item.ToClipId == PrimaryTwo);
+        var secondCut = second.ProposedTimeline.Transitions.Single(item => item.ToClipId == PrimaryTwo);
+        var replayCut = replay.ProposedTimeline.Transitions.Single(item => item.ToClipId == PrimaryTwo);
+
+        Assert.Equal(PrimaryOne, firstCut.FromClipId);
+        Assert.Equal(Insert, secondCut.FromClipId);
+        Assert.NotEqual(firstCut.Id, secondCut.Id);
+        Assert.Equal(firstCut.Id, replayCut.Id);
+    }
+
+    [Fact]
+    public void Labels_containing_candidate_delimiters_cannot_alias_another_proposals_identity()
+    {
+        // The previous colon/pipe serialization assigned the same candidate
+        // digest to these requests: the first label contains an entire serialized
+        // second candidate, whereas the other request has that actual candidate.
+        var encodedSecond = string.Join(":",
+            PrimaryTwo.ToString("N"), ShotTwo.ToString("N"), SceneTwo.ToString("N"),
+            "2", "1", "2", MovieIntercutCoverageKinds.Primary, "-", "second");
+        var timelineId = Guid.Parse("50000000-0000-0000-0000-000000000104");
+        var single = new MovieIntercutPlanRequest
+        {
+            TimelineId = timelineId,
+            BaseTimelineVersion = 1,
+            Clips =
+            [
+                Coverage(PrimaryOne, ShotOne, SceneOne, 1, 1, 2m,
+                    MovieIntercutCoverageKinds.Primary, label: $"first|{encodedSecond}"),
+            ],
+        };
+        var two = new MovieIntercutPlanRequest
+        {
+            TimelineId = timelineId,
+            BaseTimelineVersion = 1,
+            Clips =
+            [
+                Coverage(PrimaryOne, ShotOne, SceneOne, 1, 1, 2m,
+                    MovieIntercutCoverageKinds.Primary, label: "first"),
+                Coverage(PrimaryTwo, ShotTwo, SceneTwo, 2, 1, 2m,
+                    MovieIntercutCoverageKinds.Primary, label: "second"),
+            ],
+        };
+
+        var first = MovieIntercutPlanner.Build(ProjectId, single);
+        var second = MovieIntercutPlanner.Build(ProjectId, two);
+        var replay = MovieIntercutPlanner.Build(ProjectId, single);
+
+        Assert.Single(first.ProposedTimeline.Clips);
+        Assert.Equal(2, second.ProposedTimeline.Clips.Count);
+        Assert.NotEqual(first.ProposalId, second.ProposalId);
+        Assert.NotEqual(first.ProvenanceHash, second.ProvenanceHash);
+        Assert.Equal(first.ProposalId, replay.ProposalId);
+        Assert.Equal(first.ProvenanceHash, replay.ProvenanceHash);
     }
 
     private static MovieIntercutCoverageRequest Coverage(Guid clipId, Guid shotId, Guid sceneId, int sceneSequence, int shotSequence, decimal duration, string kind, Guid? anchorShotId = null, string? label = null) => new()

@@ -27,6 +27,8 @@ import { MovieBudgetReadinessPanel } from "@/components/MovieBudgetReadinessPane
 import {
   buildMovieProductionWorkspaceModel,
   matchesProductionFilter,
+  movieProductionExecutionState,
+  movieProductionProgressPercent,
   type MovieProductionWorkspaceAdapter,
   type ProductionReadiness,
   type ProductionWorkspaceFilter,
@@ -91,7 +93,7 @@ function newIdempotencyKey(prefix: string) {
 export function MovieProductionWorkspace({ project, completionPercent, onRefresh, cost = null, adapter = createApiAdapter() }: { project: MovieProject; completionPercent: number; onRefresh: () => Promise<void>; cost?: MovieOverviewCost | null; adapter?: MovieProductionWorkspaceAdapter }) {
   const { locale, t } = useLocale();
   const model = useMemo(() => buildMovieProductionWorkspaceModel(project), [project]);
-  const displayProgress = model.shots.length ? model.progressPercent : completionPercent;
+  const displayProgress = movieProductionProgressPercent(model.shots.length ? model.progressPercent : completionPercent);
   const hasActiveExecution = useMemo(() => hasActiveMovieProductionExecution(project), [project]);
   const [filter, setFilter] = useState<ProductionWorkspaceFilter>("all");
   const [selectedTier, setSelectedTier] = useState<MovieResolutionTier>(model.counts.selectedTakes > 0 ? "Master" : model.counts.candidates > 0 ? "Upgrade" : "Draft");
@@ -275,6 +277,7 @@ function ProductionShotCard({ item, busyKey, selectedTier, adapter, onAction, on
   const sourceStoryboard = item.storyboard;
   const isBusy = (action: string) => busyKey === `${shot.id}:${action}`;
   const renderFailed = item.render?.execution?.status === "Failed";
+  const renderCancelled = item.render?.execution?.status === "Cancelled";
   const renderReady = item.render?.execution?.status === "Succeeded";
   const canCreateTake = Boolean(item.render && renderReady && !item.takes.some((take) => take.generationJobId === item.render?.generationJobId));
   const approvedTake = item.takes.find((take) => take.status === "Approved" || take.status === "Selected") ?? null;
@@ -293,7 +296,7 @@ function ProductionShotCard({ item, busyKey, selectedTier, adapter, onAction, on
       {item.pendingKeyframe && <button type="button" className="movie-workspace-button is-primary" disabled={Boolean(busyKey)} onClick={() => void onAction(`${shot.id}:approve-keyframe`, () => adapter.reviewVersion(item.pendingKeyframe!.id, { approve: true, reason: "Source frame approved in Production." }))}>{isBusy("approve-keyframe") ? "Saving…" : "Approve source frame"}</button>}
       {item.keyframe && !item.motion && <button type="button" className="movie-workspace-button is-secondary" disabled={Boolean(busyKey)} onClick={() => void onAction(`${shot.id}:motion`, () => adapter.createMotionPreview(shot.id, item.keyframe!.id))}><Play size={14} /> Create motion check</button>}
       {item.motion?.status === "PendingApproval" && <button type="button" className="movie-workspace-button is-primary" disabled={Boolean(busyKey)} onClick={() => void onAction(`${shot.id}:approve-motion`, () => adapter.reviewVersion(item.motion!.id, { approve: true, reason: "Motion check approved in Production." }))}>{isBusy("approve-motion") ? "Saving…" : "Approve motion check"}</button>}
-      {item.motion?.status === "Approved" && (!item.render || renderFailed) && <button type="button" className="movie-workspace-button is-secondary" disabled={Boolean(busyKey)} onClick={() => void onAction(`${shot.id}:render`, () => adapter.queueRender(shot.id, item.motion!.id, Boolean(item.render && renderFailed), productionIntentForTier(selectedTier)))}><WandSparkles size={14} /> {renderFailed ? "Retry master pass" : "Create master pass"}</button>}
+      {item.motion?.status === "Approved" && (!item.render || renderFailed || renderCancelled) && <button type="button" className="movie-workspace-button is-secondary" disabled={Boolean(busyKey)} onClick={() => void onAction(`${shot.id}:render`, () => adapter.queueRender(shot.id, item.motion!.id, Boolean(item.render && (renderFailed || renderCancelled)), productionIntentForTier(selectedTier)))}><WandSparkles size={14} /> {renderFailed || renderCancelled ? "Retry master pass" : "Create master pass"}</button>}
       {canCreateTake && <button type="button" className="movie-workspace-button is-primary" disabled={Boolean(busyKey)} onClick={() => void onAction(`${shot.id}:take`, () => adapter.createTake(item.render!.id))}><CheckCircle2 size={14} /> Save as take</button>}
       {selectedTier === "Master" && item.selectedTake && <button type="button" className="movie-workspace-button is-finish" disabled={Boolean(busyKey) || !masterAllowed} onClick={() => void onAction(`${shot.id}:master`, () => adapter.requestMaster(item.selectedTake!.id))}><Flag size={14} /> Record master hand-off</button>}
       {renderFailed && <><button type="button" className="movie-workspace-button is-secondary" disabled={Boolean(busyKey)} onClick={() => void onAction(`${shot.id}:regenerate`, onRegenerate)}><RefreshCw size={14} /> Regenerate failed pass</button><span className="movie-production-inline-recovery"><AlertTriangle size={13} /> Review the pass note before retrying.</span></>}
@@ -313,7 +316,8 @@ function CandidateTakeRow({ take, busyKey, adapter, onAction, shotId }: { take: 
 
 function ProductionHistoryRow({ version }: { version: MovieProductionVersion }) {
   const execution = version.execution;
-  const state = execution?.status === "Failed" ? "Needs attention" : execution?.status === "Succeeded" ? "Ready" : version.status === "Rejected" ? "Revision needed" : version.status;
+  const executionState = movieProductionExecutionState(execution?.status);
+  const state = executionState ?? (version.status === "Rejected" ? "Revision needed" : version.status);
   return <div className="movie-production-history-row"><span>{version.label || "Saved pass"}</span><strong>{state}</strong><small>{version.stage.replace(/([a-z])([A-Z])/g, "$1 $2")}</small></div>;
 }
 
