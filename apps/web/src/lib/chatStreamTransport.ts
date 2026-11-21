@@ -45,13 +45,24 @@ export function awaitWithChatStreamWatchdog<T>(
       reject(error);
     };
 
-    const onAbort = () => settleReject(abortReason(signal));
+    // The caller owns the abort, but the transport it started still has to be
+    // told to stop. Without this the reader created for the in-flight read is
+    // never cancelled and the response body stays locked after the caller has
+    // already seen its AbortError.
+    const notifyTransportStop = () => {
+      try { onTimeout?.(); } catch { /* cleanup must not mask the caller abort */ }
+    };
+
+    const onAbort = () => {
+      notifyTransportStop();
+      settleReject(abortReason(signal));
+    };
 
     const timeout = setTimeout(() => {
       if (settled) return;
       settled = true;
       cleanup();
-      onTimeout?.();
+      notifyTransportStop();
       reject(new ChatStreamTransportError("STREAM_TIMEOUT", "The chat stream timed out."));
     }, timeoutMs);
 

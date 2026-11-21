@@ -36,6 +36,13 @@ public sealed class ResearchGenerationController(
                 return ApiResults.Error(this, StatusCodes.Status503ServiceUnavailable, "RESEARCH_STUDIO_UNAVAILABLE", "Research Studio is not available right now.");
             var input = ResearchGenerationContractMapper.ToInput(request);
             ResearchGenerationRequestValidator.Validate(input, options.Value);
+            // Fail closed at admission: the zero identifier is not a source
+            // file, and LoadFilesAsync can never resolve it. Rejecting here
+            // keeps doomed requests from creating a queued GenerationJob row
+            // and a usage reservation, and stops a zero GUID from
+            // masquerading as a chosen source when web sources are disabled.
+            if (input.AttachmentIds.Any(id => id == Guid.Empty))
+                return ApiResults.Error(this, StatusCodes.Status400BadRequest, GenerationJobErrorCodes.ResearchSourceUnavailable, "One or more selected source files are unavailable.");
             var estimate = ResearchGenerationCostEstimator.Estimate(options.Value);
             var preflight = await costControl.CheckPreflightAsync(input.WorkspaceId, UsageFeature.Research, estimate, cancellationToken);
             if (!preflight.Allowed)
