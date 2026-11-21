@@ -264,7 +264,7 @@ public sealed class FileProcessingService(
         try
         {
             logger.LogInformation("File upload started. FileId={FileId}; WorkspaceId={WorkspaceId}; StorageProvider={StorageProvider}; Extension={Extension}; SizeBytes={SizeBytes}", file.Id, workspaceId, storage.ProviderKey, file.Extension, file.SizeBytes);
-            await using (var input = new CountingReadStream(upload.OpenReadStream(), settings.MaxFileSizeBytes))
+            await using (var input = new CountingReadStream(upload.OpenReadStream(), settings.MaxFileSizeBytes, validated.SizeBytes))
             {
                 await RunStorageOperationAsync("store", token => storage.StoreAsync(storageKey, input, token), cancellationToken);
                 if (input.BytesRead != validated.SizeBytes)
@@ -393,8 +393,11 @@ public sealed class FileProcessingService(
     }
 }
 
-internal sealed class CountingReadStream(Stream inner, long maxBytes) : Stream
+internal sealed class CountingReadStream(Stream inner, long maxBytes, long? expectedContentLength = null) : Stream
 {
+    // Uploaded file sizes are validated before storage; expose the declared length
+    // to S3 without making this hash/counting stream seekable.
+    internal long? ExpectedContentLength => expectedContentLength;
     private readonly byte[] prefix = new byte[64];
     private readonly IncrementalHash hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
     private bool hashFinalized;

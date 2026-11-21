@@ -29,6 +29,18 @@ public sealed class DocumentGenerationController(
         {
             if (!options.Value.Enabled)
                 return ApiResults.Error(this, StatusCodes.Status503ServiceUnavailable, "DOCUMENT_STUDIO_UNAVAILABLE", "Document generation is not available right now.");
+            // Retry safety belongs to admission, not to execution. Without a key, a submission whose
+            // response the caller never saw - a dropped connection, a client-level retry, a scripted
+            // caller - queues a second full generation: a second provider call against the workspace
+            // cost ceiling plus a second Asset for one document. docs/DOCUMENT_STUDIO_ARCHITECTURE.md
+            // requires a document retry to be coupled to an idempotency key before it may safely
+            // create another draft, render and Asset publication attempt, and the sibling expensive AI
+            // creation routes already fail closed here (Presentation, Social). The shipped browser
+            // client always sends a key (apps/web/src/lib/api.ts createDocumentGenerationJob uses
+            // requestId()), so this rejects only callers that cannot prove a retry is safe.
+            var idempotencyKey = Request.Headers["Idempotency-Key"].FirstOrDefault();
+            if (string.IsNullOrWhiteSpace(idempotencyKey))
+                return ApiResults.Error(this, StatusCodes.Status400BadRequest, "IDEMPOTENCY_KEY_REQUIRED", "A unique Idempotency-Key header is required for document generation.");
             var input = DocumentGenerationContractMapper.ToInput(request);
             DocumentGenerationRequestValidator.Validate(input, options.Value);
             var estimate = DocumentGenerationCostEstimator.Estimate(options.Value);
@@ -43,7 +55,7 @@ public sealed class DocumentGenerationController(
                 Title = input.Title,
                 InputJson = DocumentGenerationContractMapper.SerializeInput(input),
                 EstimatedProviderCostUsd = preflight.EstimatedProviderCostUsd,
-            }, cancellationToken, Request.Headers["Idempotency-Key"].FirstOrDefault());
+            }, cancellationToken, idempotencyKey);
             return Accepted(new CreateDocumentGenerationResponse(GenerationJobContractMapper.ToDto(job)));
         }
         catch (DocumentRequestValidationException exception)
