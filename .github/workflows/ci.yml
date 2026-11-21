@@ -74,6 +74,32 @@ jobs:
             echo "Production NuGet vulnerability detected." >&2
             exit 1
           fi
+      # FFmpeg runner prerequisite for the Movie hosted media-qualification
+      # gate (apps/api.Tests/MovieFinalAssemblyHostedFfmpegGateTests.cs). That
+      # gate fails closed when /usr/bin/ffmpeg is missing, which is exactly how
+      # exact-head CI run 42294809646 at head 19c117a057ebb7ca79162c00f48f1be6a55f292d
+      # reported 1,072 passed / 1 failed without ever reaching the real media
+      # fixture. Provision the binaries from the runner package archive before
+      # `dotnet test` and verify the paths the gate asserts on. The test stays
+      # fail-closed and is deliberately not weakened, skipped or removed.
+      - name: Provision FFmpeg for hosted media qualification
+        shell: bash
+        run: |
+          sudo apt-get update -qq
+          # fontconfig and one core family keep the libass caption burn-in inside
+          # the same real-media fixture deterministic on a bare runner image.
+          sudo apt-get install -y -qq --no-install-recommends ffmpeg fontconfig fonts-dejavu-core
+      - name: Verify FFmpeg runner prerequisite
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -x /usr/bin/ffmpeg
+          test -x /usr/bin/ffprobe
+          # Sanitized evidence only: build/version banner and feature presence.
+          ffmpeg -hide_banner -version | sed -n '1p'
+          ffprobe -hide_banner -version | sed -n '1p'
+          ffmpeg -hide_banner -filters 2>/dev/null | grep -q -w subtitles \
+            || { echo 'FFmpeg build lacks the subtitles (libass) filter needed by caption burn-in.' >&2; exit 1; }
       - run: dotnet test apps/api.Tests/Taslim.Api.Tests.csproj
         env:
           ConnectionStrings__Postgres: Host=localhost;Port=5432;Database=taslim_tests;Username=taslim;Password=change-me
