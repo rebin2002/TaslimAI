@@ -45,12 +45,17 @@ var isProduction = builder.Environment.IsProduction();
 builder.Services.AddControllersWithViews(options =>
     {
         options.Filters.Add(new ProducesAttribute("application/json"));
+        // Normalizes antiforgery rejections that reach MVC instead of the middleware so
+        // every double-submit rejection returns the same CSRF_VALIDATION_FAILED envelope.
+        options.Filters.AddService<AntiforgeryFailureEnvelopeFilter>(
+            AntiforgeryFailureEnvelopeFilter.EnvelopeOrder);
     })
     .ConfigureApiBehaviorOptions(options =>
     {
         options.InvalidModelStateResponseFactory = context =>
             new BadRequestObjectResult(new { error = new { code = "VALIDATION_ERROR", message = "Please check the highlighted fields." } });
     });
+builder.Services.AddSingleton<AntiforgeryFailureEnvelopeFilter>();
 builder.Services.AddHttpContextAccessor();
 builder.Services.AddOptions<HealthOptions>()
     .Bind(builder.Configuration.GetSection("Health"))
