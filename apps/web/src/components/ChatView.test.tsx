@@ -16,6 +16,16 @@ describe("Chat accessibility semantics", () => {
     expect(chatSource).toContain('<textarea dir="auto"');
   });
 
+  it("delegates Chat Enter submission to the IME-safe keyboard contract", () => {
+    const composer = chatSource.slice(chatSource.indexOf('<textarea dir="auto"'), chatSource.indexOf('placeholder={t("chat.composerPlaceholder")}'));
+    expect(chatSource).toContain('import { isHomeCreationSubmitKey } from "@/lib/homeCreation"');
+    expect(composer).toContain("isHomeCreationSubmitKey({");
+    expect(composer).toContain("isComposing: event.nativeEvent.isComposing");
+    expect(composer).toContain("keyCode: event.nativeEvent.keyCode");
+    expect(composer).toContain("shiftKey: event.shiftKey");
+    expect(composer).toContain("void send(event)");
+    // homeCreation.test.ts covers Enter, Shift+Enter, composition and legacy keyCode 229.
+  });
   it("announces successful regeneration completion instead of leaving generating status", () => {
     const regenerationSource = chatSource.slice(chatSource.indexOf("async function regenerate"), chatSource.indexOf("async function retryFailed"));
     expect(regenerationSource).toContain('streamEvent.type === "message.completed"');
