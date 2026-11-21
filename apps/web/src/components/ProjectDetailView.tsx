@@ -11,6 +11,7 @@ import { ProjectForm } from "@/components/ProjectForm";
 import { ProjectContextEditor } from "@/components/ProjectContextEditor";
 import { ProjectFilesSection } from "@/components/ProjectFilesSection";
 import { ProjectAssetsSection } from "@/components/ProjectAssetsSection";
+import { resolveProjectDetailSnapshotAfterFailure } from "@/lib/projectDetailAccessState";
 
 const projectActions = [
   ["/chat", "projects.newConversation", MessageSquare, "project-action-chat"],
@@ -41,7 +42,14 @@ export function ProjectDetailView() {
     if (!cachedRequest) overviewRequest.current = { key: requestKey, promise: request };
     void request
       .then((next) => { if (active) setOverview(next); })
-      .catch((caught) => { if (active) setError(caught instanceof Error ? caught.message : t("projects.loadError")); })
+      .catch((caught) => {
+        if (!active) return;
+        // A definitive access answer outranks the cached membership snapshot:
+        // clear it so the workspace member role badge fails closed with the
+        // retry affordance, while a transient load keeps the last view.
+        if (resolveProjectDetailSnapshotAfterFailure(caught) === "invalidate") setOverview(null);
+        setError(caught instanceof Error ? caught.message : t("projects.loadError"));
+      })
       .finally(() => {
         if (overviewRequest.current?.promise === request) overviewRequest.current = null;
         if (active) setLoading(false);
@@ -56,13 +64,21 @@ export function ProjectDetailView() {
   async function archive() {
     if (!overview || !window.confirm(t("projects.archiveConfirm"))) return;
     try { replaceProject(await api.archiveProject(overview.project.id)); }
-    catch (caught) { setError(caught instanceof Error ? caught.message : t("projects.saveError")); }
+    catch (caught) {
+      // 401/403/404 here means the server no longer resolves this project for
+      // this principal; a "removed" member must not keep a live role badge.
+      if (resolveProjectDetailSnapshotAfterFailure(caught) === "invalidate") setOverview(null);
+      setError(caught instanceof Error ? caught.message : t("projects.saveError"));
+    }
   }
 
   async function restore() {
     if (!overview) return;
     try { replaceProject(await api.restoreProject(overview.project.id)); }
-    catch (caught) { setError(caught instanceof Error ? caught.message : t("projects.saveError")); }
+    catch (caught) {
+      if (resolveProjectDetailSnapshotAfterFailure(caught) === "invalidate") setOverview(null);
+      setError(caught instanceof Error ? caught.message : t("projects.saveError"));
+    }
   }
 
   function startConversation() {
