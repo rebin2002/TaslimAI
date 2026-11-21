@@ -130,6 +130,25 @@ public sealed class OpenAiProvider(
             using var reader = new StreamReader(stream, Encoding.UTF8);
             var data = new StringBuilder();
             AiUsageMetadata? usage = null;
+            AiStreamEvent? ParseStreamPayload(string payload)
+            {
+                if (payload.Length == 0 || payload == "[DONE]") return null;
+                using var json = ParseProviderJson(payload, selection, structuredOutputRequested, request.EnableStreaming);
+                var root = json.RootElement;
+                var type = root.TryGetProperty("type", out var typeElement) ? typeElement.GetString() : null;
+                if (type == "response.output_text.delta" && root.TryGetProperty("delta", out var delta) && delta.ValueKind == JsonValueKind.String)
+                    return new AiMessageDelta(delta.GetString() ?? string.Empty);
+                if (type == "response.completed")
+                    return new AiMessageCompleted(ReadUsage(root, selection, stopwatch.ElapsedMilliseconds));
+                if (type is "error" or "response.failed")
+                {
+                    var providerError = ReadSafeProviderError(root);
+                    logger.LogWarning("OpenAI provider emitted a failure event. FailureCategory={FailureCategory}; ProviderErrorCode={ProviderErrorCode}; ProviderKey={ProviderKey}; ModelKey={ModelKey}; StructuredOutput={StructuredOutput}; Streaming={Streaming}", AiProviderFailureCategories.Transient, providerError, selection.ProviderKey, selection.ModelKey, structuredOutputRequested, request.EnableStreaming);
+                    throw new AiProviderException(providerErrorCode: providerError, failureCategory: AiProviderFailureCategories.Transient, modelKey: selection.ModelKey, structuredOutputRequested: structuredOutputRequested, streamingRequested: request.EnableStreaming);
+                }
+                return null;
+            }
+
             while (!reader.EndOfStream)
             {
                 var line = await ReadLineAsync(reader, timeout.Token, cancellationToken, selection, structuredOutputRequested);
@@ -143,24 +162,16 @@ public sealed class OpenAiProvider(
 
                 var payload = data.ToString().Trim();
                 data.Clear();
-                if (payload.Length == 0 || payload == "[DONE]") continue;
-                using var json = ParseProviderJson(payload, selection, structuredOutputRequested, request.EnableStreaming);
-                var root = json.RootElement;
-                var type = root.TryGetProperty("type", out var typeElement) ? typeElement.GetString() : null;
-                if (type == "response.output_text.delta" && root.TryGetProperty("delta", out var delta) && delta.ValueKind == JsonValueKind.String)
-                {
-                    yield return new AiMessageDelta(delta.GetString() ?? string.Empty);
-                }
-                else if (type == "response.completed")
-                {
-                    usage = ReadUsage(root, selection, stopwatch.ElapsedMilliseconds);
-                }
-                else if (type is "error" or "response.failed")
-                {
-                    var providerError = ReadSafeProviderError(root);
-                    logger.LogWarning("OpenAI provider emitted a failure event. FailureCategory={FailureCategory}; ProviderErrorCode={ProviderErrorCode}; ProviderKey={ProviderKey}; ModelKey={ModelKey}; StructuredOutput={StructuredOutput}; Streaming={Streaming}", AiProviderFailureCategories.Transient, providerError, selection.ProviderKey, selection.ModelKey, structuredOutputRequested, request.EnableStreaming);
-                    throw new AiProviderException(providerErrorCode: providerError, failureCategory: AiProviderFailureCategories.Transient, modelKey: selection.ModelKey, structuredOutputRequested: structuredOutputRequested, streamingRequested: request.EnableStreaming);
-                }
+                var parsed = ParseStreamPayload(payload);
+                if (parsed is AiMessageDelta delta) yield return delta;
+                else if (parsed is AiMessageCompleted completed) usage = completed.Usage;
+            }
+
+            if (data.Length > 0)
+            {
+                var parsed = ParseStreamPayload(data.ToString().Trim());
+                if (parsed is AiMessageDelta delta) yield return delta;
+                else if (parsed is AiMessageCompleted completed) usage = completed.Usage;
             }
 
             if (usage is null)

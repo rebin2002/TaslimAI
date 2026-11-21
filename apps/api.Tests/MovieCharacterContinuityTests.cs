@@ -17,7 +17,7 @@ public sealed class MovieCharacterContinuityTests
         await connection.OpenAsync();
         await using var db = CreateDb(connection);
         var seeded = await SeedAsync(db, "Mara reaches the ferry terminal.", "Mara checks the evidence.");
-        var service = new MovieCharacterContinuityService(db, new WorkspaceAccessService(db));
+        var service = new MovieCharacterContinuityService(db, new MovieCollaborationAccess(db, new WorkspaceAccessService(db)));
 
         var projection = await service.ProjectAsync(seeded.UserId, seeded.MovieId, seeded.SceneId, seeded.ShotId);
 
@@ -25,6 +25,26 @@ public sealed class MovieCharacterContinuityTests
         Assert.Equal("Mara", character.Name);
         Assert.Equal(seeded.SceneId, projection.MovieSceneId);
         Assert.Equal(seeded.ShotId, projection.MovieShotId);
+    }
+
+    [Fact]
+    public async Task Workspace_member_without_movie_view_cannot_project_character_continuity()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = CreateDb(connection);
+        var seeded = await SeedAsync(db, "Mara reaches the ferry terminal.", "Mara checks the evidence.");
+        var outsiderId = Guid.NewGuid();
+        var now = DateTime.UtcNow;
+        db.Users.Add(new ApplicationUser { Id = outsiderId, UserName = $"workspace-only-{outsiderId:N}", NormalizedUserName = $"WORKSPACE-ONLY-{outsiderId:N}".ToUpperInvariant(), DisplayName = "Workspace Only", CreatedAt = now, UpdatedAt = now });
+        db.WorkspaceMembers.Add(new WorkspaceMember { Id = Guid.NewGuid(), WorkspaceId = seeded.WorkspaceId, UserId = outsiderId, Role = WorkspaceRole.Member });
+        await db.SaveChangesAsync();
+
+        var service = new MovieCharacterContinuityService(db, new MovieCollaborationAccess(db, new WorkspaceAccessService(db)));
+
+        var projection = await service.ProjectAsync(outsiderId, seeded.MovieId, seeded.SceneId, seeded.ShotId);
+
+        Assert.Null(projection);
     }
 
     [Fact]
@@ -49,7 +69,7 @@ public sealed class MovieCharacterContinuityTests
         db.MovieCharacterContinuityLocks.Add(stateLock);
         db.MovieCharacterStates.Add(state);
         await db.SaveChangesAsync();
-        var service = new MovieCharacterContinuityService(db, new WorkspaceAccessService(db));
+        var service = new MovieCharacterContinuityService(db, new MovieCollaborationAccess(db, new WorkspaceAccessService(db)));
 
         var snapshot = await service.BuildSnapshotForTargetAsync(seeded.MovieId, seeded.SceneId, seeded.ShotId, false);
 
@@ -71,7 +91,7 @@ public sealed class MovieCharacterContinuityTests
         db.MovieProjects.Add(otherMovie);
         db.MovieScenes.Add(otherScene);
         await db.SaveChangesAsync();
-        var service = new MovieCharacterContinuityService(db, new WorkspaceAccessService(db));
+        var service = new MovieCharacterContinuityService(db, new MovieCollaborationAccess(db, new WorkspaceAccessService(db)));
 
         await Assert.ThrowsAsync<MovieContinuityTargetException>(() => service.BuildSnapshotForTargetAsync(seeded.MovieId, otherScene.Id, null, false));
     }
@@ -91,6 +111,7 @@ public sealed class MovieCharacterContinuityTests
         db.Workspaces.Add(new Workspace { Id = workspaceId, Name = "Continuity Workspace", Slug = $"continuity-{userId:N}", Type = WorkspaceType.Personal, CreatedAt = now, UpdatedAt = now });
         db.WorkspaceMembers.Add(new WorkspaceMember { Id = Guid.NewGuid(), WorkspaceId = workspaceId, UserId = userId, Role = WorkspaceRole.Owner });
         db.MovieProjects.Add(new MovieProject { Id = movieId, WorkspaceId = workspaceId, CreatedByUserId = userId, Title = "Continuity", Description = "Continuity test movie", DurationSeconds = 30, CreatedAt = now, UpdatedAt = now, Guide = new MovieContinuityGuide { Id = Guid.NewGuid(), UpdatedAt = now } });
+        db.MovieTeamMembers.Add(new MovieTeamMember { Id = Guid.NewGuid(), MovieProjectId = movieId, UserId = userId, Role = MovieTeamRoles.Producer, IsProjectOwner = true, CreatedAt = now, UpdatedAt = now });
         db.MovieScenes.Add(new MovieScene { Id = sceneId, MovieProjectId = movieId, Sequence = 1, Title = "Ferry", Summary = sceneSummary, CreatedAt = now, UpdatedAt = now });
         db.MovieShots.Add(new MovieShot { Id = shotId, MovieSceneId = sceneId, Sequence = 1, Description = shotDescription, CreatedAt = now, UpdatedAt = now });
         db.MovieCharacters.Add(new MovieCharacter { Id = Guid.NewGuid(), MovieProjectId = movieId, Name = "Mara", Description = "Lead investigator", Wardrobe = "Charcoal coat", CreatedAt = now, UpdatedAt = now });

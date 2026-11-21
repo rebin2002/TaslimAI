@@ -2,7 +2,7 @@
 
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { localeNames, locales, type Locale } from "@/lib/i18n";
-import { readStoredLocale } from "@/lib/localePersistence";
+import { anonymousLocaleStorageKey, readStoredLocale, writeStoredLocale } from "@/lib/localePersistence";
 import { anonymousLanguagePackStorageKey, readStoredLanguagePack, writeStoredLanguagePack } from "@/lib/languagePackPersistence";
 import { defaultLanguagePackRegistry, languagePackDirection, languagePackIds, languagePackManifest, languagePackNames, languagePackTag, legacyLocaleForLanguagePack, translateLanguagePack } from "@/lib/languagePackRegistry";
 import type { LanguagePackId } from "@/lib/languagePackTypes";
@@ -24,12 +24,26 @@ type LocaleContextValue = {
 
 const LocaleContext = createContext<LocaleContextValue | null>(null);
 
-function storedLanguagePack(): LanguagePackId {
-  if (typeof window === "undefined") return "en";
-  const savedPack = readStoredLanguagePack(window.localStorage);
-  if (savedPack) return savedPack;
-  // Migrate the existing anonymous legacy preference without changing its key.
-  return readStoredLocale(window.localStorage) ?? "en";
+export function safeBrowserStorage(): Storage | null {
+  if (typeof window === "undefined") return null;
+  try {
+    // Accessing the property itself can throw (e.g. denied browser storage).
+    return window.localStorage;
+  } catch {
+    return null;
+  }
+}
+
+export function storedLanguagePack(): LanguagePackId {
+  const storage = safeBrowserStorage();
+  if (!storage) return "en";
+  // The legacy anonymous key stays the cross-feature contract for the built-in
+  // locales - other lanes persist through it via `setLocale` - so it wins when it
+  // is present. The pack key only extends that contract with ids the legacy key
+  // cannot represent, and is cleared whenever a representable pack is chosen.
+  const legacy = readStoredLocale(storage);
+  if (legacy) return legacy;
+  return readStoredLanguagePack(storage) ?? "en";
 }
 
 export function LocaleProvider({ children }: Readonly<{ children: React.ReactNode }>) {
@@ -62,7 +76,21 @@ export function LocaleProvider({ children }: Readonly<{ children: React.ReactNod
     setLanguagePackState(next);
     setLocaleState(legacyLocaleForLanguagePack(next));
     if (options?.persist === false) return;
-    if (typeof window !== "undefined") writeStoredLanguagePack(window.localStorage, anonymousLanguagePackStorageKey, next);
+    const storage = safeBrowserStorage();
+    if (!storage) return;
+    // Keep both anonymous keys in step. A pack the legacy key cannot hold must
+    // leave no legacy value behind, or that stale value would win on next load.
+    // The browser can revoke storage access at any time, including removeItem.
+    try {
+      if (legacyLocaleForLanguagePack(next) === next) {
+        writeStoredLocale(storage, anonymousLocaleStorageKey, next as Locale);
+      } else {
+        storage.removeItem(anonymousLocaleStorageKey);
+      }
+      writeStoredLanguagePack(storage, anonymousLanguagePackStorageKey, next);
+    } catch {
+      // In-memory language selection remains active when storage is denied.
+    }
   }, []);
   const setLocale = useCallback((next: Locale, options?: LocaleUpdateOptions) => {
     setLanguagePack(next, options);

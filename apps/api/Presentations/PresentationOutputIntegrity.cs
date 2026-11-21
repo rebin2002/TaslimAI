@@ -18,6 +18,21 @@ public static class PresentationOutputIntegrityValidator
     private const string SlideRelationshipType = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide";
     private const string SlideLayoutRelationshipType = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout";
 
+    // ECMA-376 Part 1 pairs each theme format style list with a fixed-length content model: CT_FillStyleList,
+    // CT_LineStyleList, CT_EffectStyleList and CT_BackgroundFillStyleList all declare minOccurs=maxOccurs=3, so
+    // a theme shipping any other number of entries is schema-invalid.
+    private const int FormatSchemeEntryCount = 3;
+
+    private static readonly string[] FormatFillEntries = ["solidFill", "gradFill", "blipFill", "pattFill", "grpFill", "noFill"];
+
+    private static readonly IReadOnlyList<(string List, IReadOnlyList<string> AllowedEntries)> FormatSchemeLists =
+    [
+        ("fillStyleLst", FormatFillEntries),
+        ("lnStyleLst", new[] { "ln" }),
+        ("effectStyleLst", new[] { "effectStyle" }),
+        ("bgFillStyleLst", FormatFillEntries),
+    ];
+
     private static readonly string[] RequiredParts =
     [
         "[Content_Types].xml",
@@ -56,8 +71,13 @@ public static class PresentationOutputIntegrityValidator
                 _ = archive.GetEntry(part) ?? throw new PresentationOutputIntegrityException($"The presentation package is missing required part '{part}'.");
 
             RequireRoot(ParseRequiredXml(archive, "[Content_Types].xml"), "Types", ContentTypesNamespace, "[Content_Types].xml");
-            RequireRoot(ParseRequiredXml(archive, "_rels/.rels"), "Relationships", RelationshipsNamespace, "_rels/.rels");
-            RequireRoot(ParseRequiredXml(archive, "ppt/theme/theme1.xml"), "theme", DrawingNamespace, "ppt/theme/theme1.xml");
+            var packageRelationships = RequireRoot(ParseRequiredXml(archive, "_rels/.rels"), "Relationships", RelationshipsNamespace, "_rels/.rels");
+            if (!packageRelationships.Elements(XName.Get("Relationship", RelationshipsNamespace)).Any(item =>
+                    string.Equals(item.Attribute("Type")?.Value, OfficeRelationshipNamespace + "/officeDocument", StringComparison.Ordinal)
+                    && string.Equals(item.Attribute("Target")?.Value, "ppt/presentation.xml", StringComparison.Ordinal)))
+                throw new PresentationOutputIntegrityException("The presentation package is missing a relationship to 'ppt/presentation.xml' in '_rels/.rels'.");
+            var themeRoot = RequireRoot(ParseRequiredXml(archive, "ppt/theme/theme1.xml"), "theme", DrawingNamespace, "ppt/theme/theme1.xml");
+            RequireFormatScheme(themeRoot);
             var slideMasterRoot = RequireRoot(ParseRequiredXml(archive, "ppt/slideMasters/slideMaster1.xml"), "sldMaster", PresentationNamespace, "ppt/slideMasters/slideMaster1.xml");
             var slideMasterRelationships = RequireRoot(ParseRequiredXml(archive, "ppt/slideMasters/_rels/slideMaster1.xml.rels"), "Relationships", RelationshipsNamespace, "ppt/slideMasters/_rels/slideMaster1.xml.rels");
             RequireRoot(ParseRequiredXml(archive, "ppt/slideLayouts/slideLayout1.xml"), "sldLayout", PresentationNamespace, "ppt/slideLayouts/slideLayout1.xml");
@@ -134,6 +154,35 @@ public static class PresentationOutputIntegrityValidator
         {
             throw new PresentationOutputIntegrityException($"The presentation package contains invalid XML in '{part}'.", exception);
         }
+    }
+
+    // A theme with empty or short format style lists is rejected by PowerPoint as damaged content even though
+    // every part and relationship still resolves, so the relationship graph alone cannot certify a package as
+    // exportable. Validate the content model that the format scheme entries must satisfy.
+    private static void RequireFormatScheme(XElement theme)
+    {
+        var elements = theme.Element(XName.Get("themeElements", DrawingNamespace))
+            ?? throw new PresentationOutputIntegrityException("The presentation theme is missing its elements.");
+        var scheme = elements.Element(XName.Get("fmtScheme", DrawingNamespace))
+            ?? throw new PresentationOutputIntegrityException("The presentation theme is missing its format scheme.");
+
+        foreach (var (listLocalName, allowedEntries) in FormatSchemeLists)
+        {
+            var list = scheme.Element(XName.Get(listLocalName, DrawingNamespace))
+                ?? throw new PresentationOutputIntegrityException($"The presentation theme format scheme is missing '{listLocalName}'.");
+            var entries = list.Elements().ToArray();
+            if (entries.Length != FormatSchemeEntryCount)
+                throw new PresentationOutputIntegrityException($"The presentation theme format scheme '{listLocalName}' must declare exactly {FormatSchemeEntryCount} entries.");
+            if (entries.Any(entry => entry.Name.NamespaceName != DrawingNamespace || !allowedEntries.Contains(entry.Name.LocalName)))
+                throw new PresentationOutputIntegrityException($"The presentation theme format scheme '{listLocalName}' declares an unsupported entry.");
+        }
+
+        // CT_EffectStyleItem requires either an ordered effect list or an effect graph, so an effect style
+        // carrying neither child describes no style at all.
+        foreach (var effectStyle in scheme.Element(XName.Get("effectStyleLst", DrawingNamespace))!.Elements())
+            if (effectStyle.Element(XName.Get("effectLst", DrawingNamespace)) is null
+                && effectStyle.Element(XName.Get("effectDag", DrawingNamespace)) is null)
+                throw new PresentationOutputIntegrityException("The presentation theme declares an effect style without an effect list.");
     }
 
     private static XElement RequireRoot(XDocument document, string localName, string namespaceName, string part)
