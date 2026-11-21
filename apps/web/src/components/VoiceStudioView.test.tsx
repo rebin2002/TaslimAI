@@ -6,6 +6,7 @@ import { VoiceAudioPlayer, nextVoiceChoiceIndex, voiceLanguageTag, voiceTextDire
 import { translate } from "../lib/i18n";
 
 const voiceSource = readFileSync(new URL("./VoiceStudioView.tsx", import.meta.url), "utf8");
+const globalStyles = readFileSync(new URL("../app/globals.css", import.meta.url), "utf8");
 
 describe("Voice Studio accessibility", () => {
   it("gives the custom audio controls localized names and a readable progress value", () => {
@@ -48,5 +49,20 @@ describe("Voice Studio accessibility", () => {
     expect(nextVoiceChoiceIndex(1, "Enter", 3)).toBeNull();
     expect(voiceSource).toContain('tabIndex={language === value ? 0 : -1}');
     expect(voiceSource).toContain('onKeyDown={(event) => handleVoiceChoiceKeyDown(event, languages, value, setLanguage)}');
+  });
+
+  it("keeps the final dark-hero title rule on the light foreground", () => {
+    const parallelVoiceStudioBaseStyles = globalStyles.slice(globalStyles.indexOf("/* Parallel Voice Studio */")).split("@media")[0];
+    expect(parallelVoiceStudioBaseStyles).toMatch(/\.voice-studio-header h1\s*\{[^}]*color: var\(--white\);/);
+  });
+
+  it("resolves the finished job's download against the artifact's stored-file state", () => {
+    // The result action and the recent-row icon are both artifact-aware now, so
+    // neither may keep a raw asset-file link that survives a pruned artifact.
+    expect(voiceSource).toContain("findMediaJobArtifact(recentAssets, result?.assetId)");
+    expect(voiceSource).toContain("state={resultArtifactState}");
+    expect(voiceSource).toContain("state={mediaJobArtifactDownloadState(asset)}");
+    expect(voiceSource).not.toContain('<a className="voice-download-icon"');
+    expect(voiceSource).not.toMatch(/<a className="voice-secondary-action" href=\{api\.assetFileUrl\(result\.assetId!\)\}/);
   });
 });

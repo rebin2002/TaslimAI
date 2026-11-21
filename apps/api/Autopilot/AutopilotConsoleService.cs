@@ -128,6 +128,14 @@ public sealed class AutopilotConsoleService(TaslimDbContext db)
 
         return (await query
             .OrderByDescending(item => item.CreatedAt)
+            // A controller cycle can commit several events with one shared
+            // CreatedAt value. Without a deterministic tiebreak the order of
+            // that burst is decided by the storage plan, so the clamped
+            // window below can cut through it at an arbitrary row and the
+            // newest records may fall out of the page or move between
+            // repeated reads. Break ties by descending id, the same rule the
+            // operations dashboard audit feed pins.
+            .ThenByDescending(item => item.Id)
             .Take(Math.Clamp(limit, 1, 500))
             .ToListAsync(cancellationToken))
         .Select(item => new AutopilotAuditDto(
