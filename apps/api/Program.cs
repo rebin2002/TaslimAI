@@ -296,6 +296,7 @@ builder.Services.AddScoped<IMovieTimelineTransitionService, MovieTimelineTransit
 builder.Services.AddScoped<IMovieTakeSelectService, MovieTakeSelectService>();
     builder.Services.AddScoped<IMovieFinalMasteringService, MovieFinalMasteringService>();
 builder.Services.AddScoped<IMovieMissingInsertPlannerService, MovieMissingInsertPlannerService>();
+builder.Services.AddScoped<IMovieMissingInsertDecisionService, MovieMissingInsertDecisionService>();
 builder.Services.AddScoped<IMovieFinalAssemblyService, MovieFinalAssemblyService>();
 builder.Services.Configure<MovieFinalAssemblyOptions>(builder.Configuration.GetSection("MovieFinalAssembly"));
 builder.Services.AddScoped<MovieFinalAssemblyExecutionStore>();

@@ -74,6 +74,7 @@ public sealed class TaslimDbContext(DbContextOptions<TaslimDbContext> options)
     public DbSet<MovieProductionKit> MovieProductionKits => Set<MovieProductionKit>();
     public DbSet<MovieProductionKitRevision> MovieProductionKitRevisions => Set<MovieProductionKitRevision>();
     public DbSet<MovieProductionKitReference> MovieProductionKitReferences => Set<MovieProductionKitReference>();
+    public DbSet<MovieMissingInsertDecision> MovieMissingInsertDecisions => Set<MovieMissingInsertDecision>();
     public DbSet<MovieAct> MovieActs => Set<MovieAct>();
     public DbSet<MovieSequence> MovieSequences => Set<MovieSequence>();
     public DbSet<MovieStory> MovieStories => Set<MovieStory>();
@@ -321,6 +322,29 @@ public sealed class TaslimDbContext(DbContextOptions<TaslimDbContext> options)
             entity.HasIndex(item => new { item.ReferenceType, item.SourceId });
             entity.HasIndex(item => new { item.MovieProductionKitRevisionId, item.ReferenceType, item.SourceId, item.SourceRevision }).IsUnique();
             entity.HasOne(item => item.Revision).WithMany(item => item.References).HasForeignKey(item => item.MovieProductionKitRevisionId).OnDelete(DeleteBehavior.Cascade);
+        });
+        builder.Entity<MovieMissingInsertDecision>(entity =>
+        {
+            entity.HasKey(item => item.Id);
+            entity.Property(item => item.ContractVersion).HasMaxLength(80).IsRequired();
+            entity.Property(item => item.InsertType).HasMaxLength(30).IsRequired();
+            entity.Property(item => item.Description).HasMaxLength(2_000).IsRequired();
+            entity.Property(item => item.Purpose).HasMaxLength(2_000).IsRequired();
+            entity.Property(item => item.ProposalGroundingJson).HasMaxLength(4_000).IsRequired();
+            entity.Property(item => item.ContinuityAnchorJson).HasMaxLength(8_000).IsRequired();
+            entity.Property(item => item.ScreenDirectionAnchorJson).HasMaxLength(8_000).IsRequired();
+            entity.Property(item => item.ProductionKitHash).HasMaxLength(64);
+            entity.Property(item => item.Status).HasMaxLength(30).IsRequired();
+            entity.Property(item => item.ReviewNote).HasMaxLength(4_000);
+            entity.HasIndex(item => new { item.MovieProjectId, item.TimelineRevisionId, item.ProposalId }).IsUnique();
+            entity.HasIndex(item => new { item.MovieProjectId, item.Status, item.CreatedAt });
+            entity.HasIndex(item => item.TimelineRevisionId);
+            entity.HasIndex(item => item.AnchorTakeId);
+            entity.HasIndex(item => item.AnchorSelectId);
+            entity.HasOne(item => item.MovieProject).WithMany().HasForeignKey(item => item.MovieProjectId).OnDelete(DeleteBehavior.Cascade);
+            entity.HasOne(item => item.CreatedByUser).WithMany().HasForeignKey(item => item.CreatedByUserId).OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne(item => item.ReviewedByUser).WithMany().HasForeignKey(item => item.ReviewedByUserId).OnDelete(DeleteBehavior.SetNull);
+            entity.HasOne(item => item.AppliedByUser).WithMany().HasForeignKey(item => item.AppliedByUserId).OnDelete(DeleteBehavior.SetNull);
         });
         builder.Entity<MovieAct>(entity =>
         {
