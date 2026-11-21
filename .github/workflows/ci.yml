@@ -109,8 +109,21 @@ jobs:
       - run: npm ci
       - run: npx playwright install --with-deps chromium
         working-directory: apps/web
+      # Compile outside the health window: on current main the API needs
+      # >116s before it first serves /health/live when `dotnet run` builds
+      # in-line and the EF migration chain (~80 migrations) runs before
+      # Kestrel binds, which races the smoke helper's default 60x2s budget.
+      # Browser E2E failed both attempts of run 44220770861 (PR #1022) with
+      # "connection refused" after 120s while passing heads exhausted
+      # attempts 40 and 58 of 60.
+      - name: Build API before the health window
+        run: dotnet build apps/api/Taslim.Api.csproj --nologo -v q
       - name: Start API
         env:
+          # Widen the wait budget (120 x 2s = 240s) so a slow-but-healthy
+          # cold start cannot exhaust the probe window; still fails fast if
+          # the API crashes on boot because the log capture surfaces it.
+          SMOKE_MAX_ATTEMPTS: "120"
           ASPNETCORE_ENVIRONMENT: Development
           ConnectionStrings__Postgres: Host=localhost;Port=5432;Database=taslim_e2e;Username=taslim;Password=change-me
           Database__ApplyMigrations: "true"

@@ -78,6 +78,12 @@ export function shouldPollDocumentJob(job: GenerationJob | null) {
   return !!job && !isDocumentTerminal(job);
 }
 
+export function isDocumentJobUnavailableError(error: unknown) {
+  if (typeof error !== "object" || error === null || !("status" in error)) return false;
+  const status = (error as { status?: unknown }).status;
+  return status === 403 || status === 404;
+}
+
 export function nextDocumentPollDelay(job: GenerationJob | null, retryAttempt = 0) {
   if (!shouldPollDocumentJob(job)) return null;
   return Math.min(700 * Math.max(1, retryAttempt + 1), 2_800);
@@ -115,6 +121,56 @@ function nonEmptyString(value: unknown): value is string {
   return typeof value === "string" && value.trim().length > 0;
 }
 
+// The Document Studio template preview renders the persisted job result directly into the
+// browser DOM. React escapes the values, so markup can never execute, but an oversized or
+// control-character-laden result still floods the reader, pollutes the copy-to-clipboard
+// brief, and lets bidirectional or zero-width characters spoof what the preview appears to
+// say. The preview boundary therefore owns its own sanitization: every rendered string is
+// stripped of control and invisible formatting characters, whitespace-collapsed, and hard
+// capped, and the preview structure is bounded so one hostile result cannot grow the reader
+// without limit. This is deliberately scoped to the preview; editor drafts, downloadable
+// representations, and the server renderer keep their own separate boundaries.
+export const documentPreviewBounds = {
+  titleMax: 240,
+  languageMax: 35,
+  summaryMax: 1_200,
+  headingMax: 240,
+  blockTypeMax: 48,
+  textMax: 6_000,
+  itemMax: 1_000,
+  cellMax: 500,
+  sectionsMax: 24,
+  blocksPerSectionMax: 40,
+  itemsPerBlockMax: 60,
+  rowsPerBlockMax: 60,
+  cellsPerRowMax: 12,
+} as const;
+
+// Control characters (newline and tab are handled separately as layout whitespace), soft
+// hyphen, zero-width and bidirectional formatting characters, and BOM. Nothing here strips
+// ordinary printable punctuation, so legitimate Arabic, Kurdish, and Latin prose is kept
+// byte-for-byte.
+const previewInvisibleCharacters = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f\u00ad\u061c\u180e\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u206f\ufeff]/g;
+// The language chip is matched against the raw value, so a tag carrying any control,
+// whitespace, or invisible formatting character is dropped outright rather than silently
+// repaired into a different tag ("en" plus a trailing RLO must not render as "en").
+const previewLanguageTagPattern = /^[a-z]{2,3}(-([A-Z]{2,3}|[a-z]{3}|[A-Za-z][a-z]{3}|[0-9]{3}))?$/;
+
+export function sanitizeDocumentPreviewText(value: unknown, max: number): string {
+  if (typeof value !== "string") return "";
+  const stripped = value
+    .replace(previewInvisibleCharacters, "")
+    // Unicode spaces (en/em, punctuation, narrow no-break, ideographic) render like word
+    // separators, so spoofed word joins such as "result\u2008ok" normalize to one real space.
+    .replace(/[\u00a0\u1680\u2000-\u200a\u202f\u205f\u3000]/g, " ")
+    .replace(/[\t ]+/g, " ")
+    .replace(/\s*\n\s*/g, "\n")
+    .trim();
+  if (stripped.length <= max) return stripped;
+  // Leave room for the ellipsis so the returned preview never exceeds the bound.
+  return `${stripped.slice(0, Math.max(0, max - 1)).trimEnd()}\u2026`;
+}
+
 const documentIdentifierPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 export function isSafeDocumentIdentifier(value: unknown): value is string {
@@ -123,34 +179,42 @@ export function isSafeDocumentIdentifier(value: unknown): value is string {
 
 function parseSections(value: unknown): NonNullable<DocumentJobResult["sections"]> {
   if (!Array.isArray(value)) return [];
-  return value.flatMap((section) => {
+  return value.slice(0, documentPreviewBounds.sectionsMax).flatMap((section) => {
     if (!isRecord(section)) return [];
     const heading = readDocumentProperty(section, "heading", "Heading");
     const blocksValue = readDocumentProperty(section, "blocks", "Blocks");
     if (!nonEmptyString(heading) || !Array.isArray(blocksValue)) return [];
-    const blocks = blocksValue.flatMap((block) => {
+    const blocks = blocksValue.slice(0, documentPreviewBounds.blocksPerSectionMax).flatMap((block) => {
       if (!isRecord(block)) return [];
       const type = readDocumentProperty(block, "type", "Type");
       const text = readDocumentProperty(block, "text", "Text");
       const itemsValue = readDocumentProperty(block, "items", "Items");
       const rowsValue = readDocumentProperty(block, "rows", "Rows");
       if (!nonEmptyString(type)) return [];
-      const items = Array.isArray(itemsValue) ? itemsValue.filter(nonEmptyString) : undefined;
+      const items = Array.isArray(itemsValue)
+        ? itemsValue.filter(nonEmptyString).slice(0, documentPreviewBounds.itemsPerBlockMax).map((item) => sanitizeDocumentPreviewText(item, documentPreviewBounds.itemMax)).filter(nonEmptyString)
+        : undefined;
       const rows = Array.isArray(rowsValue)
-        ? rowsValue.flatMap((row) => {
+        ? rowsValue.slice(0, documentPreviewBounds.rowsPerBlockMax).flatMap((row) => {
           if (!isRecord(row)) return [];
           const cells = readDocumentProperty(row, "cells", "Cells");
-          return Array.isArray(cells) ? [{ cells: cells.filter(nonEmptyString) }] : [];
+          if (!Array.isArray(cells)) return [];
+          const sanitizedCells = cells.filter(nonEmptyString).slice(0, documentPreviewBounds.cellsPerRowMax).map((cell) => sanitizeDocumentPreviewText(cell, documentPreviewBounds.cellMax)).filter(nonEmptyString);
+          return sanitizedCells.length ? [{ cells: sanitizedCells }] : [];
         })
         : undefined;
+      const sanitizedType = sanitizeDocumentPreviewText(type, documentPreviewBounds.blockTypeMax);
+      if (!sanitizedType) return [];
       return [{
-        type,
-        text: typeof text === "string" ? text : null,
+        type: sanitizedType,
+        text: typeof text === "string" ? sanitizeDocumentPreviewText(text, documentPreviewBounds.textMax) : null,
         items: items?.length ? items : null,
         rows: rows?.length ? rows : null,
       }];
     });
-    return [{ heading, blocks }];
+    const sanitizedHeading = sanitizeDocumentPreviewText(heading, documentPreviewBounds.headingMax);
+    if (!sanitizedHeading || blocks.length === 0) return [];
+    return [{ heading: sanitizedHeading, blocks }];
   });
 }
 
@@ -210,12 +274,17 @@ export function parseDocumentJobResult(job: GenerationJob | null): DocumentJobRe
     const summary = readDocumentProperty(parsed, "summary", "Summary");
     const sections = readDocumentProperty(parsed, "sections", "Sections");
     const representations = readDocumentProperty(parsed, "representations", "Representations");
+    const languagePreview = typeof language === "string" && language.length <= documentPreviewBounds.languageMax && previewLanguageTagPattern.test(language)
+      ? sanitizeDocumentPreviewText(language, documentPreviewBounds.languageMax)
+      : "";
     return {
       assetId: isSafeDocumentIdentifier(assetId) ? assetId.trim() : undefined,
       documentType: documentType === "document" ? "document" : undefined,
-      title: typeof title === "string" ? title : undefined,
-      language: typeof language === "string" ? language : undefined,
-      summary: typeof summary === "string" ? summary : undefined,
+      title: typeof title === "string" ? sanitizeDocumentPreviewText(title, documentPreviewBounds.titleMax) : undefined,
+      // The language chip only ever shows a short tag; anything with spaces, markup-like
+      // characters, or excess length is dropped so the preview renders its fallback label.
+      language: languagePreview && previewLanguageTagPattern.test(languagePreview) ? languagePreview : undefined,
+      summary: typeof summary === "string" ? sanitizeDocumentPreviewText(summary, documentPreviewBounds.summaryMax) : undefined,
       sections: parseSections(sections),
       representations: parseRepresentations(representations),
     };

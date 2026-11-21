@@ -77,5 +77,7 @@ describe("chat submission lifecycle", () => {
   it("recognizes browser stream cancellation without treating ordinary errors as cancellation", () => {
     expect(isAbortError(new DOMException("Stopped", "AbortError"))).toBe(true);
     expect(isAbortError(new Error("network failed"))).toBe(false);
+    expect(isAbortError({ name: "AbortError", message: "native fetch abort" })).toBe(true);
+    expect(isAbortError({ name: "NetworkError" })).toBe(false);
   });
 });

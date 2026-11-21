@@ -102,4 +102,31 @@ public sealed class SocialOutputValidationTests
         };
         Assert.Throws<SocialOutputValidationException>(() => SocialDraftValidator.Validate(markupTitle, options));
     }
+
+    [Fact]
+    public void Draft_validator_rejects_degenerate_hashtags_and_embedded_non_space_whitespace()
+    {
+        var options = new SocialGenerationOptions();
+
+        static SocialDraft Draft(params string[] hashtags) => new()
+        {
+            Title = "Launch",
+            Platform = "linkedin",
+            SocialType = "announcement",
+            Language = "en",
+            Posts = [new SocialPost { Order = 1, Hook = "Hook", Body = "Body", Hashtags = hashtags.ToList() }],
+        };
+
+        // Bare sigils carry no tag body and previously passed validation.
+        Assert.Throws<SocialOutputValidationException>(() => SocialDraftValidator.Validate(Draft("#"), options));
+        Assert.Throws<SocialOutputValidationException>(() => SocialDraftValidator.Validate(Draft("##"), options));
+        Assert.Throws<SocialOutputValidationException>(() => SocialDraftValidator.Validate(Draft("###"), options));
+        // Only ASCII spaces were rejected; tabs, newlines and non-breaking spaces survived.
+        Assert.Throws<SocialOutputValidationException>(() => SocialDraftValidator.Validate(Draft("#launch\tevent"), options));
+        Assert.Throws<SocialOutputValidationException>(() => SocialDraftValidator.Validate(Draft("#launch\nevent"), options));
+        Assert.Throws<SocialOutputValidationException>(() => SocialDraftValidator.Validate(Draft("#launch\u00A0event"), options));
+
+        // Canonical tags keep validating unchanged.
+        SocialDraftValidator.Validate(Draft("#taslim", "#Launch2026", "#a"), options);
+    }
 }
