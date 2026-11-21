@@ -61,15 +61,13 @@ describe("ProductAdInputWizard brand-logo optionality", () => {
     expect(body).not.toMatch(/setBrandLogo|setLogoError|\bbrandLogo\b|\blogoError\b/);
   });
 
-  it("keeps the only logo-clearing branch inside the logo control itself", () => {
+  it("limits logo clearing to the logo control and draft hydration", () => {
     const logoBody = functionBody("updateBrandLogo");
     expect(logoBody).toContain("setBrandLogo(null)");
     expect(logoBody).toContain("isSupportedProductAdImage");
-    // Exactly one clear site in the whole component, and it lives in the logo
-    // handler, so no other interaction — photo replacement or preview
-    // invalidation — can silently drop an optional logo the user already chose.
-    expect(componentSource.match(/setBrandLogo\(null\)/g) ?? []).toHaveLength(1);
-    expect(componentSource.replace(logoBody, "")).not.toContain("setBrandLogo(null)");
+    const outsideLogoHandler = componentSource.replace(logoBody, "");
+    expect(outsideLogoHandler).toMatch(/setProductPhoto\(null\);\s*setBrandLogo\(null\);\s*setProductPhotoUrl\(null\);\s*setBrandLogoUrl\(null\);/);
+    expect(outsideLogoHandler.match(/setBrandLogo\(null\)/g) ?? []).toHaveLength(1);
   });
 
   it("does not drop the logo when the preview is cleared", () => {
