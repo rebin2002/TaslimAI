@@ -12,6 +12,7 @@ public sealed class OperationalFailureClassificationTests
     [InlineData("DOCUMENT_PROVIDER_UNSUPPORTED_REQUEST", "provider", false)]
     [InlineData("DOCUMENT_STORAGE_FAILED", "storage", true)]
     [InlineData("IMAGE_OUTPUT_INVALID", "output", true)]
+    [InlineData("RESEARCH_SEARCH_UNAVAILABLE", "provider", true)]
     [InlineData("JOB_CANCELLED", "cancelled", false)]
     [InlineData("JOB_POISONED", "recovery", false)]
     [InlineData("IMAGE_REQUEST_INVALID", "validation", false)]
