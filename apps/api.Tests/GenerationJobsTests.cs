@@ -20,6 +20,7 @@ public class GenerationJobsApiFactory : WebApplicationFactory<Program>
     protected readonly string databasePath = Path.Combine(Path.GetTempPath(), $"taslim-generation-{Guid.NewGuid():N}.db");
 
     protected virtual bool WorkerEnabled => true;
+    protected virtual bool DocumentEnabled => true;
 
     public GenerationJobsApiFactory()
     {
@@ -41,6 +42,7 @@ public class GenerationJobsApiFactory : WebApplicationFactory<Program>
     {
         builder.UseEnvironment("Testing");
         builder.UseSetting("GenerationJobs:WorkerEnabled", WorkerEnabled.ToString());
+        builder.UseSetting("DocumentGeneration:Enabled", DocumentEnabled.ToString());
         builder.UseSetting("GenerationJobs:PollIntervalMilliseconds", "50");
         builder.UseSetting("GenerationJobs:CancellationPollMilliseconds", "5");
         builder.UseSetting("GenerationJobs:ClaimRecoveryIntervalMilliseconds", "1000");
@@ -64,6 +66,11 @@ public class GenerationJobsApiFactory : WebApplicationFactory<Program>
 public sealed class GenerationJobsNoWorkerFactory : GenerationJobsApiFactory
 {
     protected override bool WorkerEnabled => false;
+}
+
+public sealed class GenerationJobsDocumentDisabledFactory : GenerationJobsApiFactory
+{
+    protected override bool DocumentEnabled => false;
 }
 
 public sealed class GenerationJobsTests : IClassFixture<GenerationJobsApiFactory>
@@ -491,6 +498,115 @@ public sealed class GenerationJobsTests : IClassFixture<GenerationJobsApiFactory
         var response = await SendWithCsrf(client, method, path, payload, idempotencyKey);
         Assert.True(response.IsSuccessStatusCode, await response.Content.ReadAsStringAsync());
         return (await response.Content.ReadFromJsonAsync<T>())!;
+    }
+
+    private static async Task<HttpResponseMessage> SendWithCsrf(HttpClient client, HttpMethod method, string path, object? payload, string? idempotencyKey = null)
+    {
+        var csrf = await client.GetFromJsonAsync<JsonElement>("/api/auth/csrf");
+        using var request = new HttpRequestMessage(method, path);
+        request.Headers.Add("X-CSRF-TOKEN", csrf.GetProperty("token").GetString());
+        if (idempotencyKey is not null) request.Headers.Add("Idempotency-Key", idempotencyKey);
+        if (payload is not null) request.Content = JsonContent.Create(payload);
+        return await client.SendAsync(request);
+    }
+}
+
+public sealed class GenerationJobsDocumentDisabledTests : IClassFixture<GenerationJobsDocumentDisabledFactory>
+{
+    private readonly GenerationJobsDocumentDisabledFactory factory;
+
+    public GenerationJobsDocumentDisabledTests(GenerationJobsDocumentDisabledFactory factory)
+    {
+        this.factory = factory;
+        using var scope = factory.Services.CreateScope();
+        scope.ServiceProvider.GetRequiredService<TaslimDbContext>().Database.EnsureCreated();
+    }
+
+    [Fact]
+    public async Task Disabled_document_create_rejects_generic_route_before_queueing_or_usage_reservation()
+    {
+        using var client = factory.CreateClient();
+        var auth = await Register(client, $"jobs-document-disabled-{Guid.NewGuid():N}@example.com");
+        var response = await SendWithCsrf(client, HttpMethod.Post, "/api/generation/jobs", new
+        {
+            workspaceId = auth.PersonalWorkspace.Id,
+            jobType = GenerationJobTypes.DocumentGenerate,
+            title = "Disabled document",
+            inputJson = DocumentInput(auth.PersonalWorkspace.Id),
+        });
+
+        await AssertDisabledResponse(response);
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        Assert.False(await db.GenerationJobs.AsNoTracking().AnyAsync(item => item.WorkspaceId == auth.PersonalWorkspace.Id && item.JobType == GenerationJobTypes.DocumentGenerate));
+        Assert.False(await db.UsageTransactions.AsNoTracking().AnyAsync(item => item.WorkspaceId == auth.PersonalWorkspace.Id && item.Feature == UsageFeature.Document));
+    }
+
+    [Fact]
+    public async Task Disabled_document_retry_rejects_before_creating_retry_job_or_usage_reservation()
+    {
+        using var client = factory.CreateClient();
+        var auth = await Register(client, $"jobs-document-retry-disabled-{Guid.NewGuid():N}@example.com");
+        var sourceId = Guid.NewGuid();
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            db.GenerationJobs.Add(new GenerationJob
+            {
+                Id = sourceId,
+                WorkspaceId = auth.PersonalWorkspace.Id,
+                CreatedByUserId = auth.User.Id,
+                JobType = GenerationJobTypes.DocumentGenerate,
+                Status = GenerationJobStatus.Failed,
+                InputJson = DocumentInput(auth.PersonalWorkspace.Id),
+                ErrorCode = GenerationJobErrorCodes.DocumentProviderUnavailable,
+                ErrorMessage = "Document generation is temporarily unavailable.",
+                CreatedAt = DateTime.UtcNow.AddMinutes(-1),
+                FailedAt = DateTime.UtcNow.AddSeconds(-30),
+                ConcurrencyToken = Guid.NewGuid(),
+            });
+            await db.SaveChangesAsync();
+        }
+
+        const string retryKey = "document-disabled-retry-001";
+        var response = await SendWithCsrf(client, HttpMethod.Post, $"/api/generation/jobs/{sourceId}/retry", null, retryKey);
+
+        await AssertDisabledResponse(response);
+        using var verifyScope = factory.Services.CreateScope();
+        var verifyDb = verifyScope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        Assert.Equal(1, await verifyDb.GenerationJobs.AsNoTracking().CountAsync(item => item.WorkspaceId == auth.PersonalWorkspace.Id));
+        Assert.False(await verifyDb.GenerationJobs.AsNoTracking().AnyAsync(item => item.IdempotencyKey == retryKey));
+        Assert.False(await verifyDb.UsageTransactions.AsNoTracking().AnyAsync(item => item.WorkspaceId == auth.PersonalWorkspace.Id && item.Feature == UsageFeature.Document));
+    }
+
+    private async Task<AuthResponse> Register(HttpClient client, string email)
+    {
+        var response = await SendWithCsrf(client, HttpMethod.Post, "/api/auth/register", new { displayName = "Document Kill Switch", email, password = "StrongPassword!123", preferredLanguage = "en" });
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        return (await response.Content.ReadFromJsonAsync<AuthResponse>())!;
+    }
+
+    private static string DocumentInput(Guid workspaceId) => DocumentGenerationContractMapper.SerializeInput(new DocumentGenerationInput(
+        workspaceId,
+        null,
+        "Disabled document",
+        "Create a safe document for this deterministic test.",
+        "report",
+        "standard",
+        null,
+        null,
+        [],
+        "en",
+        "pdf",
+        "professional",
+        true));
+
+    private static async Task AssertDisabledResponse(HttpResponseMessage response)
+    {
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, response.StatusCode);
+        var body = await response.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal("DOCUMENT_STUDIO_UNAVAILABLE", body.GetProperty("error").GetProperty("code").GetString());
+        Assert.Equal("Document generation is not available right now.", body.GetProperty("error").GetProperty("message").GetString());
     }
 
     private static async Task<HttpResponseMessage> SendWithCsrf(HttpClient client, HttpMethod method, string path, object? payload, string? idempotencyKey = null)
