@@ -16,6 +16,9 @@ public interface IMovieTakeSelectService
 
 public sealed class MovieTakeSelectService(TaslimDbContext db, MovieCollaborationAccess collaboration) : IMovieTakeSelectService
 {
+    private const int MaximumSelectNumberAllocationAttempts = 3;
+    internal const string SelectNumberUniqueIndexName = "IX_MovieTakeSelects_MovieTakeId_SelectNumber";
+
     public async Task<IReadOnlyList<MovieTakeSelectDto>?> ListAsync(Guid userId, Guid movieProjectId, Guid takeId, CancellationToken cancellationToken)
     {
         var take = await OwnedTakeQuery().AsNoTracking().FirstOrDefaultAsync(item => item.Id == takeId && item.MovieShot.Scene.MovieProjectId == movieProjectId, cancellationToken);
@@ -42,19 +45,48 @@ public sealed class MovieTakeSelectService(TaslimDbContext db, MovieCollaboratio
         var sourceDuration = ResolveTakeDuration(take);
         ValidateRange(request.StartMilliseconds, request.EndMilliseconds, sourceDuration);
 
-        var now = DateTime.UtcNow;
-        var select = new MovieTakeSelect
+        for (var attempt = 0; attempt < MaximumSelectNumberAllocationAttempts; attempt++)
         {
-            Id = Guid.NewGuid(), MovieTakeId = take.Id,
-            SelectNumber = (await db.MovieTakeSelects.Where(item => item.MovieTakeId == take.Id).MaxAsync(item => (int?)item.SelectNumber, cancellationToken) ?? 0) + 1,
-            Label = request.Label.Trim(), Status = MovieTakeSelectStatuses.Draft,
-            StartMilliseconds = request.StartMilliseconds, EndMilliseconds = request.EndMilliseconds,
-            Notes = Clean(request.Notes), ProvenanceJson = MovieTakeSelectProvenance.Create(take, sourceAsset.Id, request.StartMilliseconds, request.EndMilliseconds, now),
-            CreatedByUserId = userId, CreatedAt = now, UpdatedAt = now,
-        };
-        db.MovieTakeSelects.Add(select);
-        await db.SaveChangesAsync(cancellationToken);
-        return ToDto(select);
+            var now = DateTime.UtcNow;
+            var select = new MovieTakeSelect
+            {
+                Id = Guid.NewGuid(), MovieTakeId = take.Id,
+                // The unique index is the authoritative allocator boundary. Two writers can
+                // legitimately observe the same MAX; a losing writer must re-read rather than
+                // leak a provider-specific duplicate-key error to the Movie Studio client.
+                SelectNumber = (await db.MovieTakeSelects.Where(item => item.MovieTakeId == take.Id).MaxAsync(item => (int?)item.SelectNumber, cancellationToken) ?? 0) + 1,
+                Label = request.Label.Trim(), Status = MovieTakeSelectStatuses.Draft,
+                StartMilliseconds = request.StartMilliseconds, EndMilliseconds = request.EndMilliseconds,
+                Notes = Clean(request.Notes), ProvenanceJson = MovieTakeSelectProvenance.Create(take, sourceAsset.Id, request.StartMilliseconds, request.EndMilliseconds, now),
+                CreatedByUserId = userId, CreatedAt = now, UpdatedAt = now,
+            };
+            db.MovieTakeSelects.Add(select);
+            try
+            {
+                await db.SaveChangesAsync(cancellationToken);
+                return ToDto(select);
+            }
+            catch (DbUpdateException exception) when (attempt + 1 < MaximumSelectNumberAllocationAttempts && IsSelectNumberUniqueViolation(exception))
+            {
+                // SaveChanges leaves the failed Added entity tracked. Detach only this insert so
+                // the next attempt can safely allocate the next number without replaying it.
+                db.Entry(select).State = EntityState.Detached;
+            }
+        }
+
+        throw new InvalidOperationException("Movie select-number allocation did not converge after concurrent retries.");
+    }
+
+    internal static bool IsSelectNumberUniqueViolation(DbUpdateException exception)
+    {
+        var details = exception.ToString();
+        var isUniqueViolation = details.Contains("duplicate key", StringComparison.OrdinalIgnoreCase)
+            || details.Contains("UNIQUE constraint failed", StringComparison.OrdinalIgnoreCase)
+            || details.Contains("Cannot insert duplicate key", StringComparison.OrdinalIgnoreCase);
+        if (!isUniqueViolation) return false;
+
+        return details.Contains(SelectNumberUniqueIndexName, StringComparison.OrdinalIgnoreCase)
+            || details.Contains("MovieTakeSelects.MovieTakeId, MovieTakeSelects.SelectNumber", StringComparison.OrdinalIgnoreCase);
     }
 
     public async Task<MovieTakeSelectDto?> ReviewAsync(Guid userId, Guid movieProjectId, Guid takeId, Guid selectId, MovieTakeSelectReviewRequest request, CancellationToken cancellationToken)
