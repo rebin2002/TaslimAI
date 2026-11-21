@@ -8,6 +8,21 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  # Batch release-evidence generation so a rapid commit stream cannot emit
+  # multiple overlapping Railway Web/API release manifests for the same
+  # source. Each workflow keeps its own lane keyed by the source branch or
+  # pull request; supersede only on non-main lanes. Integrated main pushes
+  # resolve to a run-unique group here on purpose: under GitHub's documented
+  # default queue: single, a third main push REPLACES an already-pending
+  # main run even when cancel-in-progress is false, so a shared column-0
+  # lane cannot retain every integrated commit. The serialized, non-cancelled
+  # manifest lives on the job-level release lane below (queue: max +
+  # cancel-in-progress: false; queue: max must never combine with
+  # cancel-in-progress: true).
+  group: ${{ github.workflow }}-${{ github.ref == 'refs/heads/main' && github.run_id || github.head_ref || github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
 env:
   NODE_VERSION: "22"
   DOTNET_VERSION: "8.0.x"
@@ -16,6 +31,15 @@ jobs:
   release-evidence:
     name: Release evidence and safety contract
     runs-on: ubuntu-latest
+    # Retention + serialization lane for integrated main commits: queue: max
+    # keeps every pending manifest run (up to 100) instead of GitHub's
+    # default of replacing the oldest pending run, and is valid only with
+    # cancel-in-progress: false. Non-main runs resolve to a run-unique group
+    # here and are superseded by the workflow-level policy above.
+    concurrency:
+      group: ${{ github.ref == 'refs/heads/main' && github.workflow || github.run_id }}
+      queue: max
+      cancel-in-progress: false
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
