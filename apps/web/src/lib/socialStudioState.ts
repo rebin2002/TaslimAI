@@ -130,6 +130,13 @@ export function parseSocialJobResult(job: GenerationJob | null): SocialJobResult
     return { assetId: nonEmptyString(parsed.assetId) ? parsed.assetId : undefined, socialType: typeof parsed.socialType === "string" ? parsed.socialType : undefined, platform: typeof parsed.platform === "string" ? parsed.platform : undefined, title: typeof parsed.title === "string" ? parsed.title : undefined, language: typeof parsed.language === "string" ? parsed.language : undefined, postCount: typeof parsed.postCount === "number" ? parsed.postCount : undefined, posts: parsePosts(parsed.posts) };
   } catch { return null; }
 }
-export function isSocialSourceReady(file: StoredFile) { return [".pdf", ".docx", ".txt", ".md", ".csv", ".xlsx"].includes(file.extension.toLowerCase()) && file.status === "Ready" && file.textExtractionStatus === "Ready"; }
+export function isSocialSourceReady(file: StoredFile) {
+  // The API generation boundary additionally rejects sources whose ExtractedText is
+  // null or whitespace, so a source the API reports as having no extracted text must
+  // never be presented as selectable and then deterministically fail generation.
+  // `undefined` (field omitted by older callers) preserves the previous behaviour.
+  const knownExtractionLength: number | null | undefined = file.extractedTextLength;
+  return [".pdf", ".docx", ".txt", ".md", ".csv", ".xlsx"].includes(file.extension.toLowerCase()) && file.status === "Ready" && file.textExtractionStatus === "Ready" && (knownExtractionLength === undefined || (knownExtractionLength !== null && knownExtractionLength > 0));
+}
 export function isSocialAssetSelectable(asset: Asset) { return asset.status === "Active" && asset.hasFile && ["image", "document", "presentation", "research", "social"].includes(asset.assetType); }
 export function formatSocialPostForCopy(post: SocialPost) { return [post.hook, post.body, post.callToAction, post.hashtags?.join(" ")].filter((value) => typeof value === "string" && value.trim()).join("\n\n"); }
