@@ -3,6 +3,7 @@ using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.Extensions.Options;
+using Taslim.Api.Authorization;
 using Taslim.Api.Contracts;
 using Taslim.Api.Domain;
 using Taslim.Api.Generation;
@@ -18,7 +19,8 @@ namespace Taslim.Api.Controllers;
 public sealed class VoiceGenerationController(
     IGenerationJobService jobs,
     IOptions<VoiceGenerationOptions> options,
-    IUsageCostControl costControl) : ControllerBase
+    IUsageCostControl costControl,
+    WorkspaceAccessService access) : ControllerBase
 {
     [HttpPost("jobs")]
     [ValidateAntiForgeryToken]
@@ -27,6 +29,9 @@ public sealed class VoiceGenerationController(
     {
         try
         {
+            if (!await access.IsMemberAsync(GetUserId(), request.WorkspaceId, cancellationToken))
+                return Forbid();
+
             if (!options.Value.Enabled
                 || string.IsNullOrWhiteSpace(options.Value.ProviderKey)
                 || string.Equals(options.Value.ProviderKey, "unconfigured", StringComparison.OrdinalIgnoreCase))
