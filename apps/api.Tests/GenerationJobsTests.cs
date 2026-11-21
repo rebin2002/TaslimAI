@@ -18,9 +18,12 @@ namespace Taslim.Api.Tests;
 public class GenerationJobsApiFactory : WebApplicationFactory<Program>
 {
     protected readonly string databasePath = Path.Combine(Path.GetTempPath(), $"taslim-generation-{Guid.NewGuid():N}.db");
-
     protected virtual bool WorkerEnabled => true;
-
+    // Mirrors the shipped appsettings default, where Document Studio is off until
+    // a deployment opts in. Tests that need to queue a document job through the
+    // generic Generation Job route override this, so the kill-switch gate on that
+    // route stays closed for every other fixture.
+    protected virtual bool DocumentEnabled => false;
     public GenerationJobsApiFactory()
     {
         using var connection = new SqliteConnection($"Data Source={databasePath}");
@@ -41,6 +44,7 @@ public class GenerationJobsApiFactory : WebApplicationFactory<Program>
     {
         builder.UseEnvironment("Testing");
         builder.UseSetting("GenerationJobs:WorkerEnabled", WorkerEnabled.ToString());
+        builder.UseSetting("DocumentGeneration:Enabled", DocumentEnabled.ToString());
         builder.UseSetting("GenerationJobs:PollIntervalMilliseconds", "50");
         builder.UseSetting("GenerationJobs:CancellationPollMilliseconds", "5");
         builder.UseSetting("GenerationJobs:ClaimRecoveryIntervalMilliseconds", "1000");
@@ -64,6 +68,18 @@ public class GenerationJobsApiFactory : WebApplicationFactory<Program>
 public sealed class GenerationJobsNoWorkerFactory : GenerationJobsApiFactory
 {
     protected override bool WorkerEnabled => false;
+}
+
+/// <summary>
+/// Worker-less fixture that explicitly opts into Document Studio. The generic
+/// Generation Job route rejects <c>document.generate</c> while the Document kill
+/// switch is off, so any fixture that queues a document job through that route
+/// must state the opt-in rather than rely on the disabled shipped default.
+/// </summary>
+public sealed class DocumentEnabledNoWorkerFactory : GenerationJobsApiFactory
+{
+    protected override bool WorkerEnabled => false;
+    protected override bool DocumentEnabled => true;
 }
 
 public sealed class GenerationJobsTests : IClassFixture<GenerationJobsApiFactory>

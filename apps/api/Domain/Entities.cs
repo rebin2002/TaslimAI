@@ -160,6 +160,7 @@ public static class GenerationJobErrorCodes
     public const string ImageSafetyRefusal = "IMAGE_SAFETY_REFUSAL";
     public const string ImageReferenceNotSupported = "IMAGE_REFERENCE_NOT_SUPPORTED";
     public const string DocumentRequestInvalid = "DOCUMENT_REQUEST_INVALID";
+    public const string DocumentStudioUnavailable = "DOCUMENT_STUDIO_UNAVAILABLE";
     public const string DocumentAttachmentUnavailable = "DOCUMENT_ATTACHMENT_UNAVAILABLE";
     public const string DocumentAttachmentExtractionFailed = "DOCUMENT_ATTACHMENT_EXTRACTION_FAILED";
     public const string DocumentContextTooLarge = "DOCUMENT_CONTEXT_TOO_LARGE";
