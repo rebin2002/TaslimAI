@@ -205,12 +205,6 @@ public sealed class ChatController(
             return;
         }
 
-        if (!modelRouter.IsChatGenerationAvailable())
-        {
-            await WriteEventAsync("message.failed", new { code = ProviderUnavailableCode, message = ProviderUnavailableMessage }, cancellationToken);
-            return;
-        }
-
         await StreamRegenerationAsync(conversation, sourceUser, request.RequestId.Trim(), cancellationToken);
     }
 
@@ -243,11 +237,21 @@ public sealed class ChatController(
                     return;
                 }
 
+                if (!modelRouter.IsChatGenerationAvailable())
+                {
+                    await WriteEventAsync("message.failed", new { code = ProviderUnavailableCode, message = ProviderUnavailableMessage }, cancellationToken);
+                    return;
+                }
                 assistant = existing;
                 ResetAssistantForRetry(assistant);
             }
             else
             {
+                if (!modelRouter.IsChatGenerationAvailable())
+                {
+                    await WriteEventAsync("message.failed", new { code = ProviderUnavailableCode, message = ProviderUnavailableMessage }, cancellationToken);
+                    return;
+                }
                 assistant = new ChatMessage
                 {
                     Id = Guid.NewGuid(),
@@ -318,7 +322,6 @@ public sealed class ChatController(
     public async Task<IActionResult> SendMessage(Guid conversationId, SendMessageRequest request, CancellationToken cancellationToken)
     {
         if (!ModelState.IsValid) return ApiResults.Validation(this, "Please enter a message.");
-        if (!modelRouter.IsChatGenerationAvailable()) return ProviderUnavailable();
         var prepared = await PrepareMessageAsync(conversationId, request, cancellationToken);
         if (prepared.Error is not null) return prepared.Error;
         if (prepared.ExistingResult is not null) return Ok(prepared.ExistingResult);
@@ -368,12 +371,6 @@ public sealed class ChatController(
         if (!ModelState.IsValid)
         {
             await WriteEventAsync("message.failed", new { code = "VALIDATION_ERROR", message = "Please enter a message." }, cancellationToken);
-            return;
-        }
-
-        if (!modelRouter.IsChatGenerationAvailable())
-        {
-            await WriteEventAsync("message.failed", new { code = ProviderUnavailableCode, message = ProviderUnavailableMessage }, cancellationToken);
             return;
         }
 
@@ -507,6 +504,8 @@ public sealed class ChatController(
                 return PreparedChat.Failure(ApiResults.Error(this, StatusCodes.Status409Conflict, "MESSAGE_IN_PROGRESS", "That message is already being generated."));
             if (existingAssistant.Status == ChatMessageStatus.Failed)
             {
+                // A failed turn needs fresh generation, unlike a completed idempotent replay.
+                if (!modelRouter.IsChatGenerationAvailable()) return PreparedChat.Failure(ProviderUnavailable());
                 existingAssistant.Status = ChatMessageStatus.Pending;
                 existingAssistant.Content = string.Empty;
                 existingAssistant.ProviderKey = null;
@@ -516,6 +515,10 @@ public sealed class ChatController(
             }
             return PreparedChat.FromExisting(new SendMessageResponse(ToDto(conversation), ToMessageDto(existingUser), ToMessageDto(existingAssistant, string.Equals(existingAssistant.ProviderKey, "mock", StringComparison.OrdinalIgnoreCase))));
         }
+
+        // Authorization and completed-request replay precede provider readiness.
+        // New turns must fail before messages or usage reservations are persisted.
+        if (!modelRouter.IsChatGenerationAvailable()) return PreparedChat.Failure(ProviderUnavailable());
 
         var now = DateTime.UtcNow;
         if (conversation.Title == "New chat") conversation.Title = BuildTitle(content);
