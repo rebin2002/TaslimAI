@@ -38,4 +38,10 @@ describe("HomeComposer", () => {
     expect(html).not.toContain("storageProvider");
     expect(html).not.toContain("storageKey");
   });
+
+  it("keeps creation enabled when a PDF is attached without typed instructions", () => {
+    const file = new File([new Uint8Array(5000)], "brief.pdf", { type: "application/pdf" });
+    const html = renderToStaticMarkup(<LocaleProvider><HomeComposer value="" onChange={vi.fn()} onSubmit={vi.fn()} busy={false} projects={[]} projectId="" onProjectChange={vi.fn()} files={[file]} onFilesChange={vi.fn()} onRemoveFile={vi.fn()} /></LocaleProvider>);
+    expect(html).not.toContain('disabled=""');
+  });
 });
