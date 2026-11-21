@@ -8,10 +8,13 @@
 | Base | `main` |
 | Evidence prepared against | `main` = `da8d8b55be1ed3058c986ee71797a1caa03b17b3` (2026-11-21T18:23:12Z, merge of #1222) |
 | Code candidate (release subject) | `e98ce379167ed12a300577c5b2b0b2e52236d5ac` |
+| Re-verified against | `main` = `5ed70ccb6cff19e53c6e498729fade53898d814d` (2026-11-21T19:35:47Z, merge of #282) — §1.1 |
 | Evidence generated | 2026-11-21 (UTC), read-only inspection + local reproduction; nothing merged, deployed, closed or reconfigured |
 | Gate posture | Label `security-review-required`; `reviewDecision` empty — independent security sign-off is still outstanding and is **not** supplied by this document |
 
 This file is documentation for the lane. It changes no code: the two source files certified here are byte-identical to the tree at `e98ce379`.
+
+> `main` moves continuously. This dossier was prepared against `da8d8b55` and re-verified against `5ed70ccb`; a reviewer repeating it later should re-run the §A checks in the appendix rather than assume the SHAs still match.
 
 ---
 
@@ -25,10 +28,12 @@ This file is documentation for the lane. It changes no code: the two source file
 | commit 1 | `c97e5890` | 2026-11-14T02:22:28Z | `feat(music): resolve reference assets into authorized workspace-scoped evidence (#708 slice)` |
 | commit 2 = head | `e98ce379` | 2026-11-21T18:20:58Z | `fix(music): refuse expired and deletion-recorded references at the access layer (#708, #1152)` |
 
-**Lane scope.** `git diff --name-status` from the merge-base to the head is exactly two added files, 793 insertions, zero deletions, zero modifications:
+**Lane scope.** `git diff --name-status` from the merge-base to the certified code head `e98ce379` is exactly two added files, 793 insertions, zero deletions, zero modifications:
 
 - `apps/api/Music/MusicReferenceAssetAuthorization.cs` (311 lines)
 - `apps/api.Tests/MusicReferenceAssetAuthorizationTests.cs` (482 lines)
+
+This dossier is the only file added since (`docs/MUSIC_STUDIO_REFERENCE_ASSET_AUTHORIZATION_RELEASE_EVIDENCE.md`, documentation only, §5.1); it leaves both code files byte-identical.
 
 **Integration with current main was actually tested, not assumed.** The exact-head CI ran on the pull-request merge ref `7e10768438463d747765bda4259c2eca3bd94fae`, whose two parents are `da8d8b55` (the current `main` tip) and `e98ce379` (the lane head). Every check below therefore executed the candidate merged onto current main.
 
@@ -55,11 +60,33 @@ Per `docs/RELEASE_EVIDENCE.md`, a `pull_request` run hashes the merge ref, which
 
 **Rollback posture.** Migration fingerprint unchanged from main ⇒ the lane neither advances nor reorders the schema chain; a deployment carrying this candidate has the same database posture as one that does not, so no migration review is triggered by merging it.
 
+### 1.1 Re-verification against the newest `main` tip
+
+`main` advanced to `5ed70ccb` (merge of #282) while this evidence was being assembled, moving 39 commits through `appsettings.Production.json` and 55 through `apps/api/Domain/Entities.cs`. The lane was therefore re-checked against that tip in a throwaway merge (`06c57de4`, never pushed):
+
+| Check on `5ed70ccb` + lane head | Result |
+| --- | --- |
+| Merge conflicts | 0 |
+| Files the lane adds against that tip | exactly 3 (`apps/api/Music/MusicReferenceAssetAuthorization.cs`, `apps/api.Tests/MusicReferenceAssetAuthorizationTests.cs`, this document) — all additions, no modifications |
+| Build | `dotnet build` 0 errors (20 pre-existing warnings) |
+| Lane tests | `Passed: 38, Failed: 0` |
+| `~Music` filter | `Passed: 167, Failed: 0` |
+| `buildInputs.fingerprintSha256` | `8fe5df4c…` — identical to newest main's own manifest |
+| `migrations.fingerprintSha256` | `13cdf606…`, 82 files — identical to newest main's own manifest |
+| `productionSafetyDefaults` | identical (`customerChargingEnabled: false`, `openAiEnabled: false`) |
+| Lane paths already on main | absent (0/0/0) — the seam is still unowned, so the lane is still required |
+| `MusicGeneration:Enabled` | `false` in `appsettings.json` and `appsettings.Production.json` |
+| Capability catalog `SupportsAuthorizedWorkspaceReferences` | 3 × `false`, 0 × `true` |
+| Validator fail-close | still throws `MUSIC_PROVIDER_UNAVAILABLE` for reference requests (`MusicGenerationRequestValidator.cs` lines 109–113) |
+| DI registration / type collisions for the lane's 7 types | 0 anywhere on that tip |
+
+Note on the two music-filter figures: **70/70** (§5) was measured on the lane's own tree, whose recorded base is `c7622a13`; **167/167** here is measured on the lane merged with the newest `main`, whose music suite has grown. Neither figure replaces CI's whole-suite numbers, which are the current-main integration proof.
+
 ---
 
 ## 2. Ownership
 
-**Claimed surface.** The lane owns exactly the two paths in §1. Neither exists on current `main` (`git ls-tree origin/main -- apps/api/Music/MusicReferenceAssetAuthorization.cs` → empty), and none of the seven types it introduces appears anywhere on main (0 files each for `MusicReferenceAssetAuthorizationCodes`, `MusicReferenceAssetSelection`, `MusicReferenceAuthorizedAsset`, `MusicReferenceAuthorizationDenial`, `MusicReferenceAssetAuthorizationOutcome`, `IMusicReferenceAssetAuthorizer`, `MusicReferenceAssetAuthorizer`) — so integration onto current main creates no duplicate-type conflict.
+**Claimed surface.** The lane owns two code paths (§1) plus this documentation-only file. None of the three exists on current `main` (`git ls-tree origin/main -- apps/api/Music/MusicReferenceAssetAuthorization.cs` → empty), and none of the seven types the lane introduces appears anywhere on main (0 files each for `MusicReferenceAssetAuthorizationCodes`, `MusicReferenceAssetSelection`, `MusicReferenceAuthorizedAsset`, `MusicReferenceAuthorizationDenial`, `MusicReferenceAssetAuthorizationOutcome`, `IMusicReferenceAssetAuthorizer`, `MusicReferenceAssetAuthorizer`) — so integration onto current main creates no duplicate-type conflict. No other open PR claims this document's path.
 
 **Cross-lane scan.** All 63 open PRs whose title or branch name matches `music|asset|storage|reference|upload|provider|media` were file-listed. Only four contain the lane's paths:
 
@@ -169,7 +196,23 @@ Candidate `e98ce379167ed12a300577c5b2b0b2e52236d5ac`, event `pull_request`, merg
 
 These tests need no database, no web factory, no network, no clock injection and no provider — which is itself the construction proof for §4.
 
-**Note on the PR description.** The body of #805 predates the head commit and quotes 28 cases / 19 methods and a 60-test music filter. The certified figures at the exact head are **38 cases / 27 methods** and a **70-test** music filter; the body also still describes #776 and #709 as open prerequisites, which §6 corrects.
+**Note on the PR description.** The body of #805 originally predated the head commit and quoted 28 cases / 19 methods and a 60-test music filter, with #776 and #709 described as open prerequisites. It has been refreshed on 2026-11-21 to the certified figures — **38 cases / 27 methods**, the CI 1971 → 2009 delta, the `e98ce379` retention/deletion axis, and the corrected dependency position (§6) — so the description and this dossier no longer contradict each other.
+
+### 5.1 Exact-head CI for the evidence commits themselves
+
+This document was committed to the lane as `bb3c5857` (docs-only; the two source files unchanged from `e98ce379`). CI re-ran on the pull-request merge ref `a4b603b00dc3d71843af6ed21dc21309c3a5e211`, whose parents are `da8d8b55` (current `main`) + `bb3c5857` (lane head):
+
+| Check | Result | Window (UTC) |
+| --- | --- | --- |
+| Release evidence and safety contract (run `44941114349`, artifact `14721955686`) | success | 19:28:32 → 19:28:41 |
+| Deployment smoke helper contracts | success | 19:28:32 → 19:28:36 |
+| Frontend checks | success | 19:28:32 → 19:30:26 |
+| API integration tests | success — `Failed: 0, Passed: 2009, Skipped: 0, Total: 2009` | 19:28:32 → 19:33:23 |
+| Autopilot next-wave gate | success | 19:28:32 → 19:31:30 |
+| Build production images and smoke-test API (run `44941114348`) | success | 19:28:32 → 19:33:03 |
+| Browser E2E | success | 19:30:29 → 19:40:22 |
+
+7/7 green, and the new manifest reproduces the same `8fe5df4c…` / `13cdf606…` fingerprints and the same safety defaults as both the code candidate and `main` — the documentation commit moved no release input and no test outcome. CI for any commit made after `bb3c5857` is reported by the PR's own checks list and by the evidence comment on #805, not here, so that this file does not have to keep rewriting its own subject.
 
 ---
 
@@ -201,13 +244,33 @@ Both failures are explained by the stale producer, not by #1152's assertions: in
 
 ## 7. Verdict and outstanding conditions
 
-**Evidence complete** for the candidate `e98ce379` against `main` `da8d8b55`: provenance (lineage, merge-ref integration, machine manifest reproduced off-CI), ownership (two new files, zero collisions, boundaries held, staleness of downstream copies quantified), API authorization (thirteen ordered fail-closed decisions on server-recorded state behind the shared visibility rule, with disclosure ordering and a leakage contract), provider/cost safety (no provider, no key, no job, no charge, no schema, no DI, no route), exact-head CI (7/7 green on current main, +38 test delta proving execution), and dependency order (main-side prerequisites landed; #815 → #1116/#1152 → controller wiring follow).
+**Evidence complete** for the candidate `e98ce379` against `main` `da8d8b55`, and re-verified in merge against the later tip `5ed70ccb` (§1.1): provenance (lineage, merge-ref integration, machine manifest reproduced off-CI), ownership (two new files, zero collisions, boundaries held, staleness of downstream copies quantified), API authorization (thirteen ordered fail-closed decisions on server-recorded state behind the shared visibility rule, with disclosure ordering and a leakage contract), provider/cost safety (no provider, no key, no job, no charge, no schema, no DI, no route), exact-head CI (7/7 green on current main at both the code candidate and the evidence commit, +38 test delta proving execution), and dependency order (main-side prerequisites landed; #815 → #1116/#1152 → controller wiring follow).
 
 **Conditions outside this document's authority:**
 
-1. `security-review-required` sign-off by an independent reviewer (`reviewDecision` is still empty).
+1. `security-review-required` sign-off by an independent reviewer (`reviewDecision` is still empty; no review has been submitted on #805 as of this writing).
 2. Re-cut #815 onto this head, then #1116 and #1152, before any of them is considered mergeable; #1152 is RED until then.
 3. A separate rights/provider-capability decision before any flip of `SupportsAuthorizedWorkspaceReferences`.
 4. The authoritative release manifest for this code will be the post-merge `push` run of `Taslim Release Evidence`; §1's manifest is candidate evidence only, and the merge ref it names is garbage-collected when the PR is updated.
 
 Nothing here merges, deploys, closes a PR, enables a provider, or touches Railway.
+
+## Appendix A — checks a reviewer can repeat
+
+```bash
+# provenance / scope
+git merge-base origin/main <lane-head>
+git diff --name-status $(git merge-base origin/main <lane-head>) <lane-head>
+git ls-tree origin/main -- apps/api/Music/MusicReferenceAssetAuthorization.cs   # expect empty
+
+# reproduction of the machine identity, on the pull-request merge ref
+git worktree add /tmp/m refs/pull/805/merge && cd /tmp/m
+bash scripts/release-evidence.test.sh
+bash scripts/release-evidence.sh /tmp/e.json     # compare fingerprints with the CI artifact
+
+# behaviour, without CI
+dotnet test apps/api.Tests/Taslim.Api.Tests.csproj --filter FullyQualifiedName~MusicReferenceAssetAuthorization
+dotnet test apps/api.Tests/Taslim.Api.Tests.csproj --filter FullyQualifiedName~Music
+```
+
+Machine-generated inputs retained while preparing this dossier: CI artifact `taslim-release-evidence-44935259311` (ID `14719686278`, code candidate) and `taslim-release-evidence-44941114349` (ID `14721955686`, evidence commit); job logs `136940368277`, `136940367856`, `136940315736`, `136958312594`, `136921432360`.
