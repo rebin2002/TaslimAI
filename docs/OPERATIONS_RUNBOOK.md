@@ -148,7 +148,7 @@ Before pushing an observability change, run the complete API test project where 
 
 ## Known limitations
 
-The API logs use the configured `ILogger` providers; centralized retention, alert thresholds, and log shipping are Railway deployment concerns rather than a second in-application monitoring architecture. Provider health does not make live provider calls and therefore cannot prove end-to-end provider availability. The recent-failure window is based on durable generation-job failures and does not replace provider status pages.
+The API logs use the configured `ILogger` providers; centralized retention, alert thresholds, and log shipping are Railway deployment concerns rather than a second in-application monitoring architecture. Provider health does not make live provider calls and therefore cannot prove end-to-end provider availability. The recent-failure window is based on durable generation-job failures, falling back to durable usage-ledger failures only where a provider records no job rows in the range, and it does not replace provider status pages. A reported failure code and its timestamp describe the same observed failure: a value that is not one bounded token of letters, digits, `_`, `-` or `.` is replaced by the stable `GENERATION_FAILURE` code instead of being shown with its separators stripped out.
 
 Lease recovery increments a durable retry count when a worker loses an expired claim. It does not automatically retry a user-cancelled job or a terminally failed job. A readiness storage probe verifies the configured adapter with a read-only check, but it cannot prove that every future object publication will succeed.
 

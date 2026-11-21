@@ -13,45 +13,60 @@ public sealed record GeneratedMediaDescriptor(string SafeFileName, string Extens
 /// </summary>
 public static class GeneratedMediaSecurity
 {
-    private static readonly IReadOnlyDictionary<string, string> SupportedGeneratedTypes =
-        new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+    /// <summary>
+    /// The media profiles each generated container is allowed to carry. A container declares more
+    /// than one profile only when the same byte format legitimately holds a different kind of
+    /// essence (WebM carries both video and audio-only speech); any other declared profile, and
+    /// any container outside this registry, is still rejected outright.
+    /// </summary>
+    private static readonly IReadOnlyDictionary<string, string[]> SupportedGeneratedTypes =
+        new Dictionary<string, string[]>(StringComparer.OrdinalIgnoreCase)
         {
-            [".aac"] = "audio/aac",
-            [".csv"] = "text/csv",
-            [".docx"] = "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-            [".flac"] = "audio/flac",
-            [".json"] = "application/json",
-            [".jpg"] = "image/jpeg",
-            [".jpeg"] = "image/jpeg",
-            [".m4a"] = "audio/mp4",
-            [".md"] = "text/markdown",
-            [".mp3"] = "audio/mpeg",
-            [".mp4"] = "video/mp4",
-            [".mov"] = "video/quicktime",
-            [".ogg"] = "audio/ogg",
-            [".opus"] = "audio/ogg",
-            [".pdf"] = "application/pdf",
-            [".png"] = "image/png",
-            [".pptx"] = "application/vnd.openxmlformats-officedocument.presentationml.presentation",
-            [".txt"] = "text/plain",
-            [".wav"] = "audio/wav",
-            [".webm"] = "video/webm",
-            [".webp"] = "image/webp",
-            [".xlsx"] = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            [".aac"] = ["audio/aac"],
+            [".csv"] = ["text/csv"],
+            [".docx"] = ["application/vnd.openxmlformats-officedocument.wordprocessingml.document"],
+            [".flac"] = ["audio/flac"],
+            [".json"] = ["application/json"],
+            [".jpg"] = ["image/jpeg"],
+            [".jpeg"] = ["image/jpeg"],
+            [".m4a"] = ["audio/mp4"],
+            [".md"] = ["text/markdown"],
+            [".mp3"] = ["audio/mpeg"],
+            [".mp4"] = ["video/mp4"],
+            [".mov"] = ["video/quicktime"],
+            [".ogg"] = ["audio/ogg"],
+            [".opus"] = ["audio/ogg"],
+            [".pdf"] = ["application/pdf"],
+            [".png"] = ["image/png"],
+            [".pptx"] = ["application/vnd.openxmlformats-officedocument.presentationml.presentation"],
+            [".txt"] = ["text/plain"],
+            [".wav"] = ["audio/wav"],
+            [".webm"] = ["video/webm", "audio/webm"],
+            [".webp"] = ["image/webp"],
+            [".xlsx"] = ["application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"],
         };
 
+    /// <summary>
+    /// Resolves the container and the media profile that will be persisted for it. The persisted
+    /// type is always the registered profile rather than the caller's spelling, so the stored file
+    /// record, the asset media type, and the served response type stay identical.
+    /// </summary>
     public static GeneratedMediaDescriptor ValidateDescriptor(string fileName, string contentType)
     {
         var safeName = FileValidationService.SanitizeFileName(fileName);
         var extension = Path.GetExtension(safeName).ToLowerInvariant();
-        if (string.IsNullOrWhiteSpace(extension) || !SupportedGeneratedTypes.TryGetValue(extension, out var expectedType))
+        if (string.IsNullOrWhiteSpace(extension) || !SupportedGeneratedTypes.TryGetValue(extension, out var declaredTypes))
             throw new FileUploadValidationException("Generated file extension is not supported.");
 
-        if (string.IsNullOrWhiteSpace(contentType) || contentType.Length > 160
-            || !string.Equals(contentType.Trim(), expectedType, StringComparison.OrdinalIgnoreCase))
+        if (string.IsNullOrWhiteSpace(contentType) || contentType.Length > 160)
             throw new FileUploadValidationException("Generated file content type does not match its extension.");
 
-        return new GeneratedMediaDescriptor(safeName, extension, expectedType);
+        var declared = contentType.Trim();
+        var matchedType = Array.Find(declaredTypes, expectedType => string.Equals(expectedType, declared, StringComparison.OrdinalIgnoreCase));
+        if (matchedType is null)
+            throw new FileUploadValidationException("Generated file content type does not match its extension.");
+
+        return new GeneratedMediaDescriptor(safeName, extension, matchedType);
     }
 
     public static void ValidateContent(GeneratedMediaDescriptor descriptor, ReadOnlySpan<byte> content, FileOptions settings)

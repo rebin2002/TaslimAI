@@ -59,9 +59,18 @@ public sealed class AssetService(TaslimDbContext db, WorkspaceAccessService acce
         {
             var search = filter.Search.Trim();
             if (search.Length > 120) throw new AssetValidationException("ASSET_SEARCH_TOO_LONG", "Search must be 120 characters or fewer.");
-            query = db.Database.ProviderName?.Contains("Npgsql", StringComparison.OrdinalIgnoreCase) == true
-                ? query.Where(asset => EF.Functions.ILike(asset.Name, $"%{search}%") || (asset.Description != null && EF.Functions.ILike(asset.Description, $"%{search}%")))
-                : query.Where(asset => asset.Name.ToLower().Contains(search.ToLower()) || (asset.Description != null && asset.Description.ToLower().Contains(search.ToLower())));
+            // The provider branch stays split because only PostgreSQL runs this through LIKE
+            // pattern syntax; every other provider already matches the term as plain text.
+            if (db.Database.ProviderName?.Contains("Npgsql", StringComparison.OrdinalIgnoreCase) == true)
+            {
+                var pattern = AssetSearchPattern.Contains(search);
+                query = query.Where(asset => EF.Functions.ILike(asset.Name, pattern, AssetSearchPattern.EscapeCharacter)
+                    || (asset.Description != null && EF.Functions.ILike(asset.Description, pattern, AssetSearchPattern.EscapeCharacter)));
+            }
+            else
+            {
+                query = query.Where(asset => asset.Name.ToLower().Contains(search.ToLower()) || (asset.Description != null && asset.Description.ToLower().Contains(search.ToLower())));
+            }
         }
 
         var sort = string.IsNullOrWhiteSpace(filter.Sort) ? AssetSorts.Recent : filter.Sort.Trim().ToLowerInvariant();
@@ -118,7 +127,10 @@ public sealed class AssetService(TaslimDbContext db, WorkspaceAccessService acce
             var representationFile = await db.StoredFiles.AsNoTracking()
                 .Include(file => file.Project)
                 .FirstOrDefaultAsync(file => file.Id == representation.StoredFileId, cancellationToken);
-            if (representationFile is not { Status: StoredFileStatus.Ready } || !CanReadStoredFile(representationFile, userId, asset.WorkspaceId))
+            if (representationFile is not { Status: StoredFileStatus.Ready }
+                || !CanReadStoredFile(representationFile, userId, asset.WorkspaceId)
+                || (string.Equals(asset.AssetType, AssetTypes.Document, StringComparison.OrdinalIgnoreCase)
+                    && !IsDocumentRepresentationConsistent(representation, representationFile)))
                 throw new AssetValidationException("ASSET_FILE_UNAVAILABLE", "This document format is not available.");
             return new AssetDownload(asset, representationFile, representation.FileName, representation.ContentType);
         }
@@ -161,4 +173,20 @@ public sealed class AssetService(TaslimDbContext db, WorkspaceAccessService acce
                 && !file.ConversationId.HasValue
                 && file.Project is not null
                 && file.Project.WorkspaceId == workspaceId));
+
+    private static bool IsDocumentRepresentationConsistent(AssetRepresentation representation, StoredFile file)
+    {
+        var expected = representation.RepresentationType.Trim().ToLowerInvariant() switch
+        {
+            AssetRepresentationTypes.Docx => (Extension: ".docx", ContentType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document"),
+            AssetRepresentationTypes.Pdf => (Extension: ".pdf", ContentType: "application/pdf"),
+            _ => (Extension: string.Empty, ContentType: string.Empty),
+        };
+        return expected.Extension.Length > 0
+            && representation.SizeBytes == file.SizeBytes
+            && string.Equals(representation.ContentType, expected.ContentType, StringComparison.OrdinalIgnoreCase)
+            && string.Equals(file.ContentType, expected.ContentType, StringComparison.OrdinalIgnoreCase)
+            && string.Equals(Path.GetExtension(representation.FileName), expected.Extension, StringComparison.OrdinalIgnoreCase)
+            && string.Equals(file.Extension, expected.Extension, StringComparison.OrdinalIgnoreCase);
+    }
 }

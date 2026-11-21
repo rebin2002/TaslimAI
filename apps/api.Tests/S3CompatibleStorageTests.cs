@@ -65,6 +65,21 @@ public sealed class S3CompatibleStorageTests
     }
 
     [Fact]
+    public void S3_client_uses_required_only_checksums_for_R2()
+    {
+        var config = S3CompatibleFileStorageService.CreateConfig(new FileOptions
+        {
+            S3Endpoint = "https://example.r2.cloudflarestorage.com",
+            S3Region = "auto",
+        });
+
+        Assert.Equal(Amazon.Runtime.RequestChecksumCalculation.WHEN_REQUIRED, config.RequestChecksumCalculation);
+        Assert.True(config.ForcePathStyle);
+        Assert.False(config.UseHttp);
+        Assert.Equal("auto", config.AuthenticationRegion);
+    }
+
+    [Fact]
     public void PutObject_request_disables_r2_incompatible_signing_and_checksum_validation()
     {
         using var content = new MemoryStream([1, 2, 3]);
@@ -77,6 +92,38 @@ public sealed class S3CompatibleStorageTests
         Assert.False(request.AutoResetStreamPosition);
         Assert.True(request.DisablePayloadSigning);
         Assert.True(request.DisableDefaultChecksumValidation);
+        Assert.False(request.UseChunkEncoding);
+    }
+
+    [Fact]
+    public void PutObject_request_sets_content_length_for_validated_nonseekable_upload()
+    {
+        using var source = new MemoryStream([1, 2, 3, 4]);
+        using var counted = new CountingReadStream(source, maxBytes: 25, expectedContentLength: 4);
+
+        Assert.False(counted.CanSeek);
+        Assert.Throws<NotSupportedException>(() => _ = counted.Length);
+
+        var request = AwsS3CompatibleObjectClient.CreatePutObjectRequest(
+            "taslim-private", "workspace/private.pdf", counted);
+
+        Assert.Equal("4", request.Headers["Content-Length"]);
+        Assert.Same(counted, request.InputStream);
+        Assert.False(request.UseChunkEncoding);
+        Assert.False(request.AutoResetStreamPosition);
+    }
+
+    [Fact]
+    public void PutObject_request_sets_remaining_content_length_for_seekable_stream()
+    {
+        using var source = new MemoryStream([1, 2, 3, 4]);
+        source.Position = 1;
+
+        var request = AwsS3CompatibleObjectClient.CreatePutObjectRequest(
+            "taslim-private", "workspace/private.png", source);
+
+        Assert.Equal("3", request.Headers["Content-Length"]);
+        Assert.Same(source, request.InputStream);
     }
 
     [Fact]

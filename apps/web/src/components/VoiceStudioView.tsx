@@ -9,7 +9,6 @@ import {
   Check,
   CheckCircle2,
   Clock3,
-  Download,
   FileAudio,
   Headphones,
   LoaderCircle,
@@ -22,8 +21,10 @@ import {
   XCircle,
 } from "lucide-react";
 import { useAuth } from "@/components/AuthProvider";
+import { MediaJobArtifactDownload } from "@/components/MediaJobArtifactDownload";
 import { useLocale } from "@/components/LocaleProvider";
 import { ApiError, api, type Asset, type GenerationJob, type Project, type VoiceGenerationInput } from "@/lib/api";
+import { findMediaJobArtifact, mediaJobArtifactDownloadState } from "@/lib/mediaJobArtifactState";
 import { canCancelVoiceJob, clearVoiceActiveJobId, formatVoiceDuration, formatVoiceFileSize, isRestorableVoiceJob, isVoiceAsset, nextVoicePollDelay, parseVoiceJobResult, persistVoiceActiveJobId, readVoiceActiveJobId, shouldPollVoiceJob } from "@/lib/voiceStudioState";
 
 const languages = ["en", "ar", "ku"] as const;
@@ -134,6 +135,37 @@ function formatCreatedAt(value: string, locale: string) {
   return new Intl.DateTimeFormat(localeTag(locale), { month: "short", day: "numeric", year: "numeric" }).format(date);
 }
 
+/**
+ * The in-flight status poll failed. Backoff keeps retrying on its own, but the
+ * member has to be told: this asserts the localized copy over the polite
+ * progress region and never echoes the provider's own message, which is
+ * English and server-facing ("Something went wrong.").
+ */
+export function VoiceStudioPollingNoticeView({ t }: { t: (key: string) => string }) {
+  return (
+    <p className="voice-alert" role="alert" aria-live="assertive">
+      <AlertCircle size={15} aria-hidden="true" />
+      <span>{t("voice.pollError")}</span>
+    </p>
+  );
+}
+
+/**
+ * A member-initiated action failed while a job was in flight - today that means
+ * the cancel request. It is a different claim from a failed status read, so it
+ * carries its own message and its own slot instead of borrowing the polling
+ * notice's copy.
+ */
+export function VoiceStudioActionNoticeView({ message }: { message: string }) {
+  return (
+    <p className="voice-alert" role="alert" aria-live="assertive">
+      <AlertCircle size={15} aria-hidden="true" />
+      <span>{message}</span>
+    </p>
+  );
+}
+
+
 export function VoiceStudioView() {
   const { workspace } = useAuth();
   const { locale, t } = useLocale();
@@ -152,6 +184,13 @@ export function VoiceStudioView() {
   const [loadingProjects, setLoadingProjects] = useState(true);
   const [loadingRecent, setLoadingRecent] = useState(true);
   const [error, setError] = useState("");
+  // The status-read failure is a separate slot from `error`. One string cannot
+  // hold two claims: `error` belongs to member actions (submit, cancel) and
+  // survives only until the next action, while `pollError` belongs to the
+  // background read and is withdrawn by the next good read. Sharing the slot
+  // made a failed cancel announce itself as "could not refresh", and let an
+  // unrelated good read silently withdraw a cancel the server refused.
+  const [pollError, setPollError] = useState("");
   const restoreJobId = useRef<string | null>(null);
 
   const loadWorkspaceData = useCallback(async () => {
@@ -204,17 +243,30 @@ export function VoiceStudioView() {
         if (active) {
           setCurrent(next);
           setPollRetry(0);
-          setError("");
+          // A good read says nothing about whether an earlier cancel worked, so
+          // it dismisses only its own notice.
+          setPollError("");
         }
-      } catch (caught) {
+      } catch {
+        // The provider's own message is deliberately not surfaced: it is English
+        // and server-facing, and the localized copy below is what the member
+        // needs. Backoff keeps retrying on its own.
         if (active) {
           setPollRetry((attempt) => attempt + 1);
-          setError(caught instanceof Error ? caught.message : t("voice.pollError"));
+          setPollError(t("voice.pollError"));
         }
       }
     }, nextVoicePollDelay(current, pollRetry) ?? 650);
     return () => { active = false; window.clearTimeout(timer); };
   }, [current, pollRetry, t]);
+  // A finished job re-reads the workspace lists, as the Music studio already
+  // does, so the download control reflects the stored-file state of its own
+  // artifact rather than the snapshot taken when the studio mounted.
+  useEffect(() => {
+    if (current?.status !== "Succeeded") return;
+    const timer = window.setTimeout(() => void loadWorkspaceData(), 0);
+    return () => window.clearTimeout(timer);
+  }, [current?.status, loadWorkspaceData]);
 
   async function generate(event: React.FormEvent) {
     event.preventDefault();
@@ -225,6 +277,7 @@ export function VoiceStudioView() {
     setWorking(true);
     setError("");
     setPollRetry(0);
+    setPollError("");
     restoreJobId.current = null;
     clearVoiceActiveJobId(workspace.id);
     const input: VoiceGenerationInput = {
@@ -240,8 +293,16 @@ export function VoiceStudioView() {
       const job = await api.createVoiceGenerationJob(input);
       persistVoiceActiveJobId(workspace.id, job.id);
       setCurrent(job);
-    } catch (caught) {
-      setError(caught instanceof Error ? caught.message : t("voice.createError"));
+    } catch {
+      // Localized copy, never the rejection's own text: `ApiError.message` is
+      // the server's English string (`src/lib/api.ts`:
+      // `body?.error?.message ?? "Something went wrong."`), and this slot
+      // renders into the compose form for members reading the en, ar and ku
+      // screens. The studio can claim that the request was refused; it cannot
+      // translate server prose on the member's behalf. The cancel handler below
+      // already follows this rule, and the route-scoped Voice boundary does the
+      // same by design (`app/create/voice/error.tsx` never reads `error.message`).
+      setError(t("voice.createError"));
     } finally {
       setWorking(false);
     }
@@ -255,8 +316,13 @@ export function VoiceStudioView() {
       await api.cancelGenerationJob(current.id);
       setCurrent(await api.getGenerationJob(current.id));
       setPollRetry(0);
-    } catch (caught) {
-      setError(caught instanceof Error ? caught.message : t("voice.cancelError"));
+    } catch {
+      // Localized copy, not the rejection's own text: this message is now
+      // rendered inside the in-flight panel as well as the compose form, and
+      // `ApiError.message` is the server's English string. The studio can claim
+      // that the cancellation was refused; it cannot translate a provider's
+      // prose on the member's behalf.
+      setError(t("voice.cancelError"));
     } finally {
       setWorking(false);
     }
@@ -268,10 +334,16 @@ export function VoiceStudioView() {
     setCurrent(null);
     setError("");
     setPollRetry(0);
+    setPollError("");
     window.setTimeout(() => document.getElementById("voice-script")?.focus(), 0);
   }
 
   const result = useMemo(() => parseVoiceJobResult(current), [current]);
+  // The loaded workspace list is what tells this studio whether the finished
+  // job's artifact still has a stored file, so the download control is derived
+  // from it instead of from the job result alone.
+  const resultArtifact = useMemo(() => findMediaJobArtifact(recentAssets, result?.assetId), [recentAssets, result]);
+  const resultArtifactState = mediaJobArtifactDownloadState(resultArtifact);
   const isSuccess = current?.status === "Succeeded" && !!result?.assetId;
   const isFailure = current?.status === "Failed" || current?.status === "Cancelled";
   const unavailable = current?.errorCode === "VOICE_PROVIDER_UNAVAILABLE";
@@ -309,13 +381,15 @@ export function VoiceStudioView() {
             <div className="voice-result-copy"><strong>{text.trim().slice(0, 72) || t("voice.untitledAudio")}</strong><span>{t(`voice.language.${result.language ?? language}`)} · {t(`voice.style.${result.voiceStyle ?? voiceStyle}`)} · {t(`voice.speaking.${result.speakingStyle ?? speakingStyle}`)}</span></div>
             <VoiceAudioPlayer src={api.assetFileUrl(result.assetId!, true)} label={t("voice.resultTitle")} durationMilliseconds={result.durationMilliseconds} />
           </div>
-          <div className="voice-result-actions"><a className="voice-secondary-action" href={api.assetFileUrl(result.assetId!)}><Download size={15} /> {t("voice.download")}</a><Link className="voice-secondary-action" href={`/assets?search=${encodeURIComponent(text.slice(0, 60))}`}>{t("voice.openAssets")}</Link><button className="voice-primary-action" type="button" onClick={createAnother}><RefreshCw size={15} /> {t("voice.createAnother")}</button></div>
+          <div className="voice-result-actions"><MediaJobArtifactDownload href={api.assetFileUrl(result.assetId!)} state={resultArtifactState} className="voice-secondary-action" label={t("voice.download")} unavailableLabel={t("assets.fileUnavailable")} /><Link className="voice-secondary-action" href={`/assets?search=${encodeURIComponent(text.slice(0, 60))}`}>{t("voice.openAssets")}</Link><button className="voice-primary-action" type="button" onClick={createAnother}><RefreshCw size={15} /> {t("voice.createAnother")}</button></div>
         </section>
       ) : isGenerating ? (
         <section className="voice-generation-panel" aria-labelledby="voice-generation-title">
           <div className="voice-generating-icon"><LoaderCircle size={27} aria-hidden="true" /></div><p className="section-eyebrow">{t("voice.progressEyebrow")}</p><h2 id="voice-generation-title">{progressStatus}</h2><p>{t("voice.progressText")}</p>
           <p className="sr-only" role="status" aria-live="polite" aria-atomic="true">{progressAnnouncement}</p>
           <div className="generation-progress-label"><span>{t("jobs.progress")}</span><strong>{progress}%</strong></div><div className="generation-progress-track" role="progressbar" aria-label={t("jobs.progress")} aria-valuemin={0} aria-valuemax={100} aria-valuenow={progress} aria-valuetext={progressAnnouncement}><span style={{ width: `${progress}%` }} /></div>
+          {pollError && <VoiceStudioPollingNoticeView t={t} />}
+          {error && <VoiceStudioActionNoticeView message={error} />}
           {canCancelVoiceJob(current) && <button className="voice-secondary-action voice-cancel-action" type="button" onClick={() => void cancel()} disabled={working}><XCircle size={15} /> {t("voice.cancel")}</button>}
         </section>
       ) : (
@@ -346,7 +420,7 @@ export function VoiceStudioView() {
 
       <section className="voice-recent-section" aria-labelledby="voice-recent-title">
         <div className="voice-section-heading"><div><p className="section-eyebrow">03 / {t("voice.workflow.listen")}</p><h2 id="voice-recent-title">{t("voice.recentTitle")}</h2><p>{t("voice.recentSubtitle")}</p></div><Link href="/assets?type=audio" className="voice-text-link">{t("voice.openAssets")} <span aria-hidden="true">→</span></Link></div>
-        {loadingRecent ? <div className="voice-recent-loading" role="status" aria-live="polite"><LoaderCircle size={18} aria-hidden="true" /><span>{t("voice.recentLoading")}</span></div> : recentAssets.length === 0 ? <div className="voice-recent-empty"><div className="voice-empty-icon"><FileAudio size={22} /></div><div><h3>{t("voice.recentEmptyTitle")}</h3><p>{t("voice.recentEmptyDescription")}</p></div></div> : <div className="voice-recent-list">{recentAssets.map((asset) => <article className="voice-recent-item" key={asset.id}><div className="voice-recent-icon"><FileAudio size={17} /></div><div className="voice-recent-copy"><strong title={asset.name}>{asset.name}</strong><span>{asset.projectName ?? t("voice.noProject")} · {formatCreatedAt(asset.createdAt, locale)}</span><small>{formatVoiceFileSize(asset.fileSizeBytes)}{asset.mimeType ? ` · ${asset.mimeType.replace("audio/", "").toUpperCase()}` : ""}</small></div>{asset.hasFile && asset.canPreview ? <VoiceAudioPlayer src={api.assetFileUrl(asset.id, true)} label={asset.name} compact /> : <span className="voice-audio-unavailable">{t("voice.audioUnavailable")}</span>}<a className="voice-download-icon" href={api.assetFileUrl(asset.id)} aria-label={`${t("voice.download")} ${asset.name}`}><Download size={15} /></a></article>)}</div>}
+        {loadingRecent ? <div className="voice-recent-loading" role="status" aria-live="polite"><LoaderCircle size={18} aria-hidden="true" /><span>{t("voice.recentLoading")}</span></div> : recentAssets.length === 0 ? <div className="voice-recent-empty"><div className="voice-empty-icon"><FileAudio size={22} /></div><div><h3>{t("voice.recentEmptyTitle")}</h3><p>{t("voice.recentEmptyDescription")}</p></div></div> : <div className="voice-recent-list">{recentAssets.map((asset) => <article className="voice-recent-item" key={asset.id}><div className="voice-recent-icon"><FileAudio size={17} /></div><div className="voice-recent-copy"><strong title={asset.name}>{asset.name}</strong><span>{asset.projectName ?? t("voice.noProject")} · {formatCreatedAt(asset.createdAt, locale)}</span><small>{formatVoiceFileSize(asset.fileSizeBytes)}{asset.mimeType ? ` · ${asset.mimeType.replace("audio/", "").toUpperCase()}` : ""}</small></div>{asset.hasFile && asset.canPreview ? <VoiceAudioPlayer src={api.assetFileUrl(asset.id, true)} label={asset.name} compact /> : <span className="voice-audio-unavailable">{t("voice.audioUnavailable")}</span>}<MediaJobArtifactDownload variant="icon" href={api.assetFileUrl(asset.id)} state={mediaJobArtifactDownloadState(asset)} className="voice-download-icon" label={t("voice.download")} unavailableLabel={t("assets.fileUnavailable")} assetName={asset.name} /></article>)}</div>}
       </section>
       <p className="voice-studio-footnote">{t("voice.safetyNote")}</p>
     </div>
