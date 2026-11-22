@@ -31,4 +31,17 @@ public sealed class VideoCallbackSecurityTests
         Assert.False(VideoCallbackSecurity.IsAuthentic(body, secret, timestamp, signature, signedAt.AddMinutes(6), TimeSpan.FromMinutes(5)));
         Assert.False(VideoCallbackSecurity.IsAuthentic(body, secret, timestamp, signature, signedAt, TimeSpan.Zero));
     }
+
+    [Fact]
+    public void Future_signed_timestamp_is_rejected_even_within_replay_window()
+    {
+        var body = Encoding.UTF8.GetBytes("payload");
+        var secret = Encoding.UTF8.GetBytes("test-only-secret");
+        var receivedAt = DateTimeOffset.FromUnixTimeSeconds(1_700_000_000);
+        var signedAt = receivedAt.AddMinutes(1);
+        var timestamp = signedAt.ToUnixTimeSeconds().ToString();
+        var signature = VideoCallbackSecurity.ComputeHmacSha256(body, secret, timestamp);
+
+        Assert.False(VideoCallbackSecurity.IsAuthentic(body, secret, timestamp, signature, receivedAt, TimeSpan.FromMinutes(5)));
+    }
 }
