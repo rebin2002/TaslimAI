@@ -396,6 +396,104 @@ public sealed class ProviderResilienceTests
         Assert.Contains(results, result => result.IsReplay || result.ErrorCode == "EXECUTION_ALREADY_CLAIMED");
     }
 
+    // The routing gate only refuses a provider that cannot de-duplicate when the caller
+    // opts into RequireIdempotency. When a route deliberately admits such a provider, the
+    // retry wrapper is the last place able to stop the same paid submission being sent
+    // twice, so it must fail closed on any outcome that does not prove the provider
+    // rejected the request before accepting it.
+    [Fact]
+    public async Task Ambiguous_timeout_is_never_resubmitted_to_a_provider_without_idempotency_support()
+    {
+        var store = new FakeResilienceStore();
+        var provider = new TestProvider(
+            "non-idempotent",
+            _ => throw new ProviderResilienceException(ProviderAttemptResultCategory.TimedOut, "PROVIDER_TIMEOUT"),
+            new ProviderRoutingProfile(SupportsIdempotency: false));
+
+        var result = await Create(store, retries: 2).ExecuteAsync(
+            JobId,
+            Token,
+            new ProviderRouteRequirements("movie.generate", RequireIdempotency: false),
+            "resubmit-timeout",
+            "input",
+            [provider]);
+
+        Assert.Equal(ProviderAttemptResultCategory.TimedOut, result.Category);
+        Assert.Equal("PROVIDER_TIMEOUT", result.ErrorCode);
+        Assert.Equal(1, provider.Calls);
+        Assert.Single(store.Attempts);
+        Assert.Equal(1, result.AttemptCount);
+    }
+
+    [Fact]
+    public async Task Ambiguous_network_failure_is_never_resubmitted_to_a_provider_without_idempotency_support()
+    {
+        var store = new FakeResilienceStore();
+        var provider = new TestProvider(
+            "non-idempotent",
+            _ => throw new HttpRequestException("connection reset after the request was written"),
+            new ProviderRoutingProfile(SupportsIdempotency: false));
+
+        var result = await Create(store, retries: 2).ExecuteAsync(
+            JobId,
+            Token,
+            new ProviderRouteRequirements("movie.generate", RequireIdempotency: false),
+            "resubmit-network",
+            "input",
+            [provider]);
+
+        Assert.Equal(ProviderAttemptResultCategory.TransientFailure, result.Category);
+        Assert.Equal("PROVIDER_NETWORK_FAILURE", result.ErrorCode);
+        Assert.Equal(1, provider.Calls);
+        Assert.Single(store.Attempts);
+    }
+
+    [Fact]
+    public async Task Definitive_rate_limit_rejection_is_still_retried_for_a_provider_without_idempotency_support()
+    {
+        var store = new FakeResilienceStore();
+        var provider = new TestProvider(
+            "non-idempotent",
+            _ => throw new ProviderResilienceException(ProviderAttemptResultCategory.RateLimited, "RATE_LIMITED"),
+            new ProviderRoutingProfile(SupportsIdempotency: false));
+
+        var result = await Create(store, retries: 2).ExecuteAsync(
+            JobId,
+            Token,
+            new ProviderRouteRequirements("movie.generate", RequireIdempotency: false),
+            "resubmit-rate-limit",
+            "input",
+            [provider]);
+
+        // A rate limit proves the provider refused the request before accepting it,
+        // so re-sending cannot duplicate work the provider has already taken on.
+        Assert.Equal(ProviderAttemptResultCategory.RateLimited, result.Category);
+        Assert.Equal(3, provider.Calls);
+        Assert.Equal(3, store.Attempts.Count);
+    }
+
+    [Fact]
+    public async Task Ambiguous_timeout_keeps_being_retried_when_the_provider_can_deduplicate_the_idempotency_key()
+    {
+        var store = new FakeResilienceStore();
+        var provider = new TestProvider(
+            "idempotent",
+            _ => throw new ProviderResilienceException(ProviderAttemptResultCategory.TimedOut, "PROVIDER_TIMEOUT"),
+            new ProviderRoutingProfile(SupportsIdempotency: true));
+
+        var result = await Create(store, retries: 2).ExecuteAsync(
+            JobId,
+            Token,
+            new ProviderRouteRequirements("movie.generate", RequireIdempotency: false),
+            "resubmit-idempotent",
+            "input",
+            [provider]);
+
+        Assert.Equal(ProviderAttemptResultCategory.TimedOut, result.Category);
+        Assert.Equal(3, provider.Calls);
+        Assert.Equal(3, store.Attempts.Count);
+    }
+
     private static ProviderResilienceOrchestrator Create(FakeResilienceStore store, int retries = 0, decimal maxCostUsd = 5m) =>
         new(store, new AllowAllProviderCostGuard(), Options.Create(new ProviderResilienceOptions
         {
