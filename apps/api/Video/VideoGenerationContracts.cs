@@ -145,13 +145,21 @@ public sealed record VideoGenerationCapabilities(
     public bool SupportsAspectRatio(string aspectRatio) => SupportedAspectRatios.Any(
         value => string.Equals(value, aspectRatio, StringComparison.OrdinalIgnoreCase));
 
+    /// <summary>
+    /// Evaluates every capability dimension an adapter declares, so an unsupported
+    /// request is refused before <see cref="IVideoGenerationAdapter.SubmitAsync"/> can
+    /// queue provider work or reserve usage evidence. Continuation is a declared
+    /// dimension and is therefore part of this preflight, matching the sibling
+    /// DirectVideo, Runway and Manus admission paths.
+    /// </summary>
     public bool Supports(VideoGenerationRequest request)
     {
         if (!SupportsOperation(request.Operation)
             || request.DurationSeconds < MinDurationSeconds
             || request.DurationSeconds > MaxDurationSeconds
             || !SupportsAspectRatio(request.AspectRatio)
-            || request.ReferenceImages is { Count: > 0 } && !SupportsReferenceImages)
+            || (request.ReferenceImages is { Count: > 0 } && !SupportsReferenceImages)
+            || (request.Continuation is not null && !SupportsContinuation))
             return false;
 
         return request.RequestedResolution is null
