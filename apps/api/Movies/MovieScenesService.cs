@@ -116,19 +116,29 @@ public sealed class MovieScenesService(TaslimDbContext db, MovieCollaborationAcc
     private static MovieScenesWorkspaceDto BuildWorkspace(MovieProject movie, ApprovedStorySnapshot? story, WorldSnapshot world)
     {
         var approvedRevision = story?.Revision;
-        var screenplayByProductionScene = approvedRevision?.Scenes.Where(item => item.MovieSceneId.HasValue).ToDictionary(item => item.MovieSceneId!.Value) ?? [];
+        var linkedScreenplayGroups = approvedRevision?.Scenes
+            .Where(item => item.MovieSceneId.HasValue)
+            .GroupBy(item => item.MovieSceneId!.Value)
+            .ToArray() ?? [];
+        var screenplayByProductionScene = linkedScreenplayGroups
+            .Where(group => group.Count() == 1)
+            .ToDictionary(group => group.Key, group => group.Single());
+        var ambiguousProductionSceneIds = linkedScreenplayGroups
+            .Where(group => group.Count() > 1)
+            .Select(group => group.Key)
+            .ToHashSet();
         var acts = movie.Acts.OrderBy(item => item.Sequence).Select(act => new MovieScenesActDto(
             act.Id, act.Sequence, act.Title, act.Summary, act.Status,
             act.Sequences.OrderBy(item => item.Sequence).Select(sequence => new MovieScenesSequenceDto(
                 sequence.Id, sequence.Sequence, sequence.Title, sequence.Summary, sequence.Status,
-                sequence.Scenes.OrderBy(item => item.Sequence).Select(scene => ToScene(scene, act, sequence, screenplayByProductionScene.GetValueOrDefault(scene.Id), approvedRevision, world)).ToArray())).ToArray())).ToArray();
+                sequence.Scenes.OrderBy(item => item.Sequence).Select(scene => ToScene(scene, act, sequence, screenplayByProductionScene.GetValueOrDefault(scene.Id), approvedRevision, world, ambiguousProductionSceneIds.Contains(scene.Id))).ToArray())).ToArray())).ToArray();
         var sceneCount = acts.Sum(act => act.Sequences.Sum(sequence => sequence.Scenes.Count));
         var linkedCount = acts.Sum(act => act.Sequences.Sum(sequence => sequence.Scenes.Count(scene => scene.ScreenplaySceneId.HasValue)));
         var shotCount = acts.Sum(act => act.Sequences.Sum(sequence => sequence.Scenes.Sum(scene => scene.ShotCount)));
         return new MovieScenesWorkspaceDto(movie.Id, movie.Title, movie.ProductionStatus, story?.Story.ApprovalState ?? "NotAvailable", story?.Story.ApprovedRevisionId, approvedRevision?.RevisionNumber, acts, sceneCount, linkedCount, shotCount);
     }
 
-    private static MovieSceneWorkspaceDto ToScene(MovieScene scene, MovieAct act, MovieSequence sequence, MovieScreenplayScene? screenplay, MovieStoryRevision? approvedRevision, WorldSnapshot world)
+    private static MovieSceneWorkspaceDto ToScene(MovieScene scene, MovieAct act, MovieSequence sequence, MovieScreenplayScene? screenplay, MovieStoryRevision? approvedRevision, WorldSnapshot world, bool ambiguousScreenplayLink)
     {
         var usages = world.Usages.Where(item => item.MovieSceneId == scene.Id).ToArray();
         var locations = usages.Where(item => item.EntityType.Equals(MovieWorldEntityTypes.Location, StringComparison.OrdinalIgnoreCase) && world.Locations.TryGetValue(item.EntityId, out _)).Select(item => new MovieSceneWorldReferenceDto(item.EntityId, world.Locations[item.EntityId].Name, item.Role)).DistinctBy(item => item.Id).ToArray();
@@ -136,6 +146,7 @@ public sealed class MovieScenesService(TaslimDbContext db, MovieCollaborationAcc
         var characters = screenplay?.Elements.Where(item => !string.IsNullOrWhiteSpace(item.CharacterName)).Select(item => item.CharacterName!.Trim()).Distinct(StringComparer.OrdinalIgnoreCase).OrderBy(item => item).ToArray() ?? [];
         var warnings = new List<string>();
         if (!string.IsNullOrWhiteSpace(scene.ContinuityNotes)) warnings.Add(scene.ContinuityNotes.Trim());
+        if (ambiguousScreenplayLink) warnings.Add("Multiple screenplay scenes link to this production scene; screenplay link withheld until repaired.");
         warnings.AddRange(world.Facts.Where(item => item.ScopeId == scene.Id).Select(item => $"{item.FactKey}: {item.FactValue}"));
         var slug = screenplay?.Slugline ?? scene.Title;
         var description = string.IsNullOrWhiteSpace(scene.Summary) ? screenplay?.Synopsis ?? string.Empty : scene.Summary;
