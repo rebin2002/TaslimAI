@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { canCancelVoiceJob, clearVoiceActiveJobId, formatVoiceDuration, formatVoiceFileSize, isRestorableVoiceJob, isVoiceAsset, isVoiceJob, isVoiceTerminal, nextVoicePollDelay, parseVoiceJobResult, persistVoiceActiveJobId, readVoiceActiveJobId, shouldPollVoiceJob, voiceActiveJobStorageKey, voiceJobPollIntervalMs, voiceJobPollMaxDelayMs } from "./voiceStudioState";
+import { canCancelVoiceJob, clearVoiceActiveJobId, formatVoiceDuration, formatVoiceFileSize, isRestorableVoiceJob, isVoiceAsset, isVoiceJob, isVoiceTerminal, nextVoicePollDelay, parseVoiceJobResult, persistVoiceActiveJobId, readVoiceActiveJobId, safeVoiceJobView, shouldPollVoiceJob, voiceActiveJobStorageKey, voiceJobPollIntervalMs, voiceJobPollMaxDelayMs } from "./voiceStudioState";
 import type { GenerationJob } from "./api";
 
 const baseJob: GenerationJob = {
@@ -51,6 +51,14 @@ describe("voiceStudioState", () => {
   it("rejects malformed or non-audio results", () => {
     expect(parseVoiceJobResult({ ...baseJob, resultJson: "not-json" })).toBeNull();
     expect(parseVoiceJobResult({ ...baseJob, resultJson: JSON.stringify({ assetId: "asset-1", assetType: "image" }) })).toBeNull();
+  });
+
+  it("rejects a succeeded result whose asset identity is empty or whitespace-only", () => {
+    for (const assetId of ["", "   ", "\t", "\n "]) {
+      const malformed = { ...baseJob, resultJson: JSON.stringify({ assetId, assetType: "audio" }) };
+      expect(parseVoiceJobResult(malformed)).toBeNull();
+      expect(safeVoiceJobView(malformed)?.result).toBeNull();
+    }
   });
 
   it("only allows cancellation for active Voice jobs", () => {
