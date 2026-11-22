@@ -48,7 +48,7 @@ public sealed class AssetsController(
         var asset = await assets.GetAsync(userId, id, cancellationToken);
         return asset is null
             ? ApiResults.Error(this, StatusCodes.Status404NotFound, "ASSET_NOT_FOUND", "Asset not found.")
-            : Ok(AssetContractMapper.ToDto(asset, GetUserId()));
+            : Ok(AssetContractMapper.ToDto(asset, userId));
     }
 
     [HttpPatch("{id:guid}")]
@@ -61,7 +61,7 @@ public sealed class AssetsController(
             var asset = await assets.UpdateAsync(userId, id, request, cancellationToken);
             return asset is null
                 ? ApiResults.Error(this, StatusCodes.Status404NotFound, "ASSET_NOT_FOUND", "Asset not found.")
-                : Ok(AssetContractMapper.ToDto(asset, GetUserId()));
+                : Ok(AssetContractMapper.ToDto(asset, userId));
         }
         catch (AssetValidationException exception)
         {
@@ -155,7 +155,7 @@ public sealed class AssetsController(
             : await assets.RestoreAsync(userId, id, cancellationToken);
         return asset is null
             ? ApiResults.Error(this, StatusCodes.Status404NotFound, "ASSET_NOT_FOUND", "Asset not found.")
-            : Ok(AssetContractMapper.ToDto(asset, GetUserId()));
+            : Ok(AssetContractMapper.ToDto(asset, userId));
     }
 
     private bool TryGetUserId(out Guid userId) =>
