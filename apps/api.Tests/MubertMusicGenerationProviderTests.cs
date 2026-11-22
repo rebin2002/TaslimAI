@@ -177,6 +177,22 @@ public sealed class MubertMusicGenerationProviderTests
         await Assert.ThrowsAsync<MusicProviderTimeoutException>(() => provider.GenerateAsync(Input()));
     }
 
+    [Fact]
+    public async Task Download_transport_failure_is_normalized_to_provider_unavailable()
+    {
+        var handler = new MubertHandler(
+            (_, requestNumber) => requestNumber switch
+            {
+                1 => Json(HttpStatusCode.OK, "{\"data\":{\"id\":\"track-transport\",\"session_id\":\"session\"}}"),
+                2 => Json(HttpStatusCode.OK, "{\"data\":{\"generations\":[{\"status\":\"completed\",\"url\":\"https://download.example/track.mp3\"}]}}"),
+                _ => throw new HttpRequestException("synthetic download transport failure"),
+            });
+        var provider = CreateProvider(handler, maxPollAttempts: 1);
+
+        await Assert.ThrowsAsync<MusicProviderUnavailableException>(() => provider.GenerateAsync(Input()));
+        Assert.Equal(3, handler.Requests.Count);
+    }
+
     private static MubertMusicGenerationProvider CreateProvider(
         HttpMessageHandler handler,
         string customerId = "customer",
