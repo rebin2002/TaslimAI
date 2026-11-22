@@ -204,6 +204,13 @@ public static class GenerationJobContractMapper
     ///
     /// <c>ResultJson</c> itself is never rewritten here in either direction: historical published
     /// snapshots stay immutable, and the availability fact rides beside them.
+    ///
+    /// Availability here is the readiness-only
+    /// <see cref="BuildRepresentationDownloadability"/> rule, so this overload is the in-memory test
+    /// seam for the snapshot/annotation contract. Nothing serves studio availability through it: the
+    /// production read path is <c>GenerationJobExecution.GetPublishedAsync</c>, which answers the full
+    /// download predicate and annotates through
+    /// <see cref="ToDtoWithRepresentationAvailability"/>.
     /// </summary>
     public static GenerationJobDto ToDtoWithRepresentationDownloads(
         GenerationJob job,
@@ -277,12 +284,19 @@ public static class GenerationJobContractMapper
 
     /// <summary>
     /// The one definition of "this rendition can actually be downloaded right now", read from the
-    /// same fact <c>AssetService.GetDownloadAsync</c> enforces before it streams a representation:
-    /// the rendition's own stored file has to be <see cref="StoredFileStatus.Ready"/>. A pruned
-    /// (<c>Deleted</c>), still-processing (<c>Uploading</c>/<c>Processing</c>) or failed file is
-    /// unavailable; the <c>AssetRepresentation</c> row itself survives retention, which is why the
-    /// status - not the presence of a row - decides. Per representation, never per asset, matching
-    /// the library lane's predicate in <c>AssetContractMapper.ToDto</c>.
+    /// stored-file fact <c>AssetService.GetDownloadAsync</c> checks first: the rendition's own stored
+    /// file has to be <see cref="StoredFileStatus.Ready"/>. A pruned (<c>Deleted</c>),
+    /// still-processing (<c>Uploading</c>/<c>Processing</c>) or failed file is unavailable; the
+    /// <c>AssetRepresentation</c> row itself survives retention, which is why the status - not the
+    /// presence of a row - decides. Per representation, never per asset.
+    ///
+    /// Readiness is one of the route's three branches, not the whole answer, and this helper cannot
+    /// see the other two: it is handed renditions with no viewer and no asset, so it cannot evaluate
+    /// <c>CanReadStoredFile</c> or the document metadata check. The served studio contract resolves
+    /// the shared <see cref="AssetService.CanDownloadRepresentation"/> instead, in
+    /// <c>GenerationJobExecution.ReadPublishedRepresentationAvailabilityAsync</c>, and feeds
+    /// <see cref="ToDtoWithRepresentationAvailability"/>. Use that for anything user-visible; this
+    /// helper is the status-only in-memory seam its own suite pins (#1202 review).
     /// </summary>
     public static IReadOnlyDictionary<Guid, bool> BuildRepresentationDownloadability(
         IEnumerable<AssetRepresentation> representations)

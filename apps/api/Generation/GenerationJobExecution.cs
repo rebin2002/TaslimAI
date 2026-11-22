@@ -739,19 +739,27 @@ public sealed class GenerationJobService(
         // job this caller has already been allowed to read.
         var job = await GetAsync(userId, jobId, cancellationToken);
         if (job is null) return null;
-        return new GenerationJobPublishedReadModel(job, await ReadPublishedRepresentationAvailabilityAsync(job, cancellationToken));
+        return new GenerationJobPublishedReadModel(job, await ReadPublishedRepresentationAvailabilityAsync(userId, job, cancellationToken));
     }
 
     /// <summary>
-    /// Answers every rendition the published <c>ResultJson</c> snapshot advertises with the state its
-    /// own stored file has right now, in ONE projected query regardless of how many renditions the
-    /// snapshot names (issue #1049: the snapshot is baked at completion and is never rewritten, so
-    /// after a retention prune it still promises a download the route refuses with
+    /// Answers every rendition the published <c>ResultJson</c> snapshot advertises with the answer the
+    /// download route would give <em>this</em> viewer right now, in ONE projected query regardless of
+    /// how many renditions the snapshot names (issue #1049: the snapshot is baked at completion and is
+    /// never rewritten, so after a retention prune it still promises a download the route refuses with
     /// <c>409 ASSET_FILE_UNAVAILABLE</c>).
     ///
+    /// The answer comes from <see cref="AssetService.CanDownloadRepresentation"/>, the same predicate
+    /// <c>AssetService.GetDownloadAsync</c> enforces and <c>AssetContractMapper.ToDto</c> reports, so
+    /// the studio half of the contract cannot advertise a rendition the route refuses. File status is
+    /// only one of its three branches: a Ready file the viewer may not read (conversation-scoped or
+    /// non-shared) and a Ready document rendition whose stored metadata disagrees with the file are
+    /// both refusals, and the studio views have to withdraw for them exactly as the library lane does
+    /// (#1041 / #1092 invariant, applied to the studio path it did not cover).
+    ///
     /// The set is bounded by construction: the identities come from this authorized job's snapshot and
-    /// nothing else is asked for, only <c>Id</c> and the stored file's <c>Status</c> are read (no
-    /// bytes, keys, hashes or neighbouring rows), and each identity is additionally pinned to the
+    /// nothing else is asked for, only the columns the shared predicate reads are projected (no bytes,
+    /// storage keys, hashes or neighbouring rows), and each identity is additionally pinned to the
     /// authorized job's own workspace so a stale or foreign identity inside a snapshot fails closed
     /// instead of reporting another workspace's file state.
     ///
@@ -759,7 +767,7 @@ public sealed class GenerationJobService(
     /// contract byte-for-byte unchanged; a job that promises downloads gets a complete, fail-closed
     /// answer for each of them.
     /// </summary>
-    private async Task<IReadOnlyDictionary<Guid, bool>?> ReadPublishedRepresentationAvailabilityAsync(GenerationJob job, CancellationToken cancellationToken)
+    private async Task<IReadOnlyDictionary<Guid, bool>?> ReadPublishedRepresentationAvailabilityAsync(Guid userId, GenerationJob job, CancellationToken cancellationToken)
     {
         var advertised = GenerationJobContractMapper.AdvertisedRepresentationIds(job.ResultJson);
         if (advertised.Count == 0) return null;
@@ -768,14 +776,72 @@ public sealed class GenerationJobService(
         var rows = await db.AssetRepresentations.AsNoTracking()
             .Where(representation => advertisedIds.Contains(representation.Id)
                 && representation.Asset.WorkspaceId == workspaceId)
-            .Select(representation => new { representation.Id, State = representation.StoredFile.Status })
+            .Select(representation => new
+            {
+                representation.Id,
+                representation.AssetId,
+                representation.StoredFileId,
+                representation.RepresentationType,
+                representation.FileName,
+                RepresentationContentType = representation.ContentType,
+                representation.SizeBytes,
+                AssetWorkspaceId = representation.Asset.WorkspaceId,
+                AssetType = representation.Asset.AssetType,
+                // StoredFile is a required relationship (inner join), so these are always present in
+                // a returned row; Project is optional, hence the explicit null branch that EF can
+                // translate to a CASE instead of dereferencing a missing join partner.
+                FileId = representation.StoredFile.Id,
+                FileStatus = representation.StoredFile.Status,
+                FileWorkspaceId = representation.StoredFile.WorkspaceId,
+                FileUserId = representation.StoredFile.UserId,
+                FileProjectId = representation.StoredFile.ProjectId,
+                FileConversationId = representation.StoredFile.ConversationId,
+                FileProjectWorkspaceId = representation.StoredFile.Project == null
+                    ? (Guid?)null
+                    : representation.StoredFile.Project.WorkspaceId,
+                FileContentType = representation.StoredFile.ContentType,
+                FileExtension = representation.StoredFile.Extension,
+                FileSizeBytes = representation.StoredFile.SizeBytes,
+            })
             .ToListAsync(cancellationToken);
 
         // Seeded unavailable, then confirmed from the loaded state: an advertised rendition whose row
-        // is gone entirely is a rendition the route cannot serve either.
+        // is gone entirely, and one whose stored file row is gone, is a rendition the route cannot
+        // serve either, so both stay false.
         var availability = new Dictionary<Guid, bool>(advertisedIds.Count);
         foreach (var id in advertisedIds) availability[id] = false;
-        foreach (var row in rows) availability[row.Id] = row.State == StoredFileStatus.Ready;
+        foreach (var row in rows)
+        {
+            // Rebuilt from the projection rather than loaded as tracked graph entities: the predicate
+            // reads exactly these members, and only its own answer leaves this method.
+            var asset = new Asset { Id = row.AssetId, WorkspaceId = row.AssetWorkspaceId, AssetType = row.AssetType };
+            var representation = new AssetRepresentation
+            {
+                Id = row.Id,
+                AssetId = row.AssetId,
+                StoredFileId = row.StoredFileId,
+                RepresentationType = row.RepresentationType,
+                FileName = row.FileName,
+                ContentType = row.RepresentationContentType,
+                SizeBytes = row.SizeBytes,
+            };
+            var file = new StoredFile
+            {
+                Id = row.FileId,
+                WorkspaceId = row.FileWorkspaceId,
+                UserId = row.FileUserId,
+                ProjectId = row.FileProjectId,
+                ConversationId = row.FileConversationId,
+                Project = row.FileProjectWorkspaceId is null
+                    ? null
+                    : new Project { Id = row.FileProjectId ?? Guid.Empty, WorkspaceId = row.FileProjectWorkspaceId.Value },
+                Status = row.FileStatus,
+                ContentType = row.FileContentType,
+                Extension = row.FileExtension,
+                SizeBytes = row.FileSizeBytes,
+            };
+            availability[row.Id] = AssetService.CanDownloadRepresentation(asset, representation, file, userId);
+        }
         return availability;
     }
 

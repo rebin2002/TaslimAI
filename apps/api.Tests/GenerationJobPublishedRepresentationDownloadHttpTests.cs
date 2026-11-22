@@ -87,9 +87,17 @@ public sealed class PublishedRepresentationDownloadApiFactory : GenerationJobsAp
 /// 4. a denied caller gets the same not-found envelope, with no rendition identity in it;
 /// 5. identities are answered from the authorized job's own workspace only, so a snapshot naming
 ///    another workspace's rendition fails closed instead of leaking that file's state;
-/// 6. one bounded query carries the whole set: a three-rendition snapshot costs no more round-trips
-///    than a one-rendition snapshot.
-///
+    /// 6. one bounded query carries the whole set: a three-rendition snapshot costs no more round-trips
+    ///    than a one-rendition snapshot.
+    /// 7. the studio answer is the same predicate the route enforces, not file status alone: a Ready
+    ///    rendition pinned to somebody else's conversation, a Ready document rendition whose stored
+    ///    size or content type has drifted from the rendition row, and a rendition type the document
+    ///    route has no serving contract for are each withheld here exactly as that route refuses them
+    ///    with <c>409</c>;
+    /// 8. controls on both of those new branches - a project-shared file another member may read, and a
+    ///    metadata-drifted rendition on a non-document asset - prove the mirror did not become a
+    ///    refusal of its own.
+    ///
 /// Synthetic fixtures only: no paid provider, no secret, no real storage object, no user data and no
 /// migration. The snapshot is baked through <c>GenerationJobExecution.AddPublishedAssetReference</c>
 /// itself - the same production builder PR #1117 uses in its mapper suite - so its shape cannot drift
@@ -106,7 +114,26 @@ public sealed class GenerationJobPublishedRepresentationDownloadHttpTests : ICla
         scope.ServiceProvider.GetRequiredService<TaslimDbContext>().Database.EnsureCreated();
     }
 
-    private sealed record RenditionPlan(string RepresentationType, string FileName, string ContentType, string Extension, StoredFileStatus Status);
+    /// <summary>
+    /// One rendition the published snapshot advertises. The optional members carry the two shapes the
+    /// retention lifecycle cannot produce but the download route still refuses: a <see cref="StoredFileStatus.Ready"/>
+    /// file this viewer is not entitled to read (<see cref="OwnerUserId"/> plus <see cref="ConversationScoped"/>),
+    /// and a Ready file whose stored metadata no longer agrees with the rendition row
+    /// (<see cref="FileSizeBytes"/> / <see cref="FileContentType"/>). Every member defaults to the
+    /// healthy shape, so the pre-existing plans describe exactly what they described before.
+    /// </summary>
+    private sealed record RenditionPlan(
+        string RepresentationType,
+        string FileName,
+        string ContentType,
+        string Extension,
+        StoredFileStatus Status,
+        bool ConversationScoped = false,
+        bool ProjectShared = false,
+        Guid? OwnerUserId = null,
+        long? FileSizeBytes = null,
+        string? FileContentType = null,
+        long? RepresentationSizeBytes = null);
 
     private sealed record SeededPublication(
         Guid JobId,
@@ -126,6 +153,13 @@ public sealed class GenerationJobPublishedRepresentationDownloadHttpTests : ICla
     private static readonly RenditionPlan ReadyPptx = new(
         AssetRepresentationTypes.Pptx, "deck.pptx",
         "application/vnd.openxmlformats-officedocument.presentationml.presentation", ".pptx", StoredFileStatus.Ready);
+
+    /// <summary>
+    /// A second healthy document type. <c>(AssetId, RepresentationType)</c> is unique, so a fixture
+    /// that contrasts one withheld rendition against one served sibling has to use two types.
+    /// </summary>
+    private static readonly RenditionPlan ReadyPdf = new(
+        AssetRepresentationTypes.Pdf, "report.pdf", "application/pdf", ".pdf", StoredFileStatus.Ready);
 
     private static readonly RenditionPlan[] DocxAndPdf = [ReadyDocx, PrunedPdf];
     private static readonly RenditionPlan[] DocxOnly = [ReadyDocx];
@@ -286,6 +320,156 @@ public sealed class GenerationJobPublishedRepresentationDownloadHttpTests : ICla
         Assert.Equal(noneQueries + 1, singleQueries);
     }
 
+    // ----- The two route branches the studio half used to ignore (#1202 availability parity) -----
+
+    [Fact]
+    public async Task Conversation_Scoped_Ready_Rendition_Is_Withheld_By_The_Studio_Because_The_Route_Refuses_It()
+    {
+        using var client = factory.CreateClient();
+        var auth = await Register(client, "Conversation Scope Owner");
+        Guid foreignId;
+        using (var otherClient = factory.CreateClient())
+        {
+            foreignId = (await Register(otherClient, "Conversation File Owner")).User.Id;
+        }
+
+        // Two Ready renditions on one published asset. The DOCX is the viewer's own file and stays
+        // served; the PDF is Ready in the same workspace but belongs to another member and is pinned
+        // to a conversation, so AssetService.CanReadStoredFile refuses it and the download route
+        // answers 409. Status alone cannot tell these two apart - which is exactly the
+        // over-advertisement the studio half of the contract used to keep.
+        var scoped = ReadyPdf with { ConversationScoped = true, OwnerUserId = foreignId };
+        var seeded = await SeedPublication(client, auth, "conversation-scoped", [ReadyDocx, scoped]);
+
+        var (_, payload, _) = await ReadJob(client, seeded.JobId);
+        Assert.True(
+            CanDownload(payload, seeded.RepresentationIds[0]),
+            "a healthy rendition lost its promise, so the fix over-tightened the studio path");
+        Assert.False(CanDownload(payload, seeded.RepresentationIds[1]));
+
+        // The withheld entry keeps its identity and metadata: only the promise is withdrawn.
+        Assert.Equal("report.pdf", Entry(payload, seeded.RepresentationIds[1]).GetProperty("fileName").GetString());
+
+        // The flag and the route agree, which is the whole point of resolving one predicate.
+        var refused = await client.GetAsync($"/api/assets/{seeded.AssetId}/representations/{seeded.RepresentationIds[1]}/download");
+        Assert.Equal(HttpStatusCode.Conflict, refused.StatusCode);
+        Assert.Contains("ASSET_FILE_UNAVAILABLE", await refused.Content.ReadAsStringAsync());
+        var served = await client.GetAsync($"/api/assets/{seeded.AssetId}/representations/{seeded.RepresentationIds[0]}/download");
+        Assert.NotEqual(HttpStatusCode.Conflict, served.StatusCode);
+    }
+
+    [Fact]
+    public async Task Project_Shared_Ready_Rendition_Another_Member_Can_Read_Stay_Advertised()
+    {
+        using var client = factory.CreateClient();
+        var auth = await Register(client, "Project Sharing Owner");
+        Guid memberId;
+        using (var otherClient = factory.CreateClient())
+        {
+            memberId = (await Register(otherClient, "Project File Owner")).User.Id;
+        }
+
+        // Control on the same branch: the file is owned by somebody else, but it is shared through a
+        // project in this workspace and carries no conversation scope, so the route serves it. The
+        // studio must keep advertising it - the mirror must not become a refusal of its own.
+        var shared = ReadyDocx with { ProjectShared = true, OwnerUserId = memberId };
+        var seeded = await SeedPublication(client, auth, "project-shared", [shared]);
+
+        var (_, payload, _) = await ReadJob(client, seeded.JobId);
+        Assert.True(CanDownload(payload, seeded.RepresentationIds[0]));
+
+        var served = await client.GetAsync($"/api/assets/{seeded.AssetId}/representations/{seeded.RepresentationIds[0]}/download");
+        Assert.NotEqual(HttpStatusCode.Conflict, served.StatusCode);
+        Assert.DoesNotContain("ASSET_FILE_UNAVAILABLE", await served.Content.ReadAsStringAsync());
+    }
+
+    [Fact]
+    public async Task Ready_Rendition_Whose_File_Size_Drifted_Is_Withheld_Because_The_Route_Refuses_It()
+    {
+        using var client = factory.CreateClient();
+        var auth = await Register(client, "Drifted Size Owner");
+
+        // The Ready file behind the rendition shrank to 99 bytes while the rendition row still
+        // promises its published 4,096. That is the document metadata half of
+        // AssetService.IsDocumentRepresentationConsistent: two rows that each look fine alone.
+        var drifted = ReadyPdf with { FileSizeBytes = 99, RepresentationSizeBytes = 4_096 };
+        var seeded = await SeedPublication(client, auth, "drifted-size", [ReadyDocx, drifted]);
+
+        var (_, payload, _) = await ReadJob(client, seeded.JobId);
+        Assert.True(CanDownload(payload, seeded.RepresentationIds[0]));
+        Assert.False(CanDownload(payload, seeded.RepresentationIds[1]));
+
+        var refused = await client.GetAsync($"/api/assets/{seeded.AssetId}/representations/{seeded.RepresentationIds[1]}/download");
+        Assert.Equal(HttpStatusCode.Conflict, refused.StatusCode);
+        Assert.Contains("ASSET_FILE_UNAVAILABLE", await refused.Content.ReadAsStringAsync());
+    }
+
+    [Fact]
+    public async Task Ready_Rendition_Whose_File_Content_Type_Drifted_Is_Withheld_Because_The_Route_Refuses_It()
+    {
+        using var client = factory.CreateClient();
+        var auth = await Register(client, "Drifted Content Type Owner");
+
+        // The other half of the same consistency contract: a Ready file whose content type is no
+        // longer the representation type's canonical one.
+        var drifted = ReadyDocx with { FileContentType = "application/octet-stream" };
+        var seeded = await SeedPublication(client, auth, "drifted-content-type", [drifted]);
+
+        var (_, payload, _) = await ReadJob(client, seeded.JobId);
+        Assert.False(CanDownload(payload, seeded.RepresentationIds[0]));
+
+        var refused = await client.GetAsync($"/api/assets/{seeded.AssetId}/representations/{seeded.RepresentationIds[0]}/download");
+        Assert.Equal(HttpStatusCode.Conflict, refused.StatusCode);
+        Assert.Contains("ASSET_FILE_UNAVAILABLE", await refused.Content.ReadAsStringAsync());
+    }
+
+    [Fact]
+    public async Task Ready_Rendition_Type_The_Document_Route_Cannot_Serve_Is_Withheld()
+    {
+        using var client = factory.CreateClient();
+        var auth = await Register(client, "Unmapped Rendition Owner");
+
+        // A PPTX rendition hanging off a document asset is Ready and readable, but the document
+        // route has no serving contract for that type, so it answers 409 too. Status alone said
+        // "downloadable" here; the single predicate says what the route says.
+        var seeded = await SeedPublication(client, auth, "unmapped-type", [ReadyDocx, ReadyPptx]);
+
+        var (_, payload, _) = await ReadJob(client, seeded.JobId);
+        Assert.True(CanDownload(payload, seeded.RepresentationIds[0]));
+        Assert.False(CanDownload(payload, seeded.RepresentationIds[1]));
+
+        var refused = await client.GetAsync($"/api/assets/{seeded.AssetId}/representations/{seeded.RepresentationIds[1]}/download");
+        Assert.Equal(HttpStatusCode.Conflict, refused.StatusCode);
+        Assert.Contains("ASSET_FILE_UNAVAILABLE", await refused.Content.ReadAsStringAsync());
+    }
+
+    [Fact]
+    public async Task Non_Document_Asset_Keeps_A_Metadata_Drifted_Rendition_Advertised()
+    {
+        using var client = factory.CreateClient();
+        var auth = await Register(client, "Image Drift Owner");
+
+        // Control on the type axis: the route only applies document strictness to document assets, so
+        // the studio must not refuse a drifted rendition it would actually serve. Without this case a
+        // "fix" that always checked consistency would look green while hiding live downloads.
+        var drifted = ReadyPptx with { FileSizeBytes = 99, RepresentationSizeBytes = 4_096 };
+        var seeded = await SeedPublication(client, auth, "image-drift", [drifted], assetType: AssetTypes.Image);
+
+        var (_, payload, _) = await ReadJob(client, seeded.JobId);
+        Assert.True(CanDownload(payload, seeded.RepresentationIds[0]));
+
+        var served = await client.GetAsync($"/api/assets/{seeded.AssetId}/representations/{seeded.RepresentationIds[0]}/download");
+        Assert.NotEqual(HttpStatusCode.Conflict, served.StatusCode);
+        Assert.DoesNotContain("ASSET_FILE_UNAVAILABLE", await served.Content.ReadAsStringAsync());
+    }
+
+    private static JsonElement Entry(JsonElement payload, Guid representationId) =>
+        payload.GetProperty("representationDownloads").EnumerateArray()
+            .Single(item => item.GetProperty("id").GetGuid() == representationId);
+
+    private static bool CanDownload(JsonElement payload, Guid representationId) =>
+        Entry(payload, representationId).GetProperty("canDownload").GetBoolean();
+
     private async Task<(HttpResponseMessage Response, JsonElement Payload, long Queries)> ReadJob(HttpClient client, Guid jobId)
     {
         factory.QueryCounter.Reset();
@@ -326,13 +510,17 @@ public sealed class GenerationJobPublishedRepresentationDownloadHttpTests : ICla
         AuthResponse auth,
         string name,
         RenditionPlan[] plans,
-        bool advertise = true)
+        bool advertise = true,
+        string assetType = AssetTypes.Document)
     {
         var now = DateTime.UtcNow;
         var jobId = Guid.NewGuid();
         var assetId = Guid.NewGuid();
         var workspaceId = auth.PersonalWorkspace.Id;
         var userId = auth.User.Id;
+        // Lazily created, and shared by every conversation-scoped plan in one fixture: the readability
+        // guard only reaches the conversation branch through a project that exists in this workspace.
+        Project? sharedProject = null;
 
         var asset = new Asset
         {
@@ -341,7 +529,7 @@ public sealed class GenerationJobPublishedRepresentationDownloadHttpTests : ICla
             CreatedByUserId = userId,
             SourceGenerationJobId = jobId,
             Name = name,
-            AssetType = AssetTypes.Document,
+            AssetType = assetType,
             Status = AssetStatus.Active,
             CreatedAt = now,
             UpdatedAt = now,
@@ -353,16 +541,17 @@ public sealed class GenerationJobPublishedRepresentationDownloadHttpTests : ICla
         {
             var storedFileId = Guid.NewGuid();
             var representationId = Guid.NewGuid();
+            var ownerId = plan.OwnerUserId ?? userId;
             var file = new StoredFile
             {
                 Id = storedFileId,
                 WorkspaceId = workspaceId,
-                UserId = userId,
+                UserId = ownerId,
                 OriginalFileName = plan.FileName,
                 StoredFileName = $"{storedFileId:N}{plan.Extension}",
-                ContentType = plan.ContentType,
+                ContentType = plan.FileContentType ?? plan.ContentType,
                 Extension = plan.Extension,
-                SizeBytes = 4_096,
+                SizeBytes = plan.FileSizeBytes ?? 4_096,
                 StorageProvider = FileStorageProviders.Local,
                 StorageKey = $"issue-1049-http/{name}/{storedFileId:N}{plan.Extension}",
                 Status = plan.Status,
@@ -370,6 +559,36 @@ public sealed class GenerationJobPublishedRepresentationDownloadHttpTests : ICla
                 ProcessedAt = plan.Status == StoredFileStatus.Ready ? now : null,
                 DeletedAt = plan.Status == StoredFileStatus.Deleted ? now : null,
             };
+            if (plan.ConversationScoped || plan.ProjectShared)
+            {
+                sharedProject ??= new Project
+                {
+                    Id = Guid.NewGuid(),
+                    WorkspaceId = workspaceId,
+                    Name = $"Issue 1049 HTTP fixture {name} project",
+                    CreatedAt = now,
+                    UpdatedAt = now,
+                };
+                file.ProjectId = sharedProject.Id;
+                file.Project = sharedProject;
+                if (plan.ConversationScoped)
+                {
+                    // A real conversation row owned by the file's own owner: the guard's project branch
+                    // is reached and then refused because the file is pinned to somebody's conversation.
+                    file.ConversationId = Guid.NewGuid();
+                    file.Conversation = new Conversation
+                    {
+                        Id = file.ConversationId.Value,
+                        WorkspaceId = workspaceId,
+                        ProjectId = sharedProject.Id,
+                        UserId = ownerId,
+                        Title = $"Issue 1049 HTTP fixture {name} conversation",
+                        Status = ConversationStatus.Active,
+                        CreatedAt = now,
+                        UpdatedAt = now,
+                    };
+                }
+            }
             if (primaryFile is null)
             {
                 primaryFile = file;
@@ -386,7 +605,7 @@ public sealed class GenerationJobPublishedRepresentationDownloadHttpTests : ICla
                 RepresentationType = plan.RepresentationType,
                 FileName = plan.FileName,
                 ContentType = plan.ContentType,
-                SizeBytes = file.SizeBytes,
+                SizeBytes = plan.RepresentationSizeBytes ?? file.SizeBytes,
                 CreatedAt = now,
             });
             representationIds.Add(representationId);
