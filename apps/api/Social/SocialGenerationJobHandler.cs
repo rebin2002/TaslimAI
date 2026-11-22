@@ -138,6 +138,13 @@ public sealed class SocialGenerationJobHandler(
                 || asset.StoredFileId is null
                 || asset.StoredFile is not { Status: StoredFileStatus.Ready }
                 || asset.StoredFile.WorkspaceId != workspaceId
+                // An asset and the file behind it must carry the same project
+                // scope. Asset reassignment can move Asset.ProjectId without
+                // moving StoredFile.ProjectId, and the extracted text of the
+                // backing file is fed into the prompt, so a mismatched pair is
+                // never an admissible selection - not even for the creator.
+                // Personal assets are unscoped on both sides and still match.
+                || asset.ProjectId != asset.StoredFile.ProjectId
                 // Project assets may be shared only when their backing file is
                 // also project-scoped. Personal and conversation-backed assets
                 // remain private to their creator.
