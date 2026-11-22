@@ -2,6 +2,7 @@ using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
 using Microsoft.AspNetCore.Hosting;
+using System.IO;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
@@ -51,6 +52,34 @@ public sealed class ActivityUnscopedCreatorPrivacyHttpApiFactory : WebApplicatio
             services.RemoveAll<DbContextOptions<TaslimDbContext>>();
             services.AddDbContext<TaslimDbContext>(options => options.UseSqlite($"Data Source={databasePath};Cache=Shared;Default Timeout=30"));
         });
+    }
+
+    /// <summary>
+    /// Removes the synthetic SQLite file and its WAL sidecars when xUnit retires the class. The
+    /// surrounding suite otherwise leaves one database per fixture instantiation in the temp
+    /// directory; this lane is the file's only owner, so it cleans up after itself. Best-effort by
+    /// design: a lingering shared-cache handle must never turn a green privacy run red.
+    /// </summary>
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing)
+        {
+            foreach (var path in new[] { databasePath, databasePath + "-wal", databasePath + "-shm" })
+            {
+                try
+                {
+                    if (File.Exists(path)) File.Delete(path);
+                }
+                catch (IOException)
+                {
+                }
+                catch (UnauthorizedAccessException)
+                {
+                }
+            }
+        }
+
+        base.Dispose(disposing);
     }
 }
 

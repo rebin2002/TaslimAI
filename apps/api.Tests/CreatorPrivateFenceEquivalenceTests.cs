@@ -81,6 +81,26 @@ public sealed class CreatorPrivateFenceEquivalenceTests
         Assert.Contains(jobs[6], memberVisible);
     }
 
+    [Fact]
+    public void Both_translatable_fences_rely_on_job_types_being_stored_in_canonical_form()
+    {
+        // The two queryable fences (ActivityCenterService.VisibleToMember and the job read model's
+        // mirrored predicate) compare JobType with ordinal != so that EF can translate them to SQL,
+        // while the in-memory IsPrivateExecutionRecord they must agree with compares
+        // OrdinalIgnoreCase. Those only accept the same records while every persisted JobType is a
+        // canonical GenerationJobTypes.Supported value; a mixed-case or padded row would make the
+        // SQL side stop matching and the creator-private record would reappear in a co-member's
+        // Activity Center - fail open. The enqueue path guarantees it by resolving the request
+        // through Supported.First(...) before persisting, so the guarantee is pinned here rather
+        // than left implicit: if a canonical constant is ever declared in a form that is not its
+        // own trimmed lower-case value, this fails and the fences must be revisited together.
+        foreach (var jobType in GenerationJobTypes.Supported)
+        {
+            Assert.Equal(jobType, jobType.Trim());
+            Assert.Equal(jobType, jobType.ToLowerInvariant());
+        }
+    }
+
     private static void AssertSameVisibility(List<GenerationJob> jobs, Guid userId)
     {
         var expected = ApplyExecutionFence(jobs, userId).Select(job => job.Id).OrderBy(id => id);
