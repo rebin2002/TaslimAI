@@ -5,6 +5,7 @@ using Microsoft.Extensions.Options;
 using Taslim.Api.Contracts;
 using Taslim.Api.Controllers;
 using Taslim.Api.Domain;
+using Taslim.Api.Documents;
 using Taslim.Api.Generation;
 using Taslim.Api.Images;
 using Xunit;
@@ -45,7 +46,13 @@ public sealed class GenerationJobQueueStatusFilterTests
     private static (GenerationJobsController Controller, RecordingJobService Service) Build(Guid userId)
     {
         var service = new RecordingJobService();
-        var controller = new GenerationJobsController(service, Options.Create(new ImageGenerationOptions()))
+        // Document Studio's kill switch is part of this controller's contract; the
+        // queue-filter scenarios below are unrelated to it, so the switch is left at
+        // its enabled default and no request here is gated by it.
+        var controller = new GenerationJobsController(
+            service,
+            Options.Create(new ImageGenerationOptions()),
+            Options.Create(new DocumentGenerationOptions()))
         {
             ControllerContext = new ControllerContext
             {
