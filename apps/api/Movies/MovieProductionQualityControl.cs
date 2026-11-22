@@ -21,6 +21,8 @@ public static class MovieProductionQcReasonCodes
     public const string Accepted = "MOVIE_QC_ACCEPTED";
     public const string MeasurementMissing = "MOVIE_QC_MEASUREMENT_MISSING";
     public const string MeasurementInvalid = "MOVIE_QC_MEASUREMENT_INVALID";
+    public const string OutputIntegrityEvidenceMissing = "MOVIE_QC_OUTPUT_INTEGRITY_EVIDENCE_MISSING";
+    public const string OutputIntegrityEvidenceInvalid = "MOVIE_QC_OUTPUT_INTEGRITY_EVIDENCE_INVALID";
     public const string AspectRatioMismatch = "MOVIE_QC_ASPECT_RATIO_MISMATCH";
     public const string DurationMissing = "MOVIE_QC_DURATION_MISSING";
     public const string DurationOutOfTolerance = "MOVIE_QC_DURATION_OUT_OF_TOLERANCE";
@@ -69,7 +71,8 @@ public sealed record MovieProductionQcRequirements(
     string? RequiredContinuitySnapshotHash = null,
     int? MaxContinuityWarnings = null,
     bool RequireContinuityEvidence = true,
-    MovieResolution? RecommendedRegenerationSourceResolution = null);
+    MovieResolution? RecommendedRegenerationSourceResolution = null,
+    bool RequireOutputIntegrityEvidence = true);
 
 /// <summary>
 /// Economics are estimates only. This contract never charges, reserves, or calls a provider.
@@ -160,6 +163,17 @@ public sealed class MovieProductionQualityControlService(
         else if (Math.Abs(evidence.DurationSeconds.Value - requirements.ExpectedDurationSeconds) > durationTolerance)
         {
             Add(findings, MovieProductionQcReasonCodes.DurationOutOfTolerance, "duration", "error", $"{requirements.ExpectedDurationSeconds}±{durationTolerance}s", evidence.DurationSeconds.Value.ToString(CultureInfo.InvariantCulture));
+            reviewRequired = true;
+        }
+
+        if (requirements.RequireOutputIntegrityEvidence && string.IsNullOrWhiteSpace(evidence.OutputSha256))
+        {
+            Add(findings, MovieProductionQcReasonCodes.OutputIntegrityEvidenceMissing, "integrity", "error", "sha-256 output digest", null);
+            reviewRequired = true;
+        }
+        else if (requirements.RequireOutputIntegrityEvidence && !IsSha256(evidence.OutputSha256))
+        {
+            Add(findings, MovieProductionQcReasonCodes.OutputIntegrityEvidenceInvalid, "integrity", "error", "64 hexadecimal characters", evidence.OutputSha256);
             reviewRequired = true;
         }
 
@@ -348,6 +362,9 @@ public sealed class MovieProductionQualityControlService(
 
     private static string? FormatCost(decimal? cost) =>
         cost?.ToString("0.########", CultureInfo.InvariantCulture);
+
+    private static bool IsSha256(string? value) =>
+        value is { Length: 64 } && value.All(character => character is >= '0' and <= '9' or >= 'a' and <= 'f' or >= 'A' and <= 'F');
 
     private static void Add(List<MovieProductionQcFinding> findings, string reasonCode, string category, string severity, string? expected, string? actual) =>
         findings.Add(new(reasonCode, category, severity, expected, actual));
