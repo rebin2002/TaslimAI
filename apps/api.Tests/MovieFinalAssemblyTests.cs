@@ -145,6 +145,66 @@ public sealed class MovieFinalAssemblyTests
         }
     }
 
+    [Fact]
+    public void Silent_source_gets_bounded_synthesised_silence_instead_of_an_audio_pad()
+    {
+        var videoAsset = Guid.NewGuid();
+        var input = Contract(videoAsset, null, MovieAssemblyCaptionModes.None);
+        var probes = new Dictionary<Guid, MovieFinalAssemblyVideoProbe> { [videoAsset] = new(600m, false) };
+
+        var arguments = FfmpegMovieFinalAssemblyCommandBuilder.Build(
+            new MovieFinalAssemblyExecutionRequest(input, new Dictionary<Guid, string> { [videoAsset] = "/tmp/clip.mp4" }, probes),
+            "/tmp/master.mp4").ToArray();
+
+        var graph = arguments[Array.IndexOf(arguments, "-filter_complex") + 1];
+        // A probed-silent clip must never address a pad that does not exist, and the
+        // replacement silence has to be bounded to the clip instead of running free.
+        Assert.DoesNotContain("[0:a]", graph);
+        Assert.Contains("anullsrc=r=48000:cl=stereo", graph);
+        Assert.Contains("atrim=duration=", graph);
+    }
+
+    [Fact]
+    public void Mixed_timeline_silences_only_the_probed_silent_clip_and_keeps_real_audio()
+    {
+        var withAudio = Guid.NewGuid();
+        var silent = Guid.NewGuid();
+        var profile = new MovieFinalAssemblyProfile(MovieFinalAssemblyProfiles.Uhd4K, 3_840, 2_160);
+        var input = new MovieFinalAssemblyInput(
+            "final_assembly",
+            Guid.NewGuid(),
+            Guid.NewGuid(),
+            profile.Key,
+            profile,
+            [
+                new MovieAssemblyTimelineItem(Guid.NewGuid(), withAudio, 0, 0m, 2.5m, "continuity-hash"),
+                new MovieAssemblyTimelineItem(Guid.NewGuid(), silent, 1, 0m, 2.5m, "continuity-hash"),
+            ],
+            [],
+            new MovieAssemblyCaptions(MovieAssemblyCaptionModes.None, null, "en"),
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            "assembly:mixed-timeline",
+            3);
+        var probes = new Dictionary<Guid, MovieFinalAssemblyVideoProbe>
+        {
+            [withAudio] = new(600m, true),
+            [silent] = new(600m, false),
+        };
+
+        var arguments = FfmpegMovieFinalAssemblyCommandBuilder.Build(
+            new MovieFinalAssemblyExecutionRequest(input, new Dictionary<Guid, string>
+            {
+                [withAudio] = "/tmp/sounded.mp4",
+                [silent] = "/tmp/silent.mp4",
+            }, probes),
+            "/tmp/master.mp4").ToArray();
+
+        var graph = arguments[Array.IndexOf(arguments, "-filter_complex") + 1];
+        Assert.Contains("[0:a]", graph);
+        Assert.DoesNotContain("[1:a]", graph);
+        Assert.Equal(1, graph.Split("anullsrc").Length - 1);
+    }
+
     // The builder requires per-source probe evidence for every distinct timeline
     // source (MovieFinalAssemblyExecutionRequest.VideoProbes) because that evidence
     // is what keeps [i:a] mapping and duration bounds honest. Builder-contract tests
