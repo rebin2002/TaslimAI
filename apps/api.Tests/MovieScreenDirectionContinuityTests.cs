@@ -99,6 +99,14 @@ public sealed class MovieScreenDirectionContinuityTests
         Assert.Contains("supported screen direction", MovieScreenDirectionPlanValidator.Validate(plan), StringComparison.OrdinalIgnoreCase);
     }
 
+    [Fact]
+    public void Codec_rejects_persisted_unsupported_schema_instead_of_normalizing_it()
+    {
+        var plan = MovieScreenDirectionPlanCodec.FromJson("{\"axis\":\"corridor-a\",\"orientation\":\"side_a\",\"schemaVersion\":99}");
+
+        Assert.Null(plan);
+    }
+
     private static MovieProductionContinuityShotContext Shot(Guid id, int sequence, MovieScreenDirectionPlan plan) =>
         new(id, sequence, $"Shot {sequence}", null, null, [], null, null, null, null, null, null, null, null, plan);
 }
