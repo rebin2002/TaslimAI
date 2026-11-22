@@ -170,7 +170,10 @@ public static class GeneratedMediaSecurity
             ".png" => IsCompletePng(content),
             ".jpg" or ".jpeg" => IsCompleteJpeg(content),
             ".webp" => IsCompleteWebp(content),
-            _ => true,
+            // A registered image container with no completeness rule must not silently skip the
+            // gate: an unbounded default would accept any truncated output the moment a new image
+            // extension is added to the registry above, so an unknown container fails closed.
+            _ => false,
         };
 
         if (!complete)
@@ -191,11 +194,63 @@ public static class GeneratedMediaSecurity
         if (content.Length < 4 || content[0] != 0xFF || content[1] != 0xD8)
             return false;
 
-        for (var index = 2; index < content.Length - 1; index++)
-            if (content[index] == 0xFF && content[index + 1] == 0xD9)
-                return true;
+        // Walk the marker segments instead of searching for an FFD9 pair anywhere. A byte search
+        // is satisfied by an FFD9 sequence that lives inside a segment body (an EXIF thumbnail or
+        // a comment payload), so a file truncated after the metadata block but before the end of
+        // the scan data still looked complete. Here each segment is skipped by its declared
+        // length, entropy-coded data is stepped over with its 0xFF00 byte stuffing honoured, and
+        // the file is complete only when the walk reaches EOI with nothing but fill bytes behind
+        // it. Restart markers are handled inside the scan, so a multi-scan JPEG is not rejected.
+        var index = 2;
+        var inScanData = false;
+        while (index + 1 < content.Length)
+        {
+            if (inScanData)
+            {
+                // Inside entropy-coded data every 0xFF is stuffed with a following 0x00, so the
+                // first 0xFF whose successor is non-zero starts the next marker.
+                if (content[index] == 0xFF && content[index + 1] != 0x00)
+                    inScanData = false;
+                else
+                    index++;
+                continue;
+            }
+
+            if (content[index] != 0xFF) return false;
+            while (index < content.Length && content[index] == 0xFF) index++;
+            if (index >= content.Length) return false;
+
+            var marker = content[index++];
+            if (marker == 0xD9) return IsJpegFill(content[index..]);
+            if (marker is 0x01) continue;
+            if (marker >= 0xD0 && marker <= 0xD7)
+            {
+                inScanData = true;
+                continue;
+            }
+
+            if (!TryReadSegmentLength(content, ref index)) return false;
+            if (marker == 0xDA) inScanData = true;
+        }
 
         return false;
+    }
+
+    private static bool TryReadSegmentLength(ReadOnlySpan<byte> content, ref int index)
+    {
+        if (index + 2 > content.Length) return false;
+        var segmentLength = BinaryPrimitives.ReadUInt16BigEndian(content[index..(index + 2)]);
+        if (segmentLength < 2 || index + segmentLength > content.Length) return false;
+        index += segmentLength;
+        return true;
+    }
+
+    private static bool IsJpegFill(ReadOnlySpan<byte> tail)
+    {
+        // FFD9 is the last real marker; JPEG permits 0xFF fill bytes and 0x00 padding after it.
+        foreach (var value in tail)
+            if (value is not (0xFF or 0x00)) return false;
+        return true;
     }
 
     private static bool IsCompleteWebp(ReadOnlySpan<byte> content)

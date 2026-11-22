@@ -193,6 +193,21 @@ public sealed class MubertMusicGenerationProviderTests
         Assert.Equal(3, handler.Requests.Count);
     }
 
+    [Fact]
+    public async Task Download_stream_io_failure_after_headers_is_normalized_to_provider_unavailable()
+    {
+        // The request succeeds and headers arrive, then the body stream faults with IOException
+        // (SocketException inherits from it). This is the read-stage path, not the request-stage
+        // path covered by Download_transport_failure_is_normalized_to_provider_unavailable.
+        var handler = CompleteTrackHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StreamContent(new IoFaultingStream()),
+        });
+        var provider = CreateProvider(handler, maxPollAttempts: 1);
+
+        await Assert.ThrowsAsync<MusicProviderUnavailableException>(() => provider.GenerateAsync(Input()));
+    }
+
     private static MubertMusicGenerationProvider CreateProvider(
         HttpMessageHandler handler,
         string customerId = "customer",
@@ -277,6 +292,22 @@ public sealed class MubertMusicGenerationProviderTests
             await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
             return 0;
         }
+    }
+
+    private sealed class IoFaultingStream : Stream
+    {
+        public override bool CanRead => true;
+        public override bool CanSeek => false;
+        public override bool CanWrite => false;
+        public override long Length => 0;
+        public override long Position { get => 0; set => throw new NotSupportedException(); }
+        public override void Flush() => throw new NotSupportedException();
+        public override int Read(byte[] buffer, int offset, int count) => throw new IOException("synthetic stream io failure");
+        public override ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default) =>
+            throw new IOException("synthetic stream io failure");
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
     }
 
     private static HttpResponseMessage Json(HttpStatusCode status, string body) => new(status)

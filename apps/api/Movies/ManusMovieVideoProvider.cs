@@ -674,8 +674,7 @@ public sealed class ManusMovieVideoProvider(
             {
                 if (!inner.CanSeek) throw new NotSupportedException();
                 inner.Position = value;
-                bytesRead = value;
-                completed = false;
+                SyncBoundedPosition();
             }
         }
         public override void Flush() => inner.Flush();
@@ -687,10 +686,22 @@ public sealed class ManusMovieVideoProvider(
         public override long Seek(long offset, SeekOrigin origin)
         {
             var position = inner.Seek(offset, origin);
-            bytesRead = position;
-            completed = false;
+            SyncBoundedPosition();
             return position;
         }
+
+        private void SyncBoundedPosition()
+        {
+            // The bounded reader sizes every request as expectedLength - bytesRead, so a position
+            // beyond the declared length would otherwise surface later as an argument-range or
+            // arithmetic error instead of the provider-output contract violation it is. Seeking
+            // back inside the window is allowed and re-arms the over-read probe.
+            if (inner.Position > expectedLength)
+                throw new MovieVideoProviderOutputException();
+            bytesRead = inner.Position;
+            completed = false;
+        }
+
         public override void SetLength(long value) => throw new NotSupportedException();
         public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
         public override void Write(ReadOnlySpan<byte> buffer) => throw new NotSupportedException();

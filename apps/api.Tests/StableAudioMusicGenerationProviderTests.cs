@@ -130,6 +130,27 @@ public sealed class StableAudioMusicGenerationProviderTests
     }
 
     [Fact]
+    public async Task Download_stream_io_failure_is_normalized_to_provider_unavailable()
+    {
+        // A socket reset arrives as IOException/SocketException rather than HttpRequestException.
+        // Before the retry-classification lane, that type escaped the provider unclassified and
+        // reached the worker as an unexpected fault.
+        var handler = new StableAudioHandler((_, requestNumber) => requestNumber switch
+        {
+            1 => Json(HttpStatusCode.Accepted, "{\"id\":\"generation-io-fault\"}"),
+            2 => new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StreamContent(new IoFaultingStream()),
+            },
+            _ => throw new InvalidOperationException("unexpected request"),
+        });
+        var provider = CreateProvider(handler, maxPollAttempts: 1);
+
+        await Assert.ThrowsAsync<MusicProviderUnavailableException>(() => provider.GenerateAsync(Input()));
+        Assert.Equal(2, handler.Requests.Count);
+    }
+
+    [Fact]
     public async Task Caller_cancellation_stops_async_polling_without_becoming_timeout()
     {
         var secondRequest = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -256,6 +277,22 @@ public sealed class StableAudioMusicGenerationProviderTests
         public override void Flush() => throw new NotSupportedException();
         public override int Read(byte[] buffer, int offset, int count) => throw new HttpRequestException("synthetic stream failure");
         public override ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default) => throw new HttpRequestException("synthetic stream failure");
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+    }
+
+    private sealed class IoFaultingStream : Stream
+    {
+        public override bool CanRead => true;
+        public override bool CanSeek => false;
+        public override bool CanWrite => false;
+        public override long Length => 0;
+        public override long Position { get => 0; set => throw new NotSupportedException(); }
+        public override void Flush() => throw new NotSupportedException();
+        public override int Read(byte[] buffer, int offset, int count) => throw new IOException("synthetic stream io failure");
+        public override ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default) =>
+            throw new IOException("synthetic stream io failure");
         public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
         public override void SetLength(long value) => throw new NotSupportedException();
         public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
