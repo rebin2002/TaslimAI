@@ -19,10 +19,11 @@ public sealed class UpscalingController(IUpscalingJobService jobs) : ControllerB
     public async Task<IActionResult> Create(CreateUpscalingJobRequest request, CancellationToken cancellationToken)
     {
         if (!ModelState.IsValid) return ApiResults.Validation(this);
+        if (!TryGetUserId(out var userId)) return Unauthorized();
         try
         {
             var job = await jobs.CreateAsync(
-                GetUserId(),
+                userId,
                 request,
                 cancellationToken,
                 Request.Headers["Idempotency-Key"].FirstOrDefault(),
@@ -36,7 +37,8 @@ public sealed class UpscalingController(IUpscalingJobService jobs) : ControllerB
     [HttpGet("{id:guid}")]
     public async Task<IActionResult> Get(Guid id, CancellationToken cancellationToken)
     {
-        var job = await jobs.GetAsync(GetUserId(), id, cancellationToken);
+        if (!TryGetUserId(out var userId)) return Unauthorized();
+        var job = await jobs.GetAsync(userId, id, cancellationToken);
         return job is null
             ? ApiResults.Error(this, StatusCodes.Status404NotFound, "UPSCALING_JOB_NOT_FOUND", "Upscaling job not found.")
             : Ok(UpscalingContractMapper.ToDto(job));
@@ -51,6 +53,7 @@ public sealed class UpscalingController(IUpscalingJobService jobs) : ControllerB
         [FromQuery] string? targetResolution = null,
         CancellationToken cancellationToken = default)
     {
+        if (!TryGetUserId(out var userId)) return Unauthorized();
         UpscalingJobStatus? filterStatus = null;
         if (!string.IsNullOrWhiteSpace(status))
         {
@@ -60,7 +63,7 @@ public sealed class UpscalingController(IUpscalingJobService jobs) : ControllerB
         }
         try
         {
-            var result = await jobs.ListAsync(GetUserId(), new UpscalingJobFilter(workspaceId, page, pageSize, filterStatus, targetResolution), cancellationToken);
+            var result = await jobs.ListAsync(userId, new UpscalingJobFilter(workspaceId, page, pageSize, filterStatus, targetResolution), cancellationToken);
             return result is null ? Forbid() : Ok(result);
         }
         catch (UpscalingValidationException exception)
@@ -74,9 +77,10 @@ public sealed class UpscalingController(IUpscalingJobService jobs) : ControllerB
     [EnableRateLimiting(RateLimiting.ExpensiveAi)]
     public async Task<IActionResult> Retry(Guid id, CancellationToken cancellationToken)
     {
+        if (!TryGetUserId(out var userId)) return Unauthorized();
         try
         {
-            var job = await jobs.RetryAsync(GetUserId(), id, cancellationToken);
+            var job = await jobs.RetryAsync(userId, id, cancellationToken);
             return job is null
                 ? ApiResults.Error(this, StatusCodes.Status404NotFound, "UPSCALING_JOB_NOT_FOUND", "Upscaling job not found.")
                 : Ok(UpscalingContractMapper.ToDto(job));
@@ -91,9 +95,10 @@ public sealed class UpscalingController(IUpscalingJobService jobs) : ControllerB
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> Cancel(Guid id, CancellationToken cancellationToken)
     {
+        if (!TryGetUserId(out var userId)) return Unauthorized();
         try
         {
-            var job = await jobs.CancelAsync(GetUserId(), id, cancellationToken);
+            var job = await jobs.CancelAsync(userId, id, cancellationToken);
             return job is null
                 ? ApiResults.Error(this, StatusCodes.Status404NotFound, "UPSCALING_JOB_NOT_FOUND", "Upscaling job not found.")
                 : Ok(UpscalingContractMapper.ToDto(job));
@@ -108,9 +113,10 @@ public sealed class UpscalingController(IUpscalingJobService jobs) : ControllerB
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> ReviewQuality(Guid id, ReviewUpscalingQualityRequest request, CancellationToken cancellationToken)
     {
+        if (!TryGetUserId(out var userId)) return Unauthorized();
         try
         {
-            var job = await jobs.ReviewQualityAsync(GetUserId(), id, request, cancellationToken);
+            var job = await jobs.ReviewQualityAsync(userId, id, request, cancellationToken);
             return job is null
                 ? ApiResults.Error(this, StatusCodes.Status404NotFound, "UPSCALING_JOB_NOT_FOUND", "Upscaling job not found.")
                 : Ok(UpscalingContractMapper.ToDto(job));
@@ -121,5 +127,5 @@ public sealed class UpscalingController(IUpscalingJobService jobs) : ControllerB
         }
     }
 
-    private Guid GetUserId() => Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier) ?? throw new InvalidOperationException("Authenticated user identifier is missing."));
+    private bool TryGetUserId(out Guid userId) => Guid.TryParse(User.FindFirstValue(ClaimTypes.NameIdentifier), out userId);
 }
