@@ -135,6 +135,37 @@ function formatCreatedAt(value: string, locale: string) {
   return new Intl.DateTimeFormat(localeTag(locale), { month: "short", day: "numeric", year: "numeric" }).format(date);
 }
 
+/**
+ * The in-flight status poll failed. Backoff keeps retrying on its own, but the
+ * member has to be told: this asserts the localized copy over the polite
+ * progress region and never echoes the provider's own message, which is
+ * English and server-facing ("Something went wrong.").
+ */
+export function VoiceStudioPollingNoticeView({ t }: { t: (key: string) => string }) {
+  return (
+    <p className="voice-alert" role="alert" aria-live="assertive">
+      <AlertCircle size={15} aria-hidden="true" />
+      <span>{t("voice.pollError")}</span>
+    </p>
+  );
+}
+
+/**
+ * A member-initiated action failed while a job was in flight - today that means
+ * the cancel request. It is a different claim from a failed status read, so it
+ * carries its own message and its own slot instead of borrowing the polling
+ * notice's copy.
+ */
+export function VoiceStudioActionNoticeView({ message }: { message: string }) {
+  return (
+    <p className="voice-alert" role="alert" aria-live="assertive">
+      <AlertCircle size={15} aria-hidden="true" />
+      <span>{message}</span>
+    </p>
+  );
+}
+
+
 export function VoiceStudioView() {
   const { workspace } = useAuth();
   const { locale, t } = useLocale();
@@ -153,6 +184,13 @@ export function VoiceStudioView() {
   const [loadingProjects, setLoadingProjects] = useState(true);
   const [loadingRecent, setLoadingRecent] = useState(true);
   const [error, setError] = useState("");
+  // The status-read failure is a separate slot from `error`. One string cannot
+  // hold two claims: `error` belongs to member actions (submit, cancel) and
+  // survives only until the next action, while `pollError` belongs to the
+  // background read and is withdrawn by the next good read. Sharing the slot
+  // made a failed cancel announce itself as "could not refresh", and let an
+  // unrelated good read silently withdraw a cancel the server refused.
+  const [pollError, setPollError] = useState("");
   const restoreJobId = useRef<string | null>(null);
 
   const loadWorkspaceData = useCallback(async () => {
@@ -205,12 +243,17 @@ export function VoiceStudioView() {
         if (active) {
           setCurrent(next);
           setPollRetry(0);
-          setError("");
+          // A good read says nothing about whether an earlier cancel worked, so
+          // it dismisses only its own notice.
+          setPollError("");
         }
-      } catch (caught) {
+      } catch {
+        // The provider's own message is deliberately not surfaced: it is English
+        // and server-facing, and the localized copy below is what the member
+        // needs. Backoff keeps retrying on its own.
         if (active) {
           setPollRetry((attempt) => attempt + 1);
-          setError(caught instanceof Error ? caught.message : t("voice.pollError"));
+          setPollError(t("voice.pollError"));
         }
       }
     }, nextVoicePollDelay(current, pollRetry) ?? 650);
@@ -234,6 +277,7 @@ export function VoiceStudioView() {
     setWorking(true);
     setError("");
     setPollRetry(0);
+    setPollError("");
     restoreJobId.current = null;
     clearVoiceActiveJobId(workspace.id);
     const input: VoiceGenerationInput = {
@@ -249,8 +293,16 @@ export function VoiceStudioView() {
       const job = await api.createVoiceGenerationJob(input);
       persistVoiceActiveJobId(workspace.id, job.id);
       setCurrent(job);
-    } catch (caught) {
-      setError(caught instanceof Error ? caught.message : t("voice.createError"));
+    } catch {
+      // Localized copy, never the rejection's own text: `ApiError.message` is
+      // the server's English string (`src/lib/api.ts`:
+      // `body?.error?.message ?? "Something went wrong."`), and this slot
+      // renders into the compose form for members reading the en, ar and ku
+      // screens. The studio can claim that the request was refused; it cannot
+      // translate server prose on the member's behalf. The cancel handler below
+      // already follows this rule, and the route-scoped Voice boundary does the
+      // same by design (`app/create/voice/error.tsx` never reads `error.message`).
+      setError(t("voice.createError"));
     } finally {
       setWorking(false);
     }
@@ -264,8 +316,13 @@ export function VoiceStudioView() {
       await api.cancelGenerationJob(current.id);
       setCurrent(await api.getGenerationJob(current.id));
       setPollRetry(0);
-    } catch (caught) {
-      setError(caught instanceof Error ? caught.message : t("voice.cancelError"));
+    } catch {
+      // Localized copy, not the rejection's own text: this message is now
+      // rendered inside the in-flight panel as well as the compose form, and
+      // `ApiError.message` is the server's English string. The studio can claim
+      // that the cancellation was refused; it cannot translate a provider's
+      // prose on the member's behalf.
+      setError(t("voice.cancelError"));
     } finally {
       setWorking(false);
     }
@@ -277,6 +334,7 @@ export function VoiceStudioView() {
     setCurrent(null);
     setError("");
     setPollRetry(0);
+    setPollError("");
     window.setTimeout(() => document.getElementById("voice-script")?.focus(), 0);
   }
 
@@ -330,6 +388,8 @@ export function VoiceStudioView() {
           <div className="voice-generating-icon"><LoaderCircle size={27} aria-hidden="true" /></div><p className="section-eyebrow">{t("voice.progressEyebrow")}</p><h2 id="voice-generation-title">{progressStatus}</h2><p>{t("voice.progressText")}</p>
           <p className="sr-only" role="status" aria-live="polite" aria-atomic="true">{progressAnnouncement}</p>
           <div className="generation-progress-label"><span>{t("jobs.progress")}</span><strong>{progress}%</strong></div><div className="generation-progress-track" role="progressbar" aria-label={t("jobs.progress")} aria-valuemin={0} aria-valuemax={100} aria-valuenow={progress} aria-valuetext={progressAnnouncement}><span style={{ width: `${progress}%` }} /></div>
+          {pollError && <VoiceStudioPollingNoticeView t={t} />}
+          {error && <VoiceStudioActionNoticeView message={error} />}
           {canCancelVoiceJob(current) && <button className="voice-secondary-action voice-cancel-action" type="button" onClick={() => void cancel()} disabled={working}><XCircle size={15} /> {t("voice.cancel")}</button>}
         </section>
       ) : (

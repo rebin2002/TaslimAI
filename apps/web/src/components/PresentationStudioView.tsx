@@ -39,6 +39,9 @@ import {
   loadPresentationDraftState,
   isRestorablePresentationJob,
   isPresentationSourceReady,
+  markPresentationCancellationRequestedForJob,
+  resolvePresentationJobSnapshot,
+  isPresentationCancellationNoOp,
   nextPresentationPollDelay,
   parsePresentationJobResult,
   persistPresentationActiveJobId,
@@ -48,6 +51,10 @@ import {
   shouldResetPresentationWorkspaceState,
   shouldPollPresentationJob,
 } from "@/lib/presentationStudioState";
+import {
+  filterStudioDownloadableRepresentations,
+  readStudioRepresentationDownloadability,
+} from "@/lib/studioRepresentationAvailability";
 
 const extensions = [".pdf", ".docx", ".txt", ".md", ".csv", ".xlsx"];
 type PresentationType = "auto" | "business" | "company_profile" | "sales" | "investor" | "proposal" | "training" | "project_update" | "report" | "educational" | "general";
@@ -305,7 +312,7 @@ function IdentityScopedPresentationStudioView({ userId }: { userId: string }) {
         clearPresentationActiveJobId(userId, workspace.id);
         return;
       }
-      setCurrent(job);
+      setCurrent((previous) => resolvePresentationJobSnapshot(previous, job));
       setPollRetry(0);
     }).catch((cause) => {
       if (!active || sessionDeniedRef.current || workspaceGeneration.current !== workspaceVersion || restoreJobId.current !== storedJobId) return;
@@ -329,7 +336,7 @@ function IdentityScopedPresentationStudioView({ userId }: { userId: string }) {
       try {
         const next = await api.getGenerationJob(jobId);
         if (!active || sessionDeniedRef.current || workspaceGeneration.current !== workspaceVersion || current.id !== jobId) return;
-        setCurrent(next);
+        setCurrent((previous) => resolvePresentationJobSnapshot(previous, next));
         setPollRetry(0);
         setError("");
       } catch (cause) {
@@ -354,6 +361,10 @@ function IdentityScopedPresentationStudioView({ userId }: { userId: string }) {
   }, [current, pollRetry, t, workspace, userId, revokeSession]);
 
   const result = parsePresentationJobResult(current);
+  // #1049: gate the export menu on the live per-representation facts delivered beside the
+  // immutable ResultJson snapshot (`representationDownloads`, the #1117 API contract). No
+  // field, no change: legacy payloads keep advertising every rendition exactly as before.
+  const representationDownloadability = readStudioRepresentationDownloadability(current);
   const state = presentationStudioState(current, result);
   const readyFiles = files.filter((file) => isPresentationSourceReady(file));
   const progress = displayPresentationProgress(current);
@@ -421,11 +432,27 @@ function IdentityScopedPresentationStudioView({ userId }: { userId: string }) {
     setError("");
     try {
       await api.cancelGenerationJob(jobId);
+      // The accepted cancellation is durable. Keep the UI on the cancelling path
+      // even if a poll that started before this request resolves afterwards.
+      // Bound to the job that issued it: a new brief can already own this state
+      // when the request settles, and must not be stranded as cancelling.
+      setCurrent(markPresentationCancellationRequestedForJob(jobId));
       const next = await api.getGenerationJob(jobId);
       if (sessionDeniedRef.current || workspaceGeneration.current !== workspaceVersion || current.id !== jobId) return;
-      setCurrent(next);
+      setCurrent((previous) => resolvePresentationJobSnapshot(previous, next));
     } catch (cause) {
       if (cause instanceof ApiError && cause.status === 401 && !sessionDeniedRef.current) revokeSession();
+      else if (cause instanceof ApiError && isPresentationCancellationNoOp(cause.status, cause.code) && !sessionDeniedRef.current && workspaceGeneration.current === workspaceVersion && current.id === jobId) {
+        // The job settled before the cancellation was recorded, so cancelling it
+        // again is an idempotent no-op: adopt the authoritative state instead of
+        // reporting a failed cancellation for work that already finished.
+        try {
+          const next = await api.getGenerationJob(jobId);
+          if (!sessionDeniedRef.current && workspaceGeneration.current === workspaceVersion && current.id === jobId) setCurrent((previous) => resolvePresentationJobSnapshot(previous, next));
+        } catch {
+          setError(t("presentation.completedLoadError"));
+        }
+      }
       else if (!sessionDeniedRef.current && workspaceGeneration.current === workspaceVersion && current.id === jobId) setError(t("presentation.cancelError"));
     } finally {
       if (!sessionDeniedRef.current && workspaceGeneration.current === workspaceVersion) setWorking(false);
@@ -440,7 +467,7 @@ function IdentityScopedPresentationStudioView({ userId }: { userId: string }) {
     setError("");
     try {
       const next = await api.getGenerationJob(jobId);
-      if (!sessionDeniedRef.current && workspaceGeneration.current === workspaceVersion && current.id === jobId) setCurrent(next);
+      if (!sessionDeniedRef.current && workspaceGeneration.current === workspaceVersion && current.id === jobId) setCurrent((previous) => resolvePresentationJobSnapshot(previous, next));
     } catch (cause) {
       if (cause instanceof ApiError && cause.status === 401 && !sessionDeniedRef.current) revokeSession();
       else if (!sessionDeniedRef.current && workspaceGeneration.current === workspaceVersion && current.id === jobId) setError(t("presentation.completedLoadError"));
@@ -540,7 +567,7 @@ function IdentityScopedPresentationStudioView({ userId }: { userId: string }) {
            * the control through `aria-busy` / `aria-disabled` and refused by the click handler, and the
            * accessible name states the action plus the specific file, because the bare format token could
            * not tell two PowerPoint renditions apart. presentationExportAccess.ts owns both decisions.
-           */}{selectPresentationExports(result.representations).map((representation) => {
+           */}{filterStudioDownloadableRepresentations(selectPresentationExports(result.representations), representationDownloadability).map((representation) => {
              const exportControl = resolvePresentationExportControl({ working, pendingExportId, exportId: representation.id });
              return <button className="secondary-button" key={representation.id} type="button" onClick={() => { if (canActivatePresentationExport(exportControl)) void downloadRepresentation(representation.id, representation.fileName); }} aria-busy={exportControl.busy || undefined} aria-disabled={exportControl.blocked || undefined} aria-label={presentationExportAccessibleName({ action: t("presentation.downloadLabel"), caption: presentationExportCaption(representation.type), fileName: representation.fileName })}><Download size={15} /> {presentationExportCaption(representation.type)}</button>;
            })}<Link className="secondary-button" href="/assets"><ExternalLink size={15} /> {t("presentation.openAssets")}</Link></div></div><div className="presentation-active-slide" role="region" aria-label={selectedSlide ? `${t("presentation.selectedSlide")}: ${selectedSlide.title}` : t("presentation.resultTitle")}><span className="sr-only" aria-live="polite">{selectedSlide ? `${t("presentation.selectedSlide")}: ${selectedSlide.title}` : t("presentation.resultTitle")}</span>{selectedSlide ? <SlideArtwork slide={selectedSlide} /> : <EmptySlideCanvas title={t("presentation.resultTitle")} description={t("presentation.completedLoadHint")} />}<button className="slide-nav-button slide-nav-prev" onClick={() => setActiveSlide((index) => Math.max(0, index - 1))} disabled={activeSlide === 0} aria-label={t("presentation.previousSlide")}><ArrowLeft size={17} /></button><button className="slide-nav-button slide-nav-next" onClick={() => setActiveSlide((index) => Math.min(Math.max(0, slides.length - 1), index + 1))} disabled={activeSlide >= slides.length - 1} aria-label={t("presentation.nextSlide")}><ArrowRight size={17} /></button></div><div className="presentation-output-footer"><span><CheckCircle2 size={15} /> {t("presentation.savedToAssets")}</span><span>{t("presentation.safetyNote")}</span></div>{downloadError && <div className="form-error" role="alert"><XCircle size={15} /> {downloadError}</div>}</section>

@@ -22,6 +22,29 @@ public sealed class MovieProductionQualityControlTests
     }
 
     [Fact]
+    public void Missing_output_integrity_evidence_requires_review_instead_of_accepting_a_render()
+    {
+        var decision = qc.Evaluate(new MovieProductionQcRequest(
+            Requirements(),
+            new MovieProductionQcEvidence(new(1920, 1080), 5, "continuity-v1")));
+
+        Assert.Equal(MovieProductionQcActions.RequireReview, decision.Action);
+        Assert.True(decision.RequiresHumanReview);
+        Assert.Contains(decision.Findings, item => item.ReasonCode == MovieProductionQcReasonCodes.OutputIntegrityEvidenceMissing);
+    }
+
+    [Fact]
+    public void Invalid_output_integrity_evidence_requires_review()
+    {
+        var decision = qc.Evaluate(new MovieProductionQcRequest(
+            Requirements(),
+            new MovieProductionQcEvidence(new(1920, 1080), 5, "continuity-v1", OutputSha256: "not-a-sha256")));
+
+        Assert.Equal(MovieProductionQcActions.RequireReview, decision.Action);
+        Assert.Contains(decision.Findings, item => item.ReasonCode == MovieProductionQcReasonCodes.OutputIntegrityEvidenceInvalid);
+    }
+
+    [Fact]
     public void Resolution_gap_within_source_and_scale_bounds_requests_upscale()
     {
         var decision = qc.Evaluate(Request(
@@ -116,14 +139,14 @@ public sealed class MovieProductionQualityControlTests
               "continuitySnapshotHash": "continuity-v1",
               "continuityWarningCount": 0,
               "hardContinuityConflictCount": 0,
-              "outputSha256": "abc123"
+              "outputSha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
             }
             """);
 
         Assert.Equal(new MovieResolution(1280, 720), evidence.CurrentResolution);
         Assert.Equal(5, evidence.DurationSeconds);
         Assert.Equal("continuity-v1", evidence.ContinuitySnapshotHash);
-        Assert.Equal("abc123", evidence.OutputSha256);
+        Assert.Equal("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", evidence.OutputSha256);
         Assert.Equal(new MovieProductionQcEvidence(null, null, null), MovieProductionQcEvidenceParser.Parse("not-json"));
     }
 
@@ -131,8 +154,10 @@ public sealed class MovieProductionQualityControlTests
         MovieResolution current,
         MovieProductionQcEconomics? cost) => new(
         Requirements(),
-        new MovieProductionQcEvidence(current, 5, "continuity-v1"),
+        new MovieProductionQcEvidence(current, 5, "continuity-v1", OutputSha256: ValidSha256),
         cost);
+
+    private const string ValidSha256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
     private static MovieProductionQcRequirements Requirements() => new(
         new MovieResolution(1920, 1080),

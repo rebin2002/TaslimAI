@@ -16,6 +16,11 @@ export const localeTags: Record<Locale, string> = {
 
 export const translations: Record<Locale, Record<string, string>> = {
   en: {
+    "admin.center": "Admin Center",
+    "admin.centerUsage": "Usage & Costs",
+    "admin.centerUsageDescription": "Review provider spend, customer charges, and usage by feature or workspace.",
+    "admin.centerOperations": "Operations",
+    "admin.centerOperationsDescription": "Review operating metrics, provider health, and generation failures.",
     "assets.category.all": "All",
     "assets.category.images": "Images",
     "assets.category.documents": "Documents",
@@ -1107,6 +1112,11 @@ export const translations: Record<Locale, Record<string, string>> = {
   },
 
   ar: {
+    "admin.center": "مركز الإدارة",
+    "admin.centerUsage": "الاستخدام والتكاليف",
+    "admin.centerUsageDescription": "راجع تكاليف المزوّدين ورسوم العملاء والاستخدام حسب الميزة أو مساحة العمل.",
+    "admin.centerOperations": "العمليات",
+    "admin.centerOperationsDescription": "راجع مؤشرات التشغيل وحالة المزوّدين وحالات فشل التوليد.",
     "assets.category.all": "الكل",
     "assets.category.images": "الصور",
     "assets.category.documents": "المستندات",
@@ -2032,6 +2042,11 @@ export const translations: Record<Locale, Record<string, string>> = {
   },
 
   ku: {
+    "admin.center": "ناوەندی بەڕێوەبردن",
+    "admin.centerUsage": "بەکارهێنان و تێچووەکان",
+    "admin.centerUsageDescription": "تێچووی دابینکەران، پارەی وەرگیراو لە کڕیاران و بەکارهێنان بەپێی تایبەتمەندی یان شوێنی کار بپشکنە.",
+    "admin.centerOperations": "کارگێڕی",
+    "admin.centerOperationsDescription": "پێوەرەکانی کارگێڕی، دۆخی دابینکەران و شکستی بەرهەمهێنان بپشکنە.",
     "assets.category.all": "هەموو",
     "assets.category.images": "وێنەکان",
     "assets.category.documents": "بەڵگەنامەکان",
