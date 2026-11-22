@@ -362,8 +362,10 @@ public sealed class UsageRefundCancellationLedgerRaceTests : IDisposable
         // taslim_tests database; skipped elsewhere). A cancellation finalizer holds its reservation
         // snapshot while two independent contexts, released by a barrier so both pass the
         // read-check-write pre-flight before either writes, book the refund leg with different keys.
-        // The barrier makes the read phase genuinely overlap and pins the write phase, so the
-        // assertion is deterministic rather than timing-dependent.
+        // The barrier makes the read phase genuinely overlap; which contender wins the unique-index
+        // insert is decided by PostgreSQL scheduling and the loser adopts the winner's leg, so the
+        // assertions pin the order-tolerant invariants (one consistent full reversal equal to
+        // whichever key committed first) rather than the identity of one specific winner.
         var connectionString = Environment.GetEnvironmentVariable("ConnectionStrings__Postgres")!;
         var schema = $"refund_cancel_{Guid.NewGuid():N}";
         var adminBuilder = new NpgsqlConnectionStringBuilder(connectionString);
@@ -416,7 +418,7 @@ public sealed class UsageRefundCancellationLedgerRaceTests : IDisposable
             var results = await Task.WhenAll(refundTask, retryTask);
 
             // Exactly one leg may report that it created the reversal; the loser adopts the winner.
-            Assert.Equal(1, results.Count(item => item is not null && item.Created));
+            var winner = Assert.Single(results, item => item is not null && item.Created);
 
             // The stale cancellation finalizer now writes, holding the pre-charge snapshot.
             await Ledger(staleDb).CancelAsync(staleCancelCopy, CancellationCode);
@@ -428,7 +430,13 @@ public sealed class UsageRefundCancellationLedgerRaceTests : IDisposable
 
             // Row-count and amount guarantees under real contention.
             var adjustment = Assert.Single(adjustments);
-            Assert.Equal(UsageTransactionAdjustmentType.Refund, adjustment.Type);
+            // The persisted leg must be exactly the winner's row: the refund key commits first it
+            // is a Refund, the competing retry key commits first it is a Reversal. The financial
+            // guarantee under contention is that whichever leg won, exactly one full-charge
+            // reversal is persisted and every reader observes that same row.
+            Assert.NotNull(winner);
+            Assert.Equal(winner!.Adjustment.Id, adjustment.Id);
+            Assert.Equal(winner.Adjustment.Type, adjustment.Type);
             Assert.Equal(ChargedAmountUsd, adjustment.AmountUsd);
 
             // The consistency guarantee the reviewer flagged as untested.
@@ -442,8 +450,11 @@ public sealed class UsageRefundCancellationLedgerRaceTests : IDisposable
             await using var replayDb = new TaslimDbContext(options);
             var replayCopy = await replayDb.UsageTransactions.SingleAsync(item => item.Id == txId);
             var replay = await Ledger(replayDb).RefundAsync(replayCopy);
-            Assert.NotNull(replay);
-            Assert.False(replay!.Created);
+            // When the refund key won the race the replay adopts the committed leg
+            // (Created == false); when the retry key won there is no refund-key row and
+            // the already fully reversed, non-billable transaction yields a null no-op.
+            // Either shape adds nothing; the single-row check below is the ledger guarantee.
+            Assert.True(replay is null || !replay.Created, "Replay must not create a second adjustment.");
             await using var after = new TaslimDbContext(options);
             Assert.Single(await after.UsageTransactionAdjustments.AsNoTracking()
                 .Where(item => item.UsageTransactionId == txId).ToListAsync());
