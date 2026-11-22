@@ -100,6 +100,28 @@ public sealed class MovieResolutionPlanningTests
     }
 
     [Fact]
+    public void Planner_keeps_an_older_eligible_snapshot_when_a_newer_snapshot_is_insufficient()
+    {
+        var planner = new MovieResolutionPlanner(new MovieResolutionPlannerOptions { MinimumBenchmarkSamples = 3 });
+        var result = planner.Plan(
+            new(
+                MovieResolutionTiers.P1080,
+                null,
+                0.80m,
+                [
+                    Evidence(MovieResolutionPathKinds.Native, MovieResolutionTiers.P1080, null, 0.10m, 0m, 0.95m, samples: 10, benchmarkedAt: BenchmarkTime.AddHours(-24)),
+                    Evidence(MovieResolutionPathKinds.Native, MovieResolutionTiers.P1080, null, 0.10m, 0m, 0.95m, samples: 1, benchmarkedAt: BenchmarkTime.AddHours(-1)),
+                ]),
+            BenchmarkTime);
+
+        Assert.Equal(MovieResolutionPlanStatuses.Recommended, result.Status);
+        Assert.NotNull(result.SelectedPath);
+        Assert.Equal(MovieResolutionPathKinds.Native, result.SelectedPath!.PathKind);
+        Assert.Equal(0.10m, result.SelectedPath.EstimatedCostUsd);
+        Assert.Equal(0.95m, result.SelectedPath.PredictedQualityScore);
+    }
+
+    [Fact]
     public void Planner_rejects_unknown_source_tiers_and_never_exposes_provider_model_or_prompt_fields()
     {
         var planner = new MovieResolutionPlanner();
