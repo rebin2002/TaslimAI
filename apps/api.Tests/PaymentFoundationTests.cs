@@ -242,6 +242,66 @@ public sealed class PaymentFoundationTests
     }
 
     [Fact]
+    public async Task Checkout_replays_the_recorded_session_when_only_the_idempotency_key_whitespace_differs()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = CreateDb(connection);
+        var workspace = NewWorkspace();
+        db.Workspaces.Add(workspace);
+        await db.SaveChangesAsync();
+        var provider = new CountingCheckoutProvider();
+        var service = new CheckoutSessionService(db, Options.Create(new BillingOptions { CustomerChargingEnabled = true, Provider = "fake" }), [provider], NullLogger<CheckoutSessionService>.Instance);
+
+        var first = await service.CreateAsync(workspace.Id, "pro", "checkout:whitespace-replay", "https://example.test/success", "https://example.test/cancel");
+
+        Exception? thrown = null;
+        CheckoutSessionResult? replay = null;
+        try
+        {
+            replay = await service.CreateAsync(workspace.Id, "pro", "  checkout:whitespace-replay\t", "https://example.test/success", "https://example.test/cancel");
+        }
+        catch (Exception exception)
+        {
+            thrown = exception;
+        }
+
+        var failures = new List<string>();
+        if (thrown is not null)
+            failures.Add($"A replay that only differs by surrounding whitespace threw {thrown.GetType().Name} instead of replaying the recorded session.");
+        if (replay is null || replay.Code != "IDEMPOTENT_REPLAY")
+            failures.Add($"The whitespace-variant replay must return IDEMPOTENT_REPLAY; observed '{replay?.Code ?? "<no result>"}'.");
+        if (replay?.CheckoutSessionId != first.CheckoutSessionId)
+            failures.Add("The whitespace-variant replay must return the original checkout session.");
+        if (provider.CheckoutCallCount != 1)
+            failures.Add($"The fake provider must be asked for exactly one checkout session; observed {provider.CheckoutCallCount} calls.");
+        if (await db.CheckoutSessions.CountAsync(item => item.WorkspaceId == workspace.Id) != 1)
+            failures.Add("Exactly one checkout session must be recorded for the replayed request.");
+        Assert.True(failures.Count == 0, string.Join(" ", failures));
+    }
+
+    [Fact]
+    public async Task Checkout_fails_closed_without_an_idempotency_key_before_touching_the_provider()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = CreateDb(connection);
+        var workspace = NewWorkspace();
+        db.Workspaces.Add(workspace);
+        await db.SaveChangesAsync();
+        var provider = new CountingCheckoutProvider();
+        var service = new CheckoutSessionService(db, Options.Create(new BillingOptions { CustomerChargingEnabled = true, Provider = "fake" }), [provider], NullLogger<CheckoutSessionService>.Instance);
+
+        var result = await service.CreateAsync(workspace.Id, "pro", "   ", "https://example.test/success", "https://example.test/cancel");
+
+        Assert.False(result.Available);
+        Assert.Equal("CHECKOUT_IDEMPOTENCY_KEY_REQUIRED", result.Code);
+        Assert.Null(result.CheckoutSessionId);
+        Assert.Equal(0, provider.CheckoutCallCount);
+        Assert.Empty(await db.CheckoutSessions.ToListAsync());
+    }
+
+    [Fact]
     public async Task Payment_attempts_are_idempotent_and_failed_subscription_becomes_past_due()
     {
         await using var connection = new SqliteConnection("Data Source=:memory:");
@@ -2029,6 +2089,19 @@ public sealed class PaymentFoundationTests
             CallCount++;
             return signature == "valid";
         }
+    }
+
+    private sealed class CountingCheckoutProvider : IPaymentProvider
+    {
+        public string Key => "fake";
+        public IWebhookSignatureVerifier WebhookSignatureVerifier { get; } = new AcceptingSignatureVerifier();
+        public int CheckoutCallCount { get; private set; }
+        public Task<ProviderCheckoutSessionResult> CreateCheckoutSessionAsync(ProviderCheckoutRequest request, CancellationToken cancellationToken = default)
+        {
+            CheckoutCallCount++;
+            return Task.FromResult(new ProviderCheckoutSessionResult($"session-{CheckoutCallCount}", $"https://example.test/checkout/session-{CheckoutCallCount}", DateTime.UtcNow.AddMinutes(30)));
+        }
+        public ProviderPaymentEvent ParseWebhook(string rawPayload) => throw new InvalidOperationException("The fake checkout provider does not parse webhooks.");
     }
 
     private sealed class NullNotificationEventWriter : INotificationEventWriter
