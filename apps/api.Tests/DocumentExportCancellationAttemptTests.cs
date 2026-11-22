@@ -741,6 +741,12 @@ public sealed class DocumentExportCancellationAttemptTests : IClassFixture<Docum
         var csrf = await client.GetFromJsonAsync<JsonElement>("/api/auth/csrf");
         using var request = new HttpRequestMessage(method, path);
         request.Headers.Add("X-CSRF-TOKEN", csrf.GetProperty("token").GetString()!);
+        // Integration reconciliation (vehicle-only, 2026-11-22): main now fails closed without a
+        // unique Idempotency-Key on document-generation creation (cost-safety guardrail merged
+        // after this lane was cut; the shipped browser client always sends one). Mirror the
+        // main-suite convention so the lane's cancellation assertions exercise the live contract.
+        if (method == HttpMethod.Post && path == "/api/document-generation/jobs")
+            request.Headers.TryAddWithoutValidation(DocumentTestRequests.IdempotencyHeader, DocumentTestRequests.NewKey());
         if (payload is not null) request.Content = JsonContent.Create(payload);
         return await client.SendAsync(request);
     }
