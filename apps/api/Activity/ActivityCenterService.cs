@@ -167,6 +167,19 @@ public sealed class ActivityCenterService(TaslimDbContext db, WorkspaceAccessSer
     // the unread counts all stay consistent with the hidden records, and so a noncreator cannot
     // even acknowledge a job they are not allowed to see. Intentionally shared non-Research
     // activity keeps its existing workspace visibility.
+    // Batch 3 reconciliation (#1129 x #1130, GATE-PRIV-01): #1130 generalises creator privacy
+    // beyond Research - an unscoped Presentation export record and an unscoped Social record are
+    // private to their creator as well (GenerationJobService.IsPrivateExecutionRecord), and after
+    // the jobType bucket expansion on main those records do reach this feed. The Research-only
+    // predicate above therefore disagreed with the job read model: a co-member could list, count
+    // and try to acknowledge another member's unscoped Social/Presentation jobs. This predicate is
+    // the translatable mirror of IsPrivateExecutionRecord; CreatorPrivateFenceEquivalenceTests
+    // guards the two fences against drifting apart again and
+    // ActivityUnscopedCreatorPrivacyHttpTests pins the observable HTTP behaviour. Project-scoped
+    // jobs keep the intentional workspace sharing surface for both the record and the asset.
     private static IQueryable<GenerationJob> VisibleToMember(IQueryable<GenerationJob> jobs, Guid userId) =>
-        jobs.Where(job => job.JobType != GenerationJobTypes.ResearchGenerate || job.CreatedByUserId == userId);
+        jobs.Where(job => job.CreatedByUserId == userId
+            || (job.JobType != GenerationJobTypes.ResearchGenerate
+                && (job.JobType != GenerationJobTypes.PresentationGenerate || job.ProjectId != null)
+                && (job.JobType != GenerationJobTypes.SocialGenerate || job.ProjectId != null)));
 }
