@@ -2950,3 +2950,6 @@ body { background: var(--canvas); }
 [dir="rtl"] .movie-shot-title, [dir="rtl"] .movie-shot-list-item { flex-direction: row-reverse; }
 [dir="rtl"] .movie-shot-designer-heading, [dir="rtl"] .movie-shot-intent-heading, [dir="rtl"] .movie-shot-advanced-heading, [dir="rtl"] .movie-shot-designer-footer, [dir="rtl"] .movie-capability-heading { flex-direction: row-reverse; }
 @media (max-width: 520px) { [dir="rtl"] .movie-shot-designer-heading, [dir="rtl"] .movie-shot-advanced-heading, [dir="rtl"] .movie-shot-designer-footer, [dir="rtl"] .movie-capability-heading { flex-direction: column; } }
+
+/* #1030: a pruned/processing representation row keeps its metadata but is no longer a link — match the muted unavailable affordance. */
+.asset-representation.is-unavailable { color: #a0acb7; }

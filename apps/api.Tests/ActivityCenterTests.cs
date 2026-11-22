@@ -107,6 +107,108 @@ public sealed class ActivityCenterTests : IClassFixture<GenerationJobsNoWorkerFa
     }
 
     [Fact]
+    public async Task Activity_job_type_filter_selects_exactly_the_bucket_vocabulary_items_report()
+    {
+        using var client = factory.CreateClient();
+        var auth = await Register(client, $"activity-jobtype-{Guid.NewGuid():N}@example.com");
+        var rawTypes = new[]
+        {
+            GenerationJobTypes.ImageGenerate,
+            GenerationJobTypes.DocumentGenerate,
+            GenerationJobTypes.PresentationGenerate,
+            GenerationJobTypes.ResearchGenerate,
+            GenerationJobTypes.SocialGenerate,
+            GenerationJobTypes.VoiceGenerate,
+            GenerationJobTypes.MusicGenerate,
+            GenerationJobTypes.MovieQuickGenerate,
+            GenerationJobTypes.MovieClipGenerate,
+            GenerationJobTypes.MovieAssembly,
+            GenerationJobTypes.MovieDialogueVoiceGenerate,
+            GenerationJobTypes.MovieSoundGenerate,
+            GenerationJobTypes.SystemTest,
+        };
+        var created = new Dictionary<string, Guid>();
+        var baseTime = DateTime.UtcNow;
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            for (var i = 0; i < rawTypes.Length; i++)
+            {
+                var id = Guid.NewGuid();
+                created[rawTypes[i]] = id;
+                db.GenerationJobs.Add(new GenerationJob
+                {
+                    Id = id,
+                    WorkspaceId = auth.PersonalWorkspace.Id,
+                    CreatedByUserId = auth.User.Id,
+                    JobType = rawTypes[i],
+                    Status = GenerationJobStatus.Queued,
+                    InputJson = "{}",
+                    Title = $"Activity type probe {i}",
+                    CreatedAt = baseTime.AddSeconds(-i),
+                    ConcurrencyToken = Guid.NewGuid(),
+                });
+            }
+            await db.SaveChangesAsync();
+        }
+
+        // The endpoint's own reported buckets define the expected partition; historic rows
+        // (system test, movie dialogue voice, movie sound) land in the default arm.
+        var unfiltered = await client.GetFromJsonAsync<ActivityListDto>(
+            $"/api/activity?workspaceId={auth.PersonalWorkspace.Id}&pageSize=100");
+        Assert.NotNull(unfiltered);
+        var expectedByBucket = unfiltered.Items
+            .GroupBy(item => item.JobType)
+            .ToDictionary(group => group.Key, group => group.Select(item => item.JobId).ToHashSet());
+
+        Assert.Equal(rawTypes.Length, expectedByBucket.Values.Sum(ids => ids.Count));
+        Assert.Equal(
+            new[] { created[GenerationJobTypes.MovieQuickGenerate], created[GenerationJobTypes.MovieClipGenerate], created[GenerationJobTypes.MovieAssembly] }.OrderBy(id => id),
+            expectedByBucket["movie"].OrderBy(id => id));
+        Assert.Equal(
+            new[] { created[GenerationJobTypes.MovieDialogueVoiceGenerate], created[GenerationJobTypes.MovieSoundGenerate], created[GenerationJobTypes.SystemTest] }.OrderBy(id => id),
+            expectedByBucket["other"].OrderBy(id => id));
+
+        foreach (var (bucket, expectedIds) in expectedByBucket)
+        {
+            var filtered = await client.GetFromJsonAsync<ActivityListDto>(
+                $"/api/activity?workspaceId={auth.PersonalWorkspace.Id}&jobType={bucket}&pageSize=100");
+            Assert.NotNull(filtered);
+            Assert.Equal(expectedIds.Count, filtered.TotalCount);
+            Assert.Equal(expectedIds, filtered.Items.Select(item => item.JobId).ToHashSet());
+            Assert.All(filtered.Items, item => Assert.Equal(bucket, item.JobType));
+        }
+
+        // The raw persisted vocabulary keeps working and stays case-insensitive, matching the
+        // canonical casing the create path stores for supported types.
+        var rawFiltered = await client.GetFromJsonAsync<ActivityListDto>(
+            $"/api/activity?workspaceId={auth.PersonalWorkspace.Id}&jobType=MUSIC.GENERATE&pageSize=100");
+        Assert.NotNull(rawFiltered);
+        Assert.Equal(new[] { created[GenerationJobTypes.MusicGenerate] }, rawFiltered.Items.Select(item => item.JobId));
+
+        var bucketCased = await client.GetFromJsonAsync<ActivityListDto>(
+            $"/api/activity?workspaceId={auth.PersonalWorkspace.Id}&jobType=Movie&pageSize=100");
+        Assert.NotNull(bucketCased);
+        Assert.Equal(3, bucketCased.TotalCount);
+
+        // Paginating a bucket stays consistent with the filtered total.
+        var secondPage = await client.GetFromJsonAsync<ActivityListDto>(
+            $"/api/activity?workspaceId={auth.PersonalWorkspace.Id}&jobType=movie&page=2&pageSize=2");
+        Assert.NotNull(secondPage);
+        Assert.Equal(3, secondPage.TotalCount);
+        Assert.Equal(2, secondPage.TotalPages);
+        Assert.Single(secondPage.Items);
+        Assert.All(secondPage.Items, item => Assert.Equal("movie", item.JobType));
+
+        // Unknown values preserve the previous exact-match behavior: no rows, no error.
+        var unknown = await client.GetFromJsonAsync<ActivityListDto>(
+            $"/api/activity?workspaceId={auth.PersonalWorkspace.Id}&jobType=not.a.type&pageSize=100");
+        Assert.NotNull(unknown);
+        Assert.Equal(0, unknown.TotalCount);
+        Assert.Empty(unknown.Items);
+    }
+
+    [Fact]
     public async Task Concurrent_mark_read_requests_are_idempotent_at_the_unique_boundary()
     {
         using var client = factory.CreateClient();
