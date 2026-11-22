@@ -850,10 +850,12 @@ public sealed class GenerationJobService(
         if (!await access.IsMemberAsync(userId, filter.WorkspaceId, cancellationToken)) return null;
         var page = ApiPagination.NormalizePage(filter.Page);
         var pageSize = ApiPagination.NormalizePageSize(filter.PageSize);
-        // Mirrors IsPrivateExecutionRecord: research records and unscoped presentation export
-        // records stay with their creator because their result JSON references assets that other
-        // workspace members cannot read. Expressed as a translatable predicate so paging and the
-        // total count stay consistent with the hidden records.
+        // Mirrors IsPrivateExecutionRecord: research records stay with their creator because the
+        // published report asset is creator-private (#936), and an unscoped presentation export
+        // publishes an asset that AssetVisibility already keeps private to its creator, so in both
+        // cases the result JSON references assets other workspace members cannot read. Expressed
+        // as a translatable predicate so paging and the total count stay consistent with the
+        // hidden records.
         var query = db.GenerationJobs.AsNoTracking().Where(job => job.WorkspaceId == filter.WorkspaceId &&
             (job.CreatedByUserId == userId
                 || (job.JobType != GenerationJobTypes.ResearchGenerate
@@ -913,11 +915,13 @@ public sealed class GenerationJobService(
     }
 
     // Execution records that describe creator-private output must not disclose the output's
-    // identifiers. Research records embed report text derived from private uploads, and a
-    // presentation job without a project publishes an asset that AssetVisibility keeps private
-    // to its creator, so the asset id, representation ids and exported file name carried in the
-    // presentation result JSON are private to that creator as well. Project-scoped jobs keep the
-    // intentional workspace sharing surface for both the record and the asset.
+    // identifiers. Research records embed report text derived from private uploads, and since
+    // #936 the research report asset is creator-private for the same reason, so the record and
+    // the asset hide from co-members together. A presentation job without a project publishes
+    // an asset that AssetVisibility keeps private to its creator, so the asset id,
+    // representation ids and exported file name carried in the presentation result JSON are
+    // private to that creator as well. Project-scoped presentation and other deliverable jobs
+    // keep the intentional workspace sharing surface for both the record and the asset.
     private static bool IsPrivateExecutionRecord(GenerationJob job, Guid userId) =>
         job.CreatedByUserId != userId
         && (string.Equals(job.JobType, GenerationJobTypes.ResearchGenerate, StringComparison.OrdinalIgnoreCase)
