@@ -8,6 +8,9 @@ const apiOrigin = (configuredApiUrl ?? "http://localhost:5000").replace(/\/$/, "
 const apiNamespacePathname = new URL(`${apiOrigin}/api/`).pathname;
 const MAX_PROXY_BODY_BYTES = 25 * 1024 * 1024;
 const UPSTREAM_TIMEOUT_MS = 30_000;
+// Bounded percent-decode rounds used to recognize a dot-relative segment in
+// any repeated-encoding spelling (%2e%2e, %252e%252e, %25252e%25252e, ...).
+const MAX_RELATIVE_DECODE_ROUNDS = 4;
 // Remove the entire client-controlled forwarding namespace, not just today's
 // commonly recognized names (e.g. X-Forwarded-Client-Cert and future variants).
 // The upstream HTTPS/cookie trust boundary must never depend on client metadata.
@@ -30,12 +33,19 @@ const bodyMethods = new Set(["POST", "PUT", "PATCH", "DELETE"]);
 // handler, so a relative segment reaching here composes a target whose request
 // line the WHATWG URL parser collapses out of the /api/ namespace
 // (e.g. /api/v1/../../admin -> /admin) while the caller's session cookie keeps
-// traveling with it. Relative segments are dropped before composition; a
-// percent-decode failure is treated as an ordinary (non-relative) segment
-// because the encoded form cannot collapse.
+// traveling with it. Relative segments are refused outright, before the target
+// is composed, before any credential header is copied, and before the request
+// body is read; a percent-decode failure is treated as an ordinary
+// (non-relative) segment because the encoded form cannot collapse.
 function isRelativePathSegment(segment: string): boolean {
   let candidate = segment;
-  for (let depth = 0; depth < 2; depth++) {
+  // Bounded fixed-point decode: every additional percent-encoding round is
+  // another spelling of the same relative segment (%2e%2e, %252e%252e,
+  // %25252e%25252e, ...), and all of them must be refused rather than
+  // forwarded as encoded noise. A segment whose decoding reaches a fixed point
+  // without becoming exactly "." or ".." (an ordinary name such as "...env" or
+  // a dot-prefixed name with encoded separators) exits immediately.
+  for (let round = 0; round < MAX_RELATIVE_DECODE_ROUNDS; round++) {
     if (candidate === "." || candidate === "..") return true;
     let decoded: string;
     try {
@@ -94,7 +104,19 @@ async function readBoundedBody(request: Request): Promise<ArrayBuffer | Response
 
 async function forward(request: Request, context: RouteContext): Promise<Response> {
   const { path } = await context.params;
-  const target = `${apiOrigin}/api/${path.filter((segment) => !isRelativePathSegment(segment)).map((segment) => encodeURIComponent(segment)).join("/")}${new URL(request.url).search}`;
+  // Fail closed on a dot-relative segment instead of dropping it: removing the
+  // segment silently rewrote a request that was meant to be rejected into a
+  // *different* valid endpoint (["v1","..","..","admin"] -> /api/v1/admin) and
+  // still forwarded the caller's session cookie and CSRF material to it. This
+  // refusal happens before the target is composed, before any header is copied
+  // and before the request body is read, and its envelope echoes neither the
+  // path, the offending segment, nor the upstream origin.
+  if (path.some(isRelativePathSegment))
+    return Response.json(
+      { error: { code: "INVALID_PATH", message: "The requested path is not valid." } },
+      { status: 400 },
+    );
+  const target = `${apiOrigin}/api/${path.map((segment) => encodeURIComponent(segment)).join("/")}${new URL(request.url).search}`;
   // Second, independent fail-closed assertion: if the composed target would
   // ever normalize outside the forwarding namespace for any reason, refuse it
   // before fetch() so neither the request line nor any credential header
