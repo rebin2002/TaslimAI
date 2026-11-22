@@ -80,7 +80,8 @@ public sealed class NotificationService(TaslimDbContext db, WorkspaceAccessServi
     public async Task CreateBillingPaymentFailedAsync(Guid workspaceId, Guid paymentAttemptId, CancellationToken cancellationToken = default)
     {
         var owners = await db.WorkspaceMembers.AsNoTracking()
-            .Where(member => member.WorkspaceId == workspaceId && (member.Role == WorkspaceRole.Owner || member.Role == WorkspaceRole.Admin))
+            .Where(member => member.WorkspaceId == workspaceId && !member.Workspace.IsArchived
+                && (member.Role == WorkspaceRole.Owner || member.Role == WorkspaceRole.Admin))
             .Select(member => member.UserId).ToListAsync(cancellationToken);
         var key = $"{NotificationTypes.BillingPaymentFailed}:{paymentAttemptId:N}";
         foreach (var userId in owners)
