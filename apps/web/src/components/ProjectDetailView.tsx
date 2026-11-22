@@ -44,9 +44,17 @@ export function ProjectDetailView() {
   // already cleared the banner, so without this the member would land on the
   // not-found branch, which has no retry affordance at all.
   const accessEndedMessage = useRef("");
+  // The project the route currently names, kept live so continuations that
+  // outlive their originating page can be retired. The load effect fences
+  // itself with a per-run `active` flag; the mutation continuations have no
+  // effect run of their own, so they consult this instead: a mutation answer
+  // about a project the member navigated away from must not act on the page
+  // at all — not its snapshot, not the access-ended epoch, not the error banner.
+  const routeProjectId = useRef(params.projectId);
 
   useEffect(() => {
     let active = true;
+    routeProjectId.current = params.projectId;
     const requestKey = `${params.projectId}:${loadAttempt}`;
     const cachedRequest = overviewRequest.current?.key === requestKey ? overviewRequest.current : null;
     // The access-ended epoch this read was issued under. It is taken when the
@@ -93,8 +101,15 @@ export function ProjectDetailView() {
 
   async function archive() {
     if (!overview || !window.confirm(t("projects.archiveConfirm"))) return;
-    try { replaceProject(await api.archiveProject(overview.project.id)); }
+    // Captured at click time: the answer, whatever it carries, is only about
+    // this project. If the route has moved on by the time it lands, retire it.
+    const targetProjectId = overview.project.id;
+    try {
+      const archived = await api.archiveProject(targetProjectId);
+      if (routeProjectId.current === targetProjectId) replaceProject(archived);
+    }
     catch (caught) {
+      if (routeProjectId.current !== targetProjectId) return;
       // 401/403/404 here means the server no longer resolves this project for
       // this principal; a "removed" member must not keep a live role badge.
       // This is also the answer that usually confirms the revocation, so it
@@ -108,8 +123,13 @@ export function ProjectDetailView() {
 
   async function restore() {
     if (!overview) return;
-    try { replaceProject(await api.restoreProject(overview.project.id)); }
+    const targetProjectId = overview.project.id;
+    try {
+      const restored = await api.restoreProject(targetProjectId);
+      if (routeProjectId.current === targetProjectId) replaceProject(restored);
+    }
     catch (caught) {
+      if (routeProjectId.current !== targetProjectId) return;
       const message = caught instanceof Error ? caught.message : t("projects.saveError");
       if (hasProjectDetailAccessEnded(caught)) { accessEndedEpoch.current += 1; accessEndedMessage.current = message; }
       if (resolveProjectDetailSnapshotAfterFailure(caught) === "invalidate") setOverview(null);
