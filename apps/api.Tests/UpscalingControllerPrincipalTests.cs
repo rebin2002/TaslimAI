@@ -9,9 +9,16 @@ namespace Taslim.Api.Tests;
 
 public sealed class UpscalingControllerPrincipalTests
 {
-    [Fact]
-    public async Task Malformed_authenticated_principal_is_rejected_before_upscaling_authorization()
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("not-a-guid")]
+    [InlineData("00000000-0000-0000-0000-000000000000")]
+    public async Task Malformed_authenticated_principal_is_rejected_before_upscaling_authorization(string? identifier)
     {
+        var claims = identifier is null
+            ? Array.Empty<Claim>()
+            : new[] { new Claim(ClaimTypes.NameIdentifier, identifier) };
         var controller = new UpscalingController(null!)
         {
             ControllerContext = new ControllerContext
@@ -19,7 +26,7 @@ public sealed class UpscalingControllerPrincipalTests
                 HttpContext = new DefaultHttpContext
                 {
                     User = new ClaimsPrincipal(new ClaimsIdentity(
-                        [new Claim(ClaimTypes.NameIdentifier, "not-a-guid")],
+                        claims,
                         authenticationType: "test")),
                 },
             },

@@ -9,11 +9,15 @@ namespace Taslim.Api.Tests;
 
 public sealed class MovieSoundControllerPrincipalTests
 {
-    [Fact]
-    public async Task Malformed_authenticated_principal_returns_unauthorized_for_all_sound_actions()
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("not-a-guid")]
+    [InlineData("00000000-0000-0000-0000-000000000000")]
+    public async Task Malformed_authenticated_principal_returns_unauthorized_for_all_sound_actions(string? identifier)
     {
         var service = new RecordingMovieSoundService();
-        var controller = CreateController(service);
+        var controller = CreateController(service, identifier);
         var projectId = Guid.NewGuid();
         var sceneId = Guid.NewGuid();
         var shotId = Guid.NewGuid();
@@ -36,8 +40,11 @@ public sealed class MovieSoundControllerPrincipalTests
         Assert.Equal(0, service.Calls);
     }
 
-    private static MovieSoundController CreateController(RecordingMovieSoundService service)
+    private static MovieSoundController CreateController(RecordingMovieSoundService service, string? identifier)
     {
+        var claims = identifier is null
+            ? Array.Empty<Claim>()
+            : new[] { new Claim(ClaimTypes.NameIdentifier, identifier) };
         var controller = new MovieSoundController(service)
         {
             ControllerContext = new ControllerContext
@@ -45,7 +52,7 @@ public sealed class MovieSoundControllerPrincipalTests
                 HttpContext = new DefaultHttpContext
                 {
                     User = new ClaimsPrincipal(new ClaimsIdentity(
-                        [new Claim(ClaimTypes.NameIdentifier, "not-a-guid")],
+                        claims,
                         authenticationType: "Test")),
                 },
             },
