@@ -6,6 +6,7 @@ using Taslim.Api.Contracts;
 using Taslim.Api.Domain;
 using Taslim.Api.Infrastructure;
 using Taslim.Api.Persistence;
+using Taslim.Api.Projects;
 
 namespace Taslim.Api.Controllers;
 
@@ -69,6 +70,7 @@ public sealed class ProjectsController(TaslimDbContext db, WorkspaceAccessServic
         var project = await db.Projects.AsNoTracking().FirstOrDefaultAsync(item => item.Id == projectId, cancellationToken);
         if (project is null) return ApiResults.Error(this, 404, "PROJECT_NOT_FOUND", "Project not found.");
         if (!await access.IsMemberAsync(GetUserId(), project.WorkspaceId, cancellationToken)) return Forbid();
+        Response.Headers.ETag = ProjectRevision.FormatETag(project.UpdatedAt);
         return Ok(ToDto(project));
     }
 
@@ -132,19 +134,67 @@ public sealed class ProjectsController(TaslimDbContext db, WorkspaceAccessServic
     public async Task<IActionResult> Update(Guid projectId, UpdateProjectRequest request, CancellationToken cancellationToken)
     {
         if (!ModelState.IsValid) return ApiResults.Validation(this);
-        var project = await db.Projects.FirstOrDefaultAsync(item => item.Id == projectId, cancellationToken);
+        var project = await db.Projects.AsNoTracking().FirstOrDefaultAsync(item => item.Id == projectId, cancellationToken);
         if (project is null) return ApiResults.Error(this, 404, "PROJECT_NOT_FOUND", "Project not found.");
         if (!await access.IsMemberAsync(GetUserId(), project.WorkspaceId, cancellationToken)) return Forbid();
         var type = ResolveType(request.Type);
         if (type is null) return ApiResults.Validation(this, "Choose a valid project type.");
-        project.Name = request.Name.Trim();
-        project.Description = CleanDescription(request.Description);
-        project.Instructions = CleanText(request.Instructions);
-        project.ContextNotes = CleanText(request.ContextNotes);
-        project.Type = type;
-        project.UpdatedAt = DateTime.UtcNow;
-        await db.SaveChangesAsync(cancellationToken);
-        return Ok(ToDto(project));
+
+        // The persisted UpdatedAt is the project's opaque revision stamp. When a client
+        // declares the revision its form was built against with If-Match, a stale base is
+        // refused before anything is touched; otherwise the revision observed a few lines
+        // above still fences the write against a commit that lands mid-request.
+        var baseRevision = project.UpdatedAt;
+        var ifMatch = Request.Headers.TryGetValue("If-Match", out var ifMatchValue) ? ifMatchValue.ToString() : null;
+        var wildcard = string.Equals(ifMatch?.Trim(), ProjectRevision.WildcardETag, StringComparison.Ordinal);
+        if (!string.IsNullOrWhiteSpace(ifMatch) && !wildcard)
+        {
+            if (!ProjectRevision.TryParseETag(ifMatch, out var declaredRevision))
+            {
+                return ApiResults.Error(this, StatusCodes.Status400BadRequest, "INVALID_IF_MATCH",
+                    "If-Match must be a revision token from this project's ETag header, or *.");
+            }
+            if (declaredRevision != baseRevision)
+            {
+                Response.Headers.ETag = ProjectRevision.FormatETag(baseRevision);
+                return ApiResults.Error(this, StatusCodes.Status409Conflict, "PROJECT_REVISION_CONFLICT",
+                    "Another edit reached this project first. Re-read it and apply your change again.");
+            }
+        }
+
+        var name = request.Name.Trim();
+        var description = CleanDescription(request.Description);
+        var instructions = CleanText(request.Instructions);
+        var contextNotes = CleanText(request.ContextNotes);
+        var nextRevision = ProjectRevision.NextStamp(baseRevision, DateTime.UtcNow);
+
+        // One conditional UPDATE does the whole write: fenced on the revision this request
+        // observed, so overlapping edits fail closed with a conflict instead of silently
+        // reverting each other. A wildcard If-Match opts out of the fence and applies
+        // unconditionally, per RFC 9110.
+        var target = wildcard ? db.Projects : db.Projects.Where(item => item.UpdatedAt == baseRevision);
+        var affected = await target
+            .Where(item => item.Id == projectId)
+            .ExecuteUpdateAsync(setters => setters
+                .SetProperty(item => item.Name, name)
+                .SetProperty(item => item.Description, description)
+                .SetProperty(item => item.Instructions, instructions)
+                .SetProperty(item => item.ContextNotes, contextNotes)
+                .SetProperty(item => item.Type, type)
+                .SetProperty(item => item.UpdatedAt, nextRevision),
+                cancellationToken);
+        if (affected == 0)
+        {
+            var current = await db.Projects.AsNoTracking().FirstOrDefaultAsync(item => item.Id == projectId, cancellationToken);
+            if (current is null) return ApiResults.Error(this, 404, "PROJECT_NOT_FOUND", "Project not found.");
+            Response.Headers.ETag = ProjectRevision.FormatETag(current.UpdatedAt);
+            return ApiResults.Error(this, StatusCodes.Status409Conflict, "PROJECT_REVISION_CONFLICT",
+                "Another edit reached this project first. Re-read it and apply your change again.");
+        }
+
+        var updated = await db.Projects.AsNoTracking().FirstAsync(item => item.Id == projectId, cancellationToken);
+        Response.Headers.ETag = ProjectRevision.FormatETag(updated.UpdatedAt);
+        return Ok(ToDto(updated));
     }
 
     [HttpPost("api/projects/{projectId:guid}/archive")]
