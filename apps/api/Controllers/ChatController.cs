@@ -609,6 +609,7 @@ public sealed class ChatController(
                 attachment.StoredFile.OriginalFileName,
                 attachment.StoredFile.ContentType,
                 attachment.StoredFile.Extension,
+                attachment.StoredFile.SizeBytes,
                 attachment.StoredFile.ExtractedText,
                 attachment.StoredFile.Status,
                 attachment.StoredFile.TextExtractionStatus,
@@ -626,19 +627,43 @@ public sealed class ChatController(
             string? dataUrl = null;
             if (FileContentTypes.IsImage(file.Extension))
             {
+                // A storage adapter can only wrap the exception raised by the
+                // object-open call. An R2 connection can also fail while the
+                // body is still streaming, and the resulting S3 or transport
+                // exception carries the endpoint account and object key inside
+                // its message. Bound the read to the configured storage
+                // operation timeout, compare the body with the size recorded at
+                // upload so a truncated object cannot reach the model, and log
+                // only the sanitized category. That keeps an attachment
+                // readback failure on the existing attachment-content contract
+                // instead of surfacing it as a generic generation failure with
+                // the wrong usage code.
+                using var readbackTimeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                readbackTimeout.CancelAfter(fileOptions.Value.StorageOperationTimeout);
+                var readbackToken = readbackTimeout.Token;
+                var readbackBound = Math.Max(fileOptions.Value.MaxFileSizeBytes, file.SizeBytes);
                 try
                 {
-                    await using var stream = await fileStorage.OpenReadAsync(file.StorageKey, cancellationToken) ?? throw new FileContentUnavailableException();
-                    using var buffer = new MemoryStream();
-                    await stream.CopyToAsync(buffer, cancellationToken);
-                    dataUrl = $"data:{file.ContentType};base64,{Convert.ToBase64String(buffer.ToArray())}";
+                    await using var stream = await fileStorage.OpenReadAsync(file.StorageKey, readbackToken) ?? throw new FileContentUnavailableException();
+                    var bytes = await StorageReadbackFaults.ReadBoundedAsync(stream, readbackBound, readbackToken);
+                    if (bytes.LongLength != file.SizeBytes)
+                        throw new InvalidDataException("Stored attachment content did not match its recorded size.");
+                    dataUrl = $"data:{file.ContentType};base64,{Convert.ToBase64String(bytes)}";
                 }
-                catch (FileStorageUnavailableException)
+                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested || !readbackTimeout.IsCancellationRequested)
                 {
-                    throw new FileContentUnavailableException();
+                    throw;
                 }
-                catch (FileStorageOperationException)
+                catch (Exception exception) when (exception is OperationCanceledException || StorageReadbackFaults.IsReadbackFault(exception))
                 {
+                    logger.LogWarning(
+                        "Chat attachment readback failed. ConversationId={ConversationId}; MessageId={MessageId}; FileId={FileId}; StorageProvider={StorageProvider}; FailureClass={FailureClass}; TimeoutSeconds={TimeoutSeconds}",
+                        conversation.Id,
+                        currentMessageId,
+                        file.StoredFileId,
+                        fileStorage.ProviderKey,
+                        exception is OperationCanceledException ? "timeout" : StorageReadbackFaults.Classify(exception).ToString("G").ToLowerInvariant(),
+                        fileOptions.Value.StorageOperationTimeout.TotalSeconds);
                     throw new FileContentUnavailableException();
                 }
             }
