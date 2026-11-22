@@ -116,9 +116,7 @@ public sealed class MovieCollaborationService(TaslimDbContext db, WorkspaceAcces
         if (!await workspaceAccess.IsMemberAsync(member.UserId, movie.WorkspaceId, cancellationToken)) throw new MovieCollaborationValidationException("The user is no longer a member of the movie workspace.");
         member.Role = request.Role.Trim();
         member.UpdatedAt = DateTime.UtcNow;
-        db.MovieTeamMemberPermissions.RemoveRange(member.PermissionOverrides);
-        member.PermissionOverrides = [];
-        ApplyOverrides(member, request.Permissions ?? [], request.PermissionOverrides ?? []);
+        ReconcileOverrides(member, request.Permissions ?? [], request.PermissionOverrides ?? []);
         await db.SaveChangesAsync(cancellationToken);
         return await LoadMemberDtoAsync(member.Id, cancellationToken);
     }
@@ -290,6 +288,47 @@ public sealed class MovieCollaborationService(TaslimDbContext db, WorkspaceAcces
         member.PermissionOverrides = permissions.Select(permission => new MovieTeamMemberPermission { Id = Guid.NewGuid(), MovieTeamMemberId = member.Id, Permission = permission.Trim(), Granted = true })
             .Concat(overrides.Select(item => new MovieTeamMemberPermission { Id = Guid.NewGuid(), MovieTeamMemberId = member.Id, Permission = item.Permission.Trim(), Granted = item.Granted }))
             .ToList();
+    }
+
+    /// <summary>
+    /// Reconciles the persisted permission overrides of an existing team member in place:
+    /// surviving permissions keep their row and only flip the Granted flag when the decision
+    /// changes, permissions the request no longer names are deleted, and only genuinely new
+    /// permissions are inserted.
+    ///
+    /// The previous behaviour deleted every override row and re-added replacements inside one
+    /// SaveChanges call. EF Core resolves an override instance that already carries a permanent
+    /// key against the tracked parent as an existing row, so each replacement was emitted as an
+    /// UPDATE keyed on a row that had just been deleted - or on a row that never existed at all.
+    /// That statement affected zero rows, so EF Core threw DbUpdateConcurrencyException, the
+    /// transaction rolled back, and every role change or permission revocation carrying an
+    /// override returned 500 without revoking anything. Revocation therefore could never be
+    /// proven before the next mutation, because it never reached the database.
+    /// </summary>
+    private void ReconcileOverrides(MovieTeamMember member, IReadOnlyCollection<string> permissions, IReadOnlyCollection<MoviePermissionOverrideRequest> overrides)
+    {
+        var desired = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
+        foreach (var permission in permissions)
+            desired[permission.Trim()] = true;
+        foreach (var item in overrides)
+            desired[item.Permission.Trim()] = item.Granted;
+
+        var reused = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var existing in member.PermissionOverrides.ToList())
+        {
+            if (desired.TryGetValue(existing.Permission, out var granted) && reused.Add(existing.Permission))
+            {
+                existing.Granted = granted;
+                continue;
+            }
+            db.MovieTeamMemberPermissions.Remove(existing);
+        }
+
+        foreach (var (permission, granted) in desired)
+        {
+            if (reused.Contains(permission)) continue;
+            db.MovieTeamMemberPermissions.Add(new MovieTeamMemberPermission { Id = Guid.NewGuid(), MovieTeamMemberId = member.Id, Permission = permission, Granted = granted });
+        }
     }
 
     private static void ValidateAssignment(string title, string? description, string status)
