@@ -247,17 +247,30 @@ public sealed class MovieResolutionPlanner(MovieResolutionPlannerOptions? config
         decimal minimumQuality,
         DateTime asOfUtc)
     {
-        var candidate = allEvidence
+        var candidates = allEvidence
             .Where(item => Matches(item, path, target, source))
             .OrderByDescending(item => item.BenchmarkedAtUtc ?? DateTime.MinValue)
             .ThenBy(item => TotalCost(item) ?? decimal.MaxValue)
-            .FirstOrDefault();
+            .ToArray();
 
-        if (candidate is null)
+        if (candidates.Length == 0)
         {
             return Ineligible(path, MovieResolutionPlanReasonCodes.EvidenceMissing);
         }
 
+        var evaluations = candidates
+            .Select(candidate => EvaluateCandidate(path, candidate, target, minimumQuality, asOfUtc))
+            .ToArray();
+        return evaluations.FirstOrDefault(item => item.IsEligible) ?? evaluations[0];
+    }
+
+    private MovieResolutionPlanPath EvaluateCandidate(
+        ExpectedPath path,
+        MovieResolutionEvidence candidate,
+        MovieResolutionTier target,
+        decimal minimumQuality,
+        DateTime asOfUtc)
+    {
         if (!MovieResolutionPathKinds.Supported.Contains(candidate.PathKind?.Trim() ?? string.Empty))
         {
             return Ineligible(path, MovieResolutionPlanReasonCodes.UnsupportedPath);
