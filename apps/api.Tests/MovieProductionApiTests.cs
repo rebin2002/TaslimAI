@@ -381,9 +381,49 @@ public sealed class MovieProductionApiTests : IClassFixture<GenerationJobsNoWork
             $"/api/movie-studio/shots/{shot.Id}/production/versions", new { stage = MovieProductionStages.StoryboardCandidate, compositionJson = "{}" });
         var approvedStoryboard = await SendWithCsrf<MovieProductionVersionDto>(client, HttpMethod.Post,
             $"/api/movie-studio/production/versions/{storyboard.Id}/review", new { approve = true });
+        // The approved keyframe must carry renderable asset evidence, otherwise the
+        // keyframe-integrity guard rejects the render before the provider-route gate is reached.
+        var referenceFileId = Guid.NewGuid();
+        var keyframeAssetId = Guid.NewGuid();
+        using (var seedScope = factory.Services.CreateScope())
+        {
+            var seedDb = seedScope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            var now = DateTime.UtcNow;
+            seedDb.StoredFiles.Add(new StoredFile
+            {
+                Id = referenceFileId,
+                WorkspaceId = auth.PersonalWorkspace.Id,
+                UserId = auth.User.Id,
+                OriginalFileName = "keyframe-reference.png",
+                StoredFileName = "keyframe-reference.png",
+                ContentType = "image/png",
+                Extension = ".png",
+                SizeBytes = 128,
+                StorageProvider = FileStorageProviders.Local,
+                StorageKey = $"test/{referenceFileId:N}",
+                Status = StoredFileStatus.Ready,
+                CreatedAt = now,
+                ProcessedAt = now,
+                TextExtractionStatus = FileExtractionStatus.NotApplicable,
+            });
+            seedDb.Assets.Add(new Asset
+            {
+                Id = keyframeAssetId,
+                WorkspaceId = auth.PersonalWorkspace.Id,
+                CreatedByUserId = auth.User.Id,
+                StoredFileId = referenceFileId,
+                Name = "Keyframe reference",
+                AssetType = AssetTypes.Image,
+                MimeType = "image/png",
+                Status = AssetStatus.Active,
+                CreatedAt = now,
+                UpdatedAt = now,
+            });
+            await seedDb.SaveChangesAsync();
+        }
         var keyframe = await SendWithCsrf<MovieProductionVersionDto>(client, HttpMethod.Post,
             $"/api/movie-studio/shots/{shot.Id}/production/versions",
-            new { stage = MovieProductionStages.ProductionKeyframe, sourceVersionId = approvedStoryboard.Id, compositionJson = "{}" });
+            new { stage = MovieProductionStages.ProductionKeyframe, sourceVersionId = approvedStoryboard.Id, compositionJson = "{}", assetId = keyframeAssetId });
         var approvedKeyframe = await SendWithCsrf<MovieProductionVersionDto>(client, HttpMethod.Post,
             $"/api/movie-studio/production/versions/{keyframe.Id}/review", new { approve = true });
         var motion = await SendWithCsrf<MovieProductionVersionDto>(client, HttpMethod.Post,
