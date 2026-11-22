@@ -20,6 +20,7 @@ public static class DirectorCreativeValidationReasonCodes
     public const string UnsupportedLockedCanonClaim = "CREATIVE_LOCKED_CANON_UNSUPPORTED";
     public const string OutputLanguageMismatch = "CREATIVE_OUTPUT_LANGUAGE_MISMATCH";
     public const string BaseRevisionMismatch = "CREATIVE_BASE_REVISION_MISMATCH";
+    public const string SceneIdentifierCollision = "CREATIVE_SCENE_IDENTIFIER_COLLISION";
     public const string StructuredRepairApplied = "CREATIVE_STRUCTURED_REPAIR_APPLIED";
 }
 
@@ -232,6 +233,11 @@ public sealed class MovieDirectorCreativeOutputValidator(
         }
 
         ValidateText(findings, scene.SceneIdentifier, 80, "sceneIdentifier");
+        if (!string.IsNullOrWhiteSpace(scene.SceneIdentifier))
+        {
+            var normalizedIdentifier = Normalize(scene.SceneIdentifier);
+            AddIf(findings, AllScenes(context).Any(item => string.Equals(Normalize(item.SceneIdentifier), normalizedIdentifier, StringComparison.OrdinalIgnoreCase)), DirectorCreativeValidationReasonCodes.SceneIdentifierCollision, "sceneIdentifier");
+        }
         ValidateText(findings, scene.Slugline, 500, "slugline");
         ValidateText(findings, scene.Synopsis, 20_000, "sceneSynopsis");
         AddIf(findings, scene.Elements is null || scene.Elements.Count == 0, DirectorCreativeValidationReasonCodes.RequiredFieldMissing, "elements");

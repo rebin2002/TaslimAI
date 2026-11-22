@@ -289,6 +289,7 @@ public static class MovieShotQualityRequirementsPlanner
         }
         if (requirements.GroundingSignals.Any(item => string.IsNullOrWhiteSpace(item) || item.Length > 180)
             || profile.AdaptiveResolutionDirectorInput.ContinuityAnchors.Any(item => string.IsNullOrWhiteSpace(item) || item.Length > 160)
+            || profile.AdaptiveResolutionDirectorInput.ShotDescription is null
             || profile.AdaptiveResolutionDirectorInput.ShotDescription.Length > 8_000
             || profile.AdaptiveResolutionDirectorInput.ProjectStyle is { Length: > 100 })
         {

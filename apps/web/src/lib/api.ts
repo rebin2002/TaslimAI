@@ -374,7 +374,8 @@ export type MovieTimelineRevisionRequest = { baseRevisionId?: string | null; lab
 export type MovieTakeUpscaleEligibility = { takeId: string; movieShotId: string; eligible: boolean; isSelected: boolean; isFinal: boolean; code: string; message: string; targetMasterResolution: string; sourceResolution: string | null; auditId: string | null; auditStatus: string | null; evaluatedAt: string };
 export type MovieFinalMaster = { id: string; movieProjectId: string; movieShotId: string; sourceTakeId: string; sourceMovieClipId: string | null; sourceAssetId: string | null; outputAssetId: string | null; generationJobId: string | null; targetProfile: string; sourceWidth: number | null; sourceHeight: number | null; targetWidth: number; targetHeight: number; state: string; stateReason: string | null; qcStatus: string; qcResultJson: string | null; provenanceJson: string | null; supersedesMasterId: string | null; supersededByMasterId: string | null; requestedAt: string; updatedAt: string; completedAt: string | null; supersededAt: string | null };
 export type MovieProductionVersion = { id: string; movieShotId: string; versionNumber: number; stage: MovieProductionStage; status: "Draft" | "PendingApproval" | "Approved" | "Rejected" | "Selected"; label: string | null; compositionJson: string; regenerationMetadataJson: string | null; stageProvenanceJson: string | null; continuitySnapshotReferenceJson: string | null; cinematographyReferenceJson: string | null; sourceVersionId: string | null; generationJobId: string | null; assetId: string | null; firstFrameAssetId: string | null; lastFrameAssetId: string | null; firstFrameNotes: string | null; lastFrameNotes: string | null; rejectionReason: string | null; createdAt: string; updatedAt: string; reviewedAt: string | null; assetReferences: MovieProductionAssetReference[]; execution: MovieProductionExecution | null; isLocked?: boolean; lockedAt?: string | null; lockedByUserId?: string | null; isSelected?: boolean };
-export type MovieRegenerationRequest = { id: string; movieShotId: string; targetType: string; targetId: string; actionType: string; requestedStage: MovieProductionStage; reason: string; sourceVersionId: string | null; changedInputsJson: string; compositionJson: string; status: string; createdByUserId: string; confirmedByUserId: string | null; generationJobId: string | null; resultingProductionVersionId: string | null; resultingTakeId: string | null; createdAt: string; confirmedAt: string | null; costPreview: { estimatedProviderCostUsd: number | null; estimatedProviderCostKnown: boolean; currency: string; costEstimateJson: string | null; confirmationRequired: boolean; guardrails: GenerationCostPreview | null } };
+export type MovieRegenerationCostPreview = { estimatedProviderCostUsd: number | null; estimatedProviderCostKnown: boolean; currency: string; costEstimateJson: string | null; confirmationRequired: boolean; estimateState?: string; minimumEstimatedProviderCostUsd?: number | null; maximumEstimatedProviderCostUsd?: number | null; guardrails: GenerationCostPreview | null };
+export type MovieRegenerationRequest = { id: string; movieShotId: string; targetType: string; targetId: string; actionType: string; requestedStage: MovieProductionStage; reason: string; sourceVersionId: string | null; changedInputsJson: string; compositionJson: string; status: string; createdByUserId: string; confirmedByUserId: string | null; generationJobId: string | null; resultingProductionVersionId: string | null; resultingTakeId: string | null; createdAt: string; confirmedAt: string | null; costPreview: MovieRegenerationCostPreview };
 export type MovieSelectiveRegenerationResponse = { request: MovieRegenerationRequest; job: GenerationJob | null; productionVersion: MovieProductionVersion | null; take: MovieTake | null };
 export type MovieProductionStageTransition = { id: string; movieShotId: string; movieProductionVersionId: string; fromStage: MovieProductionStage; toStage: MovieProductionStage; eventType: string; reason: string | null; metadataJson: string | null; sourceVersionId: string | null; generationJobId: string | null; actorUserId: string; createdAt: string };
 export type MovieProductionCheckpointItem = { shotId: string; sceneTitle: string; sceneSequence: number; shotSequence: number; label: string; state: "Complete" | "Running" | "Blocked" | "Recoverable" | string; currentStage: MovieProductionStage | string; progressPercent: number; blockedReason: string | null; nextAction: string | null; recoveryJobId: string | null; selectedTakeId: string | null; updatedAt: string };
@@ -1187,6 +1188,126 @@ export type MovieTakeSelectRecord = {
   reviewedAt: string | null;
   reviewNote: string | null;
 };
+export type MovieMissingInsertPlan = {
+  contractVersion: string;
+  movieProjectId: string;
+  timelineRevisionId: string | null;
+  timelineRevisionNumber: number | null;
+  timelineStatus: string;
+  requiresApproval: boolean;
+  canonicalTimelineChanged: boolean;
+  generationQueued: boolean;
+  grounding: {
+    approvedStoryRevisionId: string | null;
+    approvedStoryRevisionNumber: number | null;
+    lockedGuideRevisionId: string | null;
+    lockedGuideRevisionNumber: number | null;
+    productionKits: Array<{ shotId: string; packageHash: string; schemaVersion: number }>;
+    isComplete: boolean;
+  };
+  gaps: Array<{
+    id: string;
+    kind: string;
+    trackId: string | null;
+    timelineInMilliseconds: number;
+    timelineOutMilliseconds: number;
+    durationMilliseconds: number;
+    beforeTimelineItemId: string | null;
+    afterTimelineItemId: string | null;
+    beforeShotId: string | null;
+    afterShotId: string | null;
+    sceneId: string | null;
+    label: string;
+  }>;
+  continuityFindings: Array<{
+    code: string;
+    severity: string;
+    beforeShotId: string | null;
+    afterShotId: string | null;
+    sceneId: string | null;
+    message: string;
+    action: string;
+  }>;
+  proposals: MovieMissingInsertProposal[];
+  warnings: Array<{ code: string; severity: string; message: string; gapId: string | null }>;
+  assembledAtUtc: string;
+};
+export type MovieMissingInsertProposal = {
+    id: string;
+    gapId: string;
+    approvalStatus: string;
+    requiresApproval: boolean;
+    changesStoryCanon: boolean;
+    insertType: string;
+    sceneId: string | null;
+    storySceneId: string | null;
+    anchorShotId: string | null;
+    durationMilliseconds: number;
+    description: string;
+    purpose: string;
+    subjects: string | null;
+    locationSet: string | null;
+    productionRequirements: string | null;
+    continuityReferences: string | null;
+    cameraAndFraming: string | null;
+    cameraMotion: string | null;
+    visualContinuityNotes: string | null;
+    grounding: {
+      storySceneId: string | null;
+      approvedStoryRevisionId: string | null;
+      lockedGuideRevisionId: string | null;
+      anchorShotId: string | null;
+      productionKitHash: string | null;
+      sourceFields: string[];
+    };
+  anchorTakeId: string | null;
+  anchorSelectId: string | null;
+  continuityAnchorJson: string | null;
+  screenDirectionAnchorJson: string | null;
+};
+export type MovieMissingInsertDecision = {
+  id: string;
+  movieProjectId: string;
+  proposalId: string;
+  gapId: string;
+  timelineRevisionId: string;
+  timelineRevisionNumber: number;
+  trackId: string;
+  beforeTimelineItemId: string | null;
+  afterTimelineItemId: string | null;
+  timelineInMilliseconds: number;
+  timelineOutMilliseconds: number;
+  beforeShotId: string | null;
+  afterShotId: string | null;
+  sceneId: string | null;
+  storySceneId: string | null;
+  anchorShotId: string | null;
+  approvedStoryRevisionId: string | null;
+  lockedGuideRevisionId: string | null;
+  productionKitHash: string | null;
+  productionKitSchemaVersion: number | null;
+  anchorTakeId: string | null;
+  anchorSelectId: string | null;
+  selectedTakeId: string | null;
+  selectedSelectId: string | null;
+  contractVersion: string;
+  insertType: string;
+  durationMilliseconds: number;
+  description: string;
+  purpose: string;
+  proposalGroundingJson: string;
+  continuityAnchorJson: string;
+  screenDirectionAnchorJson: string;
+  status: string;
+  createdByUserId: string;
+  createdAt: string;
+  reviewedByUserId: string | null;
+  reviewedAt: string | null;
+  reviewNote: string | null;
+  appliedByUserId: string | null;
+  appliedAt: string | null;
+  appliedTimelineRevisionId: string | null;
+};
 export type MovieTeamMember = { id: string; userId: string; displayName: string; role: string; isProjectOwner: boolean; permissions: string[]; createdAt: string; updatedAt: string };
 export type MovieComment = { id: string; targetType: string; targetId: string; authorUserId: string; authorDisplayName: string; body: string; parentCommentId: string | null; mentions: { userId: string; displayName: string }[]; createdAt: string; updatedAt: string; resolvedAt: string | null };
 export type MovieReview = { id: string; targetType: string; targetId: string; requestedByUserId: string; requestedByDisplayName: string; reviewerUserId: string; reviewerDisplayName: string; isFinal: boolean; status: string; requestNote: string | null; decisionNote: string | null; createdAt: string; reviewedAt: string | null };
@@ -1258,6 +1379,11 @@ export const api = {
   previewMovieBudgetDirector: (id: string, input: MovieBudgetDirectorRequest) => request<MovieBudgetDirectorEstimate>(`/api/movie-studio/projects/${id}/budget-director/preview`, { method: "POST", body: JSON.stringify(input) }, true),
   getMovieProject: (id: string) => request<MovieProject>(`/api/movie-studio/projects/${id}`),
   getMovieTimeline: (id: string) => request<MovieTimeline>(`/api/movie-studio/projects/${id}/timeline`),
+  getMovieMissingInsertPlan: (id: string, revisionId?: string | null) => request<MovieMissingInsertPlan>(`/api/movie-studio/projects/${id}/insert-planner${revisionId ? `?revisionId=${encodeURIComponent(revisionId)}` : ""}`),
+  getMovieMissingInsertDecisions: (id: string) => request<MovieMissingInsertDecision[]>(`/api/movie-studio/projects/${id}/insert-planner/decisions`),
+  materializeMovieMissingInsertDecisions: (id: string, input: { timelineRevisionId?: string | null }) => request<MovieMissingInsertDecision[]>(`/api/movie-studio/projects/${id}/insert-planner/decisions`, { method: "POST", body: JSON.stringify(input) }, true),
+  reviewMovieMissingInsertDecision: (decisionId: string, input: { decision: "Approved" | "Rejected"; takeId?: string | null; selectId?: string | null; comment?: string | null }) => request<MovieMissingInsertDecision>(`/api/movie-studio/insert-planner/decisions/${decisionId}/review`, { method: "POST", body: JSON.stringify(input) }, true),
+  applyMovieMissingInsertDecision: (decisionId: string) => request<MovieMissingInsertDecision>(`/api/movie-studio/insert-planner/decisions/${decisionId}/apply`, { method: "POST", body: "{}" }, true),
   getMovieTimelineTransitions: (id: string) => request<MovieTimelineTransitionEdit>(`/api/movie-studio/projects/${id}/timeline/transition-edits`),
   applyMovieTimelineTransition: (id: string, input: { timeline: MovieCanonicalTimeline; decision: MovieTimelineEditDecision }) => request<MovieTimelineTransitionEdit>(`/api/movie-studio/projects/${id}/timeline/transition-edits`, { method: "POST", body: JSON.stringify(input) }, true),
   createMovieTimelineRevision: (id: string, input: MovieTimelineRevisionRequest) => request<MovieTimelineRevision>(`/api/movie-studio/projects/${id}/timeline/revisions`, { method: "POST", body: JSON.stringify(input) }, true),

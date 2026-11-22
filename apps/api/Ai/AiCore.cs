@@ -63,6 +63,15 @@ public interface IAiProvider
 public interface IAiModelRouter
 {
     AiProviderSelection Select(AiChatRequest request);
+
+    /// <summary>
+    /// Deployment-level readiness for chat generation: a request can only be served
+    /// when a provider selection would succeed. Admission points use this to refuse
+    /// before persisting chat history or opening a usage reservation, mirroring the
+    /// <c>IImageGenerationProviderReadiness</c> gate in front of Image Studio.
+    /// The probe never contacts a provider.
+    /// </summary>
+    bool IsChatGenerationAvailable();
 }
 
 public interface IChatCompletionService
@@ -85,7 +94,11 @@ public sealed class AiModelRouter(
     public AiProviderSelection Select(AiChatRequest request)
     {
         var tier = NormalizeTier(request.RequestedTier, settings.DefaultChatTier);
-        var providerKey = settings.OpenAI.Enabled ? "openai" : settings.AllowMockProvider ? "mock" : throw new AiProviderUnavailableException();
+        // OpenAiProvider refuses every call when the credential is missing, so the
+        // router must not advertise it as ready; otherwise admission writes state and
+        // only then discovers that nothing can be served.
+        var openAiIsUsable = settings.OpenAI.Enabled && !string.IsNullOrWhiteSpace(settings.OpenAI.ApiKey);
+        var providerKey = openAiIsUsable ? "openai" : settings.AllowMockProvider ? "mock" : throw new AiProviderUnavailableException();
         var requiresStructuredOutput = request.StructuredOutput is not null || request.JsonMode;
         var hasImageAttachments = request.Attachments?.Any(attachment => !string.IsNullOrWhiteSpace(attachment.DataUrl)) == true;
         var model = catalog.GetForTier(tier, providerKey, requiresStructuredOutput, request.EnableStreaming);
@@ -100,6 +113,19 @@ public sealed class AiModelRouter(
         if (model is null) throw new AiProviderUnavailableException();
 
         return new AiProviderSelection(providerKey, model.ModelKey, model.DisplayName, model.CapabilityTier, providerKey == "mock");
+    }
+
+    public bool IsChatGenerationAvailable()
+    {
+        try
+        {
+            Select(new AiChatRequest([], settings.SystemInstruction, string.Empty));
+            return true;
+        }
+        catch (AiProviderUnavailableException)
+        {
+            return false;
+        }
     }
 
     private static string NormalizeTier(string? requested, string fallback)

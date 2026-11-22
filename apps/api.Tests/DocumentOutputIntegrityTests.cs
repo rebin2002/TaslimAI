@@ -87,6 +87,23 @@ public sealed class DocumentOutputIntegrityTests
         var pageLessException = Assert.Throws<DocumentOutputIntegrityException>(() => DocumentOutputIntegrityValidator.Validate(pageLess));
         Assert.Contains("page object", pageLessException.Message, StringComparison.Ordinal);
     }
+
+    [Fact]
+    public void Validator_rejects_main_document_relationship_pointing_at_another_part()
+    {
+        // A DOCX can hold every required part and every correct content type while its
+        // OPC root relationship addresses a different part. Word refuses such a file,
+        // so publishing it as an Asset would ship an unopenable document. The
+        // empty-relationship case and the renderer's positive case are already covered
+        // by the tests above (merged with #273).
+        var misdirected = RewriteArchiveEntry(RenderValidDocx(), "_rels/.rels",
+            """<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/fallback.xml"/></Relationships>""");
+
+        var exception = Assert.Throws<DocumentOutputIntegrityException>(() => DocumentOutputIntegrityValidator.Validate(misdirected));
+
+        Assert.Contains("no relationship to its main document part", exception.Message, StringComparison.Ordinal);
+    }
+
     private static RenderedDocument RenderValidDocx()
     {
         var input = new DocumentGenerationInput(Guid.NewGuid(), null, "Launch brief", "Create a brief.", "report", "short", null, null, [], "en", "docx", "professional", true);

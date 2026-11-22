@@ -224,6 +224,12 @@ describe("Full Movie workspace foundation", () => {
     expect(salvageSource).toContain("movieTakeSelectId");
     expect(selectsSource).toContain("api.createMovieTakeSelect");
     expect(selectsSource).toContain("api.reviewMovieTakeSelect");
+    expect(selectsSource).toContain("api.materializeMovieMissingInsertDecisions");
+    expect(selectsSource).toContain("api.reviewMovieMissingInsertDecision");
+    expect(selectsSource).toContain("api.applyMovieMissingInsertDecision");
+    expect(selectsSource).toContain("server-grounded");
+    expect(selectsSource).not.toContain("api.createMovieTimelineRevision");
+    expect(selectsSource).not.toContain("buildSalvageTimelineRevision");
     expect(selectsSource).not.toContain("Accept recommendation");
   });
 

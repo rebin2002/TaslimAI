@@ -159,6 +159,7 @@ public static class CinematographyShotPlanValidator
         if (plan.Grounding is { Count: > MaxGroundingReferences })
             return "Cinematography grounding is limited to 24 references.";
         if (plan.Grounding is not null && plan.Grounding.Any(item =>
+                item is null ||
                 string.IsNullOrWhiteSpace(item.Source) || item.Source.Trim().Length > 80 ||
                 string.IsNullOrWhiteSpace(item.Evidence) || item.Evidence.Trim().Length > MaxGroundingEvidenceLength))
             return "Cinematography grounding references are invalid.";

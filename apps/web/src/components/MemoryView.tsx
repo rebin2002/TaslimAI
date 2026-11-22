@@ -5,6 +5,7 @@ import { Check, Pencil, Plus, Trash2, X } from "lucide-react";
 import { useAuth } from "@/components/AuthProvider";
 import { useLocale } from "@/components/LocaleProvider";
 import { api, type PersonalMemory } from "@/lib/api";
+import { useDialogAccessibility } from "@/lib/useDialogAccessibility";
 
 const categories = ["Preference", "Personal", "Business", "Writing", "Language", "Other"] as const;
 
@@ -20,6 +21,7 @@ export function MemoryView() {
   const [title, setTitle] = useState("");
   const [content, setContent] = useState("");
   const [saving, setSaving] = useState(false);
+  const dialogRef = useDialogAccessibility<HTMLFormElement>(formOpen, closeForm);
 
   useEffect(() => {
     if (!workspace?.id) return;
@@ -129,11 +131,11 @@ export function MemoryView() {
       )}
       {formOpen && (
         <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) closeForm(); }}>
-          <form className="memory-form modal-card" onSubmit={submit}>
+          <form ref={dialogRef} className="memory-form modal-card" role="dialog" aria-modal="true" aria-labelledby="memory-form-title" tabIndex={-1} onSubmit={submit}>
             <div className="modal-heading">
               <div>
                 <p className="section-eyebrow">{editing ? t("memory.editEyebrow") : t("memory.addEyebrow")}</p>
-                <h2>{editing ? t("memory.editTitle") : t("memory.addTitle")}</h2>
+                <h2 id="memory-form-title">{editing ? t("memory.editTitle") : t("memory.addTitle")}</h2>
               </div>
               <button type="button" className="modal-close" onClick={closeForm} aria-label={t("common.close")}><X size={18} /></button>
             </div>
@@ -146,7 +148,7 @@ export function MemoryView() {
               </label>
               <label className="memory-field">
                 <span>{t("memory.name")}</span>
-                <input className="memory-control" required minLength={1} maxLength={160} value={title} onChange={(event) => setTitle(event.target.value)} />
+                <input className="memory-control" data-dialog-autofocus required minLength={1} maxLength={160} value={title} onChange={(event) => setTitle(event.target.value)} />
               </label>
               <label className="memory-field memory-field-wide">
                 <span>{t("memory.content")}</span>

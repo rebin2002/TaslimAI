@@ -53,6 +53,22 @@ public sealed class RunwayMovieVideoProviderTests
     }
 
     [Fact]
+    public async Task Submission_rejects_reference_package_instead_of_silently_dropping_it()
+    {
+        var handler = new RecordingHandler(_ => JsonResponse($"{{\"id\":\"{TaskId}\"}}"));
+        var provider = CreateProvider(handler, EnabledOptions());
+        var request = Request() with
+        {
+            ReferencePackageJson = "{\"SchemaVersion\":2,\"References\":[{\"AssetId\":\"00000000-0000-0000-0000-000000000001\",\"Role\":\"composition\"}]}"
+        };
+
+        var exception = await Assert.ThrowsAsync<MovieVideoProviderException>(() => provider.SubmitAsync(request, CancellationToken.None));
+
+        Assert.Equal(GenerationJobErrorCodes.MovieProviderUnsupportedRequest, exception.Code);
+        Assert.Empty(handler.Requests);
+    }
+
+    [Fact]
     public async Task Polling_normalizes_queued_generating_and_completed_states_and_preserves_cost_metadata()
     {
         var calls = 0;
@@ -179,6 +195,64 @@ public sealed class RunwayMovieVideoProviderTests
         await Assert.ThrowsAsync<MovieVideoProviderException>(() => provider.SubmitAsync(Request(durationSeconds: 30), CancellationToken.None));
         await Assert.ThrowsAsync<MovieVideoProviderException>(() => provider.SubmitAsync(Request(aspectRatio: "4:5"), CancellationToken.None));
         await Assert.ThrowsAsync<MovieVideoProviderException>(() => provider.SubmitAsync(Request(continuationProviderJobId: TaskId.ToString()), CancellationToken.None));
+    }
+
+    [Theory]
+    // The reference image URL is resolved by the provider, so the shared
+    // download-URL scope policy has to reject non-public targets before the
+    // billable POST. That rejection belongs to the request-admission contract,
+    // never to the generic generation-failure path.
+    [InlineData("https://127.0.0.1/frame.png")]
+    [InlineData("https://10.0.0.8/frame.png")]
+    [InlineData("https://172.16.0.9/frame.png")]
+    [InlineData("https://192.168.1.5/frame.png")]
+    [InlineData("https://169.254.169.254/latest/meta-data/frame.png")]
+    [InlineData("https://[::1]/frame.png")]
+    [InlineData("https://[fd00::1]/frame.png")]
+    public async Task Reference_url_scope_rejection_is_reported_as_an_unsupported_request(string sourceImageUri)
+    {
+        var handler = new RecordingHandler(_ => throw new InvalidOperationException("a rejected reference URL must never reach Runway"));
+        var provider = CreateProvider(handler, EnabledOptions(), new ProviderUrlPolicy());
+
+        var exception = await Assert.ThrowsAsync<MovieVideoProviderException>(
+            () => provider.SubmitAsync(Request(sourceImageUri: sourceImageUri), CancellationToken.None));
+
+        Assert.Equal(GenerationJobErrorCodes.MovieProviderUnsupportedRequest, exception.Code);
+        Assert.False(exception.IsTransient);
+        Assert.Empty(handler.Requests);
+    }
+
+    [Fact]
+    public async Task Non_https_reference_url_is_reported_as_an_unsupported_request()
+    {
+        var handler = new RecordingHandler(_ => throw new InvalidOperationException("a rejected reference URL must never reach Runway"));
+        var provider = CreateProvider(handler, EnabledOptions(), new ProviderUrlPolicy());
+
+        var exception = await Assert.ThrowsAsync<MovieVideoProviderException>(
+            () => provider.SubmitAsync(Request(sourceImageUri: "http://assets.example.test/frame.png"), CancellationToken.None));
+
+        Assert.Equal(GenerationJobErrorCodes.MovieProviderUnsupportedRequest, exception.Code);
+        Assert.False(exception.IsTransient);
+        Assert.Empty(handler.Requests);
+    }
+
+    [Fact]
+    public async Task Public_reference_url_passes_the_scope_policy_without_being_fetched()
+    {
+        var handler = new RecordingHandler(_ => JsonResponse($"{{\"id\":\"{TaskId}\"}}"));
+        var provider = CreateProvider(handler, EnabledOptions(), new ProviderUrlPolicy());
+
+        var submission = await provider.SubmitAsync(Request(sourceImageUri: "https://assets.example.test/frame.png"), CancellationToken.None);
+
+        Assert.Equal(TaskId.ToString(), submission.ProviderJobId);
+        // Only the POST to the configured Runway base URL leaves the adapter;
+        // the reference URL itself is fetched by the provider, never here.
+        var request = Assert.Single(handler.Requests);
+        Assert.Equal(HttpMethod.Post, request.Method);
+        Assert.Equal("api.dev.runwayml.com", request.RequestUri!.Host);
+        Assert.Equal(
+            "https://assets.example.test/frame.png",
+            JsonDocument.Parse(handler.RequestBodies.Single()).RootElement.GetProperty("promptImage").GetString());
     }
 
     [Fact]

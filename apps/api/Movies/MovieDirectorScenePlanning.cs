@@ -146,7 +146,11 @@ public sealed class MovieDirectorScenePlanValidator(
         AddIf(findings, !SupportedLanguage(context.Language, payload.Language), DirectorScenePlanValidationReasonCodes.LanguageMismatch, "language");
         AddIf(findings, string.IsNullOrWhiteSpace(payload.AspectRatio) || payload.AspectRatio.Length > 20 || !string.Equals(payload.AspectRatio, context.AspectRatio, StringComparison.OrdinalIgnoreCase), DirectorScenePlanValidationReasonCodes.SchemaInvalid, "aspectRatio");
 
-        var targetDuration = Math.Clamp(context.DurationSeconds, 1, Math.Max(1, settings.MaxDurationSeconds));
+        var maxDuration = Math.Max(1, settings.MaxDurationSeconds);
+        var targetDuration = Math.Clamp(context.DurationSeconds, 1, maxDuration);
+        // Reject unsupported source durations rather than accepting a truncated scene plan.
+        AddIf(findings, context.DurationSeconds < 1 || context.DurationSeconds > maxDuration,
+            DirectorScenePlanValidationReasonCodes.RuntimeMismatch, "targetDurationSeconds");
         AddIf(findings, payload.TargetDurationSeconds != targetDuration, DirectorScenePlanValidationReasonCodes.RuntimeMismatch, "targetDurationSeconds");
         AddIf(findings, payload.Scenes is null || payload.Scenes.Count == 0, DirectorScenePlanValidationReasonCodes.RequiredFieldMissing, "scenes");
         if (payload.Scenes is null || payload.Scenes.Count == 0) return Rejected(findings);
@@ -188,7 +192,14 @@ public sealed class MovieDirectorScenePlanValidator(
             ValidateText(findings, scene.EmotionalObjective, 2_000, "emotionalObjective");
             ValidateText(findings, scene.TransitionRelationship, 1_000, "transitionRelationship");
             ValidateText(findings, scene.ProductionIntent, 4_000, "productionIntent");
-            AddIf(findings, scene.EstimatedDurationSeconds < 1 || scene.EstimatedDurationSeconds > targetDuration, DirectorScenePlanValidationReasonCodes.RuntimeMismatch, "estimatedDurationSeconds");
+            // Fail closed at admission on the per-scene ceiling. A scene longer than the largest unit the
+            // render path can actually produce is never honoured: MovieProductionPreflight and the
+            // generation orchestrators bill each shot from Math.Clamp(..., 1, 3_600) and provider clips are
+            // capped at ProviderCapabilityPricing.MaxDurationSeconds (default 3_600), so an admitted
+            // over-length scene would be silently shortened and underbilled rather than rejected.
+            // Bounded by targetDuration, so every plan legal under the configured ceiling behaves unchanged.
+            var renderableSceneCeilingSeconds = Math.Min(targetDuration, MovieDurationBudgetPolicy.MaxShotDurationSeconds);
+            AddIf(findings, scene.EstimatedDurationSeconds < 1 || scene.EstimatedDurationSeconds > renderableSceneCeilingSeconds, DirectorScenePlanValidationReasonCodes.RuntimeMismatch, "estimatedDurationSeconds");
             AddIf(findings, scene.ParticipatingCharacters is null, DirectorScenePlanValidationReasonCodes.SchemaInvalid, "participatingCharacters");
             AddIf(findings, scene.ContinuityRequirements is null, DirectorScenePlanValidationReasonCodes.SchemaInvalid, "continuityRequirements");
             AddIf(findings, scene.ParticipatingCharacters is not null && scene.ParticipatingCharacters.Count > 16, DirectorScenePlanValidationReasonCodes.SchemaInvalid, "participatingCharacters");

@@ -25,6 +25,7 @@ public sealed class ChatController(
     TaslimDbContext db,
     WorkspaceAccessService access,
     IChatCompletionService completion,
+    IAiModelRouter modelRouter,
     AiContextBuilder contextBuilder,
     IUsageLedgerService usageLedger,
     IOptions<Microsoft.AspNetCore.Mvc.JsonOptions> mvcJsonOptions,
@@ -42,8 +43,8 @@ public sealed class ChatController(
 
         if (request.ProjectId is not null)
         {
-            var belongsToWorkspace = await db.Projects.AnyAsync(project => project.Id == request.ProjectId && project.WorkspaceId == workspaceId, cancellationToken);
-            if (!belongsToWorkspace) return ApiResults.Error(this, StatusCodes.Status404NotFound, "PROJECT_NOT_FOUND", "Project not found.");
+            var belongsToActiveProject = await db.Projects.AnyAsync(project => project.Id == request.ProjectId && project.WorkspaceId == workspaceId && project.Status == ProjectStatuses.Active, cancellationToken);
+            if (!belongsToActiveProject) return ApiResults.Error(this, StatusCodes.Status404NotFound, "PROJECT_NOT_FOUND", "Project not found.");
         }
 
         var now = DateTime.UtcNow;
@@ -204,6 +205,12 @@ public sealed class ChatController(
             return;
         }
 
+        if (!modelRouter.IsChatGenerationAvailable())
+        {
+            await WriteEventAsync("message.failed", new { code = ProviderUnavailableCode, message = ProviderUnavailableMessage }, cancellationToken);
+            return;
+        }
+
         await StreamRegenerationAsync(conversation, sourceUser, request.RequestId.Trim(), cancellationToken);
     }
 
@@ -311,6 +318,7 @@ public sealed class ChatController(
     public async Task<IActionResult> SendMessage(Guid conversationId, SendMessageRequest request, CancellationToken cancellationToken)
     {
         if (!ModelState.IsValid) return ApiResults.Validation(this, "Please enter a message.");
+        if (!modelRouter.IsChatGenerationAvailable()) return ProviderUnavailable();
         var prepared = await PrepareMessageAsync(conversationId, request, cancellationToken);
         if (prepared.Error is not null) return prepared.Error;
         if (prepared.ExistingResult is not null) return Ok(prepared.ExistingResult);
@@ -360,6 +368,12 @@ public sealed class ChatController(
         if (!ModelState.IsValid)
         {
             await WriteEventAsync("message.failed", new { code = "VALIDATION_ERROR", message = "Please enter a message." }, cancellationToken);
+            return;
+        }
+
+        if (!modelRouter.IsChatGenerationAvailable())
+        {
+            await WriteEventAsync("message.failed", new { code = ProviderUnavailableCode, message = ProviderUnavailableMessage }, cancellationToken);
             return;
         }
 
@@ -561,6 +575,17 @@ public sealed class ChatController(
             .ThenBy(message => message.Id)
             .Select(message => new AiChatMessage(message.Role.ToString().ToLowerInvariant(), message.Content))
             .ToListAsync(cancellationToken);
+        // docs/CHAT_ARCHITECTURE.md: a regeneration keeps the response it replaces as a completed
+        // transcript row, but only the newest assistant answer of a user turn is live, so a run of
+        // adjacent assistant rows means every row but the last one was superseded. The transcript
+        // is never edited here, and the ordering above is the only thing that tells a superseded
+        // response from a plain user/assistant pair. Without this filter the answer the user
+        // rejected is replayed into every later turn's context, and the surviving replacement is
+        // replayed beside it as a duplicate second assistant answer to the same user message.
+        for (var index = history.Count - 2; index >= 0; index--)
+        {
+            if (history[index].Role == "assistant" && history[index + 1].Role == "assistant") history.RemoveAt(index);
+        }
         var project = conversation.ProjectId is null
             ? null
             : await db.Projects.AsNoTracking()
@@ -584,6 +609,7 @@ public sealed class ChatController(
                 attachment.StoredFile.OriginalFileName,
                 attachment.StoredFile.ContentType,
                 attachment.StoredFile.Extension,
+                attachment.StoredFile.SizeBytes,
                 attachment.StoredFile.ExtractedText,
                 attachment.StoredFile.Status,
                 attachment.StoredFile.TextExtractionStatus,
@@ -601,19 +627,43 @@ public sealed class ChatController(
             string? dataUrl = null;
             if (FileContentTypes.IsImage(file.Extension))
             {
+                // A storage adapter can only wrap the exception raised by the
+                // object-open call. An R2 connection can also fail while the
+                // body is still streaming, and the resulting S3 or transport
+                // exception carries the endpoint account and object key inside
+                // its message. Bound the read to the configured storage
+                // operation timeout, compare the body with the size recorded at
+                // upload so a truncated object cannot reach the model, and log
+                // only the sanitized category. That keeps an attachment
+                // readback failure on the existing attachment-content contract
+                // instead of surfacing it as a generic generation failure with
+                // the wrong usage code.
+                using var readbackTimeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                readbackTimeout.CancelAfter(fileOptions.Value.StorageOperationTimeout);
+                var readbackToken = readbackTimeout.Token;
+                var readbackBound = Math.Max(fileOptions.Value.MaxFileSizeBytes, file.SizeBytes);
                 try
                 {
-                    await using var stream = await fileStorage.OpenReadAsync(file.StorageKey, cancellationToken) ?? throw new FileContentUnavailableException();
-                    using var buffer = new MemoryStream();
-                    await stream.CopyToAsync(buffer, cancellationToken);
-                    dataUrl = $"data:{file.ContentType};base64,{Convert.ToBase64String(buffer.ToArray())}";
+                    await using var stream = await fileStorage.OpenReadAsync(file.StorageKey, readbackToken) ?? throw new FileContentUnavailableException();
+                    var bytes = await StorageReadbackFaults.ReadBoundedAsync(stream, readbackBound, readbackToken);
+                    if (bytes.LongLength != file.SizeBytes)
+                        throw new InvalidDataException("Stored attachment content did not match its recorded size.");
+                    dataUrl = $"data:{file.ContentType};base64,{Convert.ToBase64String(bytes)}";
                 }
-                catch (FileStorageUnavailableException)
+                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested || !readbackTimeout.IsCancellationRequested)
                 {
-                    throw new FileContentUnavailableException();
+                    throw;
                 }
-                catch (FileStorageOperationException)
+                catch (Exception exception) when (exception is OperationCanceledException || StorageReadbackFaults.IsReadbackFault(exception))
                 {
+                    logger.LogWarning(
+                        "Chat attachment readback failed. ConversationId={ConversationId}; MessageId={MessageId}; FileId={FileId}; StorageProvider={StorageProvider}; FailureClass={FailureClass}; TimeoutSeconds={TimeoutSeconds}",
+                        conversation.Id,
+                        currentMessageId,
+                        file.StoredFileId,
+                        fileStorage.ProviderKey,
+                        exception is OperationCanceledException ? "timeout" : StorageReadbackFaults.Classify(exception).ToString("G").ToLowerInvariant(),
+                        fileOptions.Value.StorageOperationTimeout.TotalSeconds);
                     throw new FileContentUnavailableException();
                 }
             }
@@ -746,6 +796,12 @@ public sealed class ChatController(
     private static object ErrorData(IActionResult result) => result is ObjectResult { Value: ErrorEnvelope envelope }
         ? new { code = envelope.Error.Code, message = envelope.Error.Message }
         : new { code = "CHAT_REQUEST_FAILED", message = "Taslim could not process that chat request." };
+
+    private const string ProviderUnavailableCode = "AI_PROVIDER_UNAVAILABLE";
+
+    private const string ProviderUnavailableMessage = "Taslim Chat is not available right now. Please try again later.";
+
+    private IActionResult ProviderUnavailable() => ApiResults.Error(this, StatusCodes.Status503ServiceUnavailable, ProviderUnavailableCode, ProviderUnavailableMessage);
 
     private IActionResult GenerationFailure() => ApiResults.Error(this, StatusCodes.Status503ServiceUnavailable, "AI_GENERATION_FAILED", "Taslim could not generate a response right now. Your message was saved.");
 
