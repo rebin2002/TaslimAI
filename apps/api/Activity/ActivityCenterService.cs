@@ -82,8 +82,25 @@ public sealed class ActivityCenterService(TaslimDbContext db, WorkspaceAccessSer
         var alreadyRead = await db.ActivityReadStates.AnyAsync(read => read.UserId == userId && read.GenerationJobId == jobId, cancellationToken);
         if (!alreadyRead)
         {
-            db.ActivityReadStates.Add(new ActivityReadState { Id = Guid.NewGuid(), UserId = userId, GenerationJobId = jobId, ReadAt = DateTime.UtcNow });
-            await db.SaveChangesAsync(cancellationToken);
+            var readState = new ActivityReadState { Id = Guid.NewGuid(), UserId = userId, GenerationJobId = jobId, ReadAt = DateTime.UtcNow };
+            db.ActivityReadStates.Add(readState);
+            try
+            {
+                await db.SaveChangesAsync(cancellationToken);
+            }
+            catch (DbUpdateException)
+            {
+                // The unique (UserId, GenerationJobId) index is the concurrency
+                // boundary. A concurrent request may have marked the same job
+                // read after the pre-check; treat that winner as an idempotent
+                // success while preserving unrelated persistence failures.
+                db.Entry(readState).State = EntityState.Detached;
+                if (await db.ActivityReadStates.AsNoTracking().AnyAsync(
+                        read => read.UserId == userId && read.GenerationJobId == jobId,
+                        cancellationToken))
+                    return true;
+                throw;
+            }
         }
         return true;
     }
@@ -98,8 +115,32 @@ public sealed class ActivityCenterService(TaslimDbContext db, WorkspaceAccessSer
             .ToListAsync(cancellationToken);
         if (unreadJobIds.Count == 0) return true;
         var readAt = DateTime.UtcNow;
-        db.ActivityReadStates.AddRange(unreadJobIds.Select(jobId => new ActivityReadState { Id = Guid.NewGuid(), UserId = userId, GenerationJobId = jobId, ReadAt = readAt }));
-        await db.SaveChangesAsync(cancellationToken);
+        var readStates = unreadJobIds.Select(jobId => new ActivityReadState
+        {
+            Id = Guid.NewGuid(),
+            UserId = userId,
+            GenerationJobId = jobId,
+            ReadAt = readAt,
+        }).ToArray();
+        db.ActivityReadStates.AddRange(readStates);
+        try
+        {
+            await db.SaveChangesAsync(cancellationToken);
+        }
+        catch (DbUpdateException)
+        {
+            // As with a single read, a concurrent read-all may have won the
+            // unique-key race. Only convert the exception to success when all
+            // rows this request intended to create now exist; unrelated errors
+            // and partial writes remain failures.
+            foreach (var readState in readStates)
+                db.Entry(readState).State = EntityState.Detached;
+
+            var persistedCount = await db.ActivityReadStates.AsNoTracking()
+                .CountAsync(read => read.UserId == userId && unreadJobIds.Contains(read.GenerationJobId), cancellationToken);
+            if (persistedCount == unreadJobIds.Count) return true;
+            throw;
+        }
         return true;
     }
 }

@@ -1015,6 +1015,17 @@ public static class MovieStudioValidation
         "16:9", "9:16", "1:1", "4:5", "4:3",
     };
 
+    // Limits mirror the persisted model exactly (TaslimDbContext): MovieProject.Style
+    // (100), MovieProject.AdditionalInstructions (8,000), the MovieContinuityGuide
+    // creative-direction fields (4,000) and ContinuityRules (8,000). A value that
+    // exceeds its column limit must be refused here with the endpoint's 400
+    // validation envelope instead of reaching SaveChanges, where the production
+    // provider aborts the request with a 500 INTERNAL_ERROR.
+    public const int StyleMaxLength = 100;
+    public const int AdditionalInstructionsMaxLength = 8_000;
+    public const int CreativeDirectionFieldMaxLength = 4_000;
+    public const int ContinuityRulesMaxLength = 8_000;
+
     public static string? Validate(MovieStudioCreateRequest request)
     {
         if (string.IsNullOrWhiteSpace(request.Title) || request.Title.Trim().Length > 160) return "Add a movie title.";
@@ -1023,10 +1034,20 @@ public static class MovieStudioValidation
         if (!SupportedAspectRatios.Contains(request.AspectRatio)) return "Choose a supported aspect ratio.";
         if (!LanguageCodes.Supported.Contains(request.Language)) return "Choose English, Arabic, or Kurdish.";
         if (request.Mode is not (MovieProjectModes.Quick or MovieProjectModes.Full)) return "Choose Quick Movie or Full Movie Project.";
+        if (request.Style is not null && request.Style.Trim().Length > StyleMaxLength) return $"Visual style must be {StyleMaxLength} characters or fewer.";
+        if (Exceeds(request.AdditionalInstructions, AdditionalInstructionsMaxLength)) return $"Additional instructions must be {AdditionalInstructionsMaxLength:N0} characters or fewer.";
+        if (Exceeds(request.VisualLanguage, CreativeDirectionFieldMaxLength)
+            || Exceeds(request.CameraLanguage, CreativeDirectionFieldMaxLength)
+            || Exceeds(request.ColorAndLighting, CreativeDirectionFieldMaxLength)
+            || Exceeds(request.SoundAndNarration, CreativeDirectionFieldMaxLength))
+            return $"Creative direction fields must be {CreativeDirectionFieldMaxLength:N0} characters or fewer.";
+        if (Exceeds(request.ContinuityRules, ContinuityRulesMaxLength)) return $"Continuity rules must be {ContinuityRulesMaxLength:N0} characters or fewer.";
         var cinematographyValidation = CinematographyIntentValidator.Validate(request.Cinematography);
         if (cinematographyValidation is not null) return cinematographyValidation;
         return null;
     }
+
+    private static bool Exceeds(string? value, int max) => value is not null && value.Trim().Length > max;
 }
 
 public static class MovieStudioOperations
