@@ -56,7 +56,9 @@ public sealed class MovieDirectorStoryActionExecutor(
             if (payload.TargetSceneId.HasValue && payload.TargetSceneId != originalScene.Id)
                 return new(false, "DIRECTOR_STORY_TARGET_INVALID", "The selected Story passage is not part of the requested scene.", null);
             var targetScene = scenes.FirstOrDefault(item => item.SceneIdentifier.Equals(originalScene.SceneIdentifier, StringComparison.OrdinalIgnoreCase));
-            var targetRequest = targetScene?.Elements.FirstOrDefault(item => string.Equals(item.Content, original.Content, StringComparison.Ordinal));
+            var originalElements = originalScene.Elements.OrderBy(item => item.Ordinal).ToArray();
+            var targetIndex = Array.FindIndex(originalElements, item => item.Id == targetElementId);
+            var targetRequest = targetIndex >= 0 ? targetScene?.Elements.ElementAtOrDefault(targetIndex) : null;
             if (targetRequest is null) return new(false, "DIRECTOR_STORY_PASSAGE_NOT_FOUND", "The selected Story passage is no longer available.", null);
             targetRequest.Content = payload.ReplacementContent;
         }
