@@ -127,6 +127,17 @@ public static class SocialGenerationRequestValidator
         if (input.Prompt.Length < 3 || input.Prompt.Length > options.MaxPromptCharacters) Invalid(GenerationJobErrorCodes.SocialRequestInvalid, $"Social prompt must be between 3 and {options.MaxPromptCharacters} characters.");
         if (input.AssetIds.Count > options.MaxAssetSelections) Invalid(GenerationJobErrorCodes.SocialRequestInvalid, $"Choose no more than {options.MaxAssetSelections} assets.");
         if (input.AttachmentIds.Count > options.MaxAttachmentSelections) Invalid(GenerationJobErrorCodes.SocialRequestInvalid, $"Choose no more than {options.MaxAttachmentSelections} source files.");
+        // Fail closed at admission on identifiers the server can prove are not
+        // member/workspace-scoped inputs: the zero identifier is neither an
+        // asset nor a stored file, so SocialGenerationJobHandler.LoadAssetsAsync
+        // and LoadFilesAsync can never resolve it. Rejecting here returns the
+        // same code the execution boundary raises (SOCIAL_CONTEXT_UNAVAILABLE)
+        // before a GenerationJob row, a usage reservation and an ExpensiveAi
+        // queue entry are created, mirroring the Research admission fix (#888).
+        if (input.AssetIds.Any(id => id == Guid.Empty))
+            Invalid(GenerationJobErrorCodes.SocialContextUnavailable, "One or more selected assets are unavailable.");
+        if (input.AttachmentIds.Any(id => id == Guid.Empty))
+            Invalid(GenerationJobErrorCodes.SocialContextUnavailable, "One or more selected source files are unavailable.");
         if (!SocialGenerationDefaults.Languages.Contains(input.Language) || !SocialGenerationDefaults.Tones.Contains(input.Tone) || !SocialGenerationDefaults.Platforms.Contains(input.Platform) || !SocialGenerationDefaults.SocialTypes.Contains(input.SocialType))
             Invalid(GenerationJobErrorCodes.SocialRequestInvalid, "The selected social settings are not supported.");
         if (input.Audience?.Length > options.MaxAudienceCharacters || input.BrandVoice?.Length > options.MaxBrandVoiceCharacters || input.CallToAction?.Length > options.MaxCallToActionCharacters)
