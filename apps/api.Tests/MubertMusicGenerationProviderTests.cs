@@ -187,7 +187,8 @@ public sealed class MubertMusicGenerationProviderTests
                 2 => Json(HttpStatusCode.OK, "{\"data\":{\"generations\":[{\"status\":\"completed\",\"url\":\"https://download.example/track.mp3\"}]}}"),
                 _ => throw new HttpRequestException("synthetic download transport failure"),
             });
-        var provider = CreateProvider(handler, maxPollAttempts: 1);
+        // retryAttempts: 0 pins the re-fetch budget so this proves the immediate classification.
+        var provider = CreateProvider(handler, maxPollAttempts: 1, retryAttempts: 0);
 
         await Assert.ThrowsAsync<MusicProviderUnavailableException>(() => provider.GenerateAsync(Input()));
         Assert.Equal(3, handler.Requests.Count);
@@ -203,9 +204,46 @@ public sealed class MubertMusicGenerationProviderTests
         {
             Content = new StreamContent(new IoFaultingStream()),
         });
-        var provider = CreateProvider(handler, maxPollAttempts: 1);
+        var provider = CreateProvider(handler, maxPollAttempts: 1, retryAttempts: 0);
 
         await Assert.ThrowsAsync<MusicProviderUnavailableException>(() => provider.GenerateAsync(Input()));
+    }
+
+    [Fact]
+    public async Task Completed_track_is_re_fetched_with_a_get_without_a_second_billable_track()
+    {
+        // The first artifact GET faults mid-body. The track is already complete and billed, so the
+        // provider must recover it with the same GET rather than POSTing another track.
+        var handler = CompleteTrackHandler(requestNumber => requestNumber == 3
+            ? new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StreamContent(new IoFaultingStream()),
+            }
+            : Binary(HttpStatusCode.OK, "ID3-recovered-audio", "audio/mpeg"));
+        var provider = CreateProvider(handler, maxPollAttempts: 1, retryAttempts: 1, retryDelayMilliseconds: 1);
+
+        var result = await provider.GenerateAsync(Input());
+
+        Assert.Equal("audio/mpeg", result.ContentType);
+        Assert.Equal(4, handler.Requests.Count);
+        Assert.Single(handler.Requests, request => request.Method == HttpMethod.Post);
+        Assert.Contains("download.example", handler.Requests[3].RequestUri!.ToString(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Persistent_artifact_transport_fault_exhausts_the_budget_without_a_second_track()
+    {
+        var handler = CompleteTrackHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StreamContent(new IoFaultingStream()),
+        });
+        var provider = CreateProvider(handler, maxPollAttempts: 1, retryAttempts: 2, retryDelayMilliseconds: 1);
+
+        await Assert.ThrowsAsync<MusicProviderUnavailableException>(() => provider.GenerateAsync(Input()));
+
+        // create POST, status GET, then the artifact GET plus two bounded re-fetches
+        Assert.Equal(5, handler.Requests.Count);
+        Assert.Single(handler.Requests, request => request.Method == HttpMethod.Post);
     }
 
     private static MubertMusicGenerationProvider CreateProvider(
