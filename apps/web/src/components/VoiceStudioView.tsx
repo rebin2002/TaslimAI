@@ -293,8 +293,16 @@ export function VoiceStudioView() {
       const job = await api.createVoiceGenerationJob(input);
       persistVoiceActiveJobId(workspace.id, job.id);
       setCurrent(job);
-    } catch (caught) {
-      setError(caught instanceof Error ? caught.message : t("voice.createError"));
+    } catch {
+      // Localized copy, never the rejection's own text: `ApiError.message` is
+      // the server's English string (`src/lib/api.ts`:
+      // `body?.error?.message ?? "Something went wrong."`), and this slot
+      // renders into the compose form for members reading the en, ar and ku
+      // screens. The studio can claim that the request was refused; it cannot
+      // translate server prose on the member's behalf. The cancel handler below
+      // already follows this rule, and the route-scoped Voice boundary does the
+      // same by design (`app/create/voice/error.tsx` never reads `error.message`).
+      setError(t("voice.createError"));
     } finally {
       setWorking(false);
     }
