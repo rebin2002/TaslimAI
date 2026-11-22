@@ -182,6 +182,14 @@ public sealed class RunwayMovieVideoProvider(
             throw new MovieVideoProviderException(GenerationJobErrorCodes.MovieGenerationFailed, false);
         if (!string.IsNullOrWhiteSpace(request.ContinuationProviderJobId))
             throw new MovieVideoProviderException(GenerationJobErrorCodes.MovieProviderUnsupportedRequest, false);
+        // The shared Movie contract carries approved keyframe/reference inputs, but this
+        // adapter has no provider-bound representation for them. Never silently turn a
+        // reference-backed production request into text-to-video.
+        if (!string.IsNullOrWhiteSpace(request.ReferencePackageJson)
+            || !string.IsNullOrWhiteSpace(request.FirstFrameImageUri)
+            || !string.IsNullOrWhiteSpace(request.LastFrameImageUri)
+            || request.ReferenceImages is { Count: > 0 })
+            throw new MovieVideoProviderException(GenerationJobErrorCodes.MovieProviderUnsupportedRequest, false);
         if (request.DurationSeconds is < 2 or > 10)
             throw new MovieVideoProviderException(GenerationJobErrorCodes.MovieProviderUnsupportedRequest, false);
 

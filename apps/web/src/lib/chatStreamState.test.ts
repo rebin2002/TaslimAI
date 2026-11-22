@@ -39,6 +39,35 @@ describe("Chat stream state", () => {
     expect(state.messages.find(item => item.id === "assistant-1")?.content).toBe("1");
   });
 
+  it("ignores orphan and cross-message deltas", () => {
+    let state = createChatStreamState([user]);
+    state = reduceChatStream(state, event("message.delta", { messageId: "user-1", delta: " tampered" }));
+    expect(state.messages.find(item => item.id === "user-1")?.content).toBe("List two numbers");
+
+    state = reduceChatStream(state, event("message.started", { userMessage: user, assistantMessage: assistant }));
+    state = reduceChatStream(state, event("message.delta", { messageId: "user-1", delta: " wrong target" }));
+
+    expect(state.messages.find(item => item.id === "user-1")?.content).toBe("List two numbers");
+    expect(state.messages.find(item => item.id === "assistant-1")?.content).toBe("");
+    expect(state.generating).toBe(true);
+  });
+
+  it("ignores orphan and cross-message terminal events", () => {
+    const foreignAssistant = message("assistant-foreign", "Assistant", "stale response", "Completed");
+    let state = createChatStreamState([user]);
+    state = reduceChatStream(state, event("message.completed", { userMessage: user, assistantMessage: foreignAssistant }));
+    expect(state.messages.find(item => item.id === "assistant-foreign")).toBeUndefined();
+    expect(state.generating).toBe(true);
+    expect(state.terminal).toBeNull();
+
+    state = reduceChatStream(state, event("message.started", { userMessage: user, assistantMessage: assistant }));
+    state = reduceChatStream(state, event("message.completed", { userMessage: user, assistantMessage: foreignAssistant }));
+    expect(state.messages.find(item => item.id === "assistant-1")?.content).toBe("");
+    expect(state.messages.find(item => item.id === "assistant-foreign")).toBeUndefined();
+    expect(state.generating).toBe(true);
+    expect(state.terminal).toBeNull();
+  });
+
   it("marks the active assistant failed and ends generation on failure", () => {
     let state = reduceChatStream(createChatStreamState(), event("message.started", { userMessage: user, assistantMessage: assistant }));
     state = reduceChatStream(state, event("message.delta", { messageId: "assistant-1", delta: "partial" }));
@@ -120,5 +149,65 @@ describe("Chat stream state", () => {
     expect(state.messages.find(item => item.id === "assistant-1")).toMatchObject({ content: "partial", status: "Failed" });
     expect(state.generating).toBe(false);
     expect(state.terminal).toBe("failed");
+  });
+
+  it("keeps one assistant copy when a retried request replays the settled content snapshot", () => {
+    // Cancellation/reconnection contract: a retry that reuses the original
+    // requestId against an already-settled server result replays
+    // message.started with the settled assistant content, then a single
+    // message.delta carrying that same full snapshot, then
+    // message.completed (ChatController.StreamMessage replay branch).
+    // Appending the snapshot delta onto the content delivered by
+    // message.started renders the settled answer twice in the UI.
+    const settled = message("assistant-1", "Assistant", "Connected and ready", "Completed");
+    // 1) The first attempt is interrupted in transit and closed locally.
+    let state = reduceChatStream(createChatStreamState(), event("message.started", { userMessage: user, assistantMessage: assistant }));
+    state = reduceChatStream(state, event("message.delta", { messageId: "assistant-1", delta: "Connected and ready" }));
+    state = failChatStream(state);
+    // 2) The user retries with the same requestId and the server replays.
+    state = createChatStreamState(state.messages);
+    const visibleAssistantContent: string[] = [];
+    const apply = (streamEvent: ChatStreamEvent) => {
+      state = applyChatStreamEvent(state, streamEvent, next => {
+        visibleAssistantContent.push(next.messages.find(item => item.id === "assistant-1")?.content ?? "");
+      });
+    };
+    apply(event("message.started", { userMessage: user, assistantMessage: settled }));
+    apply(event("message.delta", { messageId: "assistant-1", delta: settled.content }));
+    expect(visibleAssistantContent).not.toContain(`${settled.content}${settled.content}`);
+    // 3a) The replay is interrupted again before the terminal frame: the
+    // failed message must still hold exactly one copy of the answer.
+    const interrupted = failChatStream(state);
+    const replayed = interrupted.messages.find(item => item.id === "assistant-1");
+    expect(replayed?.content).toBe(settled.content);
+    expect(interrupted.messages.filter(item => item.role === "Assistant")).toHaveLength(1);
+    // 3b) Branching from the same replayed state, a normal terminal frame
+    // settles the message with exactly one copy of the answer.
+    const terminalState = reduceChatStream(state, event("message.completed", { userMessage: user, assistantMessage: settled }));
+    const completed = terminalState.messages.find(item => item.id === "assistant-1");
+    expect(completed).toMatchObject({ content: settled.content, status: "Completed" });
+    expect(terminalState.terminal).toBe("completed");
+  });
+
+  it("preserves identical consecutive incremental chunks while assistant is pending", () => {
+    // Valid live streams can repeat text (e.g. "ha" followed by "ha").
+    // Content equality is not a replay signal unless message.started carries
+    // an already-Completed assistant snapshot.
+    let state = reduceChatStream(createChatStreamState(), event("message.started", {
+      userMessage: user,
+      assistantMessage: assistant,
+    }));
+    state = reduceChatStream(state, event("message.delta", { messageId: "assistant-1", delta: "ha" }));
+    state = reduceChatStream(state, event("message.delta", { messageId: "assistant-1", delta: "ha" }));
+    expect(state.messages.find(item => item.id === "assistant-1")).toMatchObject({
+      content: "haha",
+      status: "Pending",
+    });
+    state = reduceChatStream(state, event("message.completed", {
+      userMessage: user,
+      assistantMessage: message("assistant-1", "Assistant", "haha", "Completed"),
+    }));
+    expect(state.messages.find(item => item.id === "assistant-1")?.content).toBe("haha");
+    expect(state.terminal).toBe("completed");
   });
 });
