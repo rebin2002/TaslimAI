@@ -93,7 +93,7 @@ public sealed class MubertMusicGenerationProvider(
             if (string.IsNullOrWhiteSpace(generation?.Url))
                 throw new MusicProviderTimeoutException();
 
-            var download = await DownloadAsync(new Uri(generation.Url, UriKind.Absolute), timeout.Token);
+            var download = await DownloadWithTransportRecoveryAsync(new Uri(generation.Url, UriKind.Absolute), timeout.Token);
             var format = NormalizeFormat(settings.MubertFormat);
             var contentType = NormalizeContentType(download.ContentType, format);
             var safeMetadata = JsonSerializer.Serialize(new
@@ -188,6 +188,38 @@ public sealed class MubertMusicGenerationProvider(
                 if (response.StatusCode is HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden or HttpStatusCode.NotFound or HttpStatusCode.TooManyRequests || (int)response.StatusCode >= 500)
                     throw new MusicProviderUnavailableException();
                 throw new MusicProviderFailureException();
+            }
+        }
+    }
+
+    /// <summary>
+    /// Re-fetches a completed track's artifact with the same GET when the transport fails. The
+    /// track already exists and was billed by Mubert once the status reported it, so the only
+    /// safe recovery is another artifact GET: creating a second track would bill the generation
+    /// again and orphan the first artifact. Auth and quota faults are excluded because they are
+    /// not transport recoveries, and integrity faults (MusicOutputInvalidException,
+    /// FileUploadValidationException) never reach this wrapper.
+    /// </summary>
+    private async Task<MubertDownload> DownloadWithTransportRecoveryAsync(Uri artifactUri, CancellationToken cancellationToken)
+    {
+        var budget = Math.Clamp(settings.MubertMaxRetryAttempts, 0, 5);
+        for (var attempt = 0; ; attempt++)
+        {
+            try
+            {
+                return await DownloadAsync(artifactUri, cancellationToken);
+            }
+            catch (MusicProviderUnavailableException exception) when (
+                exception is not MusicProviderAuthenticationException
+                && exception is not MusicProviderQuotaException
+                && attempt < budget)
+            {
+                logger.LogWarning(
+                    exception,
+                    "Mubert artifact transport fault after the track completed; re-fetching the same artifact URL instead of creating a second billable track. Attempt={Attempt}; MaxBytes={MaxBytes}",
+                    attempt + 1,
+                    Math.Min(25 * 1_048_576, Math.Max(1, settings.MaxOutputBytes)));
+                await RetryDelayAsync(attempt, cancellationToken);
             }
         }
     }

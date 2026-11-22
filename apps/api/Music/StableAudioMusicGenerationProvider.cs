@@ -60,13 +60,22 @@ public sealed class StableAudioMusicGenerationProvider(
 
             byte[]? output = null;
             string? contentType = null;
-            for (pollAttempts = 1; pollAttempts <= Math.Max(1, settings.StableAudioMaxPollAttempts); pollAttempts++)
+            // A transport fault while the audio body is streaming happens after Stability has
+            // already produced and billed this generation id. The only safe recovery is another
+            // result GET for the same generation: re-posting text-to-audio would spend credits a
+            // second time for the same requested track. Re-fetches are bounded by the existing
+            // request-retry budget and deliberately do not consume polling attempts, so a slow
+            // but healthy generation keeps its full wait window.
+            var transportFaults = 0;
+            var transportFaultBudget = Math.Clamp(settings.StableAudioMaxRetryAttempts, 0, 5);
+            for (pollAttempts = 1; pollAttempts <= Math.Max(1, settings.StableAudioMaxPollAttempts);)
             {
                 using var result = await SendResultAsync(
                     new Uri(baseUri, $"v2beta/audio/results/{Uri.EscapeDataString(generationId)}"),
                     timeout.Token);
                 if (result.StatusCode == HttpStatusCode.Accepted)
                 {
+                    pollAttempts++;
                     await Task.Delay(
                         TimeSpan.FromMilliseconds(Math.Clamp(settings.StableAudioPollIntervalMilliseconds, 100, 30_000)),
                         timeout.Token);
@@ -79,24 +88,37 @@ public sealed class StableAudioMusicGenerationProvider(
                 try
                 {
                     (output, contentType) = await ReadBoundedAudioAsync(result, timeout.Token);
+                    break;
                 }
-                catch (HttpRequestException exception)
+                catch (Exception exception) when (exception is HttpRequestException or IOException)
                 {
-                    logger.LogWarning(exception, "Stable Audio result download failed.");
-                    throw new MusicProviderUnavailableException();
+                    // IOException covers SocketException, which derives from it: a reset mid-body
+                    // used to reach the job handler unclassified. MusicOutputInvalidException (an
+                    // integrity rejection) and the timeout cancellation are not caught here, so a
+                    // corrupt artifact is never retried and a cancelled job still reports
+                    // MusicProviderTimeoutException below.
+                    if (transportFaults >= transportFaultBudget)
+                    {
+                        logger.LogWarning(
+                            exception,
+                            "Stable Audio result transport fault persisted after {TransportFaults} bounded result re-fetch(es). The completed generation was not re-created, so no second billable request was issued. ProviderKey={ProviderKey}; OperationId={OperationId}",
+                            transportFaults,
+                            Key,
+                            generationId);
+                        throw new MusicProviderUnavailableException();
+                    }
+
+                    transportFaults++;
+                    logger.LogWarning(
+                        exception,
+                        "Stable Audio result transport fault after the generation completed; re-fetching the same result with a GET instead of creating a second billable generation. Attempt={Attempt}; Stage={Stage}; ProviderKey={ProviderKey}; OperationId={OperationId}",
+                        transportFaults,
+                        exception is IOException ? "audio_body_stream" : "result_response",
+                        Key,
+                        generationId);
+                    await RetryDelayAsync(transportFaults - 1, timeout.Token);
+                    continue;
                 }
-                catch (IOException exception)
-                {
-                    // A reset or aborted socket while the audio body is still streaming surfaces as
-                    // IOException (SocketException derives from it) rather than HttpRequestException.
-                    // Left unnormalised it reaches the job handler as an unclassified transport fault
-                    // instead of the same transient provider outage a failed request reports, so it
-                    // is classified identically. Integrity rejections stay MusicOutputInvalidException
-                    // and a cancelled timeout still surfaces as MusicProviderTimeoutException below.
-                    logger.LogWarning(exception, "Stable Audio result stream failed during download.");
-                    throw new MusicProviderUnavailableException();
-                }
-                break;
             }
 
             if (output is null || string.IsNullOrWhiteSpace(contentType))

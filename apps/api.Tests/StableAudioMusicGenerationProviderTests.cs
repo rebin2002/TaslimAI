@@ -123,7 +123,9 @@ public sealed class StableAudioMusicGenerationProviderTests
             },
             _ => throw new InvalidOperationException("unexpected request"),
         });
-        var provider = CreateProvider(handler, maxPollAttempts: 1);
+        // retryAttempts: 0 pins the re-fetch budget so this proves the immediate classification;
+        // the recovery path itself is proven by the re-fetch tests below.
+        var provider = CreateProvider(handler, maxPollAttempts: 1, retryAttempts: 0);
 
         await Assert.ThrowsAsync<MusicProviderUnavailableException>(() => provider.GenerateAsync(Input()));
         Assert.Equal(2, handler.Requests.Count);
@@ -144,10 +146,54 @@ public sealed class StableAudioMusicGenerationProviderTests
             },
             _ => throw new InvalidOperationException("unexpected request"),
         });
-        var provider = CreateProvider(handler, maxPollAttempts: 1);
+        var provider = CreateProvider(handler, maxPollAttempts: 1, retryAttempts: 0);
 
         await Assert.ThrowsAsync<MusicProviderUnavailableException>(() => provider.GenerateAsync(Input()));
         Assert.Equal(2, handler.Requests.Count);
+    }
+
+    [Fact]
+    public async Task Faulted_result_body_is_re_fetched_with_a_get_without_a_second_billable_generation()
+    {
+        // The generation already exists and was billed once the result GET returned it, so the
+        // recovery must be another result GET - never a second text-to-audio POST.
+        var handler = new StableAudioHandler((_, requestNumber) => requestNumber switch
+        {
+            1 => Json(HttpStatusCode.Accepted, "{\"id\":\"generation-refetch\"}"),
+            2 => new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StreamContent(new FaultingStream()),
+            },
+            _ => Audio(HttpStatusCode.OK, ValidMp3(), "audio/mpeg"),
+        });
+        var provider = CreateProvider(handler, maxPollAttempts: 3, retryAttempts: 1, retryDelayMilliseconds: 1);
+
+        var result = await provider.GenerateAsync(Input());
+
+        Assert.Equal("mp3", result.Format);
+        Assert.Equal(3, handler.Requests.Count);
+        Assert.Single(handler.Requests, request => request.Method == HttpMethod.Post);
+        Assert.Contains("v2beta/audio/results/generation-refetch", handler.Requests[2].RequestUri!.ToString(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Persistent_result_transport_fault_exhausts_the_budget_without_a_second_generation()
+    {
+        var handler = new StableAudioHandler((_, requestNumber) => requestNumber switch
+        {
+            1 => Json(HttpStatusCode.Accepted, "{\"id\":\"generation-refetch-exhaust\"}"),
+            _ => new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StreamContent(new FaultingStream()),
+            },
+        });
+        var provider = CreateProvider(handler, maxPollAttempts: 6, retryAttempts: 2, retryDelayMilliseconds: 1);
+
+        await Assert.ThrowsAsync<MusicProviderUnavailableException>(() => provider.GenerateAsync(Input()));
+
+        // one create POST plus three result GETs (the original and two bounded re-fetches)
+        Assert.Equal(4, handler.Requests.Count);
+        Assert.Single(handler.Requests, request => request.Method == HttpMethod.Post);
     }
 
     [Fact]
