@@ -15,8 +15,11 @@ namespace Taslim.Api.Tests;
 ///     and <c>MusicGenerationCapabilityCatalog.cs</c> are read, never edited
 ///     here (they belong to draft PR #709 and its dependants #773/#813);
 ///   - <c>musicLyricsDraftPayload.ts</c> (PR #802, merged) is read only;
-///   - <c>LyricsSectionEditor.tsx</c> (PR #772, open) is asserted absent so
-///     this slice cannot be mistaken for that editor's owner.
+///   - <c>LyricsSectionEditor.tsx</c> (PR #772) is asserted to be the single
+///     editor and to mirror this vocabulary rather than restate it; it was
+///     pinned absent while that lane was unmerged, and the same two properties
+///     - one editor, and a recorded studio-wiring follow-up - are still
+///     enforced after its landing.
 /// Nothing here enables a provider, changes a capability, or performs network
 /// or provider work: these are file-and-catalog assertions only.
 /// </summary>
@@ -26,6 +29,8 @@ public sealed class MusicLyricsDraftContractMirrorTests
     private const string ValidatorPath = "apps/api/Music/MusicGenerationRequestValidator.cs";
     private const string PayloadHelperPath = "apps/web/src/lib/musicLyricsDraftPayload.ts";
     private const string LyricsEditorPath = "apps/web/src/components/music/LyricsSectionEditor.tsx";
+    private const string StudioViewPath = "apps/web/src/components/MusicStudioView.tsx";
+    private const string PreflightDocPath = "docs/MUSIC_STUDIO_PREFLIGHT_UI.md";
 
     private static string RepositoryRoot()
     {
@@ -173,14 +178,59 @@ public sealed class MusicLyricsDraftContractMirrorTests
     }
 
     [Fact]
-    public void StructuredLyricsEditorRemainsOwnedByItsOwnOpenSlice()
+    public void StructuredLyricsEditorStaysSingleSourcedAndTheWiringFollowUpStaysRecorded()
     {
-        // PR #772 owns the section editor. If that lane lands, this assertion
-        // is the signal to wire the preflight panel into the studio rather
-        // than a reason to re-implement the editor here.
-        Assert.False(
+        // PR #772 owns the section editor. While that lane was unmerged this
+        // assertion pinned its file absent, so that landing it failed here and
+        // pointed at the studio-wiring follow-up instead of at a second editor.
+        // The lane has landed onto current main, so the absence check is retired
+        // and the two properties it existed to protect are asserted positively:
+        //   1. one editor only, and it mirrors the contract vocabulary rather
+        //      than restating it (blocker B8: a 4-type / 12-section / 2,000-char
+        //      model must never come back alongside the real one);
+        //   2. the wiring follow-up stays recorded until MusicStudioView actually
+        //      consumes the editor, so the preflight panel cannot sit unused.
+        Assert.True(
             File.Exists(Absolute(LyricsEditorPath)),
-            $"{LyricsEditorPath} is owned by draft PR #772; landing it must come with a studio-wiring follow-up, not a duplicate.");
+            $"{LyricsEditorPath} is the structured lyrics editor owned by PR #772.");
+
+        var editor = ReadSource(LyricsEditorPath);
+        Assert.Contains("musicLyricsDraftPayload", editor, StringComparison.Ordinal);
+        Assert.Contains("MUSIC_LYRICS_MAX_SECTIONS", editor, StringComparison.Ordinal);
+        Assert.Contains("MUSIC_LYRICS_MAX_LINE_CHARACTERS", editor, StringComparison.Ordinal);
+        Assert.Contains("MUSIC_LYRICS_MAX_TOTAL_CHARACTERS", editor, StringComparison.Ordinal);
+        Assert.DoesNotContain("readonly LyricsSectionType[] = [", editor, StringComparison.Ordinal);
+        foreach (var token in MusicGenerationValues.LyricsSectionTypes)
+        {
+            Assert.DoesNotContain("\"" + token + "\"", editor, StringComparison.Ordinal);
+        }
+
+        // Property 1: no second declaration of the editor's section vocabulary.
+        var declaredIn = Directory
+            .EnumerateFiles(Absolute("apps/web/src"), "*.ts*", SearchOption.AllDirectories)
+            .Where(path => !string.Equals(Path.GetFullPath(path), Absolute(LyricsEditorPath), Path.DirectorySeparatorChar == '/'
+                ? StringComparison.Ordinal
+                : StringComparison.OrdinalIgnoreCase))
+            .Where(path =>
+            {
+                var text = File.ReadAllText(path);
+                return text.Contains("const lyricsSectionTypes", StringComparison.Ordinal)
+                    || text.Contains("type LyricsSectionType =", StringComparison.Ordinal);
+            })
+            .Select(path => Path.GetRelativePath(RepositoryRoot(), path).Replace(Path.DirectorySeparatorChar, '/'))
+            .ToArray();
+        Assert.Empty(declaredIn);
+
+        // Property 2: wired, or explicitly still owed. The sentence pinned here
+        // is step 1 of "Follow-ups, in order" in that document.
+        var wired = ReadSource(StudioViewPath).Contains("LyricsSectionEditor", StringComparison.Ordinal);
+        var recorded = ReadSource(PreflightDocPath)
+            .Contains("Wiring follow-up (open)", StringComparison.Ordinal);
+        Assert.True(
+            wired || recorded,
+            $"{StudioViewPath} does not consume {LyricsEditorPath} yet, and {PreflightDocPath} no longer " +
+            "records the wiring follow-up: either finish the studio wiring or restore its follow-up entry, " +
+            "but do not leave the landed editor and the preflight panel unused.");
     }
 }
 
