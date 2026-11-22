@@ -11,9 +11,18 @@
  * capability is presented as enabled from this component.
  */
 
-export type LyricsSectionType = "verse" | "chorus" | "bridge" | "outro";
+import {
+  MUSIC_LYRICS_MAX_LINE_CHARACTERS,
+  MUSIC_LYRICS_MAX_LINES_PER_SECTION,
+  MUSIC_LYRICS_MAX_SECTIONS,
+  MUSIC_LYRICS_MAX_TOTAL_CHARACTERS,
+  musicLyricsSectionTypes,
+  splitLyricsDraftLines,
+  type MusicLyricsSectionTypeName,
+} from "@/lib/musicLyricsDraftPayload";
+export type LyricsSectionType = MusicLyricsSectionTypeName;
 
-export const lyricsSectionTypes: readonly LyricsSectionType[] = ["verse", "chorus", "bridge", "outro"];
+export const lyricsSectionTypes: readonly LyricsSectionType[] = musicLyricsSectionTypes;
 
 export type LyricsSection = {
   /** Stable identifier supplied and preserved by the consumer. */
@@ -38,10 +47,18 @@ export type LyricsSectionEditorLabels = {
   emptySectionError: string;
   tooLongError: (maxCharsPerSection: number) => string;
   tooManySectionsError: (maxSections: number) => string;
+  tooManyLinesError: (maxLinesPerSection: number) => string;
+  lineTooLongError: (maxLineCharacters: number) => string;
+  totalTooLongError: (maxTotalCharacters: number) => string;
+  totalCharactersLimit: (maxTotalCharacters: number) => string;
 };
 
-export const LYRICS_MAX_CHARS_PER_SECTION = 2_000;
-export const LYRICS_MAX_SECTIONS = 12;
+export const LYRICS_MAX_LINES_PER_SECTION = MUSIC_LYRICS_MAX_LINES_PER_SECTION;
+export const LYRICS_MAX_LINE_CHARACTERS = MUSIC_LYRICS_MAX_LINE_CHARACTERS;
+/** Largest text one section can hold at the mirrored line rules; caps the input. */
+export const LYRICS_MAX_CHARS_PER_SECTION = LYRICS_MAX_LINES_PER_SECTION * LYRICS_MAX_LINE_CHARACTERS;
+export const LYRICS_MAX_SECTIONS = MUSIC_LYRICS_MAX_SECTIONS;
+export const LYRICS_MAX_TOTAL_CHARACTERS = MUSIC_LYRICS_MAX_TOTAL_CHARACTERS;
 
 /** Accessible name for a lyric input, kept identical between render and tests. */
 export const lyricsSectionAriaLabel = (
@@ -141,7 +158,10 @@ export type LyricsSectionsErrorCode =
   | "sections_too_many"
   | "section_type_invalid"
   | "section_empty"
-  | "section_too_long";
+  | "section_too_long"
+  | "lines_too_many"
+  | "line_too_long"
+  | "lyrics_total_too_long";
 
 export type LyricsSectionsError = {
   code: LyricsSectionsErrorCode;
@@ -169,6 +189,7 @@ export function validateLyricsSections(
   const requireNonEmpty = options?.requireNonEmpty ?? true;
   if (!Array.isArray(sections)) return [{ code: "sections_missing", params: {} }];
   const errors: LyricsSectionsError[] = [];
+  let totalCharacters = 0;
   if (sections.length > maxSections) errors.push({ code: "sections_too_many", params: { maxSections } });
   let hasContent = false;
   sections.forEach((section, index) => {
@@ -190,7 +211,30 @@ export function validateLyricsSections(
         params: { sectionOrdinal: ordinal, maxCharsPerSection: maxChars, actual: trimmed.length },
       });
     }
+    const lines = splitLyricsDraftLines(trimmed);
+    if (lines.length > LYRICS_MAX_LINES_PER_SECTION) {
+      errors.push({
+        code: "lines_too_many",
+        sectionId: section.id,
+        params: { sectionOrdinal: ordinal, maxLinesPerSection: LYRICS_MAX_LINES_PER_SECTION, actual: lines.length },
+      });
+    }
+    const longest = lines.reduce((max, line) => Math.max(max, line.length), 0);
+    if (longest > LYRICS_MAX_LINE_CHARACTERS) {
+      errors.push({
+        code: "line_too_long",
+        sectionId: section.id,
+        params: { sectionOrdinal: ordinal, maxLineCharacters: LYRICS_MAX_LINE_CHARACTERS, actual: longest },
+      });
+    }
+    for (const line of lines) totalCharacters += line.length;
   });
+  if (totalCharacters > LYRICS_MAX_TOTAL_CHARACTERS) {
+    errors.push({
+      code: "lyrics_total_too_long",
+      params: { maxTotalCharacters: LYRICS_MAX_TOTAL_CHARACTERS, actual: totalCharacters },
+    });
+  }
   if (requireNonEmpty && !hasContent && errors.every((error) => error.code !== "section_empty")) {
     // Only flag a missing draft when sections exist but all are blank; an empty
     // list is handled by the consumer's own required-field rules.
@@ -211,6 +255,12 @@ export function lyricsSectionsErrorMessage(error: LyricsSectionsError, labels: L
       return labels.tooManySectionsError(Number(error.params.maxSections ?? LYRICS_MAX_SECTIONS));
     case "section_type_invalid":
       return labels.emptySectionError;
+    case "lines_too_many":
+      return labels.tooManyLinesError(Number(error.params.maxLinesPerSection ?? LYRICS_MAX_LINES_PER_SECTION));
+    case "line_too_long":
+      return labels.lineTooLongError(Number(error.params.maxLineCharacters ?? LYRICS_MAX_LINE_CHARACTERS));
+    case "lyrics_total_too_long":
+      return labels.totalTooLongError(Number(error.params.maxTotalCharacters ?? LYRICS_MAX_TOTAL_CHARACTERS));
     default:
       return labels.emptySectionError;
   }
@@ -330,6 +380,7 @@ export function LyricsSectionEditor({
       <p className="lyrics-section-editor-hints">
         <span>{labels.charactersLimit(maxCharsPerSection)}</span>
         <span>{labels.sectionsLimit(maxSections)}</span>
+        <span>{labels.totalCharactersLimit(LYRICS_MAX_TOTAL_CHARACTERS)}</span>
       </p>
     </div>
   );

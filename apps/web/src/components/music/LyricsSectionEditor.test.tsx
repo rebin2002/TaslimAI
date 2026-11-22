@@ -3,6 +3,9 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 import {
   LYRICS_MAX_CHARS_PER_SECTION,
+  LYRICS_MAX_LINES_PER_SECTION,
+  LYRICS_MAX_LINE_CHARACTERS,
+  LYRICS_MAX_TOTAL_CHARACTERS,
   LYRICS_MAX_SECTIONS,
   LyricsSectionEditor,
   addLyricsSection,
@@ -34,6 +37,10 @@ const labels: LyricsSectionEditorLabels = {
   emptySectionError: "Every section needs lyrics before you continue.",
   tooLongError: (max) => `Sections cannot exceed ${max} characters.`,
   tooManySectionsError: (max) => `You can add at most ${max} sections.`,
+  tooManyLinesError: (max) => `Sections cannot exceed ${max} lines.`,
+  lineTooLongError: (max) => `A lyric line cannot exceed ${max} characters.`,
+  totalTooLongError: (max) => `Lyrics cannot exceed ${max} characters in total.`,
+  totalCharactersLimit: (max) => `Maximum ${max} characters across all sections`,
 };
 
 const baseSections: LyricsSection[] = [
@@ -78,13 +85,34 @@ describe("LyricsSectionEditor validation", () => {
     ]);
     const long = "x".repeat(LYRICS_MAX_CHARS_PER_SECTION + 5) + "   ";
     const errors = validateLyricsSections([{ id: "a", type: "chorus", text: long }]);
-    expect(errors).toEqual([
+    expect(errors.map((error) => error.code)).toEqual(["section_too_long", "line_too_long", "lyrics_total_too_long"]);
+    expect(errors[0]).toEqual({
+      code: "section_too_long",
+      sectionId: "a",
+      params: { sectionOrdinal: 1, maxCharsPerSection: LYRICS_MAX_CHARS_PER_SECTION, actual: LYRICS_MAX_CHARS_PER_SECTION + 5 },
+    });
+  });
+  it("reports the mirrored line and total rules with canonical codes", () => {
+    const manyLines = Array.from({ length: LYRICS_MAX_LINES_PER_SECTION + 1 }, () => "kilam").join("\n");
+    expect(validateLyricsSections([{ id: "a", type: "verse", text: manyLines }]).map((e) => e.code)).toEqual([
+      "lines_too_many",
+    ]);
+    const wideLine = "x".repeat(LYRICS_MAX_LINE_CHARACTERS + 1);
+    expect(validateLyricsSections([{ id: "b", type: "chorus", text: wideLine }])).toEqual([
       {
-        code: "section_too_long",
-        sectionId: "a",
-        params: { sectionOrdinal: 1, maxCharsPerSection: LYRICS_MAX_CHARS_PER_SECTION, actual: LYRICS_MAX_CHARS_PER_SECTION + 5 },
+        code: "line_too_long",
+        sectionId: "b",
+        params: { sectionOrdinal: 1, maxLineCharacters: LYRICS_MAX_LINE_CHARACTERS, actual: wideLine.length },
       },
     ]);
+    const block = "x".repeat(199);
+    const overTotal = Array.from({ length: 19 }, (_, index) => ({ id: `s${index}`, type: "verse" as const, text: block }));
+    const totalErrors = validateLyricsSections(overTotal);
+    expect(totalErrors).toHaveLength(1);
+    expect(totalErrors[0]).toEqual({
+      code: "lyrics_total_too_long",
+      params: { maxTotalCharacters: LYRICS_MAX_TOTAL_CHARACTERS, actual: 19 * 199 },
+    });
   });
 
   it("honours custom limits and flags an over-long list", () => {
