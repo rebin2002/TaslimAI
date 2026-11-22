@@ -188,7 +188,14 @@ public sealed class MovieDirectorScenePlanValidator(
             ValidateText(findings, scene.EmotionalObjective, 2_000, "emotionalObjective");
             ValidateText(findings, scene.TransitionRelationship, 1_000, "transitionRelationship");
             ValidateText(findings, scene.ProductionIntent, 4_000, "productionIntent");
-            AddIf(findings, scene.EstimatedDurationSeconds < 1 || scene.EstimatedDurationSeconds > targetDuration, DirectorScenePlanValidationReasonCodes.RuntimeMismatch, "estimatedDurationSeconds");
+            // Fail closed at admission on the per-scene ceiling. A scene longer than the largest unit the
+            // render path can actually produce is never honoured: MovieProductionPreflight and the
+            // generation orchestrators bill each shot from Math.Clamp(..., 1, 3_600) and provider clips are
+            // capped at ProviderCapabilityPricing.MaxDurationSeconds (default 3_600), so an admitted
+            // over-length scene would be silently shortened and underbilled rather than rejected.
+            // Bounded by targetDuration, so every plan legal under the configured ceiling behaves unchanged.
+            var renderableSceneCeilingSeconds = Math.Min(targetDuration, MovieDurationBudgetPolicy.MaxShotDurationSeconds);
+            AddIf(findings, scene.EstimatedDurationSeconds < 1 || scene.EstimatedDurationSeconds > renderableSceneCeilingSeconds, DirectorScenePlanValidationReasonCodes.RuntimeMismatch, "estimatedDurationSeconds");
             AddIf(findings, scene.ParticipatingCharacters is null, DirectorScenePlanValidationReasonCodes.SchemaInvalid, "participatingCharacters");
             AddIf(findings, scene.ContinuityRequirements is null, DirectorScenePlanValidationReasonCodes.SchemaInvalid, "continuityRequirements");
             AddIf(findings, scene.ParticipatingCharacters is not null && scene.ParticipatingCharacters.Count > 16, DirectorScenePlanValidationReasonCodes.SchemaInvalid, "participatingCharacters");
