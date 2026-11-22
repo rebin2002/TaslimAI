@@ -198,6 +198,11 @@ builder.Services.AddScoped<IPaymentReconciliationService, PaymentReconciliationS
 builder.Services.AddSingleton<IPaymentProvider, UnconfiguredPaymentProvider>();
 builder.Services.AddScoped<IAssetService, AssetService>();
 builder.Services.AddScoped<IGeneratedAssetPublisher, GeneratedAssetPublisher>();
+// Music Studio reference selection (#708 criteria 3-4): read-only asset authorization evidence
+// joined to the fail-closed eligibility decision. Provider-free, generation-free and billing-free
+// by construction - this boundary admits nothing to any paid path and enables no generation.
+builder.Services.AddScoped<IMusicReferenceAssetAuthorizer, MusicReferenceAssetAuthorizer>();
+builder.Services.AddScoped<IMusicReferenceEligibilityBoundary, MusicReferenceEligibilityBoundary>();
 builder.Services.AddSingleton<IGeneratedMediaRetentionHook, NoopGeneratedMediaRetentionHook>();
 builder.Services.Configure<GenerationQualityControlOptions>(builder.Configuration.GetSection("GenerationQualityControl"));
 builder.Services.AddScoped<IGenerationQualityControl, GenerationQualityControlService>();
