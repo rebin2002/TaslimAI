@@ -104,6 +104,15 @@ public sealed class ResearchGenerationJobHandler(
             throw new ResearchGenerationStageException(ResearchGenerationStages.Search, GenerationJobErrorCodes.ResearchSourceUnavailable, "No usable research sources were found.", usage);
         evidenceCandidates = evidenceProcessor.Normalize(sourceCandidates, evidenceCandidates, settings).ToList();
         sourceCandidates = (await contentFetcher.FetchAsync(sourceCandidates, settings, cancellationToken)).ToList();
+        // The citation guard is a boundary, not an adapter convention. IResearchContentFetcher is an
+        // explicit extension point that may rewrite source links after adapter ingest, so every link
+        // is re-checked here, before it can reach the report prompt, the persisted source rows, the
+        // CSV manifest, the DOCX/PDF source list or the clickable source link. Rows that fail are
+        // dropped rather than rewritten, and the surviving server-assigned citation identifiers stay
+        // the only identifiers the validator, the exports and the UI can describe.
+        sourceCandidates = ResearchCitationUrlPolicy.FilterAdmissibleSourceLinks(sourceCandidates).ToList();
+        if (sourceCandidates.Count == 0)
+            throw new ResearchGenerationStageException(ResearchGenerationStages.Search, GenerationJobErrorCodes.ResearchSourceUnavailable, "No usable research sources were found.", usage);
         progress.Report(50);
 
         var sourcesStaged = false;
