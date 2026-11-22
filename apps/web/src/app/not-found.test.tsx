@@ -51,6 +51,7 @@ describe("not-found boundary", () => {
     expect(html).toContain('href="/"');
     expect(html).toContain('href="/assets"');
     expect(html).not.toMatch(/<main\b/);
+    expect(html).not.toContain('role="main"');
     expect(html).not.toContain("error.message");
     expect(html).not.toContain("digest");
   });
@@ -69,6 +70,7 @@ describe("not-found boundary", () => {
     expect(html).toContain('href="/"');
     expect(html).toContain('href="/assets"');
     expect(html).not.toMatch(/<main\b/);
+    expect(html).toContain('role="main"');
     expect(html).not.toContain("useLocale must be used within LocaleProvider");
     expect(html).not.toContain("digest");
   });
