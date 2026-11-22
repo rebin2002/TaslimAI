@@ -40,10 +40,20 @@ test.describe("authenticated SSR route cache isolation", () => {
     expect(headers["x-robots-tag"] ?? "").toMatch(/noindex/);
   });
 
-  test("route documents for other private surfaces carry the same policy", async ({ page }) => {
+  // Since main `23f29d86` (PR #1247) these surfaces also carry a server-side
+  // session gate, so an anonymous visit is answered with a redirect to
+  // `/login?next=…` and the document the browser finally receives belongs to
+  // the allowlisted credential form. The policy under test here is the one
+  // attached to an authenticated private document, so the probe must actually
+  // hold a session: that asserts the real production shape instead of the
+  // pre-gate static shell.
+  test("route documents for other private surfaces carry the same policy", async ({ authenticatedPage: page }) => {
     for (const path of ["/", "/projects", "/activity"]) {
       const response = await page.goto(path);
       expect(response, path).not.toBeNull();
+      // Guard against the assertion silently passing on a redirected login
+      // document: the private surface itself must be what was served.
+      expect(page.url(), path).toContain(path);
       expect(response!.headers()["x-robots-tag"] ?? "", path).toMatch(/noindex/);
     }
   });
