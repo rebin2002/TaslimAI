@@ -1029,7 +1029,15 @@ public static class MovieStudioValidation
     public static string? Validate(MovieStudioCreateRequest request)
     {
         if (string.IsNullOrWhiteSpace(request.Title) || request.Title.Trim().Length > 160) return "Add a movie title.";
-        if (string.IsNullOrWhiteSpace(request.Description) || request.Description.Trim().Length > 8000) return "Describe the movie in 1–8,000 characters.";
+        // A brand-new Full-mode movie copies the trimmed description into the root Project row it
+        // creates as well as into the movie row, and TaslimDbContext declares those two columns at
+        // different limits (Project.Description 2,000 versus MovieProject.Description 8,000), so
+        // only the shapes that write no root row may use the wider ceiling. Bounding the fan-out
+        // shape here keeps an over-long brief inside the endpoint's own 400 envelope instead of
+        // letting it abort SaveChanges with a varchar length violation (500 INTERNAL_ERROR) on the
+        // production provider. Every other description target is unchanged.
+        var descriptionLimit = request.Mode == MovieProjectModes.Full && request.ProjectId is null ? 2_000 : 8_000;
+        if (string.IsNullOrWhiteSpace(request.Description) || request.Description.Trim().Length > descriptionLimit) return $"Describe the movie in 1–{descriptionLimit:N0} characters.";
         if (request.DurationSeconds is < 1 or > 3600) return "Movie duration must be between 1 second and 60 minutes.";
         if (!SupportedAspectRatios.Contains(request.AspectRatio)) return "Choose a supported aspect ratio.";
         if (!LanguageCodes.Supported.Contains(request.Language)) return "Choose English, Arabic, or Kurdish.";
