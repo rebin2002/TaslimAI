@@ -13,6 +13,7 @@ using Microsoft.Extensions.DependencyInjection.Extensions;
 using Taslim.Api.Ai;
 using Taslim.Api.Contracts;
 using Taslim.Api.Files;
+using Taslim.Api.Domain;
 using Taslim.Api.Persistence;
 using Xunit;
 
@@ -331,6 +332,207 @@ public sealed class ContextIntegrationTests : IClassFixture<ContextRecordingFact
         });
         Assert.Equal(HttpStatusCode.OK, repeatedRegeneration.StatusCode);
         Assert.DoesNotContain(recorder.LastRequest!.Messages, message => message.Content == "SUPERSEDED_ASSISTANT_MARKER");
+    }
+
+    [Fact]
+    public async Task Superseded_regenerated_response_stays_out_of_every_later_turn_context()
+    {
+        using var client = factory.CreateClient();
+        var auth = await Register(client, "Superseded Later Turn Owner");
+        var conversation = await CreateConversation(client, auth.PersonalWorkspace.Id, null);
+        var initial = await SendWithCsrf<SendMessageResponse>(client, HttpMethod.Post, $"/api/conversations/{conversation.Id}/messages", new
+        {
+            content = "SUPERSEDE_SOURCE_USER",
+            requestId = Guid.NewGuid().ToString("N"),
+        });
+
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        var originalAssistant = await db.ChatMessages.SingleAsync(message => message.Id == initial.AssistantMessage.Id);
+        originalAssistant.Content = "SUPERSEDED_RESPONSE_MARKER";
+        await db.SaveChangesAsync();
+
+        var regeneration = await SendWithCsrf(client, HttpMethod.Post, $"/api/conversations/{conversation.Id}/messages/{initial.AssistantMessage.Id}/regenerate", new
+        {
+            requestId = Guid.NewGuid().ToString("N"),
+        });
+        Assert.Equal(HttpStatusCode.OK, regeneration.StatusCode);
+        using var regenerated = ExtractEventData(await regeneration.Content.ReadAsStringAsync(), "message.completed");
+        var replacementId = regenerated.RootElement.GetProperty("assistantMessage").GetProperty("id").GetGuid();
+
+        // The replacement response is now the only live answer for that user turn, so the next
+        // ordinary message must be built from it alone. A response the user replaced must not
+        // re-enter the model context on a later turn, and the live replacement must not be
+        // replayed as a second assistant answer to the original user message.
+        var recorder = factory.Services.GetRequiredService<RecordingChatCompletionService>();
+        await SendMessage(client, conversation.Id, "SUPERSEDE_FOLLOW_UP_USER");
+        Assert.DoesNotContain(recorder.LastRequest!.Messages, message => message.Content == "SUPERSEDED_RESPONSE_MARKER");
+        var assistantContents = recorder.LastRequest.Messages
+            .Where(message => message.Role == "assistant")
+            .Select(message => message.Content)
+            .ToArray();
+        Assert.Single(assistantContents);
+        Assert.NotEqual(Guid.Empty, replacementId);
+    }
+
+    [Fact]
+    public async Task Regeneration_keeps_exactly_one_live_assistant_answer_per_user_turn()
+    {
+        using var client = factory.CreateClient();
+        var auth = await Register(client, "Regeneration Live Answer Owner");
+        var conversation = await CreateConversation(client, auth.PersonalWorkspace.Id, null);
+        var recorder = factory.Services.GetRequiredService<RecordingChatCompletionService>();
+        await SendMessage(client, conversation.Id, "SUPERSEDE_FIRST_USER");
+        Assert.DoesNotContain(recorder.LastRequest!.Messages, message => message.Role == "assistant");
+        await SendMessage(client, conversation.Id, "SUPERSEDE_SECOND_USER");
+        Assert.Single(recorder.LastRequest.Messages, message => message.Role == "assistant");
+
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        var liveAssistant = await db.ChatMessages.AsNoTracking()
+            .Where(message => message.ConversationId == conversation.Id && message.Role == ChatMessageRole.Assistant)
+            .OrderByDescending(message => message.Sequence)
+            .FirstAsync();
+        var latest = await db.ChatMessages.AsNoTracking()
+            .Where(message => message.ConversationId == conversation.Id && message.Role == ChatMessageRole.User)
+            .OrderByDescending(message => message.Sequence)
+            .FirstAsync();
+        Assert.True(latest.Sequence < liveAssistant.Sequence);
+
+        var regeneration = await SendWithCsrf(client, HttpMethod.Post, $"/api/conversations/{conversation.Id}/messages/{liveAssistant.Id}/regenerate", new
+        {
+            requestId = Guid.NewGuid().ToString("N"),
+        });
+        Assert.Equal(HttpStatusCode.OK, regeneration.StatusCode);
+        Assert.Contains("message.completed", await regeneration.Content.ReadAsStringAsync());
+
+        // The transcript still carries both responses for the replaced turn, but a later turn is
+        // built from one live answer per user turn: nothing is dropped and nothing is duplicated.
+        await SendMessage(client, conversation.Id, "SUPERSEDE_THIRD_USER");
+        var history = recorder.LastRequest!.Messages.ToArray();
+        Assert.Equal(3, history.Count(message => message.Role == "user"));
+        Assert.Equal(2, history.Count(message => message.Role == "assistant"));
+        for (var index = 1; index < history.Length; index++)
+        {
+            var duplicatedTurn = history[index].Role == "assistant" && history[index - 1].Role == "assistant";
+            Assert.False(duplicatedTurn, $"Assistant rows at {index - 1} and {index} are adjacent, so a turn lost or duplicated its live answer.");
+        }
+    }
+
+    [Fact]
+    public async Task Concurrent_regeneration_outcomes_replay_only_the_winning_answer_into_later_turns()
+    {
+        // A synthetic stand-in for two regeneration attempts that raced for the same user turn:
+        // one attempt completed and was then regenerated over, while the other never persisted an
+        // answer. The transcript keeps every completed row for audit, so the only signal that a
+        // row lost the race is its position behind a newer assistant row. A later turn must be
+        // built from the surviving winner alone: no stale replay, and no duplicate live answer.
+        using var client = factory.CreateClient();
+        var auth = await Register(client, "Raced Regeneration Owner");
+        var conversation = await CreateConversation(client, auth.PersonalWorkspace.Id, null);
+        var recorder = factory.Services.GetRequiredService<RecordingChatCompletionService>();
+        await SendMessage(client, conversation.Id, "RACE_FIRST_USER");
+
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        var superseded = await db.ChatMessages.SingleAsync(message =>
+            message.ConversationId == conversation.Id && message.Role == ChatMessageRole.Assistant && message.Sequence == 2);
+        superseded.Content = "RACE_SUPERSEDED_MARKER";
+        // A send and its reply take two consecutive sequences, so a regeneration that won the
+        // race lands directly behind the attempt it replaced: winner at sequence 3, with the
+        // attempt that never persisted an answer queued behind it still in flight.
+        var racedWinner = new ChatMessage
+        {
+            Id = Guid.NewGuid(),
+            ConversationId = conversation.Id,
+            Role = ChatMessageRole.Assistant,
+            Content = "RACE_WINNER_MARKER",
+            Status = ChatMessageStatus.Completed,
+            CreatedAt = DateTime.UtcNow,
+            Sequence = 3,
+            RequestId = Guid.NewGuid().ToString("N"),
+        };
+        var racedLoser = new ChatMessage
+        {
+            Id = Guid.NewGuid(),
+            ConversationId = conversation.Id,
+            Role = ChatMessageRole.Assistant,
+            Content = string.Empty,
+            Status = ChatMessageStatus.Pending,
+            CreatedAt = DateTime.UtcNow,
+            Sequence = 4,
+            RequestId = Guid.NewGuid().ToString("N"),
+        };
+        db.ChatMessages.AddRange(racedWinner, racedLoser);
+        var racedConversation = await db.Conversations.SingleAsync(item => item.Id == conversation.Id);
+        racedConversation.NextMessageSequence = 4;
+        await db.SaveChangesAsync();
+
+        await SendMessage(client, conversation.Id, "RACE_FOLLOW_UP_USER");
+        var history = recorder.LastRequest!.Messages.ToArray();
+        Assert.DoesNotContain(history, message => message.Content == "RACE_SUPERSEDED_MARKER");
+        Assert.Contains(history, message => message.Content == "RACE_WINNER_MARKER");
+        Assert.Equal(2, history.Count(message => message.Role == "user"));
+        Assert.Equal(1, history.Count(message => message.Role == "assistant"));
+        for (var index = 1; index < history.Length; index++)
+        {
+            var duplicatedTurn = history[index].Role == "assistant" && history[index - 1].Role == "assistant";
+            Assert.False(duplicatedTurn, $"Assistant rows at {index - 1} and {index} are adjacent, so a raced turn lost or duplicated its live answer.");
+        }
+    }
+
+    [Fact]
+    public async Task Replayed_regeneration_request_returns_the_persisted_answer_without_a_second_provider_call()
+    {
+        // A client retried a regeneration while the first attempt's response had already been
+        // superseded by the replacement it produced. The replayed request id must resolve to the
+        // persisted answer without a second provider call, and the response the user replaced must
+        // still be absent from every later turn's context.
+        using var client = factory.CreateClient();
+        var auth = await Register(client, "Replayed Regeneration Owner");
+        var conversation = await CreateConversation(client, auth.PersonalWorkspace.Id, null);
+        var recorder = factory.Services.GetRequiredService<RecordingChatCompletionService>();
+        var initial = await SendWithCsrf<SendMessageResponse>(client, HttpMethod.Post, $"/api/conversations/{conversation.Id}/messages", new
+        {
+            content = "REPLAY_SOURCE_USER",
+            requestId = Guid.NewGuid().ToString("N"),
+        });
+
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        var originalAssistant = await db.ChatMessages.SingleAsync(message => message.Id == initial.AssistantMessage.Id);
+        originalAssistant.Content = "REPLAY_SUPERSEDED_MARKER";
+        await db.SaveChangesAsync();
+
+        var requestId = Guid.NewGuid().ToString("N");
+        var firstAttempt = await SendWithCsrf(client, HttpMethod.Post, $"/api/conversations/{conversation.Id}/messages/{initial.AssistantMessage.Id}/regenerate", new { requestId });
+        Assert.Equal(HttpStatusCode.OK, firstAttempt.StatusCode);
+        using var firstCompleted = ExtractEventData(await firstAttempt.Content.ReadAsStringAsync(), "message.completed");
+        var winnerRowId = firstCompleted.RootElement.GetProperty("assistantMessage").GetProperty("id").GetGuid();
+        var callsAfterFirstAttempt = recorder.CallCount;
+
+        var replayedAttempt = await SendWithCsrf(client, HttpMethod.Post, $"/api/conversations/{conversation.Id}/messages/{winnerRowId}/regenerate", new { requestId });
+        Assert.Equal(HttpStatusCode.OK, replayedAttempt.StatusCode);
+        using var replayed = ExtractEventData(await replayedAttempt.Content.ReadAsStringAsync(), "message.completed");
+        Assert.Equal(winnerRowId, replayed.RootElement.GetProperty("assistantMessage").GetProperty("id").GetGuid());
+        Assert.Equal(callsAfterFirstAttempt, recorder.CallCount);
+        var persistedAnswers = await db.ChatMessages.AsNoTracking()
+            .Where(message => message.ConversationId == conversation.Id && message.Role == ChatMessageRole.Assistant)
+            .CountAsync();
+        Assert.Equal(2, persistedAnswers);
+
+        await SendMessage(client, conversation.Id, "REPLAY_FOLLOW_UP_USER");
+        var history = recorder.LastRequest!.Messages.ToArray();
+        Assert.DoesNotContain(history, message => message.Content == "REPLAY_SUPERSEDED_MARKER");
+        Assert.Equal(2, history.Count(message => message.Role == "user"));
+        // Three assistant rows were persisted (the replaced original, the regeneration winner,
+        // and this follow-up answer); only the two live answers may reach a later context.
+        Assert.Equal(persistedAnswers - 1, history.Count(message => message.Role == "assistant"));
+        for (var index = 1; index < history.Length; index++)
+        {
+            var duplicatedTurn = history[index].Role == "assistant" && history[index - 1].Role == "assistant";
+            Assert.False(duplicatedTurn, $"Assistant rows at {index - 1} and {index} are adjacent, so a replayed attempt duplicated its live answer.");
+        }
     }
 
     private async Task<AuthResponse> Register(HttpClient client, string displayName)
