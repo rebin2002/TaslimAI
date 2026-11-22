@@ -71,7 +71,15 @@ public sealed class PdfParserExceptionExtractionBoundaryTests : IClassFixture<Ta
                 _ = page.Text;
             }
         });
-        Assert.False(exception is InvalidDataException, $"{name}: parser exception unexpectedly derives from InvalidDataException; re-check the boundary filter.");
+        // Checked on the runtime type, not with an `is` pattern on the statically typed local:
+        // `exception is InvalidDataException` is provably false at compile time (CS0184) and
+        // folds away, so it can never fail and stops pinning anything. IsAssignableFrom is
+        // evaluated at runtime and really does break when the parser changes its base type,
+        // which is the condition that would make ExtractPdf/OpenPdfDocument's conversion to
+        // InvalidDataException redundant and the boundary filter sufficient on its own.
+        Assert.False(
+            typeof(InvalidDataException).IsAssignableFrom(exception.GetType()),
+            $"{name}: parser exception {exception.GetType().FullName} unexpectedly derives from {nameof(InvalidDataException)}; re-check the boundary filter.");
     }
 
     [Theory]
