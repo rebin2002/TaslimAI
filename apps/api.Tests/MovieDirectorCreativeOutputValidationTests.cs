@@ -107,6 +107,23 @@ public sealed class MovieDirectorCreativeOutputValidationTests
     }
 
     [Fact]
+    public void Proposed_scene_identifier_cannot_collide_with_a_base_revision_scene()
+    {
+        var scene = new MovieStorySceneRequest
+        {
+            SceneIdentifier = "1",
+            Slugline = "INT. LIGHTHOUSE - NIGHT",
+            Synopsis = "Mara guards the red lantern before the storm.",
+            Elements = [new MovieScreenplayElementRequest { ElementType = MovieScreenplayElementTypes.Action, Content = "Mara checks the red lantern." }],
+        };
+
+        var result = validator.ValidateAndRepair(Payload(DirectorStoryActionTypes.ProposeScreenplayScene, proposedScene: scene), context);
+
+        Assert.False(result.IsValid);
+        Assert.Contains(result.Findings, item => item.ReasonCode == DirectorCreativeValidationReasonCodes.SceneIdentifierCollision);
+    }
+
+    [Fact]
     public void Duplicate_screenplay_elements_receive_one_bounded_structured_repair()
     {
         var scene = new MovieStorySceneRequest
