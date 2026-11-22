@@ -59,7 +59,7 @@ public sealed class PasswordRecoveryApiFactory : WebApplicationFactory<Program>
             services.RemoveAll<IEmailSender>();
             services.AddSingleton<IEmailSender>(EmailSender);
             if (resetTokenLifetime is { } tokenLifetime)
-                services.PostConfigure<DataProtectionTokenProviderOptions>(options => options.TokenLifespan = tokenLifetime);
+                services.PostConfigure<PasswordResetTokenProviderOptions>(options => options.TokenLifespan = tokenLifetime);
         });
     }
 
@@ -465,8 +465,17 @@ public sealed class PasswordRecoveryTests(PasswordRecoveryApiFactory factory) : 
     [Fact]
     public async Task Reset_requires_csrf_rejects_invalid_tokens_and_consumes_valid_token_once_without_signing_in()
     {
-        var tokenOptions = factory.Services.GetRequiredService<IOptions<DataProtectionTokenProviderOptions>>();
-        Assert.Equal(TimeSpan.FromMinutes(PasswordRecoveryOptions.PasswordResetTokenLifetimeMinutes), tokenOptions.Value.TokenLifespan);
+        // The recovery window must apply to the password-reset purpose only: the
+        // shared provider keeps Identity's framework lifetime, so email
+        // confirmation, phone-change and two-factor tokens are never shortened
+        // by PasswordRecovery settings.
+        var sharedTokenOptions = factory.Services.GetRequiredService<IOptions<DataProtectionTokenProviderOptions>>();
+        var resetTokenOptions = factory.Services.GetRequiredService<IOptions<PasswordResetTokenProviderOptions>>();
+        var identityOptions = factory.Services.GetRequiredService<IOptions<IdentityOptions>>();
+        Assert.Equal(TimeSpan.FromDays(1), sharedTokenOptions.Value.TokenLifespan);
+        Assert.Equal(TimeSpan.FromMinutes(PasswordRecoveryOptions.PasswordResetTokenLifetimeMinutes), resetTokenOptions.Value.TokenLifespan);
+        Assert.Equal(PasswordResetTokenProviderOptions.ProviderName, identityOptions.Value.Tokens.PasswordResetTokenProvider);
+        Assert.NotEqual(PasswordResetTokenProviderOptions.ProviderName, identityOptions.Value.Tokens.EmailConfirmationTokenProvider);
 
         var email = $"reset-{Guid.NewGuid():N}@example.test";
         using var firstSession = factory.CreateClient();

@@ -88,10 +88,32 @@ public sealed class AuthController(
         if (user is null || !user.IsActive)
             return await PasswordResetRequestAcceptedAsync(requestTimer, cancellationToken);
 
-        await passwordResetOutbox.TryQueueAsync(
-            user.Id,
-            TimeSpan.FromMinutes(options.RequestCooldownMinutes),
-            cancellationToken);
+        try
+        {
+            await passwordResetOutbox.TryQueueAsync(
+                user.Id,
+                TimeSpan.FromMinutes(options.RequestCooldownMinutes),
+                cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception exception)
+        {
+            // Queuing is the only step that runs for an existing account and not for
+            // an unknown one, so an unmasked outbox or storage fault (missing table,
+            // unapplied migration, permission loss, constraint clash) answers 500 for
+            // exactly one class of address and becomes an account-enumeration oracle
+            // during an outage. The response is the same masked 202 as the unknown
+            // path; the fault is recorded server-side as a stable classification only,
+            // never an address, token or provider message.
+            logger.LogError(
+                "Password reset request queueing failed. TraceId={TraceId}; ErrorType={ErrorType}",
+                HttpContext.TraceIdentifier,
+                exception.GetType().Name);
+        }
+
         return await PasswordResetRequestAcceptedAsync(requestTimer, cancellationToken);
     }
 
@@ -129,6 +151,28 @@ public sealed class AuthController(
         // CSRF cookie ensures this response never leaves a request token bound
         // to the pre-reset browser session. The response deliberately issues no
         // authentication cookie; users must sign in again with the new password.
+        try
+        {
+            // The recovery is complete, so any still-queued or in-flight reset email
+            // for this account is obsolete and must not be delivered afterwards.
+            await passwordResetOutbox.CancelForUserAsync(user.Id, cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception exception)
+        {
+            // The password change already succeeded. Reporting a cancellation fault as
+            // a failed reset would mislead the user into retrying recovery, so it is
+            // logged as a classification only and the outcome of this request is not
+            // changed for any account, known or unknown.
+            logger.LogError(
+                "Password reset outbox cancellation failed. TraceId={TraceId}; ErrorType={ErrorType}",
+                HttpContext.TraceIdentifier,
+                exception.GetType().Name);
+        }
+
         ExpireCsrfCookie();
         return Ok(new { success = true });
     }
