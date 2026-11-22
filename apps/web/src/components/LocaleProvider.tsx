@@ -120,4 +120,15 @@ export function useLocale() {
   return context;
 }
 
+/**
+ * Non-throwing sibling of `useLocale` for framework recovery boundaries that
+ * Next can render outside `layout.tsx`'s provider tree (the legacy
+ * unrecognized-Server-Action fallback renders `app/not-found.tsx` with no
+ * LocaleProvider ancestor, see #697). Callers must handle `null` and stay
+ * renderable without the provider.
+ */
+export function useOptionalLocale() {
+  return useContext(LocaleContext);
+}
+
 export { languagePackIds, languagePackNames, localeNames, locales };
