@@ -18,14 +18,16 @@ public sealed class ActivityController(IActivityCenterService activity) : Contro
         [FromQuery] string? jobType = null,
         CancellationToken cancellationToken = default)
     {
-        var result = await activity.ListAsync(GetUserId(), new ActivityFilter(workspaceId, page, pageSize, status, jobType), cancellationToken);
+        if (!TryGetUserId(out var userId)) return Unauthorized();
+        var result = await activity.ListAsync(userId, new ActivityFilter(workspaceId, page, pageSize, status, jobType), cancellationToken);
         return result is null ? Forbid() : Ok(result);
     }
 
     [HttpGet("api/activity/unread-count")]
     public async Task<IActionResult> UnreadCount([FromQuery] Guid workspaceId, CancellationToken cancellationToken)
     {
-        var result = await activity.GetUnreadCountAsync(GetUserId(), workspaceId, cancellationToken);
+        if (!TryGetUserId(out var userId)) return Unauthorized();
+        var result = await activity.GetUnreadCountAsync(userId, workspaceId, cancellationToken);
         return result is null ? Forbid() : Ok(new { unreadCount = result.Value });
     }
 
@@ -33,7 +35,8 @@ public sealed class ActivityController(IActivityCenterService activity) : Contro
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> MarkRead(Guid jobId, ActivityReadRequest request, CancellationToken cancellationToken)
     {
-        var result = await activity.MarkReadAsync(GetUserId(), jobId, request.WorkspaceId, cancellationToken);
+        if (!TryGetUserId(out var userId)) return Unauthorized();
+        var result = await activity.MarkReadAsync(userId, jobId, request.WorkspaceId, cancellationToken);
         return result ? Ok(new { read = true }) : Forbid();
     }
 
@@ -41,9 +44,10 @@ public sealed class ActivityController(IActivityCenterService activity) : Contro
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> MarkAllRead(ActivityReadAllRequest request, CancellationToken cancellationToken)
     {
-        var result = await activity.MarkAllReadAsync(GetUserId(), request.WorkspaceId, cancellationToken);
+        if (!TryGetUserId(out var userId)) return Unauthorized();
+        var result = await activity.MarkAllReadAsync(userId, request.WorkspaceId, cancellationToken);
         return result ? Ok(new { read = true }) : Forbid();
     }
 
-    private Guid GetUserId() => Guid.Parse(User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value ?? throw new InvalidOperationException("Authenticated user identifier is missing."));
+    private bool TryGetUserId(out Guid userId) => Guid.TryParse(User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value, out userId);
 }
