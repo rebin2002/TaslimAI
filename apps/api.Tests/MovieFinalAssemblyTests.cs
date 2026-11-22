@@ -25,7 +25,7 @@ public sealed class MovieFinalAssemblyTests
         var audioPath = "/tmp/music $(touch /tmp/should-not-run.wav).wav";
 
         var arguments = FfmpegMovieFinalAssemblyCommandBuilder.Build(
-            new MovieFinalAssemblyExecutionRequest(input, new Dictionary<Guid, string>
+            ProbedRequest(input, new Dictionary<Guid, string>
             {
                 [videoAsset] = videoPath,
                 [audioAsset] = audioPath,
@@ -53,7 +53,7 @@ public sealed class MovieFinalAssemblyTests
         };
 
         var arguments = FfmpegMovieFinalAssemblyCommandBuilder.Build(
-            new MovieFinalAssemblyExecutionRequest(input, new Dictionary<Guid, string>
+            ProbedRequest(input, new Dictionary<Guid, string>
             {
                 [videoAsset] = "/tmp/source.mp4",
                 [captionsAsset] = "/tmp/captions:english's.vtt",
@@ -119,6 +119,42 @@ public sealed class MovieFinalAssemblyTests
             "assembly:test",
             3);
     }
+
+    [Fact]
+    public void Ffmpeg_builder_fails_closed_without_per_source_probe_evidence()
+    {
+        var videoAsset = Guid.NewGuid();
+        var input = Contract(videoAsset, null, MovieAssemblyCaptionModes.None);
+        var paths = new Dictionary<Guid, string> { [videoAsset] = "/tmp/clip.mp4" };
+
+        // Only the real executor probes each input before rendering, so the builder
+        // must never infer that a source carries an audio stream and emit [i:a]
+        // blindly. Absent evidence (null table), an empty table and a table that is
+        // missing this asset all have to fail closed with the same code.
+        foreach (var probes in new IReadOnlyDictionary<Guid, MovieFinalAssemblyVideoProbe>?[]
+        {
+            null,
+            new Dictionary<Guid, MovieFinalAssemblyVideoProbe>(),
+            new Dictionary<Guid, MovieFinalAssemblyVideoProbe> { [Guid.NewGuid()] = new(600m, true) },
+        })
+        {
+            var error = Assert.Throws<MovieFinalAssemblyExecutionException>(() =>
+                FfmpegMovieFinalAssemblyCommandBuilder.Build(
+                    new MovieFinalAssemblyExecutionRequest(input, paths, probes), "/tmp/master.mp4"));
+            Assert.Equal("ASSEMBLY_SOURCE_PROBE_MISSING", error.Code);
+        }
+    }
+
+    // The builder requires per-source probe evidence for every distinct timeline
+    // source (MovieFinalAssemblyExecutionRequest.VideoProbes) because that evidence
+    // is what keeps [i:a] mapping and duration bounds honest. Builder-contract tests
+    // that assert filtergraph shape therefore have to supply it; the fail-closed
+    // lanes above deliberately omit it to pin the rejection itself.
+    private static MovieFinalAssemblyExecutionRequest ProbedRequest(
+        MovieFinalAssemblyInput input,
+        IReadOnlyDictionary<Guid, string> paths) =>
+        new(input, paths, input.Timeline.Select(item => item.AssetId).Distinct()
+            .ToDictionary(id => id, _ => new MovieFinalAssemblyVideoProbe(600m, true)));
 
     private static MovieFinalAssemblyExecutionResult Output(int width, int height, int duration) => new(
         "master.mp4",
