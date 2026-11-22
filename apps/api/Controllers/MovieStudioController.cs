@@ -1051,6 +1051,10 @@ public sealed class MovieStudioController(IMovieStudioService movies, IMovieProd
         catch (MovieStudioValidationException exception) { return ApiResults.Error(this, 400, "MOVIE_SCENE_NOT_READY", exception.Message); }
         catch (MovieReferenceReadinessException exception) { return ApiResults.Error(this, 409, exception.Code, exception.Message); }
         catch (MovieStudioCostGuardException exception) { return ApiResults.Error(this, 402, exception.Code, exception.Message); }
+        // A key this user already claimed for a different request, or one whose canonical
+        // clip can no longer be resolved, is a client-correctable conflict. It must not
+        // surface as an internal error, because the rejected request created nothing.
+        catch (GenerationJobValidationException exception) { return ApiResults.Error(this, 400, exception.Code, exception.Message); }
     }
 
     [HttpPost("shots/{shotId:guid}/generate")]
@@ -1066,6 +1070,7 @@ public sealed class MovieStudioController(IMovieStudioService movies, IMovieProd
         catch (MovieStudioValidationException exception) { return ApiResults.Error(this, 400, "MOVIE_SHOT_NOT_READY", exception.Message); }
         catch (MovieReferenceReadinessException exception) { return ApiResults.Error(this, 409, exception.Code, exception.Message); }
         catch (MovieStudioCostGuardException exception) { return ApiResults.Error(this, 402, exception.Code, exception.Message); }
+        catch (GenerationJobValidationException exception) { return ApiResults.Error(this, 400, exception.Code, exception.Message); }
     }
 
     [HttpGet("projects/{movieProjectId:guid}/story")]

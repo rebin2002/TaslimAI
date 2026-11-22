@@ -123,6 +123,21 @@ describe("Voice Studio in-flight polling failure state", () => {
     expect(pollEffect).not.toContain("caught.message");
   });
 
+  it("states the create refusal in the member's own language", () => {
+    // The compose form's create arm carried the same raw-provider catch as the
+    // poll effect did, so `voice.createError` - which exists in English, Arabic
+    // and Kurdish - was unreachable for the failures that actually happen, and
+    // an ar or ku member read the server's English sentence inside a
+    // `role="alert"` region. The cancel handler was already corrected by the
+    // recovery batch; this closes the last action slot in the studio.
+    const createArm = sliceBetween("const job = await api.createVoiceGenerationJob(input);", "async function cancel()");
+    expect(createArm).toContain('setError(t("voice.createError"))');
+    expect(createArm).not.toContain("caught.message");
+    const texts = locales.map((locale) => translate(locale, "voice.createError"));
+    expect(new Set(texts).size).toBe(3);
+    expect(texts).not.toContain("Something went wrong.");
+  });
+
   it("keeps the polling notice out of the route error boundary owned by #622", () => {
     // Different state, different file: a thrown render error is route-level.
     expect(voiceSource).not.toContain("VoiceStudioError");
