@@ -177,7 +177,23 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
         var assetIds = locations.Select(item => item.ReferenceAssetId).Concat(geographyAssetIds).Concat(sets.Select(item => item.ReferenceAssetId)).Concat(sets.SelectMany(item => item.Variations.Select(variation => variation.ReferenceAssetId))).Concat(props.Select(item => item.ReferenceAssetId)).Concat(references.Select(item => item.AssetId)).Where(item => item.HasValue).Select(item => item!.Value).Distinct().ToArray();
         var assets = assetIds.Length == 0
             ? Array.Empty<MovieWorldAssetDto>()
-            : await db.Assets.AsNoTracking().Where(item => item.WorkspaceId == movie.WorkspaceId && assetIds.Contains(item.Id)).OrderBy(item => item.Name).Select(item => new MovieWorldAssetDto(item.Id, item.Name, item.AssetType, item.MimeType, item.StoredFileId.HasValue, item.StoredFileId.HasValue && (item.MimeType != null && (item.MimeType.StartsWith("image/") || item.MimeType.StartsWith("audio/") || item.MimeType.StartsWith("video/"))))).ToArrayAsync(cancellationToken);
+            : await db.Assets.AsNoTracking()
+                .Where(item => item.WorkspaceId == movie.WorkspaceId && assetIds.Contains(item.Id))
+                .OrderBy(item => item.Name)
+                .Select(item => new
+                {
+                    item.Id,
+                    item.Name,
+                    item.AssetType,
+                    item.MimeType,
+                    HasReadyFile = item.StoredFile != null && item.StoredFile.Status == StoredFileStatus.Ready,
+                })
+                .Select(item => new MovieWorldAssetDto(
+                    item.Id, item.Name, item.AssetType, item.MimeType,
+                    item.HasReadyFile,
+                    item.HasReadyFile && item.MimeType != null
+                        && (item.MimeType.StartsWith("image/", StringComparison.OrdinalIgnoreCase) || item.MimeType.StartsWith("audio/", StringComparison.OrdinalIgnoreCase) || item.MimeType.StartsWith("video/", StringComparison.OrdinalIgnoreCase))))
+                .ToArrayAsync(cancellationToken);
         return new MovieWorldWorkspaceDto(movie.Id, movie.WorkspaceId, movie.ProjectId, movie.Status, movie.Title, movie.Description, movie.DurationSeconds, movie.AspectRatio, movie.Style, movie.Language, world, usageDetails, assets);
     }
 
