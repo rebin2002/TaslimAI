@@ -53,6 +53,13 @@ public sealed class AiSocialGenerationProvider(IChatCompletionService completion
         {
             throw new SocialGenerationStageException(SocialGenerationStages.DraftValidation, GenerationJobErrorCodes.SocialOutputInvalid, "The social response did not satisfy the required structure.", result.Usage, exception);
         }
+        if (!string.Equals(draft.Platform, prompt.Input.Platform, StringComparison.OrdinalIgnoreCase)
+            || !string.Equals(draft.SocialType, prompt.Input.SocialType, StringComparison.OrdinalIgnoreCase)
+            || (!string.Equals(prompt.Input.Language, SocialGenerationDefaults.DefaultLanguage, StringComparison.OrdinalIgnoreCase)
+                && !string.Equals(draft.Language, prompt.Input.Language, StringComparison.OrdinalIgnoreCase)))
+        {
+            throw new SocialGenerationStageException(SocialGenerationStages.DraftValidation, GenerationJobErrorCodes.SocialOutputInvalid, "The social response did not preserve the requested settings.", result.Usage);
+        }
         return new SocialProviderResult(draft, result.Usage);
     }
 

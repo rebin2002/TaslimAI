@@ -18,4 +18,8 @@ describe("development hub accessibility structure", () => {
     expect(styles).toContain("prefers-reduced-motion: reduce");
     expect(styles).toContain('[dir="rtl"] .backLink svg');
   });
+
+  it("resolves supporting copy through installable language-pack keys before legacy fallback", () => {
+    expect(source).toContain("resolveDevelopmentHubCopy(locale, t)");
+  });
 });

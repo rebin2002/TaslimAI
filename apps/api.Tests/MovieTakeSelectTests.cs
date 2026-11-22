@@ -1,5 +1,7 @@
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Diagnostics;
+using System.Data.Common;
 using Taslim.Api.Authorization;
 using Taslim.Api.Contracts;
 using Taslim.Api.Domain;
@@ -11,6 +13,63 @@ namespace Taslim.Api.Tests;
 
 public sealed class MovieTakeSelectTests
 {
+    [Fact]
+    public async Task Concurrent_select_creation_retries_the_losing_select_number_allocation()
+    {
+        var databasePath = Path.Combine(Path.GetTempPath(), $"taslim-movie-select-{Guid.NewGuid():N}.db");
+        var barrier = new SelectNumberMaxBarrier();
+        try
+        {
+            var seedOptions = new DbContextOptionsBuilder<TaslimDbContext>()
+                .UseSqlite($"Data Source={databasePath};Default Timeout=30")
+                .Options;
+            await using var seedDb = new TaslimDbContext(seedOptions);
+            await seedDb.Database.EnsureCreatedAsync();
+            var fixture = await SeedAsync(seedDb);
+
+            async Task<MovieTakeSelectDto?> CreateAsync(string label)
+            {
+                var options = new DbContextOptionsBuilder<TaslimDbContext>()
+                    .UseSqlite($"Data Source={databasePath};Default Timeout=30")
+                    .AddInterceptors(barrier)
+                    .Options;
+                await using var db = new TaslimDbContext(options);
+                var service = new MovieTakeSelectService(db, new MovieCollaborationAccess(db, new WorkspaceAccessService(db)));
+                return await service.CreateAsync(fixture.UserId, fixture.MovieId, fixture.TakeId, new MovieTakeSelectRequest
+                {
+                    Label = label,
+                    StartMilliseconds = label == "Concurrent A" ? 500 : 2_000,
+                    EndMilliseconds = label == "Concurrent A" ? 1_500 : 3_000,
+                }, CancellationToken.None);
+            }
+
+            var results = await Task.WhenAll(CreateAsync("Concurrent A"), CreateAsync("Concurrent B"));
+
+            Assert.All(results, result => Assert.NotNull(result));
+            Assert.Equal(new[] { 1, 2 }, results.Select(result => result!.SelectNumber).OrderBy(number => number));
+            await using var verifyDb = new TaslimDbContext(seedOptions);
+            Assert.Equal(2, await verifyDb.MovieTakeSelects.CountAsync(item => item.MovieTakeId == fixture.TakeId));
+        }
+        finally
+        {
+            if (File.Exists(databasePath)) File.Delete(databasePath);
+        }
+    }
+
+    [Fact]
+    public void Select_number_retry_classifier_does_not_swallow_unrelated_unique_errors()
+    {
+        var selectConflict = new DbUpdateException(
+            "select conflict",
+            new InvalidOperationException("SQLite Error 19: 'UNIQUE constraint failed: MovieTakeSelects.MovieTakeId, MovieTakeSelects.SelectNumber'."));
+        var otherConflict = new DbUpdateException(
+            "other conflict",
+            new InvalidOperationException("SQLite Error 19: 'UNIQUE constraint failed: MovieTakeSelects.MovieTakeId, MovieTakeSelects.Id'."));
+
+        Assert.True(MovieTakeSelectService.IsSelectNumberUniqueViolation(selectConflict));
+        Assert.False(MovieTakeSelectService.IsSelectNumberUniqueViolation(otherConflict));
+    }
+
     [Fact]
     public async Task Selects_support_multiple_ranges_and_independent_review_without_changing_take_selection()
     {
@@ -116,6 +175,32 @@ public sealed class MovieTakeSelectTests
 
     private static TaslimDbContext CreateDb(SqliteConnection connection) =>
         new(new DbContextOptionsBuilder<TaslimDbContext>().UseSqlite(connection).Options);
+
+    private sealed class SelectNumberMaxBarrier : DbCommandInterceptor
+    {
+        private readonly TaskCompletionSource<bool> released = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private int arrivals;
+
+        public override async ValueTask<InterceptionResult<object>> ScalarExecutingAsync(
+            DbCommand command,
+            CommandEventData eventData,
+            InterceptionResult<object> result,
+            CancellationToken cancellationToken = default)
+        {
+            if (IsSelectNumberMax(command))
+            {
+                if (Interlocked.Increment(ref arrivals) >= 2) released.TrySetResult(true);
+                await released.Task.WaitAsync(TimeSpan.FromSeconds(10), cancellationToken);
+            }
+
+            return result;
+        }
+
+        private static bool IsSelectNumberMax(DbCommand command) =>
+            command.CommandText.Contains("MAX", StringComparison.OrdinalIgnoreCase)
+            && command.CommandText.Contains("MovieTakeSelects", StringComparison.OrdinalIgnoreCase)
+            && command.CommandText.Contains("SelectNumber", StringComparison.OrdinalIgnoreCase);
+    }
 
     private static async Task<SelectFixture> SeedAsync(TaslimDbContext db)
     {

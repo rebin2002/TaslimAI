@@ -92,11 +92,12 @@ const socialTypes: SocialType[] = ["auto", "announcement", "product_launch", "pr
 const tones: Tone[] = ["professional", "friendly", "persuasive", "educational", "playful", "concise", "thoughtful"];
 
 export function SocialStudioView() {
-  const { workspace } = useAuth();
+  const { workspace, user } = useAuth();
   const { t, locale } = useLocale();
   const copy = socialCopy[locale];
   const searchParams = useSearchParams();
   const workspaceId = workspace?.id ?? null;
+  const accountId = user?.id ?? null;
   const [projects, setProjects] = useState<Project[]>([]);
   const [files, setFiles] = useState<StoredFile[]>([]);
   const [assets, setAssets] = useState<Asset[]>([]);
@@ -125,6 +126,11 @@ export function SocialStudioView() {
   const [copyState, setCopyState] = useState("");
   const restoreJobId = useRef<string | null>(null);
   const workspaceIdRef = useRef<string | null>(workspaceId);
+  const accountIdRef = useRef<string | null>(accountId);
+  // Counts session replacements. A workspace id cannot identify a session: leaving a workspace and
+  // returning to it reuses the same id, so requests started by the replaced session would still
+  // match an id comparison. Every identity change advances this counter.
+  const sessionGeneration = useRef(0);
   const initializedDraftWorkspace = useRef<string | null>(null);
   const skipNextDraftSave = useRef(false);
   const inputsRequest = useRef(0);
@@ -160,8 +166,11 @@ export function SocialStudioView() {
   // A workspace switch must not retain or reintroduce a job from the previous workspace.
   useEffect(() => {
     const previousWorkspaceId = workspaceIdRef.current;
+    const previousAccountId = accountIdRef.current;
     workspaceIdRef.current = workspaceId;
-    if (previousWorkspaceId === workspaceId) return;
+    accountIdRef.current = accountId;
+    if (previousWorkspaceId === workspaceId && previousAccountId === accountId) return;
+    sessionGeneration.current += 1;
     restoreJobId.current = null;
     setCurrent(null);
     setProjects([]);
@@ -188,7 +197,7 @@ export function SocialStudioView() {
     setRestoreError("");
     setRestoreRetry(0);
     setCopyState("");
-  }, [workspaceId]);
+  }, [workspaceId, accountId]);
   // Hydrate the workspace-scoped draft after authentication/workspace changes.
   useEffect(() => {
     const workspaceId = workspace?.id ?? null;
@@ -312,11 +321,17 @@ export function SocialStudioView() {
     const cancelWorkspaceId = workspaceIdRef.current;
     if (!current || !cancelWorkspaceId || !isSocialJobForWorkspace(current, cancelWorkspaceId) || !canCancelSocialJob(current)) return;
     const jobId = current.id;
+    // The cancellation belongs to the session that issued it, and every write below settles after
+    // awaits. A superseded session may not release the busy lock, report an error, or install a job
+    // frame in the session that replaced it: releasing the lock re-enables generation while the new
+    // session is still submitting, and an older frame rewinds the status that session is showing.
+    const cancelSession = sessionGeneration.current;
+    const settledInIssuingSession = () => workspaceIdRef.current === cancelWorkspaceId && sessionGeneration.current === cancelSession;
     setWorking(true); setError("");
     try {
       await api.cancelGenerationJob(jobId);
       const next = await api.getGenerationJob(jobId);
-      if (workspaceIdRef.current !== cancelWorkspaceId) return;
+      if (!settledInIssuingSession()) return;
       if (!isSocialJobForWorkspace(next, cancelWorkspaceId)) {
         clearSocialActiveJobId(cancelWorkspaceId);
         setCurrent(null);
@@ -324,7 +339,7 @@ export function SocialStudioView() {
         return;
       }
       setCurrent(next);
-    } catch { if (workspaceIdRef.current === cancelWorkspaceId) setError(t("social.cancelError")); } finally { setWorking(false); }
+    } catch { if (settledInIssuingSession()) setError(t("social.cancelError")); } finally { if (settledInIssuingSession()) setWorking(false); }
   }
   async function copyPost(post: SocialPost) {
     try { await navigator.clipboard.writeText(formatSocialPostForCopy(post)); setCopyState(String(post.order)); window.setTimeout(() => setCopyState(""), 1800); }
@@ -338,11 +353,24 @@ export function SocialStudioView() {
   const readyFiles = files.filter(isSocialSourceReady);
   const progress = displaySocialProgress(visibleCurrent);
   const statusKey = visibleCurrent?.status ?? "Queued";
+  const statusLabel = visibleCurrent ? t(`jobs.status${statusKey}`) : "";
+  const statusAnnouncement = !visibleCurrent
+    ? ""
+    : state === "succeeded" && result
+      ? `${t("social.resultTitle")}. ${t("social.savedToAssets")}.`
+      : state === "completed-unavailable"
+        ? `${t("jobs.statusSucceeded")}. ${t("social.completedLoadError")}`
+        : state === "failed"
+          ? `${statusLabel}. ${t("social.failedSafe")}`
+          : state === "cancelled"
+            ? statusLabel
+            : t("jobs.progressAnnouncement", { title: visibleCurrent.title || t("social.title"), status: statusLabel, progress: String(progress) });
   return <div className="social-studio-page">
     <div className="social-studio-header">
       <div><p className="section-eyebrow">{t("social.eyebrow")}</p><h1>{t("social.title")}</h1><p>{t("social.subtitle")}</p></div>
       <div className="social-studio-header-tools"><span className="social-draft-badge"><ShieldCheck size={14} /> {copy.draftOnly}</span><span className="social-studio-header-icon"><Share2 size={26} /></span></div>
     </div>
+    <p className="sr-only" role="status" aria-live="polite" aria-atomic="true">{statusAnnouncement}</p>
     {!visibleCurrent ? <form className="social-studio-layout" onSubmit={(event) => void create(event)}>
       <section className="account-card social-studio-form-card">
         <div className="social-form-intro"><div className="social-form-intro-mark"><WandSparkles size={17} /></div><div><p className="section-eyebrow">{copy.briefLabel}</p><h2>{t("social.createTitle")}</h2><p>{t("social.createSubtitle")}</p></div></div>
@@ -355,7 +383,7 @@ export function SocialStudioView() {
         {restoreError && <div className="form-error" role="alert"><XCircle size={15} /><span>{restoreError}</span><button className="secondary-button" type="button" onClick={() => { setRestoreRetry(0); setRestoreError(""); }}><RefreshCw size={14} /> {t("social.retry")}</button></div>}{inputsError && <div className="form-error" role="alert"><XCircle size={15} /><span>{t("social.createError")}</span><button className="secondary-button" type="button" onClick={() => void loadInputs()} disabled={loadingInputs}><RefreshCw size={14} /> {t("social.retry")}</button></div>}{error && <div className="form-error" role="alert"><XCircle size={15} /> {error}</div>}<button className="primary-button social-generate-button" type="submit" disabled={working || prompt.trim().length < 3}><Sparkles size={16} /> {working ? t("social.working") : t("social.generate")}<span>{generateVariants ? "· 3" : "· 1"}</span></button>
       </section>
       <aside className="social-compose-rail"><div className="social-guardrail-card"><div className="social-guardrail-icon"><ShieldCheck size={18} /></div><p className="section-eyebrow">{copy.preview}</p><h2>{copy.startHint}</h2><div className="social-guardrail-list"><span><CheckCircle2 size={14} /> {copy.noPublish}</span><span><CheckCircle2 size={14} /> {copy.noSchedule}</span><span><CheckCircle2 size={14} /> {copy.noCredentials}</span></div></div><div className="social-empty-preview"><div className="social-empty-preview-top"><span>{copy.preview}</span><span>{t("social.platform.multi")}</span></div><div className="social-empty-art"><WandSparkles size={22} /></div><div className="social-empty-lines"><i /><i /><i /></div><p>{copy.reviewHint}</p></div><Link className="secondary-button social-asset-link" href="/assets"><ImageIcon size={14} /> {t("social.openAssets")}</Link></aside>
-    </form> : state === "failed" || state === "cancelled" ? <section className="account-card social-generation-state social-terminal-state" aria-live="polite"><XCircle size={28} /><p className="section-eyebrow">{t(`jobs.status${statusKey}`)}</p><h2>{visibleCurrent?.errorMessage || t("social.failedSafe")}</h2><div className="social-result-actions"><button className="primary-button" onClick={createAnother}><RefreshCw size={15} /> {t("social.createAnother")}</button><Link className="secondary-button" href="/assets">{t("social.openAssets")}</Link></div></section> : state === "succeeded" && result ? <SocialResult result={result} copy={copy} copyState={copyState} onCopy={(post) => void copyPost(post)} onCreateAnother={createAnother} t={t} /> : state === "completed-unavailable" ? <section className="account-card social-generation-state social-terminal-state"><RefreshCw size={28} /><p className="section-eyebrow">{t("jobs.statusSucceeded")}</p><h2>{t("social.completedLoadError")}</h2><p>{t("social.completedLoadHint")}</p><div className="social-result-actions"><button className="primary-button" onClick={createAnother}><RefreshCw size={15} /> {t("social.createAnother")}</button><Link className="secondary-button" href="/assets">{t("social.openAssets")}</Link></div></section> : <section className="account-card social-generation-state" aria-live="polite"><div className="image-progress-icon"><LoaderCircle size={26} /></div><p className="section-eyebrow">{t("social.progressEyebrow")}</p><h2>{t(`jobs.status${statusKey}`)}</h2><p className="image-progress-copy">{t("social.progressText")}</p><div className="generation-progress-label"><span>{t("jobs.progress")}</span><strong>{progress}%</strong></div><div className="generation-progress-track" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={progress} aria-label={t("jobs.progress")}><span style={{ width: `${progress}%` }} /></div>{error && <div className="form-error" role="alert"><XCircle size={15} /> {error}</div>}{canCancelSocialJob(visibleCurrent) && <button className="secondary-button generation-cancel-button" onClick={() => void cancel()} disabled={working}><XCircle size={15} /> {t("social.cancel")}</button>}</section>}
+    </form> : state === "failed" || state === "cancelled" ? <section className="account-card social-generation-state social-terminal-state" aria-live="polite"><XCircle size={28} /><p className="section-eyebrow">{t(`jobs.status${statusKey}`)}</p><h2>{visibleCurrent?.errorMessage || t("social.failedSafe")}</h2><div className="social-result-actions"><button className="primary-button" onClick={createAnother}><RefreshCw size={15} /> {t("social.createAnother")}</button><Link className="secondary-button" href="/assets">{t("social.openAssets")}</Link></div></section> : state === "succeeded" && result ? <SocialResult result={result} copy={copy} copyState={copyState} onCopy={(post) => void copyPost(post)} onCreateAnother={createAnother} t={t} /> : state === "completed-unavailable" ? <section className="account-card social-generation-state social-terminal-state"><RefreshCw size={28} /><p className="section-eyebrow">{t("jobs.statusSucceeded")}</p><h2>{t("social.completedLoadError")}</h2><p>{t("social.completedLoadHint")}</p><div className="social-result-actions"><button className="primary-button" onClick={createAnother}><RefreshCw size={15} /> {t("social.createAnother")}</button><Link className="secondary-button" href="/assets">{t("social.openAssets")}</Link></div></section> : <section className="account-card social-generation-state" aria-busy={shouldPollSocialJob(visibleCurrent)}><div className="image-progress-icon"><LoaderCircle size={26} /></div><p className="section-eyebrow">{t("social.progressEyebrow")}</p><h2>{t(`jobs.status${statusKey}`)}</h2><p className="image-progress-copy">{t("social.progressText")}</p><div className="generation-progress-label"><span>{t("jobs.progress")}</span><strong>{progress}%</strong></div><div className="generation-progress-track" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={progress} aria-label={t("jobs.progress")}><span style={{ width: `${progress}%` }} /></div>{error && <div className="form-error" role="alert"><XCircle size={15} /> {error}</div>}{canCancelSocialJob(visibleCurrent) && <button className="secondary-button generation-cancel-button" onClick={() => void cancel()} disabled={working}><XCircle size={15} /> {t("social.cancel")}</button>}</section>}
     <p className="social-studio-footnote"><ShieldCheck size={13} /> {t("social.safetyNote")} · {copy.noSchedule} · {copy.noCredentials}</p>
   </div>;
 }
@@ -368,5 +396,5 @@ function SocialResult({ result, copy, copyState, onCopy, onCreateAnother, t }: {
   const platform = normalizeSocialPreviewPlatform(result.platform);
   const platformLabel = t(`social.platform.${platform}`);
   const posts = result.posts ?? [];
-  return <section className="social-result-shell" aria-live="polite"><div className="social-result-topbar"><div><p className="section-eyebrow">{t("social.resultEyebrow")}</p><h2>{result.title || t("social.resultTitle")}</h2><p className="social-result-meta">{t("social.postCount", { count: String(result.postCount ?? posts.length) })} · {platformLabel}</p></div><div className="social-result-status"><CheckCircle2 size={15} /> {t("social.savedToAssets")}</div></div><div className="social-review-banner"><div><strong>{copy.preview}</strong><span>{copy.reviewHint}</span></div><span className="social-not-live"><span className="social-live-dot" /> {copy.notPublished}</span></div><div className={`social-post-list social-post-list-${platform}`}>{posts.map((post) => <article className={`social-post-card social-preview-${platform}`} key={post.order}><div className="social-preview-bar"><span className="social-preview-platform">{platformLabel}</span><span>{copy.variant} {post.order}</span><button className="secondary-button" type="button" onClick={() => onCopy(post)}>{copyState === String(post.order) ? <><Check size={14} /> {t("social.copied")}</> : <><Copy size={14} /> {t("social.copy")}</>}</button></div><div className="social-preview-identity"><span className="social-preview-avatar">T</span><div><strong>{copy.draftOnly}</strong><small>{copy.notPublished}</small></div><span className="social-preview-menu">•••</span></div><div className="social-preview-copy" dir="auto"><p className="social-preview-label">{copy.caption}</p><h3>{post.hook}</h3><p className="social-preview-body">{post.body}</p>{post.callToAction && <div className="social-preview-cta"><span>{t("social.callToAction")}</span><strong dir="auto">{post.callToAction}</strong></div>}{post.hashtags?.length ? <div className="social-preview-hashtags"><span>{copy.hashtags}</span><p>{post.hashtags.join(" ")}</p></div> : null}</div>{post.visualDirection && <div className="social-preview-detail" dir="auto"><span><ImageIcon size={13} /> {copy.visualDirection}</span><p>{post.visualDirection}</p></div>}{post.altText && <details className="social-post-detail"><summary>{t("social.altText")}</summary><p dir="auto">{post.altText}</p></details>}{post.assetRefs?.length ? <small className="social-post-assets">{t("social.usesAssets")}: {post.assetRefs.join(", ")}</small> : null}</article>)}</div><div className="social-result-actions"><Link className="secondary-button" href="/assets">{t("social.openAssets")}</Link><button className="primary-button" onClick={onCreateAnother}><RefreshCw size={15} /> {t("social.createAnother")}</button></div></section>;
+  return <section className="social-result-shell" aria-labelledby="social-result-title"><div className="social-result-topbar"><div><p className="section-eyebrow">{t("social.resultEyebrow")}</p><h2 id="social-result-title">{result.title || t("social.resultTitle")}</h2><p className="social-result-meta">{t("social.postCount", { count: String(result.postCount ?? posts.length) })} · {platformLabel}</p></div><div className="social-result-status"><CheckCircle2 size={15} /> {t("social.savedToAssets")}</div></div><div className="social-review-banner"><div><strong>{copy.preview}</strong><span>{copy.reviewHint}</span></div><span className="social-not-live"><span className="social-live-dot" /> {copy.notPublished}</span></div><div className={`social-post-list social-post-list-${platform}`}>{posts.map((post) => <article className={`social-post-card social-preview-${platform}`} key={post.order}><div className="social-preview-bar"><span className="social-preview-platform">{platformLabel}</span><span>{copy.variant} {post.order}</span><button className="secondary-button" type="button" onClick={() => onCopy(post)}>{copyState === String(post.order) ? <><Check size={14} /> {t("social.copied")}</> : <><Copy size={14} /> {t("social.copy")}</>}</button></div><div className="social-preview-identity"><span className="social-preview-avatar">T</span><div><strong>{copy.draftOnly}</strong><small>{copy.notPublished}</small></div><span className="social-preview-menu">•••</span></div><div className="social-preview-copy" dir="auto"><p className="social-preview-label">{copy.caption}</p><h3>{post.hook}</h3><p className="social-preview-body">{post.body}</p>{post.callToAction && <div className="social-preview-cta"><span>{t("social.callToAction")}</span><strong dir="auto">{post.callToAction}</strong></div>}{post.hashtags?.length ? <div className="social-preview-hashtags"><span>{copy.hashtags}</span><p>{post.hashtags.join(" ")}</p></div> : null}</div>{post.visualDirection && <div className="social-preview-detail" dir="auto"><span><ImageIcon size={13} /> {copy.visualDirection}</span><p>{post.visualDirection}</p></div>}{post.altText && <details className="social-post-detail"><summary>{t("social.altText")}</summary><p dir="auto">{post.altText}</p></details>}{post.assetRefs?.length ? <small className="social-post-assets">{t("social.usesAssets")}: {post.assetRefs.join(", ")}</small> : null}</article>)}</div><div className="social-result-actions"><Link className="secondary-button" href="/assets">{t("social.openAssets")}</Link><button className="primary-button" onClick={onCreateAnother}><RefreshCw size={15} /> {t("social.createAnother")}</button></div></section>;
 }

@@ -25,9 +25,16 @@ public static class DirectorRoomAwareness
         DirectorProductionContext? production)
     {
         var room = NormalizeRoom(requestedRoom);
-        var hasScene = selectedSceneId.HasValue;
-        var hasShot = selectedShotId.HasValue;
-        var shot = hasShot ? scenes.SelectMany(item => item.Shots).FirstOrDefault(item => item.Id == selectedShotId) : null;
+        var selectedScene = selectedSceneId is { } sceneId
+            ? scenes.FirstOrDefault(item => item.Id == sceneId)
+            : null;
+        var hasScene = selectedScene is not null;
+        var shot = selectedShotId is { } shotId
+            ? scenes.SelectMany(item => item.Shots).FirstOrDefault(item => item.Id == shotId)
+            : null;
+        if (selectedSceneId.HasValue && (selectedScene is null || shot is not null && !selectedScene.Shots.Any(item => item.Id == shot.Id)))
+            shot = null;
+        var hasShot = shot is not null;
         var shotPlanReady = shot is not null && !string.IsNullOrWhiteSpace(shot.Description);
         var storyboardApproved = string.Equals(production?.Stage, MovieProductionStages.ApprovedStoryboard, StringComparison.Ordinal)
             && string.Equals(production?.Status, MovieProductionVersionStatuses.Approved, StringComparison.Ordinal);
@@ -56,7 +63,7 @@ public static class DirectorRoomAwareness
             _ => [],
         };
 
-        return new DirectorRoomContext(room, selectedSceneId, selectedShotId, prerequisites, validActions, target);
+        return new DirectorRoomContext(room, selectedScene?.Id, shot?.Id, prerequisites, validActions, target);
     }
 }
 
