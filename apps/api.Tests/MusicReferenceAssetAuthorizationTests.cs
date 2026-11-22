@@ -45,7 +45,9 @@ public sealed class MusicReferenceAssetAuthorizationTests
         long sizeBytes = 4_000_000,
         StoredFileStatus status = StoredFileStatus.Ready,
         string? containerFormat = null,
-        double? durationSeconds = null) => new()
+        double? durationSeconds = null,
+        DateTime? retainUntil = null,
+        DateTime? deletedAt = null) => new()
     {
         Id = Guid.NewGuid(),
         WorkspaceId = workspaceId,
@@ -55,6 +57,10 @@ public sealed class MusicReferenceAssetAuthorizationTests
         Status = status,
         ContainerFormat = containerFormat,
         DurationSeconds = durationSeconds,
+        // Server-recorded retention posture. Both default to null, which means "not on record"
+        // (the upload-time shape), never "expired".
+        RetainUntil = retainUntil,
+        DeletedAt = deletedAt,
         // Sentinel storage details: if any of these ever reaches an outcome, the leakage test fails.
         StorageKey = "SENTINEL-STORAGE-KEY",
         StoredFileName = "SENTINEL-STORED-NAME",
@@ -190,6 +196,141 @@ public sealed class MusicReferenceAssetAuthorizationTests
         var outcome = await authorizer.AuthorizeAsync(OwnerId, WorkspaceA, [Audio(AudioAssetId)]);
 
         Assert.Equal(MusicReferenceAssetAuthorizationCodes.FileUnavailable, Assert.Single(outcome.Denials).Code);
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // Retention posture (#708 criterion 3, as exercised by the #1152 QA lane): the stored-file
+    // row carries RetainUntil and DeletedAt, and both outrank a status field that still says
+    // Ready. A deadline that is simply not on record outranks nothing.
+    // -----------------------------------------------------------------------------------------
+
+    private static Asset AudioFileWith(DateTime? retainUntil, DateTime? deletedAt) => MakeAsset(
+        AudioAssetId, WorkspaceA, "audio/mpeg",
+        MakeFile(WorkspaceA, "audio/mpeg", retainUntil: retainUntil, deletedAt: deletedAt));
+
+    [Fact]
+    public async Task Expired_retention_window_denies_at_the_access_layer_even_while_status_still_says_ready()
+    {
+        // The pre-purge row #1152 found unexercised: only the server's own deadline has moved.
+        var (authorizer, _) = Build((AudioAssetId, AudioFileWith(retainUntil: DateTime.UtcNow.AddDays(-2), deletedAt: null)));
+        var outcome = await authorizer.AuthorizeAsync(OwnerId, WorkspaceA, [Audio(AudioAssetId)]);
+
+        Assert.False(outcome.AllAuthorized);
+        Assert.Empty(outcome.Assets);
+        Assert.Equal(MusicReferenceAssetAuthorizationCodes.FileRetentionExpired, Assert.Single(outcome.Denials).Code);
+    }
+
+    [Fact]
+    public async Task Retention_deadline_that_has_just_arrived_denies_rather_than_rounding_to_usable()
+    {
+        // Fail-closed at the boundary: the deadline is inclusive, so a row that has reached its
+        // recorded instant is refused instead of being admitted for one more clock tick.
+        var (authorizer, _) = Build((AudioAssetId, AudioFileWith(retainUntil: DateTime.UtcNow, deletedAt: null)));
+        var outcome = await authorizer.AuthorizeAsync(OwnerId, WorkspaceA, [Audio(AudioAssetId)]);
+
+        Assert.Equal(MusicReferenceAssetAuthorizationCodes.FileRetentionExpired, Assert.Single(outcome.Denials).Code);
+    }
+
+    [Fact]
+    public async Task Recorded_deletion_denies_even_while_status_still_says_ready()
+    {
+        // A contradiction between the server's own fields denies rather than picks a side: the
+        // deletion is recorded, so the Ready status cannot rehabilitate the row (#1152 axis 1b).
+        var (authorizer, _) = Build((AudioAssetId, AudioFileWith(retainUntil: DateTime.UtcNow.AddDays(30), deletedAt: DateTime.UtcNow.AddDays(-1))));
+        var outcome = await authorizer.AuthorizeAsync(OwnerId, WorkspaceA, [Audio(AudioAssetId)]);
+
+        Assert.False(outcome.AllAuthorized);
+        Assert.Empty(outcome.Assets);
+        Assert.Equal(MusicReferenceAssetAuthorizationCodes.FileDeletionRecorded, Assert.Single(outcome.Denials).Code);
+    }
+
+    [Theory]
+    [InlineData(30)]
+    [InlineData(1)]
+    public async Task Retention_window_still_open_keeps_resolving(int daysAhead)
+    {
+        // Positive control: closing the expiry gap must not become "refuse every row that carries
+        // a retention field".
+        var (authorizer, _) = Build((AudioAssetId, AudioFileWith(retainUntil: DateTime.UtcNow.AddDays(daysAhead), deletedAt: null)));
+        var outcome = await authorizer.AuthorizeAsync(OwnerId, WorkspaceA, [Audio(AudioAssetId)]);
+
+        Assert.True(outcome.AllAuthorized);
+        Assert.Empty(outcome.Denials);
+        Assert.Equal(AudioAssetId, Assert.Single(outcome.Assets).AssetId);
+    }
+
+    [Fact]
+    public async Task Absence_of_a_recorded_retention_deadline_is_not_read_as_expiry()
+    {
+        // Upload-time rows carry neither field. Treating "not on record" as expired would deny the
+        // whole reference library instead of the expired rows inside it.
+        var (authorizer, _) = Build((AudioAssetId, AudioFileWith(retainUntil: null, deletedAt: null)));
+        var outcome = await authorizer.AuthorizeAsync(OwnerId, WorkspaceA, [Audio(AudioAssetId)]);
+
+        Assert.True(outcome.AllAuthorized);
+        Assert.DoesNotContain(outcome.Denials, d => d.Code.StartsWith("MUSIC_REFERENCE_AUTH_", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task Purged_row_still_denies_as_file_unavailable_so_the_deletion_axes_have_one_owner()
+    {
+        // #1116's contract depends on this ordering: Status = Deleted answers with
+        // MUSIC_REFERENCE_AUTH_FILE_UNAVAILABLE even when the same row also carries RetainUntil and
+        // DeletedAt, so the post-purge and pre-purge rows cannot drift into different codes.
+        var (authorizer, _) = Build((AudioAssetId, MakeAsset(AudioAssetId, WorkspaceA, "audio/mpeg", MakeFile(
+            WorkspaceA, "audio/mpeg",
+            status: StoredFileStatus.Deleted,
+            retainUntil: DateTime.UtcNow.AddDays(-2),
+            deletedAt: DateTime.UtcNow.AddDays(-1)))));
+        var outcome = await authorizer.AuthorizeAsync(OwnerId, WorkspaceA, [Audio(AudioAssetId)]);
+
+        Assert.Equal(MusicReferenceAssetAuthorizationCodes.FileUnavailable, Assert.Single(outcome.Denials).Code);
+    }
+
+    [Fact]
+    public async Task Mixed_selection_resolves_the_healthy_half_and_refuses_only_the_expired_reference()
+    {
+        // One expired reference must not blanket-refuse a selection, and must not be silently
+        // dropped: the aggregation stays per-asset, matching this service's partial-success contract.
+        var (authorizer, _) = Build(
+            (AudioAssetId, AudioFileWith(retainUntil: DateTime.UtcNow.AddDays(-5), deletedAt: null)),
+            (VideoAssetId, OwnedVideoFile()));
+        var outcome = await authorizer.AuthorizeAsync(OwnerId, WorkspaceA, [Audio(AudioAssetId), Video(VideoAssetId)]);
+
+        Assert.False(outcome.AllAuthorized);
+        Assert.Equal(VideoAssetId, Assert.Single(outcome.Assets).AssetId);
+        Assert.Equal(MusicReferenceAssetAuthorizationCodes.FileRetentionExpired, Assert.Single(outcome.Denials).Code);
+    }
+
+    [Fact]
+    public async Task Expired_reference_in_another_workspace_still_answers_with_the_ownership_fence_first()
+    {
+        // The refusal stays non-disclosing: a stranger learns "another workspace", never that the
+        // row is expired, so closing the expiry gap cannot turn this path into a retention probe.
+        var (authorizer, _) = Build((AudioAssetId, MakeAsset(AudioAssetId, WorkspaceB, "audio/mpeg", MakeFile(
+            WorkspaceB, "audio/mpeg", retainUntil: DateTime.UtcNow.AddDays(-2), deletedAt: DateTime.UtcNow.AddDays(-1)))));
+        var outcome = await authorizer.AuthorizeAsync(OwnerId, WorkspaceA, [Audio(AudioAssetId)]);
+
+        Assert.Equal(MusicReferenceAssetAuthorizationCodes.WorkspaceMismatch, Assert.Single(outcome.Denials).Code);
+    }
+
+    [Fact]
+    public async Task Retention_denials_disclose_no_asset_identifier_storage_detail_or_deadline()
+    {
+        var (authorizer, _) = Build((AudioAssetId, AudioFileWith(retainUntil: DateTime.UtcNow.AddDays(-2), deletedAt: null)));
+        var expired = await authorizer.AuthorizeAsync(OwnerId, WorkspaceA, [Audio(AudioAssetId)]);
+        var (authorizer2, _) = Build((AudioAssetId, AudioFileWith(retainUntil: DateTime.UtcNow.AddDays(30), deletedAt: DateTime.UtcNow.AddDays(-1))));
+        var deleted = await authorizer2.AuthorizeAsync(OwnerId, WorkspaceA, [Audio(AudioAssetId)]);
+
+        foreach (var outcome in new[] { expired, deleted })
+        {
+            var serialized = JsonSerializer.Serialize(outcome);
+            Assert.DoesNotContain("SENTINEL-STORAGE-KEY", serialized, StringComparison.Ordinal);
+            Assert.DoesNotContain("SENTINEL-STORED-NAME", serialized, StringComparison.Ordinal);
+            Assert.DoesNotContain("SENTINEL-ORIGINAL-NAME", serialized, StringComparison.Ordinal);
+            Assert.DoesNotContain(AudioAssetId.ToString(), serialized, StringComparison.OrdinalIgnoreCase);
+            Assert.All(outcome.Denials, denial => Assert.DoesNotContain("RetainUntil", denial.Message, StringComparison.Ordinal));
+        }
     }
 
     [Fact]
