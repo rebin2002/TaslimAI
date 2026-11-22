@@ -232,6 +232,24 @@ public static class ProviderRetryPolicy
         ProviderAttemptResultCategory.TransientFailure or
         ProviderAttemptResultCategory.TimedOut;
 
+    /// <summary>
+    /// Outcomes that do not prove the provider rejected the submission before taking
+    /// it on. A timeout or a transport failure can happen after the provider has
+    /// already accepted the work, so a second request for the same generation is a
+    /// duplicate paid submission unless the provider de-duplicates the key.
+    /// </summary>
+    public static bool IsResubmissionAmbiguous(ProviderAttemptResultCategory category) => category is
+        ProviderAttemptResultCategory.TransientFailure or
+        ProviderAttemptResultCategory.TimedOut;
+
+    /// <summary>
+    /// Retry admission for one selected provider. The category alone is not enough:
+    /// when the provider has declared it cannot de-duplicate the idempotency key, an
+    /// ambiguous outcome must fail closed instead of resubmitting accepted work.
+    /// </summary>
+    public static bool IsRetryable(ProviderAttemptResultCategory category, bool providerSupportsIdempotency) =>
+        IsRetryable(category) && (providerSupportsIdempotency || !IsResubmissionAmbiguous(category));
+
     public static TimeSpan GetDelay(ProviderResilienceOptions options, int retryOrdinal)
     {
         var initial = Math.Max(0, options.InitialBackoffMilliseconds);
@@ -581,7 +599,11 @@ public sealed class ProviderResilienceOrchestrator(
                 return new(category, value, null, attemptCounter.Value, provider.Key);
 
             last = new(category, default, code, attemptCounter.Value, provider.Key);
-            if (!ProviderRetryPolicy.IsRetryable(category) || providerAttempt >= maxAttempts)
+            // A provider that cannot de-duplicate the key is only ever re-sent an
+            // outcome that proves it refused the request before accepting it. Anything
+            // else fails closed here rather than creating a second paid submission
+            // for the same generation job.
+            if (!ProviderRetryPolicy.IsRetryable(category, profile.SupportsIdempotency) || providerAttempt >= maxAttempts)
                 break;
 
             var backoff = ProviderRetryPolicy.GetDelay(settings, providerAttempt - 1);
