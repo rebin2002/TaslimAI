@@ -64,7 +64,11 @@ public sealed record MovieMissingInsertProposalDto(
     string? CameraAndFraming,
     string? CameraMotion,
     string? VisualContinuityNotes,
-    MovieMissingInsertProposalGroundingDto Grounding);
+    MovieMissingInsertProposalGroundingDto Grounding,
+    Guid? AnchorTakeId = null,
+    Guid? AnchorSelectId = null,
+    string? ContinuityAnchorJson = null,
+    string? ScreenDirectionAnchorJson = null);
 
 public sealed record MovieMissingInsertWarningDto(
     string Code,
@@ -87,3 +91,59 @@ public sealed record MovieMissingInsertPlanDto(
     IReadOnlyList<MovieMissingInsertProposalDto> Proposals,
     IReadOnlyList<MovieMissingInsertWarningDto> Warnings,
     DateTime AssembledAtUtc);
+
+public sealed class MovieMissingInsertMaterializeRequest
+{
+    public Guid? TimelineRevisionId { get; set; }
+}
+
+public sealed class MovieMissingInsertReviewRequest
+{
+    public string Decision { get; set; } = "Approved";
+    public Guid? TakeId { get; set; }
+    public Guid? SelectId { get; set; }
+    public string? Comment { get; set; }
+}
+
+public sealed record MovieMissingInsertDecisionDto(
+    Guid Id,
+    Guid MovieProjectId,
+    Guid ProposalId,
+    Guid GapId,
+    Guid TimelineRevisionId,
+    int TimelineRevisionNumber,
+    Guid TrackId,
+    Guid? BeforeTimelineItemId,
+    Guid? AfterTimelineItemId,
+    int TimelineInMilliseconds,
+    int TimelineOutMilliseconds,
+    Guid? BeforeShotId,
+    Guid? AfterShotId,
+    Guid? SceneId,
+    Guid? StorySceneId,
+    Guid? AnchorShotId,
+    Guid? ApprovedStoryRevisionId,
+    Guid? LockedGuideRevisionId,
+    string? ProductionKitHash,
+    int? ProductionKitSchemaVersion,
+    Guid? AnchorTakeId,
+    Guid? AnchorSelectId,
+    Guid? SelectedTakeId,
+    Guid? SelectedSelectId,
+    string ContractVersion,
+    string InsertType,
+    int DurationMilliseconds,
+    string Description,
+    string Purpose,
+    string ProposalGroundingJson,
+    string ContinuityAnchorJson,
+    string ScreenDirectionAnchorJson,
+    string Status,
+    Guid CreatedByUserId,
+    DateTime CreatedAt,
+    Guid? ReviewedByUserId,
+    DateTime? ReviewedAt,
+    string? ReviewNote,
+    Guid? AppliedByUserId,
+    DateTime? AppliedAt,
+    Guid? AppliedTimelineRevisionId);
