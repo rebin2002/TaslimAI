@@ -226,6 +226,145 @@ public sealed class MovieProductionKitTests : IClassFixture<GenerationJobsNoWork
     }
 
     [Fact]
+    public async Task Three_concurrent_revision_creations_allocate_contiguous_revision_numbers()
+    {
+        var databasePath = Path.Combine(Path.GetTempPath(), $"taslim-movie-production-kit-3way-{Guid.NewGuid():N}.db");
+        var barrier = new ProductionKitReadBarrier(parties: 3);
+        try
+        {
+            var seedOptions = new DbContextOptionsBuilder<TaslimDbContext>()
+                .UseSqlite($"Data Source={databasePath};Default Timeout=30")
+                .Options;
+            await using (var seedDb = new TaslimDbContext(seedOptions))
+            {
+                await seedDb.Database.EnsureCreatedAsync();
+                await SeedDirectAsync(seedDb);
+            }
+
+            async Task<MovieProductionKitDto?> CreateRevisionAsync(string notes)
+            {
+                var options = new DbContextOptionsBuilder<TaslimDbContext>()
+                    .UseSqlite($"Data Source={databasePath};Default Timeout=30")
+                    .AddInterceptors(barrier)
+                    .Options;
+                await using var db = new TaslimDbContext(options);
+                var seed = await db.MovieProjects.Select(item => new DirectProductionKitSeed(item.CreatedByUserId, item.Id)).SingleAsync();
+                var service = CreateDirectService(db);
+                return await service.CreateRevisionAsync(seed.UserId, seed.MovieProjectId, new MovieProductionKitRevisionRequest { Notes = notes }, CancellationToken.None);
+            }
+
+            var results = await Task.WhenAll(
+                CreateRevisionAsync("Concurrent hand-off A"),
+                CreateRevisionAsync("Concurrent hand-off B"),
+                CreateRevisionAsync("Concurrent hand-off C"));
+            Assert.All(results, result => Assert.NotNull(result));
+            // The barrier had to release three simultaneous readers for this to be a real race.
+            Assert.True(barrier.Arrivals >= 3, $"Expected at least three concurrent kit readers, saw {barrier.Arrivals}.");
+
+            await using var verifyDb = new TaslimDbContext(seedOptions);
+            var kit = await verifyDb.MovieProductionKits
+                .Include(item => item.Revisions)
+                .SingleAsync();
+            // Every winner claims a distinct, gap-free number: no revision is lost or reused.
+            Assert.Equal(4, kit.CurrentRevisionNumber);
+            Assert.Equal(new[] { 1, 2, 3, 4 }, kit.Revisions.OrderBy(item => item.RevisionNumber).Select(item => item.RevisionNumber).ToArray());
+            Assert.Equal(4, kit.Revisions.Count);
+        }
+        finally
+        {
+            try { File.Delete(databasePath); } catch (IOException) { }
+        }
+    }
+
+    [Fact]
+    public async Task Unrelated_unique_violation_is_not_retried_by_revision_allocation()
+    {
+        var databasePath = Path.Combine(Path.GetTempPath(), $"taslim-movie-production-kit-unrelated-{Guid.NewGuid():N}.db");
+        var fault = new ProductionKitRevisionSaveFault(
+            "SQLite Error 19: UNIQUE constraint failed: MovieProductionKitReferences.Id");
+        try
+        {
+            var seedOptions = new DbContextOptionsBuilder<TaslimDbContext>()
+                .UseSqlite($"Data Source={databasePath};Default Timeout=30")
+                .Options;
+            await using (var seedDb = new TaslimDbContext(seedOptions))
+            {
+                await seedDb.Database.EnsureCreatedAsync();
+                await SeedDirectAsync(seedDb);
+            }
+
+            var options = new DbContextOptionsBuilder<TaslimDbContext>()
+                .UseSqlite($"Data Source={databasePath};Default Timeout=30")
+                .AddInterceptors(fault)
+                .Options;
+            await using (var db = new TaslimDbContext(options))
+            {
+                var seed = await db.MovieProjects.Select(item => new DirectProductionKitSeed(item.CreatedByUserId, item.Id)).SingleAsync();
+                var service = CreateDirectService(db);
+                // A conflict that is not an allocation conflict must surface immediately
+                // instead of being masked by the allocation retry loop.
+                await Assert.ThrowsAsync<DbUpdateException>(() => service.CreateRevisionAsync(
+                    seed.UserId, seed.MovieProjectId,
+                    new MovieProductionKitRevisionRequest { Notes = "Unrelated constraint" }, CancellationToken.None));
+                Assert.Equal(1, fault.SaveAttempts);
+            }
+
+            await using var verifyDb = new TaslimDbContext(seedOptions);
+            var kit = await verifyDb.MovieProductionKits.Include(item => item.Revisions).SingleAsync();
+            Assert.Equal(1, kit.CurrentRevisionNumber);
+            Assert.Single(kit.Revisions);
+        }
+        finally
+        {
+            try { File.Delete(databasePath); } catch (IOException) { }
+        }
+    }
+
+    [Fact]
+    public async Task Persistent_allocation_conflict_is_bounded_and_leaves_no_partial_revision()
+    {
+        var databasePath = Path.Combine(Path.GetTempPath(), $"taslim-movie-production-kit-exhaust-{Guid.NewGuid():N}.db");
+        var fault = new ProductionKitRevisionSaveFault(
+            "SQLite Error 19: UNIQUE constraint failed: MovieProductionKitRevisions.MovieProductionKitId, MovieProductionKitRevisions.RevisionNumber");
+        try
+        {
+            var seedOptions = new DbContextOptionsBuilder<TaslimDbContext>()
+                .UseSqlite($"Data Source={databasePath};Default Timeout=30")
+                .Options;
+            await using (var seedDb = new TaslimDbContext(seedOptions))
+            {
+                await seedDb.Database.EnsureCreatedAsync();
+                await SeedDirectAsync(seedDb);
+            }
+
+            var options = new DbContextOptionsBuilder<TaslimDbContext>()
+                .UseSqlite($"Data Source={databasePath};Default Timeout=30")
+                .AddInterceptors(fault)
+                .Options;
+            await using (var db = new TaslimDbContext(options))
+            {
+                var seed = await db.MovieProjects.Select(item => new DirectProductionKitSeed(item.CreatedByUserId, item.Id)).SingleAsync();
+                var service = CreateDirectService(db);
+                await Assert.ThrowsAsync<DbUpdateException>(() => service.CreateRevisionAsync(
+                    seed.UserId, seed.MovieProjectId,
+                    new MovieProductionKitRevisionRequest { Notes = "Always conflicting" }, CancellationToken.None));
+                // Exactly MaximumRevisionAllocationAttempts writes: the loop must not spin forever.
+                Assert.Equal(3, fault.SaveAttempts);
+            }
+
+            await using var verifyDb = new TaslimDbContext(seedOptions);
+            var kit = await verifyDb.MovieProductionKits.Include(item => item.Revisions).SingleAsync();
+            // Fail closed: the committed kit is unchanged after an exhausted retry sequence.
+            Assert.Equal(1, kit.CurrentRevisionNumber);
+            Assert.Single(kit.Revisions);
+        }
+        finally
+        {
+            try { File.Delete(databasePath); } catch (IOException) { }
+        }
+    }
+
+    [Fact]
     public async Task Kit_is_project_scoped_and_cross_project_sources_are_rejected()
     {
         using var owner = factory.CreateClient();
@@ -320,7 +459,12 @@ public sealed class MovieProductionKitTests : IClassFixture<GenerationJobsNoWork
     private sealed class ProductionKitReadBarrier : DbCommandInterceptor
     {
         private readonly TaskCompletionSource<bool> released = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly int parties;
         private int arrivals;
+
+        public int Arrivals => arrivals;
+
+        public ProductionKitReadBarrier(int parties = 2) => this.parties = parties;
 
         public override async ValueTask<InterceptionResult<DbDataReader>> ReaderExecutingAsync(
             DbCommand command,
@@ -330,7 +474,7 @@ public sealed class MovieProductionKitTests : IClassFixture<GenerationJobsNoWork
         {
             if (IsInitialKitRead(command))
             {
-                if (Interlocked.Increment(ref arrivals) >= 2) released.TrySetResult(true);
+                if (Interlocked.Increment(ref arrivals) >= parties) released.TrySetResult(true);
                 await released.Task.WaitAsync(TimeSpan.FromSeconds(10), cancellationToken);
             }
 
@@ -341,6 +485,48 @@ public sealed class MovieProductionKitTests : IClassFixture<GenerationJobsNoWork
             command.CommandText.Contains("MovieProductionKits", StringComparison.OrdinalIgnoreCase)
             && command.CommandText.Contains("MovieProductionKitRevisions", StringComparison.OrdinalIgnoreCase)
             && command.CommandText.Contains("MovieProjectId", StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// Fails every Production Kit revision save with a chosen uniqueness message so the
+    /// allocation retry loop can be exercised deterministically without relying on real
+    /// SQLite lock timing. Mirrors the repository's established save-failure interceptor shape.
+    /// </summary>
+    private sealed class ProductionKitRevisionSaveFault : SaveChangesInterceptor
+    {
+        private readonly string innerMessage;
+
+        public ProductionKitRevisionSaveFault(string innerMessage) => this.innerMessage = innerMessage;
+
+        public int SaveAttempts { get; private set; }
+
+        public override InterceptionResult<int> SavingChanges(
+            DbContextEventData eventData,
+            InterceptionResult<int> result)
+        {
+            Fail(eventData);
+            return result;
+        }
+
+        public override ValueTask<InterceptionResult<int>> SavingChangesAsync(
+            DbContextEventData eventData,
+            InterceptionResult<int> result,
+            CancellationToken cancellationToken = default)
+        {
+            Fail(eventData);
+            return ValueTask.FromResult(result);
+        }
+
+        private void Fail(DbContextEventData eventData)
+        {
+            var context = eventData.Context;
+            if (context is null) return;
+            if (!context.ChangeTracker.Entries<MovieProductionKitRevision>().Any(entry => entry.State == EntityState.Added)) return;
+            SaveAttempts++;
+            throw new DbUpdateException(
+                "Production Kit revision insert failed.",
+                new InvalidOperationException(innerMessage));
+        }
     }
 
     private sealed record DirectProductionKitSeed(Guid UserId, Guid MovieProjectId);
