@@ -2,6 +2,8 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Options;
 using Taslim.Api.Files;
+using Taslim.Api.Generation;
+using Taslim.Api.Operations;
 using Taslim.Api.Persistence;
 
 namespace Taslim.Api.Infrastructure;
@@ -72,10 +74,18 @@ public sealed class OperationalHealthService(
     IFileStorageService storage,
     IOptions<HealthOptions> healthOptions,
     ILogger<OperationalHealthService> logger,
-    IHostApplicationLifetime? applicationLifetime = null)
+    IHostApplicationLifetime? applicationLifetime = null,
+    IOptions<GenerationJobOptions>? generationOptions = null)
 {
     private readonly HealthOptions settings = healthOptions.Value;
     private readonly IHostApplicationLifetime? lifetime = applicationLifetime;
+
+    // The worker probe shares the options that the worker itself uses to write
+    // heartbeats, so readiness cannot drift away from the administrator
+    // operations report. When the options are absent (for example a hand-built
+    // service in a focused test) the probe assumes a worker IS expected, which
+    // reports degradation rather than silently skipping the check.
+    private readonly GenerationJobOptions generationSettings = generationOptions?.Value ?? new GenerationJobOptions();
 
     public OperationalHealthResponse Live(string requestId) =>
         new("alive", "Taslim API", requestId, [new("process", "alive", true)]);
@@ -119,6 +129,22 @@ public sealed class OperationalHealthService(
             : await CheckStorageAsync(probeTimeout.Token, cancellationToken, requestId);
         checks.Add(new("storage", storageStatus, settings.StorageRequired));
 
+        // Worker degradation is reported but never gates readiness. A replica can
+        // serve HTTP correctly while no generation worker drains the queue, so
+        // failing readiness here would pull healthy API instances out of rotation
+        // and, in a single-container deployment, restart-loop the API during a
+        // provider outage that only stalls jobs. Before this check existed the
+        // document could only ever say "ready", which hid the stalled queue from
+        // the incident procedure that records the readiness checks.
+        //
+        // `unknown` is deliberately distinct from `degraded`: a probe that could
+        // not run or could not complete must not be reported as evidence about
+        // the worker pool.
+        var workerStatus = probeTimeout.IsCancellationRequested
+            ? "unknown"
+            : await CheckWorkerAsync(probeTimeout.Token, cancellationToken, requestId);
+        checks.Add(new("worker", workerStatus, false));
+
         var ready = databaseStatus == "available"
             && (!settings.StorageRequired || storageStatus == "available");
         return (new(ready ? "ready" : "not_ready", "Taslim API", requestId, checks), ready);
@@ -150,6 +176,49 @@ public sealed class OperationalHealthService(
         {
             logger.LogWarning(exception, "Readiness storage check failed. RequestId={RequestId}; StorageProvider={StorageProvider}", requestId, storage.ProviderKey);
             return "unavailable";
+        }
+    }
+
+    private async Task<string> CheckWorkerAsync(CancellationToken probeCancellationToken, CancellationToken requestCancellationToken, string requestId)
+    {
+        if (!generationSettings.WorkerEnabled)
+        {
+            // This deployment runs no generation worker (a Testing host or a
+            // web-only replica), so the absence of heartbeats is not degradation.
+            return "disabled";
+        }
+
+        try
+        {
+            var staleAfter = GenerationWorkerLiveness.StaleWindow(generationSettings.HeartbeatStaleAfterSeconds);
+            var cutoff = DateTime.UtcNow - staleAfter;
+            // The worker touches its heartbeat on every loop iteration, including
+            // an idle poll with an empty queue, so a fresh running heartbeat is
+            // positive evidence that jobs will be claimed. Heartbeats are
+            // fleet-wide, which is why this probe answers "is any worker alive"
+            // rather than judging this replica's own slots.
+            var hasLiveWorker = await db.GenerationWorkerHeartbeats.AsNoTracking()
+                .Where(item => item.Status == GenerationWorkerStatuses.Running && item.LastSeenAt > cutoff)
+                .AnyAsync(probeCancellationToken)
+                .WaitAsync(probeCancellationToken);
+            return hasLiveWorker ? "available" : "degraded";
+        }
+        catch (OperationCanceledException) when (requestCancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (OperationCanceledException)
+        {
+            logger.LogWarning("Readiness worker check timed out. RequestId={RequestId}", requestId);
+            return "unknown";
+        }
+        catch (Exception exception)
+        {
+            // A failed query is an infrastructure fault, not proof that the
+            // worker pool is dead. Reporting it as degradation would misdirect
+            // an incident, so the evidence stays explicitly unknown.
+            logger.LogWarning(exception, "Readiness worker check failed. RequestId={RequestId}", requestId);
+            return "unknown";
         }
     }
 }
