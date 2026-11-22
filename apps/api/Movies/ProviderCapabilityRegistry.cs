@@ -10,11 +10,19 @@ public static class ProviderCapabilityKinds
     public const string VideoUpscaling = "video-upscaling";
     public const string VideoMastering = "video-mastering";
 
+    /// <summary>
+    /// Provider-neutral vocabulary for source-referencing video editing (issue #698, Phase 1 of the
+    /// architecture spike documented in PR #765). Recognizing this kind in the catalog vocabulary is
+    /// metadata only: it activates no provider, routes no request, and ships no product feature.
+    /// </summary>
+    public const string VideoEditing = "video-editing";
+
     public static readonly IReadOnlySet<string> Supported = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
     {
         VideoGeneration,
         VideoUpscaling,
         VideoMastering,
+        VideoEditing,
     };
 }
 
@@ -34,6 +42,16 @@ public static class ProviderCapabilityFeatures
     public const string ColorManagement = "color-management";
     public const string Denoise = "denoise";
     public const string FrameInterpolation = "frame-interpolation";
+
+    // Provider-neutral video-editing feature vocabulary (PR #765, proposed seam 1). Keys are discrete:
+    // a definition must claim each one explicitly, and declaring the vocabulary here enables nothing.
+    // `keyframe-guided-edit` from the spike doc is intentionally deferred to keep this change narrowly scoped.
+    public const string EditInPlace = "edit-in-place";
+    public const string RegionWindowEdit = "region-window-edit";
+    public const string SourceAudioPassthrough = "source-audio-passthrough";
+    public const string IdentityPreserve = "identity-preserve";
+    public const string WardrobeTransform = "wardrobe-transform";
+    public const string FrameRateConform = "frame-rate-conform";
 }
 
 /// <summary>

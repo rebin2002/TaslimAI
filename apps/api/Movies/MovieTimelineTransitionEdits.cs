@@ -68,7 +68,7 @@ public sealed class MovieTimelineTransitionService(
     {
         ArgumentNullException.ThrowIfNull(request);
         await collaboration.RequireAsync(userId, movieProjectId, MoviePermissions.Edit, cancellationToken);
-        var timeline = await db.MovieTimelines.FirstOrDefaultAsync(item => item.MovieProjectId == movieProjectId, cancellationToken);
+        var timeline = await db.MovieTimelines.AsNoTracking().FirstOrDefaultAsync(item => item.MovieProjectId == movieProjectId, cancellationToken);
         if (timeline is null) return null;
         if (request.Timeline is null || request.Decision is null || request.Timeline.TimelineId != timeline.Id)
             throw Invalid(MovieTimelineValidationCodes.EditTargetInvalid, "The transition edit must target the current project timeline.");
@@ -89,11 +89,34 @@ public sealed class MovieTimelineTransitionService(
 
         MovieTimelineValidator.ValidateEditDecisionOrThrow(request.Timeline, request.Decision);
         var result = MovieTimelineAuthority.ApplyUserOverride(request.Timeline, request.Decision);
+        // The initial validation is intentionally optimistic. Re-read and claim the
+        // timeline row inside one transaction so two different decisions cannot both
+        // materialize the same next canonical version after observing the same base.
+        await using var transaction = await db.Database.BeginTransactionAsync(cancellationToken);
+        var currentTimeline = await db.MovieTimelines.AsNoTracking()
+            .SingleAsync(item => item.Id == timeline.Id, cancellationToken);
+        var currentLatest = await db.MovieTimelineTransitionEdits.AsNoTracking()
+            .Where(item => item.MovieTimelineId == currentTimeline.Id)
+            .OrderByDescending(item => item.ResultTimelineVersion)
+            .Select(item => (int?)item.ResultTimelineVersion)
+            .FirstOrDefaultAsync(cancellationToken);
+        var currentBaseVersion = currentLatest ?? 1;
+        if (request.Timeline.Version != currentBaseVersion)
+            throw Invalid(MovieTimelineValidationCodes.TimelineVersionConflict, "The transition edit was created against a stale persisted timeline version.");
+
         var now = DateTime.UtcNow;
+        if (now <= currentTimeline.UpdatedAt)
+            now = currentTimeline.UpdatedAt.AddTicks(1);
+        var claimed = await db.MovieTimelines
+            .Where(item => item.Id == currentTimeline.Id && item.UpdatedAt == currentTimeline.UpdatedAt)
+            .ExecuteUpdateAsync(setters => setters.SetProperty(item => item.UpdatedAt, now), cancellationToken);
+        if (claimed != 1)
+            throw Invalid(MovieTimelineValidationCodes.TimelineVersionConflict, "The transition edit lost a concurrent update; reload the timeline and try again.");
+
         var record = new MovieTimelineTransitionEdit
         {
             Id = Guid.NewGuid(),
-            MovieTimelineId = timeline.Id,
+            MovieTimelineId = currentTimeline.Id,
             MovieProjectId = movieProjectId,
             DecisionId = request.Decision.DecisionId,
             BaseTimelineVersion = request.Timeline.Version,
@@ -106,6 +129,7 @@ public sealed class MovieTimelineTransitionService(
         };
         db.MovieTimelineTransitionEdits.Add(record);
         await db.SaveChangesAsync(cancellationToken);
+        await transaction.CommitAsync(cancellationToken);
         return ToDto(record);
     }
 

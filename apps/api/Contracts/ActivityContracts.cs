@@ -62,6 +62,52 @@ public static class ActivityContractMapper
         _ => "other",
     };
 
+    /// <summary>
+    /// Canonical persisted job types that <see cref="ActivityJobType"/> folds into each bucket
+    /// value. Keys are matched case-insensitively because the bucket vocabulary itself is a
+    /// label; values carry the canonical persisted casing, which the create path normalizes
+    /// supported types into regardless of the caller's casing.
+    /// </summary>
+    private static readonly IReadOnlyDictionary<string, string[]> BucketJobTypes =
+        new Dictionary<string, string[]>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["image"] = ["image.generate"],
+            ["document"] = ["document.generate"],
+            ["presentation"] = ["presentation.generate"],
+            ["research"] = ["research.generate"],
+            ["social"] = ["social.generate"],
+            ["voice"] = ["voice.generate"],
+            ["music"] = ["music.generate"],
+            ["movie"] = ["movie.generate", "movie.quick.generate", "movie.clip.generate", "movie.assembly"],
+        };
+
+    /// <summary>
+    /// Every named raw job type. The "other" bucket is exactly the complement of this set so
+    /// the filter matches the <see cref="ActivityJobType"/> default arm.
+    /// </summary>
+    private static readonly string[] AllNamedJobTypes = BucketJobTypes.Values.SelectMany(types => types).ToArray();
+
+    /// <summary>
+    /// Expands the <c>jobType</c> query value into the persisted job types it selects. The feed
+    /// reports the bucketed vocabulary in <c>items[].jobType</c> (and the UI labels it), so a
+    /// client filtering by the vocabulary the endpoint itself returned must receive exactly the
+    /// items labeled with that bucket; the raw persisted value keeps selecting its own rows.
+    /// Unknown values preserve the previous exact-match behavior and select nothing. Returns
+    /// null for a blank value (no filter).
+    /// </summary>
+    public static ActivityJobTypeFilter? ExpandJobTypeFilter(string? jobType)
+    {
+        if (string.IsNullOrWhiteSpace(jobType)) return null;
+        var value = jobType.Trim();
+        if (value.Equals("other", StringComparison.OrdinalIgnoreCase))
+            return new ActivityJobTypeFilter([], AllNamedJobTypes);
+        if (BucketJobTypes.TryGetValue(value, out var bucketTypes))
+            return new ActivityJobTypeFilter(bucketTypes, []);
+        if (GenerationJobTypes.Supported.Contains(value))
+            return new ActivityJobTypeFilter([GenerationJobTypes.Supported.First(type => string.Equals(type, value, StringComparison.OrdinalIgnoreCase))], []);
+        return new ActivityJobTypeFilter([value], []);
+    }
+
     public static string ActivityStatus(GenerationJobStatus status) => status switch
     {
         GenerationJobStatus.Pending or GenerationJobStatus.Queued => "Queued",
@@ -92,3 +138,10 @@ public static class ActivityContractMapper
 
 public sealed record ActivityReadRequest(Guid WorkspaceId);
 public sealed record ActivityReadAllRequest(Guid WorkspaceId);
+
+/// <summary>
+/// A translatable job type selection: rows whose persisted JobType is in
+/// <see cref="IncludeJobTypes"/> when the include set is non-empty, minus rows named in
+/// <see cref="ExcludeJobTypes"/> (which expresses the "other" complement).
+/// </summary>
+public sealed record ActivityJobTypeFilter(IReadOnlyList<string> IncludeJobTypes, IReadOnlyList<string> ExcludeJobTypes);

@@ -152,6 +152,24 @@ public interface IUsageLedgerService
     Task<UsageAdjustmentResult?> ReverseAsync(UsageTransaction transaction, string idempotencyKey, string reason, CancellationToken cancellationToken = default);
 }
 
+/// <summary>
+/// Raised when a request id resolves to a usage transaction owned by a different accounting scope.
+/// Derives from <see cref="InvalidOperationException"/> so every existing handler keeps its current
+/// fail-closed behaviour, while callers gain a stable type and code to map a scoped conflict to a
+/// 409 response instead of presenting it as a provider outage.
+/// </summary>
+public sealed class UsageRequestScopeConflictException : InvalidOperationException
+{
+    public const string ErrorCode = "USAGE_REQUEST_SCOPE_CONFLICT";
+
+    public UsageRequestScopeConflictException()
+        : base("The usage request id belongs to a different accounting scope.")
+    {
+    }
+
+    public string Code { get; } = ErrorCode;
+}
+
 public sealed class UsageLedgerService(
     TaslimDbContext db,
     IAiCostCalculator costCalculator,
@@ -176,6 +194,7 @@ public sealed class UsageLedgerService(
             cancellationToken);
         if (existing is not null)
         {
+            EnsureRequestScopeMatches(existing, userId, projectId, conversationId, generationJobId);
             // A generation transaction is permanently tied to its job idempotency key.
             // Never reopen a terminal generation after a retry or duplicate worker delivery.
             if (existing.GenerationJobId.HasValue && existing.Status is (UsageTransactionStatus.Failed or UsageTransactionStatus.Cancelled or UsageTransactionStatus.Completed or UsageTransactionStatus.Refunded))
@@ -246,9 +265,24 @@ public sealed class UsageLedgerService(
             var concurrent = await db.UsageTransactions.SingleAsync(item =>
                 item.WorkspaceId == workspaceId && item.RequestId == requestId && item.Feature == feature,
                 cancellationToken);
+            EnsureRequestScopeMatches(concurrent, userId, projectId, conversationId, generationJobId);
             logger.LogInformation("Usage transaction already exists for idempotent request. WorkspaceId={WorkspaceId}; Feature={Feature}", workspaceId, feature);
             return concurrent;
         }
+    }
+
+    private static void EnsureRequestScopeMatches(
+        UsageTransaction existing,
+        Guid userId,
+        Guid? projectId,
+        Guid? conversationId,
+        Guid? generationJobId)
+    {
+        if (existing.UserId != userId
+            || existing.ProjectId != projectId
+            || existing.ConversationId != conversationId
+            || existing.GenerationJobId != generationJobId)
+            throw new UsageRequestScopeConflictException();
     }
 
     public async Task CompleteAsync(UsageTransaction transaction, AiUsageMetadata usage, CancellationToken cancellationToken = default)

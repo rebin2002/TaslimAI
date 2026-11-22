@@ -20,7 +20,7 @@ public sealed class PresentationGenerationRequest
     [StringLength(160)] public string? BrandCompany { get; set; }
     public bool IncludeAgenda { get; set; } = true;
     public bool IncludeClosingNextSteps { get; set; } = true;
-    [MaxLength(8)] public IReadOnlyList<Guid> AttachmentIds { get; set; } = [];
+    [MaxLength(8)] public IReadOnlyList<Guid>? AttachmentIds { get; set; } = [];
 }
 
 public sealed record PresentationGenerationInput(
@@ -117,7 +117,7 @@ public static class PresentationGenerationContractMapper
         NormalizeOptional(request.BrandCompany),
         request.IncludeAgenda,
         request.IncludeClosingNextSteps,
-        request.AttachmentIds.Distinct().ToArray());
+        (request.AttachmentIds ?? []).Distinct().ToArray());
 
     public static string Normalize(string? value, string fallback) => string.IsNullOrWhiteSpace(value) ? fallback : value.Trim().ToLowerInvariant();
     public static string? NormalizeOptional(string? value) => string.IsNullOrWhiteSpace(value) ? null : value.Trim();
@@ -206,7 +206,13 @@ public static class PresentationDraftValidator
                 throw new PresentationOutputValidationException();
             if (block.Text?.Length > options.MaxBlockCharacters || block.Label?.Length > options.MaxBlockCharacters || block.Value?.Length > options.MaxBlockCharacters)
                 throw new PresentationOutputValidationException();
-            if (block.Items.Count > options.MaxItemsPerBlock || block.Columns.Count > 4 || block.Rows.Count > options.MaxRowsPerBlock || block.Metrics.Count > 6)
+            // Columns and metrics have no options-level knob: the renderer's own capacity is the
+            // only bound. Admitting more than PresentationRendererLimits can draw lets a
+            // structurally valid draft reach Render() and fail there instead, so a paid provider
+            // round-trip is reported as PRESENTATION_RENDER_FAILED rather than
+            // PRESENTATION_OUTPUT_INVALID. Rows and slide-level blocks stay on the option
+            // because PresentationGenerationOptionsValidator already clamps them to the renderer.
+            if (block.Items.Count > options.MaxItemsPerBlock || block.Columns.Count > PresentationRendererLimits.MaxColumnsPerBlock || block.Rows.Count > options.MaxRowsPerBlock || block.Metrics.Count > PresentationRendererLimits.MaxMetricsPerBlock)
                 throw new PresentationOutputValidationException();
             if (block.Items.Any(item => string.IsNullOrWhiteSpace(item) || item.Length > options.MaxBlockCharacters)
                 || block.Columns.Any(column => column is null
