@@ -247,6 +247,7 @@ public const string MusicRequestInvalid = "MUSIC_REQUEST_INVALID";
     public const string MusicOutputStorageFailed = "MUSIC_OUTPUT_STORAGE_FAILED";
     public const string MusicOutputRetrievalFailed = "MUSIC_OUTPUT_RETRIEVAL_FAILED";
     public const string MusicRetrievalRetryBlocked = "MUSIC_RETRIEVAL_RETRY_BLOCKED";
+    public const string MusicProviderSubmissionUnconfirmed = "MUSIC_PROVIDER_SUBMISSION_UNCONFIRMED";
     public const string MusicCancelled = "MUSIC_CANCELLED";
     public const string MovieSoundRequestInvalid = "MOVIE_SOUND_REQUEST_INVALID";
     public const string MovieSoundCueInvalid = "MOVIE_SOUND_CUE_INVALID";

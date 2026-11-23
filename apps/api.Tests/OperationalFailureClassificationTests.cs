@@ -21,6 +21,8 @@ public sealed class OperationalFailureClassificationTests
     // the ordinary music provider outage keeps its existing (log-only) retryable classification.
     [InlineData("MUSIC_OUTPUT_RETRIEVAL_FAILED", "delivery", false)]
     [InlineData("MUSIC_RETRIEVAL_RETRY_BLOCKED", "delivery", false)]
+    // Lease expiry with an unknown submission outcome is terminalized, never auto-re-dispatched.
+    [InlineData("MUSIC_PROVIDER_SUBMISSION_UNCONFIRMED", "provider", false)]
     [InlineData("MUSIC_PROVIDER_UNAVAILABLE", "provider", true)]
     public void Classifier_returns_bounded_operational_categories(string code, string category, bool retryable)
     {

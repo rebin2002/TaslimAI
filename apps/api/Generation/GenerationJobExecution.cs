@@ -1392,6 +1392,50 @@ public sealed class GenerationJobWorker(
                 continue;
             }
 
+            // Post-billing duplicate-submission isolation for music. The bounded recovery below
+            // re-queues the job and, as its own comment records, "the requeued attempt executes the
+            // handler from the beginning" - for music.generate that is a fresh billable POST to
+            // Stable Audio or Mubert. Neither provider accepts an idempotency key on creation and
+            // the provider operation id is not persisted until the call returns, so a worker that
+            // dies after submitting (crash loop, OOM, a rollout mid-generation) would pay for up to
+            // MaxAutomaticRetries extra generations per customer request and orphan the first
+            // artifact. Music therefore terminates instead of re-dispatching: the state is recorded
+            // with a dedicated code, the concurrency token rotates so the dead attempt's result is
+            // discarded like any other stale worker, and the customer keeps a deliberate single
+            // retry rather than an automatic triple rebill. Every other job type is untouched.
+            if (string.Equals(job.JobType, GenerationJobTypes.MusicGenerate, StringComparison.OrdinalIgnoreCase))
+            {
+                var submissionTerminalToken = Guid.NewGuid();
+                await using var submissionFinalization = await db.Database.BeginTransactionAsync(cancellationToken);
+                var interrupted = await db.GenerationJobs
+                    .Where(item => item.Id == job.Id
+                        && item.Status == GenerationJobStatus.Running
+                        && item.ConcurrencyToken == expired.ConcurrencyToken
+                        && !item.CancellationRequested
+                        && item.ClaimExpiresAt.HasValue
+                        && item.ClaimExpiresAt < now)
+                    .ExecuteUpdateAsync(setters => setters
+                        .SetProperty(item => item.Status, GenerationJobStatus.Failed)
+                        .SetProperty(item => item.ErrorCode, GenerationJobErrorCodes.MusicProviderSubmissionUnconfirmed)
+                        .SetProperty(item => item.ErrorMessage, GenerationJobErrorMessages.For(GenerationJobErrorCodes.MusicProviderSubmissionUnconfirmed) ?? PoisonJobMessage)
+                        .SetProperty(item => item.FailedAt, now)
+                        .SetProperty(item => item.ClaimExpiresAt, (DateTime?)null)
+                        .SetProperty(item => item.ConcurrencyToken, submissionTerminalToken), cancellationToken);
+                if (interrupted == 0)
+                {
+                    await submissionFinalization.RollbackAsync(cancellationToken);
+                    continue;
+                }
+                var submissionUsage = await usage.BeginAsync(job, cancellationToken: cancellationToken);
+                await usage.FailAsync(submissionUsage, GenerationJobErrorCodes.MusicProviderSubmissionUnconfirmed, cancellationToken: cancellationToken);
+                await submissionFinalization.CommitAsync(cancellationToken);
+                logger.LogWarning(
+                    "Music generation lease expired with the provider submission outcome unknown; automatic re-dispatch was suppressed so no duplicate paid generation was created. JobId={JobId}; RetryCount={RetryCount}; MaxAutomaticRetries={MaxAutomaticRetries}",
+                    job.Id, job.RetryCount, Math.Max(0, settings.MaxAutomaticRetries));
+                await TryNotifyAsync(() => notifications.CreateGenerationFailedAsync(job.Id, cancellationToken), job.Id, cancellationToken);
+                continue;
+            }
+
             var maxAutomaticRetries = Math.Max(0, settings.MaxAutomaticRetries);
             if (job.RetryCount < maxAutomaticRetries)
             {
