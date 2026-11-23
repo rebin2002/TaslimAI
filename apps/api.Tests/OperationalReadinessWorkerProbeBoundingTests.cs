@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -23,6 +24,10 @@ namespace Taslim.Api.Tests;
 public sealed class OperationalReadinessWorkerProbeBoundingTests
 {
     private static readonly TimeSpan Bound = TimeSpan.FromSeconds(2);
+
+    // Production bounds a queue wait by the request's remaining probe budget;
+    // the cases below are not about that bound, so they wait patiently.
+    private static readonly TimeSpan QueueBudget = TimeSpan.FromSeconds(30);
 
     // ---------------------------------------------------------------- cache
 
@@ -61,7 +66,7 @@ public sealed class OperationalReadinessWorkerProbeBoundingTests
                 return Task.FromResult(verdict);
             },
             CancellationToken.None,
-            CancellationToken.None);
+            CancellationToken.None, QueueBudget);
 
         Assert.Equal("available", await Probe());
 
@@ -97,7 +102,7 @@ public sealed class OperationalReadinessWorkerProbeBoundingTests
                     return Task.FromResult("unknown");
                 },
                 CancellationToken.None,
-                CancellationToken.None));
+                CancellationToken.None, QueueBudget));
         }
 
         // "unknown" means the probe could not run. Repeating it is exactly what
@@ -123,7 +128,7 @@ public sealed class OperationalReadinessWorkerProbeBoundingTests
                     return Task.FromResult("available");
                 },
                 CancellationToken.None,
-                CancellationToken.None));
+                CancellationToken.None, QueueBudget));
         }
 
         Assert.Equal(2, queries);
@@ -146,11 +151,11 @@ public sealed class OperationalReadinessWorkerProbeBoundingTests
             return "available";
         }
 
-        var inFlight = cache.ObserveAsync(ProbeDelegate, CancellationToken.None, CancellationToken.None);
+        var inFlight = cache.ObserveAsync(ProbeDelegate, CancellationToken.None, CancellationToken.None, QueueBudget);
         // Everything below queues behind the one probe that is already running.
         await started.Task.WaitAsync(TimeSpan.FromSeconds(15));
         var waiters = Enumerable.Range(0, 8)
-            .Select(_ => cache.ObserveAsync(ProbeDelegate, CancellationToken.None, CancellationToken.None))
+            .Select(_ => cache.ObserveAsync(ProbeDelegate, CancellationToken.None, CancellationToken.None, QueueBudget))
             .ToArray();
 
         release.TrySetResult();
@@ -179,14 +184,14 @@ public sealed class OperationalReadinessWorkerProbeBoundingTests
         }
 
 // The first probe is the one that pays for the query.
-        var holder = cache.ObserveAsync(ProbeDelegate, CancellationToken.None, CancellationToken.None);
+        var holder = cache.ObserveAsync(ProbeDelegate, CancellationToken.None, CancellationToken.None, QueueBudget);
         await started.Task.WaitAsync(TimeSpan.FromSeconds(15));
 
         // A second, unrelated client hangs up while it is queued behind the
         // shared query.
         abandoning.Cancel();
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
-            cache.ObserveAsync(ProbeDelegate, CancellationToken.None, abandoning.Token));
+            cache.ObserveAsync(ProbeDelegate, CancellationToken.None, abandoning.Token, QueueBudget));
 
         // The abandoned caller must not have cancelled the query feeding the rest.
         release.TrySetResult();
@@ -274,6 +279,112 @@ public sealed class OperationalReadinessWorkerProbeBoundingTests
     }
 
     [Fact]
+    public async Task A_query_slower_than_the_window_still_buys_the_next_probe_its_read()
+    {
+        // The defect this pins: stamping the window from the instant the query
+        // *started* wrote an already-expired window whenever the read was slower
+        // than the window, so the bound did nothing in exactly the slow-database
+        // state it exists for, while still serialising every probe.
+        var slowCache = new WorkerLivenessProbeCache(TimeSpan.FromMilliseconds(50));
+        var queries = 0;
+
+        Task<string> SlowQuery(CancellationToken token)
+        {
+            Interlocked.Increment(ref queries);
+            return Task.Delay(TimeSpan.FromMilliseconds(200), token).ContinueWith(_ => "available");
+        }
+
+        Assert.Equal("available", await ProbeAsync(slowCache, SlowQuery));
+        Assert.Equal("available", await ProbeAsync(slowCache, SlowQuery));
+
+        Assert.Equal(1, queries);
+        Assert.Equal(1, slowCache.ProbeExecutions);
+    }
+
+    [Fact]
+    public async Task A_caller_that_cannot_get_an_answer_in_time_is_released_instead_of_queued()
+    {
+        // The readiness route is anonymous and unrated, so a queued probe must not
+        // hold a request, a DI scope and a pooled connection for one query per probe
+        // timeout; it is released with the absence of evidence instead.
+        var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var cache = new WorkerLivenessProbeCache(Bound);
+
+        var holding = ProbeAsync(cache, token =>
+        {
+            started.TrySetResult();
+            return release.Task;
+        });
+
+        await started.Task;
+        var elapsed = Stopwatch.StartNew();
+        var released = await ProbeAsync(cache, _ => Task.FromResult("available"), waitBudget: TimeSpan.FromMilliseconds(25));
+        elapsed.Stop();
+
+        Assert.Equal("unknown", released);
+        Assert.True(elapsed.Elapsed < TimeSpan.FromSeconds(2), $"the caller waited {elapsed.Elapsed} for a query it was never going to share");
+
+        release.SetResult("degraded");
+        Assert.Equal("degraded", await holding);
+        Assert.Equal(1, cache.ProbeExecutions);
+    }
+
+    [Fact]
+    public async Task A_queue_without_any_budget_returns_advice_without_querying()
+    {
+        var clock = new TestClock();
+        var cache = new WorkerLivenessProbeCache(Bound, clock.Now);
+
+        Assert.Equal("unknown", await ProbeAsync(cache, _ => Task.FromResult("available"), waitBudget: TimeSpan.Zero));
+
+        Assert.Equal("degraded", await ProbeAsync(cache, _ => Task.FromResult("degraded")));
+        Assert.Equal("degraded", await ProbeAsync(cache, _ => Task.FromResult("available"), waitBudget: TimeSpan.Zero));
+        Assert.Equal(1, cache.ProbeExecutions);
+    }
+
+    [Fact]
+    public async Task A_clock_that_steps_backwards_never_extends_the_window()
+    {
+        // A wall-clock comparison let an NTP correction, or a restored snapshot,
+        // hold stale advice for as long as the clock jumped backwards. A step
+        // backwards now means "no window", so the next probe re-reads.
+        var clock = new TestClock();
+        var cache = new WorkerLivenessProbeCache(Bound, clock.Now);
+
+        Assert.Equal("available", await ProbeAsync(cache, _ => Task.FromResult("available")));
+
+        clock.Advance(-TimeSpan.FromMinutes(60));
+        Assert.Equal("degraded", await ProbeAsync(cache, _ => Task.FromResult("degraded")));
+        Assert.Equal(2, cache.ProbeExecutions);
+
+        // Forward time still expires the window normally after the correction.
+        clock.Advance(Bound + TimeSpan.FromSeconds(1));
+        Assert.Equal("available", await ProbeAsync(cache, _ => Task.FromResult("available")));
+        Assert.Equal(3, cache.ProbeExecutions);
+    }
+
+    [Fact]
+    public async Task The_worker_stage_only_spends_what_the_probe_timeout_leaves_it()
+    {
+        // One readiness document may not exceed the documented probe timeout: the
+        // database and storage checks have already consumed it here, so the advisory
+        // worker stage must report the absence of evidence without querying.
+        var heartbeat = Heartbeat("worker-1:0", GenerationWorkerStatuses.Running, DateTime.UtcNow);
+        await using var database = await CreateDatabaseAsync(heartbeat);
+        var cache = new WorkerLivenessProbeCache(Bound);
+
+        var outcome = await ProbeAsync(
+            database.Db,
+            cache,
+            storage: new SlowStorage(TimeSpan.FromMilliseconds(1_300)),
+            probeTimeoutSeconds: 1);
+
+        Assert.Equal("unknown", WorkerVerdict(outcome));
+        Assert.Equal(0, cache.ProbeExecutions);
+    }
+
+    [Fact]
     public void The_configured_bound_defaults_to_two_seconds_and_is_clamped()
     {
         Assert.Equal(TimeSpan.FromSeconds(2), new HealthOptions().WorkerProbeCache);
@@ -292,12 +403,14 @@ public sealed class OperationalReadinessWorkerProbeBoundingTests
     private static async Task<ReadinessOutcome> ProbeAsync(
         TaslimDbContext db,
         WorkerLivenessProbeCache? workerProbeCache,
-        bool workerEnabled = true)
+        bool workerEnabled = true,
+        IFileStorageService? storage = null,
+        int probeTimeoutSeconds = 5)
     {
         var service = new OperationalHealthService(
             db,
-            new AlwaysAvailableStorage(),
-            Options.Create(new HealthOptions { StorageRequired = true, ProbeTimeoutSeconds = 5 }),
+            storage ?? new AlwaysAvailableStorage(),
+            Options.Create(new HealthOptions { StorageRequired = true, ProbeTimeoutSeconds = probeTimeoutSeconds }),
             NullLogger<OperationalHealthService>.Instance,
             applicationLifetime: null,
             generationOptions: Options.Create(new GenerationJobOptions { WorkerEnabled = workerEnabled }),
@@ -307,8 +420,11 @@ public sealed class OperationalReadinessWorkerProbeBoundingTests
         return new ReadinessOutcome(result.Response, result.IsReady);
     }
 
-    private static Task<string> ProbeAsync(WorkerLivenessProbeCache cache, Func<CancellationToken, Task<string>> probe) =>
-        cache.ObserveAsync(probe, CancellationToken.None, CancellationToken.None);
+    private static Task<string> ProbeAsync(
+        WorkerLivenessProbeCache cache,
+        Func<CancellationToken, Task<string>> probe,
+        TimeSpan? waitBudget = null) =>
+        cache.ObserveAsync(probe, CancellationToken.None, CancellationToken.None, waitBudget ?? QueueBudget);
 
     private static string WorkerVerdict(ReadinessOutcome outcome) => WorkerCheck(outcome.Response).Status;
 
@@ -387,5 +503,19 @@ public sealed class OperationalReadinessWorkerProbeBoundingTests
         public Task<Stream?> OpenReadAsync(string storageKey, CancellationToken cancellationToken = default) => Task.FromResult<Stream?>(null);
         public Task DeleteAsync(string storageKey, CancellationToken cancellationToken = default) => Task.CompletedTask;
         public Task<bool> ExistsAsync(string storageKey, CancellationToken cancellationToken = default) => Task.FromResult(true);
+    }
+
+    /// <summary>Answers an existence check late, so a caller's probe budget is spent.</summary>
+    private sealed class SlowStorage(TimeSpan delay) : IFileStorageService
+    {
+        public string ProviderKey => "slow-test-storage";
+        public Task StoreAsync(string storageKey, Stream content, CancellationToken cancellationToken = default) => Task.CompletedTask;
+        public Task<Stream?> OpenReadAsync(string storageKey, CancellationToken cancellationToken = default) => Task.FromResult<Stream?>(null);
+        public Task DeleteAsync(string storageKey, CancellationToken cancellationToken = default) => Task.CompletedTask;
+        public async Task<bool> ExistsAsync(string storageKey, CancellationToken cancellationToken = default)
+        {
+            await Task.Delay(delay, cancellationToken);
+            return true;
+        }
     }
 }

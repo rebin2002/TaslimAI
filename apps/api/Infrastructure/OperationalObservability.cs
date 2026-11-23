@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Options;
@@ -93,7 +94,8 @@ public sealed class WorkerLivenessProbeCache(TimeSpan ttl, Func<DateTimeOffset>?
     private readonly SemaphoreSlim gate = new(1, 1);
     private readonly Func<DateTimeOffset> now = nowProvider ?? (() => DateTimeOffset.UtcNow);
     private string? verdict;
-    private DateTimeOffset validUntilUtc = DateTimeOffset.MinValue;
+    private long validUntilUtcTicks;
+    private long lastStampedUtcTicks;
     private long probeExecutions;
 
     /// <summary>How many times this cache actually asked its source.</summary>
@@ -111,10 +113,18 @@ public sealed class WorkerLivenessProbeCache(TimeSpan ttl, Func<DateTimeOffset>?
     /// evidence that every waiting probe is about to reuse.
     /// </param>
     /// <param name="callerToken">This caller's own cancellation, so waiting is still responsive.</param>
+    /// <param name="waitBudget">
+    /// How long this caller may queue behind a query already in flight. Waiting is
+    /// bounded because the readiness route is anonymous: an unbounded queue would
+    /// hold a request, a DI scope and a pooled connection for one query per probe
+    /// timeout, which is a worse outage than the parallel reads it replaces. A
+    /// caller whose budget runs out is released with advice, never with a hang.
+    /// </param>
     public async Task<string> ObserveAsync(
         Func<CancellationToken, Task<string>> probe,
         CancellationToken probeBudgetToken,
-        CancellationToken callerToken)
+        CancellationToken callerToken,
+        TimeSpan waitBudget)
     {
         if (ttl <= TimeSpan.Zero)
         {
@@ -123,12 +133,23 @@ public sealed class WorkerLivenessProbeCache(TimeSpan ttl, Func<DateTimeOffset>?
             return await probe(probeBudgetToken);
         }
 
-        await gate.WaitAsync(callerToken);
+        if (waitBudget <= TimeSpan.Zero)
+        {
+            // No budget left to queue with, so answer from advice or from nothing.
+            return ReadWindow() ?? "unknown";
+        }
+
+        if (!await gate.WaitAsync(waitBudget, callerToken))
+        {
+            // Another probe is still running. Release this caller with the freshest
+            // advice available instead of making an anonymous request wait it out.
+            return ReadWindow() ?? "unknown";
+        }
+
         try
         {
-            var current = now();
-            var cached = verdict;
-            if (cached is not null && current < validUntilUtc)
+            var cached = ReadWindow();
+            if (cached is not null)
             {
                 return cached;
             }
@@ -137,14 +158,24 @@ public sealed class WorkerLivenessProbeCache(TimeSpan ttl, Func<DateTimeOffset>?
             var status = await probe(probeBudgetToken);
             if (IsWorkerPoolEvidence(status))
             {
+                // The window is stamped from the moment the evidence exists, not
+                // from the moment the query started. Stamping at the start would
+                // write an already-expired window whenever the read is slower than
+                // the window itself - which is precisely the slow-database state
+                // this bound exists for, and it would leave a serialising mutex and
+                // no saving at all.
+                var current = now();
+                var currentTicks = current.UtcTicks;
                 verdict = status;
-                validUntilUtc = current + ttl;
+                Interlocked.Exchange(ref lastStampedUtcTicks, currentTicks);
+                Interlocked.Exchange(ref validUntilUtcTicks, currentTicks + ttl.Ticks);
             }
             else
             {
                 // Never serve the absence of evidence.
                 verdict = null;
-                validUntilUtc = DateTimeOffset.MinValue;
+                Interlocked.Exchange(ref validUntilUtcTicks, 0);
+                Interlocked.Exchange(ref lastStampedUtcTicks, 0);
             }
             return status;
         }
@@ -152,6 +183,27 @@ public sealed class WorkerLivenessProbeCache(TimeSpan ttl, Func<DateTimeOffset>?
         {
             gate.Release();
         }
+    }
+
+    /// <summary>
+    /// The memoised verdict while it is inside its window, otherwise null. A clock
+    /// that has stepped backwards (an NTP correction, a restored snapshot) is
+    /// treated as no window at all, so a jump can never stretch advice past the
+    /// freshness the operator configured.
+    /// </summary>
+    private string? ReadWindow()
+    {
+        var cached = Volatile.Read(ref verdict);
+        var until = Interlocked.Read(ref validUntilUtcTicks);
+        if (cached is null || until == 0)
+        {
+            return null;
+        }
+
+        var currentTicks = now().UtcTicks;
+        return currentTicks >= Interlocked.Read(ref lastStampedUtcTicks) && currentTicks < until
+            ? cached
+            : null;
     }
 }
 
@@ -202,6 +254,8 @@ public sealed class OperationalHealthService(
 
         using var probeTimeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         probeTimeout.CancelAfter(settings.ProbeTimeout);
+        // Monotonic, so a budget is never mis-measured by a host clock correction.
+        var probeStopwatch = Stopwatch.StartNew();
 
         var checks = new List<OperationalHealthCheckDto>();
         var databaseStatus = "available";
@@ -241,9 +295,16 @@ public sealed class OperationalHealthService(
         // `unknown` is deliberately distinct from `degraded`: a probe that could
         // not run or could not complete must not be reported as evidence about
         // the worker pool.
-        var workerStatus = probeTimeout.IsCancellationRequested
+        // What is left of the configured probe timeout, after the database and
+        // storage checks have had their turn, is the whole budget the worker stage
+        // may spend - shared read included. Handing the shared read a fresh full
+        // timeout instead would let one readiness document take twice the bound
+        // the operations runbook advertises, and would exceed the smoke script's
+        // own request deadline on a slow-storage incident.
+        var remainingProbeBudget = settings.ProbeTimeout - probeStopwatch.Elapsed;
+        var workerStatus = probeTimeout.IsCancellationRequested || remainingProbeBudget <= TimeSpan.Zero
             ? "unknown"
-            : await CheckWorkerAsync(probeTimeout.Token, cancellationToken, requestId);
+            : await CheckWorkerAsync(remainingProbeBudget, cancellationToken, requestId);
         checks.Add(new("worker", workerStatus, false));
 
         var ready = databaseStatus == "available"
@@ -280,7 +341,7 @@ public sealed class OperationalHealthService(
         }
     }
 
-    private async Task<string> CheckWorkerAsync(CancellationToken probeCancellationToken, CancellationToken requestCancellationToken, string requestId)
+    private async Task<string> CheckWorkerAsync(TimeSpan remainingBudget, CancellationToken requestCancellationToken, string requestId)
     {
         if (!generationSettings.WorkerEnabled)
         {
@@ -289,23 +350,29 @@ public sealed class OperationalHealthService(
             return "disabled";
         }
 
+        using var probeBudget = CancellationTokenSource.CreateLinkedTokenSource(requestCancellationToken);
+        probeBudget.CancelAfter(remainingBudget);
+
         if (workerProbe is null)
         {
             // No replica-wide cache was supplied, so every probe reads through,
             // inside the caller's own linked budget, exactly as before.
-            return await ProbeWorkerHeartbeatsAsync(probeCancellationToken, requestCancellationToken, requestId);
+            return await ProbeWorkerHeartbeatsAsync(probeBudget.Token, requestCancellationToken, requestId);
         }
 
         // The shared read gets its own budget instead of the caller's linked
         // token: a monitor that hangs up mid-query must not cancel the verdict
         // that the probes queued behind it are about to reuse, and an anonymous
-        // disconnect storm must not become a query relaunch storm. The window is
-        // still bounded by the same configured probe timeout.
-        using var sharedBudget = new CancellationTokenSource(settings.ProbeTimeout);
+        // disconnect storm must not become a query relaunch storm. That budget is
+        // the caller's remaining budget, and the queue wait is bounded by it too,
+        // so neither the read nor the request can outlive the documented probe
+        // timeout.
+        using var sharedBudget = new CancellationTokenSource(remainingBudget);
         return await workerProbe.ObserveAsync(
             token => ProbeWorkerHeartbeatsAsync(token, requestCancellationToken, requestId),
             sharedBudget.Token,
-            requestCancellationToken);
+            requestCancellationToken,
+            remainingBudget);
     }
 
     private async Task<string> ProbeWorkerHeartbeatsAsync(CancellationToken probeCancellationToken, CancellationToken requestCancellationToken, string requestId)
