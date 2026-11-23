@@ -193,4 +193,51 @@ describe("SSR cache isolation middleware", () => {
       expect(matcherAdmits(path), path).toBe(false);
     }
   });
+
+  // Server-side authorization and transport-layer cache isolation are separate
+  // layers that must fail together. main gates each route below before it renders
+  // (`requireAuthenticatedPage`, 22 modules as of `6d83cc70`); this vehicle's #1038
+  // lane keeps the resulting documents out of shared caches and out of the index.
+  // Enumerating main's gated set here means widening the public allowlist, or
+  // narrowing the matcher to accommodate a newly gated route, fails this test
+  // instead of silently publishing an authenticated document.
+  it("keeps every route gated server-side on main inside the private cache policy", () => {
+    const gatedOnMain = [
+      "/account/admin/operations",
+      "/account/admin/usage",
+      "/account/usage",
+      "/create",
+      "/create/document",
+      "/create/health",
+      "/create/image",
+      "/create/movie",
+      "/create/music",
+      "/create/product-ad",
+      "/create/research",
+      "/create/social",
+      "/create/voice",
+      "/development",
+      "/development/build",
+      "/development/code",
+      "/development/debug",
+      "/development/learn",
+      "/development/projects",
+      "/personal/health",
+      "/projects",
+      "/search",
+      // Dynamic shapes, concretised the way the gated pages resolve them.
+      "/analytics/reporting", // /[department]/[feature]
+      "/chat/550e8400-e29b-41d4-a716-446655440000", // /chat/[conversationId]
+      "/projects/9f2c", // /projects/[projectId]
+    ];
+    for (const route of gatedOnMain) {
+      for (const path of [route, `${route}/`, `${route}.rsc`, `${route}?_rsc=0123`]) {
+        expect(matcherAdmits(path), path).toBe(true);
+        const policy = policyFor(path);
+        expect(policy.cacheControl, path).toBe(PRIVATE_DOC_CACHE_CONTROL);
+        expect(policy.robots, path).toBe(PRIVATE_DOC_ROBOTS);
+      }
+      expect(isPublicDocPath(route), route).toBe(false);
+    }
+  });
 });
