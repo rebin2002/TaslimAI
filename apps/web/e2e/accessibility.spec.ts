@@ -337,12 +337,18 @@ test.describe("basic accessibility smoke", () => {
     { name: "Skip", title: null, destination: "/projects", intent: undefined },
   ];
 
-  // Destinations main #1247 moved behind requireAuthenticatedPage
-  // (apps/web/src/lib/serverAuth.ts): a full reload re-checks the real taslim.auth cookie
-  // server-side, rejects this mock-only session and redirects to the login page with the
-  // return path. Grow this set together with the server-side gate; every other destination
-  // stays client-gated in this test's mock-only scope.
-  const serverAuthenticatedDestinations = new Set(["/create/document", "/create/image", "/projects"]);
+  // Destinations main moved behind requireAuthenticatedPage
+  // (apps/web/src/lib/serverAuth.ts): #1247 gated /create/document, /create/image and
+  // /projects, and main later gated /create/movie the same way. A full reload re-checks the
+  // real taslim.auth cookie server-side, rejects this mock-only session and redirects to the
+  // login page with the return path. Grow this set together with the server-side gate; every
+  // other destination stays client-gated in this test's mock-only scope.
+  const serverAuthenticatedDestinations = new Set([
+    "/create/document",
+    "/create/image",
+    "/create/movie",
+    "/projects",
+  ]);
 
   for (const profile of completionProfiles) {
     for (const target of completionTargets) {
