@@ -71,6 +71,13 @@ public static class GenerationJobErrorMessages
             GenerationJobErrorCodes.MusicProviderInvalidRequest => "Please check the music request and try again.",
             GenerationJobErrorCodes.MusicOutputInvalid => "The generated music was invalid. Please try again.",
             GenerationJobErrorCodes.MusicOutputStorageFailed => "The music was generated but could not be saved. Please try again.",
+            // Both arms are exact-match and precede the MUSIC_ prefix fallback, which otherwise
+            // would render any unmapped MUSIC_ code as "The music could not be generated. Please
+            // try again." and invite a paid regeneration of a track that already exists. The copy
+            // states what happened without asking for a retry and without claiming that automatic
+            // re-delivery or a refund exists today.
+            GenerationJobErrorCodes.MusicOutputRetrievalFailed => "Your music was generated, but the finished track could not be delivered. It was not generated a second time, because that would create a duplicate.",
+            GenerationJobErrorCodes.MusicRetrievalRetryBlocked => "This retry was blocked because the track was already generated and only delivery failed. Please contact support to recover it.",
             GenerationJobErrorCodes.MusicCancelled => "The music generation was cancelled.",
             GenerationJobErrorCodes.VoiceProviderUnavailable or GenerationJobErrorCodes.VoiceProviderAuthentication => "Voice generation is temporarily unavailable. Please try again later.",
             GenerationJobErrorCodes.VoiceProviderRateLimited => "Voice generation is busy right now. Please try again later.",

@@ -484,6 +484,19 @@ public sealed class GenerationJobService(
             throw new GenerationJobValidationException("RETRY_SOURCE_NOT_TERMINAL", "Only failed or cancelled jobs can be retried.");
         if (string.IsNullOrWhiteSpace(idempotencyKey))
             throw new GenerationJobValidationException("RETRY_IDEMPOTENCY_REQUIRED", "A retry idempotency key is required.");
+        // Duplicate-paid-submission isolation. A music job that ended in MUSIC_OUTPUT_RETRIEVAL_FAILED
+        // already created (and was billed by the provider for) its generation; only delivery of the
+        // finished result failed. RetryAsync re-runs CreateAsync with the source input, which for
+        // music means a fresh POST to the provider, so this refusal is enforced here rather than
+        // left to the retry copy. Scoped to music and to this one code: every other terminal failure,
+        // including the provider-outage classes, keeps its existing retry behaviour.
+        if (string.Equals(source.JobType, GenerationJobTypes.MusicGenerate, StringComparison.OrdinalIgnoreCase)
+            && string.Equals(source.ErrorCode, GenerationJobErrorCodes.MusicOutputRetrievalFailed, StringComparison.Ordinal))
+        {
+            throw new GenerationJobValidationException(
+                GenerationJobErrorCodes.MusicRetrievalRetryBlocked,
+                "This retry was blocked because the music was already generated and only delivery failed. Generating again would create a duplicate.");
+        }
         if (string.Equals(source.JobType, GenerationJobTypes.ImageGenerate, StringComparison.OrdinalIgnoreCase) && !imageOptions.Value.Enabled)
             throw new GenerationJobValidationException(GenerationJobErrorCodes.ImageStudioUnavailable, "Image generation is not available right now.");
 
@@ -2363,6 +2376,10 @@ var qualityFailure = exception as GenerationQualityControlException ?? exception
             return exception switch
             {
                 MusicRequestValidationException validation => validation.Code,
+                // Must precede the MusicProviderUnavailableException arm: the retrieval failure is
+                // deliberately a subclass so that existing unavailable guards still catch it, while
+                // the code mapping keeps it out of the "please try again" class.
+                MusicOutputRetrievalFailedException => GenerationJobErrorCodes.MusicOutputRetrievalFailed,
                 MusicProviderUnavailableException => GenerationJobErrorCodes.MusicProviderUnavailable,
                 MusicProviderTimeoutException => GenerationJobErrorCodes.MusicProviderTimeout,
                 MusicProviderRateLimitException => GenerationJobErrorCodes.MusicProviderRateLimited,

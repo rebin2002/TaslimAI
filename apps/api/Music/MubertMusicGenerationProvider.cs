@@ -212,8 +212,21 @@ public sealed class MubertMusicGenerationProvider(
             catch (MusicProviderUnavailableException exception) when (
                 exception is not MusicProviderAuthenticationException
                 && exception is not MusicProviderQuotaException
-                && attempt < budget)
+                )
             {
+                // The budget is spent on GETs of the same artifact, never on a second track
+                // request. Exhaustion is post-billing, so it is isolated from the generic
+                // provider-unavailable class: the generic code invites a retry, and a retry
+                // here would create a second paid track and orphan the finished one.
+                if (attempt >= budget)
+                {
+                    logger.LogWarning(
+                        exception,
+                        "Mubert artifact transport fault persisted after {TransportFaults} bounded artifact re-fetch(es). The completed track was not re-created, so no second billable request was issued.",
+                        attempt);
+                    throw new MusicOutputRetrievalFailedException();
+                }
+
                 logger.LogWarning(
                     exception,
                     "Mubert artifact transport fault after the track completed; re-fetching the same artifact URL instead of creating a second billable track. Attempt={Attempt}; MaxBytes={MaxBytes}",

@@ -214,7 +214,10 @@ public sealed class MubertMusicGenerationProviderTests
         // retryAttempts: 0 pins the re-fetch budget so this proves the immediate classification.
         var provider = CreateProvider(handler, maxPollAttempts: 1, retryAttempts: 0);
 
-        await Assert.ThrowsAsync<MusicProviderUnavailableException>(() => provider.GenerateAsync(Input()));
+        // The track was already created and reported complete, so a failed artifact download is a
+        // post-billing retrieval failure, not an outage inviting a second paid track request.
+        var failure = await Assert.ThrowsAsync<MusicOutputRetrievalFailedException>(() => provider.GenerateAsync(Input()));
+        Assert.IsAssignableFrom<MusicProviderUnavailableException>(failure);
         Assert.Equal(3, handler.Requests.Count);
     }
 
@@ -230,7 +233,8 @@ public sealed class MubertMusicGenerationProviderTests
         });
         var provider = CreateProvider(handler, maxPollAttempts: 1, retryAttempts: 0);
 
-        await Assert.ThrowsAsync<MusicProviderUnavailableException>(() => provider.GenerateAsync(Input()));
+        var failure = await Assert.ThrowsAsync<MusicOutputRetrievalFailedException>(() => provider.GenerateAsync(Input()));
+        Assert.IsAssignableFrom<MusicProviderUnavailableException>(failure);
     }
 
     [Fact]
@@ -263,7 +267,10 @@ public sealed class MubertMusicGenerationProviderTests
         });
         var provider = CreateProvider(handler, maxPollAttempts: 1, retryAttempts: 2, retryDelayMilliseconds: 1);
 
-        await Assert.ThrowsAsync<MusicProviderUnavailableException>(() => provider.GenerateAsync(Input()));
+        // Exhaustion of the bounded artifact GETs leaves the billed track undelivered; the generic
+        // provider-outage class would invite a retry that creates a second paid track.
+        var failure = await Assert.ThrowsAsync<MusicOutputRetrievalFailedException>(() => provider.GenerateAsync(Input()));
+        Assert.IsAssignableFrom<MusicProviderUnavailableException>(failure);
 
         // create POST, status GET, then the artifact GET plus two bounded re-fetches
         Assert.Equal(5, handler.Requests.Count);
