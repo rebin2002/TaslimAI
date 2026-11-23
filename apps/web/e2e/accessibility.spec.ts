@@ -47,6 +47,21 @@ function onboardingBillingResponse() {
   };
 }
 
+// Mirrors PasswordPolicyDto (apps/api/Controllers/AuthController.cs) using the values
+// configured for ASP.NET Identity in apps/api/Program.cs. AuthForm reads it on the login
+// page, which main #1247's server-side route gate now redirects this mock-only session to,
+// so the double has to answer it.
+function passwordPolicyResponse() {
+  return {
+    requiredLength: 10,
+    requireDigit: true,
+    requireLowercase: true,
+    requireUppercase: true,
+    requireNonAlphanumeric: true,
+    requiredUniqueChars: 1,
+  };
+}
+
 async function interceptOnboardingApi(page: Page, options: { initialLocale?: Locale; allowCompletion?: boolean } = {}) {
   const apiCalls: string[] = [];
   const unexpectedApiCalls: string[] = [];
@@ -67,9 +82,12 @@ async function interceptOnboardingApi(page: Page, options: { initialLocale?: Loc
     body: { displayName?: string; preferredLanguage?: Locale; defaultGenerationLanguage?: Locale; intent?: string };
   }> = [];
   const authMeResponses: OnboardingMockState[] = [];
-  // Onboarding is app-wide. Exercise it on the client-gated Projects route:
-  // Billing becomes server-auth-gated under #652, which cannot be passed by
-  // mocking /api/auth/me in page.route and would invalidate this test setup.
+  // Onboarding is app-wide. Exercise it on the Projects route: Billing became
+  // server-auth-gated under #652 and Projects itself under main #1247, neither of
+  // which can be passed by mocking /api/auth/me in page.route. The server gate
+  // therefore bounces this synthetic session to the login page, where the app-wide
+  // onboarding dialog still renders, so the dialog assertions below are unchanged
+  // and only the login-page read plus the destination assertions model the redirect.
   const appOrigin = new URL(process.env.E2E_WEB_URL ?? "http://localhost:3000").origin;
   const apiOrigin = new URL(process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:5000").origin;
   const mockOrigins = new Set([appOrigin, apiOrigin]);
@@ -114,6 +132,9 @@ async function interceptOnboardingApi(page: Page, options: { initialLocale?: Loc
       else if (url.pathname === "/api/notifications/unread-count") body = { unreadCount: 0 };
       else if (url.pathname === `/api/workspaces/${onboardingWorkspace.id}/billing`) body = onboardingBillingResponse();
       else if (url.pathname === `/api/workspaces/${onboardingWorkspace.id}/projects`) body = [];
+      // Legitimate login-page read behind the #1247 redirect; anything still
+      // unmodelled keeps landing in `unexpectedApiCalls` as a strict signal.
+      else if (url.pathname === "/api/auth/password-policy") body = passwordPolicyResponse();
       else {
         unexpectedApiCalls.push(`${method} ${url.pathname}`);
         await route.fulfill({ status: 404, contentType: "application/json", body: JSON.stringify({ error: "unmocked_test_endpoint" }) });
@@ -316,6 +337,13 @@ test.describe("basic accessibility smoke", () => {
     { name: "Skip", title: null, destination: "/projects", intent: undefined },
   ];
 
+  // Destinations main #1247 moved behind requireAuthenticatedPage
+  // (apps/web/src/lib/serverAuth.ts): a full reload re-checks the real taslim.auth cookie
+  // server-side, rejects this mock-only session and redirects to the login page with the
+  // return path. Grow this set together with the server-side gate; every other destination
+  // stays client-gated in this test's mock-only scope.
+  const serverAuthenticatedDestinations = new Set(["/create/document", "/create/image", "/projects"]);
+
   for (const profile of completionProfiles) {
     for (const target of completionTargets) {
       test(`mocked ${target.name} completion persists and routes correctly (${profile.locale})`, async ({ page }) => {
@@ -382,11 +410,12 @@ test.describe("basic accessibility smoke", () => {
         const authMeResponseCountBeforeReload = traffic.authMeResponses.length;
         await page.reload();
         await expect.poll(() => traffic.authMeResponses.length).toBeGreaterThan(authMeResponseCountBeforeReload);
-        // The mock intercepts only browser API requests. A full Document route
-        // reload is server-authenticated and must reject this synthetic session.
-        // Other routes remain client-gated in this test's mock-only scope.
-        if (target.destination === "/create/document") {
-          await expect(page).toHaveURL(/\/login\?next=%2Fcreate%2Fdocument$/);
+        // The mock intercepts only browser API requests, so a server-authenticated
+        // reload must reject this synthetic session; other routes stay client-gated.
+        if (serverAuthenticatedDestinations.has(target.destination)) {
+          await expect(page).toHaveURL(
+            (url) => url.pathname === "/login" && url.searchParams.get("next") === target.destination,
+          );
         } else {
           await expect(page).toHaveURL((url) => url.pathname === target.destination);
         }
