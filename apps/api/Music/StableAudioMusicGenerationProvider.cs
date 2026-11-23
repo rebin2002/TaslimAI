@@ -105,7 +105,11 @@ public sealed class StableAudioMusicGenerationProvider(
                             transportFaults,
                             Key,
                             generationId);
-                        throw new MusicProviderUnavailableException();
+                        // Post-billing exhaustion: the generation exists and is billed, so this is
+                        // reported as a retrieval failure rather than a generic provider outage.
+                        // The generic code invites the customer to retry, and a retry here would
+                        // create a second paid generation instead of delivering the finished one.
+                        throw new MusicOutputRetrievalFailedException();
                     }
 
                     transportFaults++;

@@ -127,7 +127,10 @@ public sealed class StableAudioMusicGenerationProviderTests
         // the recovery path itself is proven by the re-fetch tests below.
         var provider = CreateProvider(handler, maxPollAttempts: 1, retryAttempts: 0);
 
-        await Assert.ThrowsAsync<MusicProviderUnavailableException>(() => provider.GenerateAsync(Input()));
+        // The generation already exists and was billed, so even with a zero re-fetch budget this is
+        // the post-billing retrieval class, not a plain provider outage that invites a new request.
+        var failure = await Assert.ThrowsAsync<MusicOutputRetrievalFailedException>(() => provider.GenerateAsync(Input()));
+        Assert.IsAssignableFrom<MusicProviderUnavailableException>(failure);
         Assert.Equal(2, handler.Requests.Count);
     }
 
@@ -148,7 +151,8 @@ public sealed class StableAudioMusicGenerationProviderTests
         });
         var provider = CreateProvider(handler, maxPollAttempts: 1, retryAttempts: 0);
 
-        await Assert.ThrowsAsync<MusicProviderUnavailableException>(() => provider.GenerateAsync(Input()));
+        var failure = await Assert.ThrowsAsync<MusicOutputRetrievalFailedException>(() => provider.GenerateAsync(Input()));
+        Assert.IsAssignableFrom<MusicProviderUnavailableException>(failure);
         Assert.Equal(2, handler.Requests.Count);
     }
 
@@ -189,7 +193,11 @@ public sealed class StableAudioMusicGenerationProviderTests
         });
         var provider = CreateProvider(handler, maxPollAttempts: 6, retryAttempts: 2, retryDelayMilliseconds: 1);
 
-        await Assert.ThrowsAsync<MusicProviderUnavailableException>(() => provider.GenerateAsync(Input()));
+        // Exhaustion happens after the generation was created and billed, so it is reported as an
+        // isolated retrieval failure rather than the generic "please try again" provider outage:
+        // a retry of the generic class would POST a second billable generation.
+        var failure = await Assert.ThrowsAsync<MusicOutputRetrievalFailedException>(() => provider.GenerateAsync(Input()));
+        Assert.IsAssignableFrom<MusicProviderUnavailableException>(failure);
 
         // one create POST plus three result GETs (the original and two bounded re-fetches)
         Assert.Equal(4, handler.Requests.Count);
