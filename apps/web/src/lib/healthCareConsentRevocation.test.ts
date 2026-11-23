@@ -14,38 +14,70 @@ import { locales, translations, type Locale } from "@/lib/i18n";
  * its own `HealthCareUiState` and its own `revokeConsent()`, so its transition
  * assertions could not catch a regression in the application, and that its screen
  * guard rejected generic form controls (`<input`, `<form`, `<select`, checkboxes,
- * switches) even when they were unrelated to document previews. Both parts are
- * removed. This file now drives the real component and the real dictionaries and
- * keeps only assertions that are true of the shipped UI, described as a placeholder.
+ * switches) even when they were unrelated to document previews. Both parts were
+ * removed: this file drives the real component and the real dictionaries and keeps
+ * only assertions that are true of the shipped UI, described as a placeholder.
  *
- * What exists on main (audited at 7322c561cc83222627aa3512a59a3b4ca2ed747f):
- * - `HealthPlaceholderPage` is the only Health Care surface. `/personal/health` renders
- *   it as `entry="personal"` and `/create/health` as `entry="create"`.
- * - It is informational: no consent control, no document picker and no preview
- *   affordance exists in it, and no consent state exists in `apps/web` at all.
- *   There is therefore no private UI state that a revocation could fail to clear.
+ * AUDIT CORRECTED AGAINST CURRENT MAIN (27ee26d2aab344f47bfa6510ea9f8553391e35f8).
+ * The earlier version of this header claimed "no consent state exists in `apps/web`
+ * at all". That claim is FALSE and is withdrawn. Real shared state now ships:
+ * - `apps/web/src/lib/healthCareConsentSelection.ts` — the deterministic controller:
+ *   `reduceConsentSelection(state, { type: "revoke" })` clears `selection`, sets
+ *   `preview` to `{ status: "unavailable", reason: "consent-revoked" }`, bumps
+ *   `revision` and `revocationCount`, all synchronously.
+ * - `apps/web/src/components/HealthCareConsentSelectionPanel.tsx` — the real panel over
+ *   that controller through `useSyncExternalStore`; when consent is not `active` it
+ *   renders only the inert opt-in prompt plus a `role="status"` withdrawal notice.
+ * - Both landed in commit `5d57f774` ("feat(health): add opt-in consent/private-document
+ *   selection controller (#714 slice)") and reached main through integration PR #1233
+ *   (merged 2026-11-22T10:06:39Z), after this file's original audit SHA `7322c561`.
  *
- * Pinned here, against that real UI:
- * 1. Every control the placeholder renders is disabled and self-labels as unavailable,
- *    so no health-document action — the action revocation would have to guard —
+ * The real revocation TRANSITION is therefore already covered by tests that ship on
+ * main and are not repeated here:
+ * - `healthCareConsentSelection.test.ts:63` "clears all selections and disables
+ *   previews immediately on revocation" (plus `:86` no implicit restore on re-grant,
+ *   `:102` fail-closed resume while revoked, `:153` mutations ignored while revoked).
+ * - `HealthCareConsentSelectionPanel.test.tsx:86` "clears every selection and removes
+ *   preview affordances immediately on withdrawal", driven through the same store the
+ *   browser uses.
+ * Restating those assertions in this file would be an already-shipped duplicate, so
+ * this lane keeps only what main does NOT pin.
+ *
+ * What is still true, and what this file pins:
+ * 1. The health routes are still placeholders: `/personal/health` and `/create/health`
+ *    each render `HealthPlaceholderPage` (`apps/web/src/app/{personal,create}/health/page.tsx`),
+ *    and nothing outside tests imports `HealthCareConsentSelectionPanel`. The real
+ *    consent UI is therefore not reachable by a user yet, so no consent control can be
+ *    granted, toggled or revoked from the shipped routes.
+ * 2. Every control the placeholder renders is disabled and self-labels as unavailable,
+ *    so no health-document action — the action a revocation would have to guard —
  *    can be taken from it.
- * 2. The placeholder claims no consent surface: nothing it renders reads as a consent
- *    grant, revocation or toggle.
- * 3. Its rendered privacy note denies collecting, uploading, storing or analyzing
- *    health information, which is the current truth revocation must not contradict.
- * 4. In every shipped locale the planned actions stay labelled unavailable over an
+ * 3. The placeholder mounts NO consent surface: its markup never contains the real
+ *    panel's own DOM signature (`health-consent-selection`), so the informational
+ *    screen cannot silently acquire a half-wired consent control. This is additive to
+ *    (1) and (2) above and is asserted against the real panel's markup contract.
+ * 4. Nothing the placeholder renders reads as a consent grant, revocation or toggle.
+ * 5. Its rendered privacy note denies collecting, uploading, storing or analyzing
+ *    health information, which is the current truth a revocation must not contradict.
+ * 6. In every shipped locale the planned actions stay labelled unavailable over an
  *    unchanged feature set, so no locale ships a half-enabled revocable surface.
- * 5. The shipped product promise that a future health feature requires explicit
+ * 7. The shipped product promise that a future health feature requires explicit
  *    consent and clear workspace ownership controls is still present in the real
  *    translation dictionary — the requirement a future revocation flow must satisfy.
  *
- * Intentional future failure: assertion 2 fails the moment a consent control is added
- * to this surface, at which point the revocation transition must be tested through
- * that component or shared state rather than through a model living in this file.
+ * Remaining acceptance gap, stated rather than papered over: an END-TO-END user
+ * revocation transition (grant in a real screen, revoke, observe the cleared state
+ * through the route) cannot be tested until the consent panel is mounted on a health
+ * route. When that routing lands, assertion 3 and assertion 4 are designed to fail and
+ * must be replaced by a transition test through the mounted component, not by a model
+ * living in this file.
  *
- * Test-only, one path, synthetic-free: edits no source file, claims no owner-held
- * path, and makes no API, provider, model, storage or network call.
+ * Test-only, synthetic-free: edits no source file, claims no owner-held path, mounts no
+ * provider, and makes no API, model, storage or network call.
  */
+
+/** The real panel's own DOM signature, copied from `HealthCareConsentSelectionPanel.tsx`. */
+const CONSENT_PANEL_DOM_SIGNATURE = "health-consent-selection";
 
 function renderPlaceholder(entry?: "create" | "personal"): string {
   return renderToStaticMarkup(
@@ -95,6 +127,21 @@ describe("issue #714 Health Care consent-revocation fence on the shipped placeho
     expect(button!.tag).toContain("disabled");
     expect(button!.tag).toContain('aria-describedby="health-coming-soon"');
     expect(visibleText(button!.body)).toContain(en.actionUnavailable);
+  });
+
+  it("mounts no consent surface at all on the shipped placeholder screens", () => {
+    // Additive to the affordance scan below: the real panel always renders a section
+    // whose class and aria ids contain "health-consent-selection". Its absence proves
+    // the placeholder has not quietly started mounting the consent controller UI while
+    // still describing itself as informational. The placeholder legitimately renders its
+    // own `role="status"` "not yet available" line, so that is not treated as a leak.
+    for (const entry of ["personal", "create"] as const) {
+      const html = renderPlaceholder(entry);
+      expect(html, `${entry}: placeholder must not mount the real consent panel`)
+        .not.toContain(CONSENT_PANEL_DOM_SIGNATURE);
+      expect(html, `${entry}: no document-selection affordance from the real panel`)
+        .not.toContain("health-consent-selection-documents");
+    }
   });
 
   it("presents no consent grant, toggle or revocation surface in the real UI", () => {
