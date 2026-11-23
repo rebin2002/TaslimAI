@@ -58,6 +58,50 @@ test.describe("authenticated SSR route cache isolation", () => {
     }
   });
 
+  // main `6d83cc70` (batch D, PR #1249) extended `requireAuthenticatedPage` to a
+  // further set of surfaces. Two independent layers now decide what a browser
+  // receives on those URLs: the server-side gate (redirect when unauthenticated)
+  // and this vehicle's transport policy (private + noindex when it does render).
+  // They must compose, so each case is asserted from both sides of the session.
+  test("surfaces newly gated on main compose with the private cache policy", async ({
+    authenticatedPage: page,
+    browser,
+  }) => {
+    const newlyGated = ["/create", "/create/movie", "/search", "/development/build", "/account/usage"];
+    for (const path of newlyGated) {
+      const response = await page.goto(path);
+      expect(response, path).not.toBeNull();
+      // Tripwire: the gated surface itself must be what rendered, not a
+      // redirected credential form.
+      expect(page.url(), path).toContain(path);
+      expect(response!.status(), path).toBe(200);
+      const headers = response!.headers();
+      expect(headers["x-robots-tag"] ?? "", path).toMatch(/noindex/);
+      expect(headers["cache-control"] ?? "", path).toMatch(/no-store/);
+      expect(headers["cache-control"] ?? "", path).not.toMatch(/s-maxage|max-age=(?!0[,\s]|0$)/);
+    }
+
+    // Same URLs, no session: the gate must answer with a redirect to the
+    // allowlisted sign-in form carrying the intended target, so no private
+    // document is ever handed to an unauthenticated cache.
+    const anon = await browser.newContext();
+    const anonPage = await anon.newPage();
+    try {
+      for (const path of ["/create/movie", "/account/usage"]) {
+        const response = await anonPage.goto(path);
+        expect(response, path).not.toBeNull();
+        const landed = new URL(anonPage.url());
+        expect(landed.pathname, path).toBe("/login");
+        // The gate must carry the intended target, and must not have leaked a
+        // private document: the sign-in form stays outside the private policy.
+        expect(landed.searchParams.get("next"), path).toBe(path);
+        expect(response!.headers()["x-robots-tag"] ?? "", path).toBe("");
+      }
+    } finally {
+      await anon.close();
+    }
+  });
+
   test("public credential forms stay outside the private policy", async ({ page }) => {
     const response = await page.goto("/register");
     expect(response).not.toBeNull();
@@ -100,7 +144,13 @@ test.describe("authenticated SSR route cache isolation", () => {
     });
     const alphaChat = await page.goto("/chat");
     expect(alphaChat).not.toBeNull();
-    await expect(page.getByText(ALPHA_MARKER)).toBeVisible();
+    // Positive control scoped to the conversation list item: the same marker
+    // string is also the signed-in user's display name, which the header chip
+    // renders as `E2E <marker>`, so a bare getByText on the marker is ambiguous
+    // by construction (it resolved to two elements and tripped Playwright's
+    // strict mode). Scoping to the conversation's own control keeps the
+    // assertion about the private conversation, not about the chrome.
+    await expect(page.getByRole("button", { name: ALPHA_MARKER })).toBeVisible();
     expect(alphaChat!.headers()["cache-control"] ?? "").toMatch(/no-store/);
 
     await logoutInUi(page);
@@ -120,7 +170,7 @@ test.describe("authenticated SSR route cache isolation", () => {
     expect(betaChat!.status()).toBe(200);
     expect(betaChat!.headers()["cache-control"] ?? "").toMatch(/no-store/);
     expect(betaChat!.headers()["cache-control"] ?? "").not.toMatch(/s-maxage/);
-    await expect(page.getByText(BETA_MARKER)).toBeVisible();
+    await expect(page.getByRole("button", { name: BETA_MARKER })).toBeVisible();
     await expect(page.getByText(ALPHA_MARKER)).toHaveCount(0);
     await expect(page.getByText(alpha.displayName)).toHaveCount(0);
   });
