@@ -31,6 +31,22 @@ import {
   type ReferenceAudioCandidate,
   type ReferenceAudioState,
 } from "@/lib/musicReferenceAudioState";
+import { LyricsSectionEditor } from "@/components/music/LyricsSectionEditor";
+import { MusicLyricsPreflightPanel } from "@/components/music/MusicLyricsPreflightPanel";
+import {
+  musicStudioLyricsComposerCopy,
+  musicStudioLyricsEditorLabels,
+  musicStudioLyricsEditorLimits,
+  musicStudioLyricsPreflightLabelOverrides,
+} from "@/components/music/musicStudioLyricsLabels";
+import {
+  buildMusicStudioLyricsPreflightInput,
+  clearMusicStudioLyricsDraftState,
+  emptyMusicStudioLyricsDraftState,
+  persistMusicStudioLyricsDraftState,
+  readMusicStudioLyricsDraftState,
+  type MusicStudioLyricsDraftState,
+} from "@/lib/musicStudioLyricsDraftState";
 
 const genres = ["auto", "ambient", "cinematic", "classical", "electronic", "folk", "hip_hop", "jazz", "lofi", "pop", "rock", "world", "other"] as const;
 const moods = ["calm", "energetic", "uplifting", "melancholic", "inspiring", "dramatic", "playful", "romantic", "focused", "other"] as const;
@@ -310,6 +326,9 @@ export function MusicStudioView() {
 function WorkspaceMusicStudio({ workspace }: { workspace: ReturnType<typeof useAuth>["workspace"] }) {
   const { t, locale } = useLocale();
   const searchParams = useSearchParams();
+  // The lyrics draft is browser-local and owner-keyed, so the member id is
+  // needed alongside the workspace the wrapper already resolved.
+  const { user } = useAuth();
   const [projects, setProjects] = useState<Project[]>([]);
   const [recentMusic, setRecentMusic] = useState<Asset[]>([]);
   const [description, setDescription] = useState("");
@@ -466,6 +485,53 @@ function WorkspaceMusicStudio({ workspace }: { workspace: ReturnType<typeof useA
   }
 
   const workspaceId = workspace?.id ?? "";
+  // Wiring follow-up, step 1 of docs/MUSIC_STUDIO_PREFLIGHT_UI.md: PR #772's
+  // LyricsSectionEditor and the provider-free preflight panel are consumed
+  // here, so authored sections are measured against the mirrored contract as
+  // the user types and survive a tab switch the way every sibling studio's
+  // unsent brief already does. Nothing in this block submits: sung lyrics are
+  // gated on provider capability, which is false for every configured
+  // provider, so a clean handoff is recorded into the browser-local draft.
+  const lyricsOwnerId = user?.id ?? "";
+  const [lyricsDraft, setLyricsDraft] = useState<MusicStudioLyricsDraftState>(emptyMusicStudioLyricsDraftState);
+  const [lyricsDraftNotice, setLyricsDraftNotice] = useState("");
+  const lyricsDraftHydratedScope = useRef("");
+  const lyricsDraftJustHydrated = useRef(false);
+  useEffect(() => {
+    // Restore once per owner scope, and never while a job owns the surface:
+    // an in-flight request is not a draft.
+    if (!lyricsOwnerId || !workspaceId || current) return;
+    const ownerKey = `${lyricsOwnerId}:${workspaceId}`;
+    if (lyricsDraftHydratedScope.current === ownerKey) return;
+    lyricsDraftHydratedScope.current = ownerKey;
+    setLyricsDraft(readMusicStudioLyricsDraftState(lyricsOwnerId, workspaceId));
+    setLyricsDraftNotice("");
+    // Even an incoming empty scope must skip the first mirror, or the
+    // outgoing workspace's rows are briefly written under the new owner.
+    lyricsDraftJustHydrated.current = true;
+  }, [current, lyricsOwnerId, workspaceId]);
+  useEffect(() => {
+    if (!lyricsOwnerId || !workspaceId || current) return;
+    if (lyricsDraftHydratedScope.current !== `${lyricsOwnerId}:${workspaceId}`) return;
+    if (lyricsDraftJustHydrated.current) {
+      lyricsDraftJustHydrated.current = false;
+      return;
+    }
+    persistMusicStudioLyricsDraftState(lyricsOwnerId, workspaceId, lyricsDraft);
+  }, [current, lyricsDraft, lyricsOwnerId, workspaceId]);
+  const lyricsPreflightInput = useMemo(() => buildMusicStudioLyricsPreflightInput(lyricsDraft, {
+    vocalLanguage: language,
+    // A local pick has no asset id yet and must fail closed in the contract
+    // rather than leak a file name or a blob URL into a request shape.
+    reference: referenceAudio.candidate
+      ? { mediaType: "audio", assetId: referenceAudio.candidate.assetId }
+      : null,
+  }), [language, lyricsDraft, referenceAudio.candidate]);
+  function handleLyricsDraftClear() {
+    if (lyricsOwnerId && workspaceId) clearMusicStudioLyricsDraftState(lyricsOwnerId, workspaceId);
+    setLyricsDraft(emptyMusicStudioLyricsDraftState());
+    setLyricsDraftNotice("");
+  }
   // One decision drives the disabled action, the reason announced on it and the
   // submit guard below, so the affordance can never again promise a request the
   // published preflight copy says will not run.
@@ -569,8 +635,30 @@ function WorkspaceMusicStudio({ workspace }: { workspace: ReturnType<typeof useA
           <label className="music-choice-field"><span>{t("music.duration")}</span><select value={durationSeconds} onChange={(event) => setDurationSeconds(Number(event.target.value))}>{durations.map((value) => <option key={value} value={value}>{t("music.durationValue", { seconds: String(value) })}</option>)}</select></label>
           <label className="music-choice-field"><span>{t("music.vocalPreference")}</span><select value={vocalPreference} onChange={(event) => setVocalPreference(event.target.value)}>{vocalPreferences.map((value) => <option key={value} value={value}>{t(`music.vocal.${value}`)}</option>)}</select></label>
         </div>
-        <details className="music-optional-controls"><summary>{t("music.moreOptions")}</summary><div className="music-optional-grid"><label className="music-choice-field"><span>{t("music.language")}</span><select value={language} onChange={(event) => setLanguage(event.target.value)}>{languages.map((value) => <option key={value} value={value}>{t(`music.language.${value}`)}</option>)}</select></label><label className="music-choice-field"><span>{t("music.project")}</span><select value={projectId} onChange={(event) => setProjectId(event.target.value)} disabled={loadingProjects}><option value="">{t("music.noProject")}</option>{projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}</select></label><label className="music-choice-field"><span>{t("music.titleLabel")}</span><input value={title} onChange={(event) => setTitle(event.target.value)} maxLength={160} placeholder={t("music.titlePlaceholder")} /></label><label className="music-primary-field music-field-wide"><span>{t("music.additionalInstructions")}</span><textarea className="is-short" value={additionalInstructions} onChange={(event) => setAdditionalInstructions(event.target.value)} maxLength={2000} placeholder={t("music.additionalInstructionsPlaceholder")} /></label></div></details>
+        <details className="music-optional-controls"><summary>{t("music.moreOptions")}</summary><div className="music-optional-grid"><label className="music-choice-field"><span>{t("music.language")}</span><select id="music-vocal-language" value={language} onChange={(event) => setLanguage(event.target.value)}>{languages.map((value) => <option key={value} value={value}>{t(`music.language.${value}`)}</option>)}</select></label><label className="music-choice-field"><span>{t("music.project")}</span><select value={projectId} onChange={(event) => setProjectId(event.target.value)} disabled={loadingProjects}><option value="">{t("music.noProject")}</option>{projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}</select></label><label className="music-choice-field"><span>{t("music.titleLabel")}</span><input value={title} onChange={(event) => setTitle(event.target.value)} maxLength={160} placeholder={t("music.titlePlaceholder")} /></label><label className="music-primary-field music-field-wide"><span>{t("music.additionalInstructions")}</span><textarea className="is-short" value={additionalInstructions} onChange={(event) => setAdditionalInstructions(event.target.value)} maxLength={2000} placeholder={t("music.additionalInstructionsPlaceholder")} /></label></div></details>
         <ReferenceAudioPanel state={referenceAudio} candidates={referenceCandidates} loading={loadingReferenceLibrary} t={t} onFileSelected={handleReferenceFilePicked} onStoredPicked={handleReferenceStoredPicked} onClear={handleReferenceAudioClear} />
+        <section className="music-lyrics-composition" aria-labelledby="music-lyrics-composition-title">
+          <div className="music-section-heading"><div><p className="music-overline">{musicStudioLyricsComposerCopy.eyebrow}</p><h2 id="music-lyrics-composition-title">{musicStudioLyricsComposerCopy.heading}</h2><p>{musicStudioLyricsComposerCopy.subtitle}</p></div></div>
+          <LyricsSectionEditor
+            value={lyricsDraft.sections}
+            language={language}
+            labels={musicStudioLyricsEditorLabels}
+            maxSections={musicStudioLyricsEditorLimits.maxSections}
+            onChange={(sections) => setLyricsDraft((previous) => ({ ...previous, sections }))}
+          />
+          <div className="music-lyrics-attestations">
+            <label className="music-lyrics-attestation"><input type="checkbox" checked={lyricsDraft.lyricsRightsConfirmed} onChange={(event) => setLyricsDraft((previous) => ({ ...previous, lyricsRightsConfirmed: event.target.checked }))} /><span>{musicStudioLyricsComposerCopy.lyricsRightsLabel}</span></label>
+            {referenceAudio.candidate ? <label className="music-lyrics-attestation"><input type="checkbox" checked={lyricsDraft.referenceRightsConfirmed} onChange={(event) => setLyricsDraft((previous) => ({ ...previous, referenceRightsConfirmed: event.target.checked }))} /><span>{musicStudioLyricsComposerCopy.referenceRightsLabel}</span></label> : null}
+          </div>
+          <MusicLyricsPreflightPanel
+            input={lyricsPreflightInput}
+            labels={musicStudioLyricsPreflightLabelOverrides}
+            onHandoff={(payload) => setLyricsDraftNotice(musicStudioLyricsComposerCopy.handoffRecorded(payload.lyrics.length))}
+            onBlocked={(result) => setLyricsDraftNotice(musicStudioLyricsComposerCopy.handoffWithheld(result.issues.length))}
+          />
+          {lyricsDraftNotice ? <p className="music-lyrics-draft-notice" id="music-lyrics-draft-notice" role="status" aria-live="polite">{lyricsDraftNotice}</p> : null}
+          {lyricsDraft.sections.length > 0 ? <button type="button" className="music-text-link" onClick={handleLyricsDraftClear}>{musicStudioLyricsComposerCopy.clearDraft}</button> : null}
+        </section>
         {error && <div className="music-inline-error"><XCircle size={15} /> {error}</div>}
         <MusicGenerationAction decision={submitDecision} working={working} noticeId="music-preflight-note" t={t} />
       </section>
