@@ -560,10 +560,10 @@ test.describe("Music Studio structured-lyrics composer wiring", () => {
     expect(focusBehaviour.takesFocus).toBe(true);
     expect(focusBehaviour.matchesFocusPseudoClass).toBe(true);
 
-    // Fail-closed while responsive: a keyboard activation and a mouse click
-    // both reach the handler, which reports the reason instead of handing the
-    // draft over, and no request is made. The issue count is read off the list
-    // the panel renders - one `li[data-issue-code]` per entry of
+    // Fail-closed while responsive: a keyboard activation and the control's
+    // own click handler both run, which reports the reason instead of handing
+    // the draft over, and no request is made. The issue count is read off the
+    // list the panel renders - one `li[data-issue-code]` per entry of
     // `result.issues`, which is exactly what `handoffWithheld` is given -
     // rather than assumed, so this stays true whatever mix of contract issues
     // this blocked draft happens to carry.
@@ -572,8 +572,20 @@ test.describe("Music Studio structured-lyrics composer wiring", () => {
     expect(blockedIssueCount).toBeGreaterThan(0);
     await expect(blockedIssues.filter({ hasText: "section_empty" })).toHaveCount(1);
     await expect(blockedIssues.filter({ hasText: "lyrics_rights_required" })).toHaveCount(1);
+
+    // `handoff.click()` is deliberately not used: Playwright's actionability
+    // contract refuses to click a control carrying `aria-disabled`, which is
+    // the very attribute this lane keeps on purpose, so that call can only
+    // wait out the test budget. Activation is therefore exercised the way the
+    // engine itself performs it - keyboard Enter on a focused button, and the
+    // `click()` DOM method a user press resolves to - so the component's
+    // handler runs while the fail-closed semantics stay untouched.
     await handoff.press("Enter");
-    await handoff.click();
+    const withheldNotice = page.locator("#music-lyrics-draft-notice");
+    await expect(withheldNotice).toHaveText(
+      `Preflight withheld this draft: ${blockedIssueCount} contract issue${blockedIssueCount === 1 ? "" : "s"} to fix before it could ever be sent.`,
+    );
+    await handoff.evaluate((el) => (el as HTMLButtonElement).click());
     await expect(page.locator("#music-lyrics-draft-notice")).toHaveText(
       `Preflight withheld this draft: ${blockedIssueCount} contract issue${blockedIssueCount === 1 ? "" : "s"} to fix before it could ever be sent.`,
     );
@@ -583,7 +595,7 @@ test.describe("Music Studio structured-lyrics composer wiring", () => {
 
     // And still no handoff was recorded: the notice is the withheld one, never
     // the recorded sentence a successful press writes.
-    await expect(page.locator("#music-lyrics-draft-notice")).not.toHaveText(composerCopy.handoffRecorded);
+    await expect(withheldNotice).not.toHaveText(composerCopy.handoffRecorded);
 
     // Right-to-left, proven physically. The row gets its Sorani line first, so the
     // only issue left is the missing attestation and the issue list is still

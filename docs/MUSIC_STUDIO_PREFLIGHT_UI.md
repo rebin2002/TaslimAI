@@ -296,10 +296,19 @@ second can only ever time out; the first hosted run of this pass failed exactly 
 (Browser E2E on `111f2995`, all six other jobs green). The control's real contract is
 that it stays in the sequential focus order and answers rather than being inert, so
 the test tabs from the attestation to it, checks that a focus attempt takes and that
-no native `disabled` attribute crept in, then presses Enter and clicks it and asserts
-the withheld notice, `data-ready="false"`, `data-admissible="false"` and a job-route
-counter of zero. The attribute is never weakened: an *enabled* handoff is still
-asserted with `toBeEnabled()` in the clean-handoff test, where the panel drops it.
+no native `disabled` attribute crept in, then activates it twice - keyboard Enter, and
+the `click()` DOM method a user press resolves to - and asserts the withheld notice,
+`data-ready="false"`, `data-admissible="false"` and a job-route counter of zero.
+
+Both halves of that activation matter for different reasons, and neither may be written
+as `handoff.click()`. Playwright's actionability contract refuses to click a control
+carrying `aria-disabled`, so clicking the deliberately-blocked handoff waits out the
+whole test budget and fails on every attempt; the second hosted run of this pass
+(Browser E2E on `3bd008ec`) failed there. Enter activation and `el.click()` run the
+component's own handler the way the engine does, so the fail-closed path is exercised
+without touching the component's semantics. The attribute is never weakened: an
+*enabled* handoff is still asserted with `toBeEnabled()` in the clean-handoff test,
+where the panel drops it.
 
 Still open, and deliberately not attempted here: an `ar` (Arabic) draft can never
 reach `data-ready="true"`, because the mirrored contract requires a dialect for
