@@ -200,8 +200,16 @@ public sealed class AutopilotOrchestrator(
         {
             // Persisted statuses are only ever written from these same constants, so the
             // translated membership test matches the set it is derived from.
+            // Intake persists the wave key with the spelling the signal carried, while
+            // the run row is keyed trimmed - which is why the event lease normalises the
+            // key and this test has to cover both spellings, or a padded key hides the
+            // outstanding evidence and the watchdog re-drives a wave whose task is still
+            // in flight, spending recovery budget on it.
+            var pendingEventKeys = run.WaveKey is null
+                ? Array.Empty<string>()
+                : new[] { run.WaveKey, run.WaveKey.Trim() }.Distinct().ToArray();
             var hasPendingEvent = await db.AutopilotEvents.AsNoTracking()
-                .AnyAsync(item => item.WaveKey == run.WaveKey
+                .AnyAsync(item => pendingEventKeys.Contains(item.WaveKey)
                     && !terminalEventStatuses.Contains(item.Status), cancellationToken);
             if (hasPendingEvent) continue;
 
@@ -229,6 +237,23 @@ public sealed class AutopilotOrchestrator(
 
             try
             {
+                // The snapshot above can be minutes old by the time a late run in the
+                // batch is reached, because the pass walks up to a hundred of them
+                // serially while the event path writes this very row under this very
+                // lease. Reloading inside the lease is what makes the fence a fence:
+                // the state-machine guard below is evaluated against the value the
+                // exclusive section actually owns, so a run that already advanced -
+                // including one already Completed - cannot be committed back through
+                // the gate, handoff and next-wave path from a stale snapshot.
+                await db.Entry(run).ReloadAsync(cancellationToken);
+                if (run.State is not (AutopilotRunStates.AwaitingEvents or AutopilotRunStates.InProgress)
+                    || run.ReconciliationCount >= maxRunReconciliations)
+                {
+                    // The lease cost nothing further: the row moved on its own, so this
+                    // pass neither re-drives it nor spends its recovery budget.
+                    continue;
+                }
+
                 await AdvanceRunAsync(run, context, recovered: true, cancellationToken);
                 if (run.ReconciliationCount >= maxRunReconciliations)
                 {
@@ -244,13 +269,18 @@ public sealed class AutopilotOrchestrator(
                         targetId: run.Id,
                         dryRun: settings.DryRun));
                 }
+
+                // The durable write is part of the exclusive section, not something
+                // done after it: the branches a stalled run really takes return
+                // without flushing, so a post-release flush committed the transition
+                // and the budget increment once ownership had already been dropped,
+                // where a second reconciler could overwrite them.
+                await FlushAsync(context, cancellationToken);
             }
             finally
             {
                 await locks.ReleaseAsync(lease, CancellationToken.None);
             }
-
-            await FlushAsync(context, cancellationToken);
         }
 
         context.EventsExamined = staleEvents.Count + expiredClaims.Count;

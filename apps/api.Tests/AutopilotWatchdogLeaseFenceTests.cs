@@ -210,6 +210,97 @@ public sealed class AutopilotWatchdogLeaseFenceTests : IDisposable
     /// reachable; the orchestrator clock is synthetic and lease expiry is manipulated
     /// through the persisted row only.
     /// </summary>
+    [Fact]
+    public async Task Watchdog_recovery_refuses_to_clobber_a_run_the_event_path_already_completed()
+    {
+        // The recovery batch is read before the lease is taken, and the pass walks up
+        // to a hundred runs serially, so a late run's snapshot can be minutes old. The
+        // fence only means something if the state the exclusive section writes is the
+        // state it read: otherwise a run that already reached a terminal state is
+        // committed back through the gate, handoff and next-wave path from the stale
+        // value, and the state-machine guard happily approves the regression because
+        // it was evaluated against that same stale snapshot.
+        using var host = new LeaseHost(maxReconciliations: 5);
+        var runId = host.SeedStalledRun("wave-stale-snapshot", LastEvidenceUtc);
+
+        // Another writer - exactly what an in-flight completion event on any other
+        // controller instance is - advances this run while the watchdog's snapshot of
+        // it is already materialized, just before the lease becomes available to it.
+        host.LeaseAcquired = async _ =>
+        {
+            using var other = host.CreateContext();
+            var row = await other.AutopilotRuns.SingleAsync(item => item.WaveKey == "wave-stale-snapshot");
+            row.State = AutopilotRunStates.Completed;
+            row.UpdatedAt = LastEvidenceUtc + TimeSpan.FromMinutes(30);
+            await other.SaveChangesAsync();
+        };
+
+        host.Clock.AdvanceTo(FirstPassUtc);
+        await host.ReconcileAsync("hourly_watchdog");
+
+        using var db = host.CreateContext();
+        var run = await db.AutopilotRuns.SingleAsync(item => item.Id == runId);
+        Assert.Equal(AutopilotRunStates.Completed, run.State);
+        Assert.Equal(0, run.ReconciliationCount);
+    }
+
+    [Fact]
+    public async Task Watchdog_recovery_commits_the_run_before_it_hands_the_lease_back()
+    {
+        // The branches a stalled run actually takes return without flushing, so a
+        // flush after the release committed the transition once exclusive ownership
+        // had already ended - the one moment a second reconciler (another replica's
+        // hourly pass, or the manual admin reconcile) can write the same row. What is
+        // durable at release time is what the fence actually protected.
+        using var host = new LeaseHost(maxReconciliations: 5);
+        var runId = host.SeedStalledRun("wave-commit-inside-lease", LastEvidenceUtc);
+        var persistedWhileOwned = -1;
+
+        host.LeaseReleasing = async _ =>
+        {
+            using var other = host.CreateContext();
+            persistedWhileOwned = await other.AutopilotRuns
+                .Where(item => item.Id == runId)
+                .Select(item => item.ReconciliationCount)
+                .SingleAsync();
+        };
+
+        host.Clock.AdvanceTo(FirstPassUtc);
+        await host.ReconcileAsync("hourly_watchdog");
+
+        Assert.Equal(1, persistedWhileOwned);
+
+        using var db = host.CreateContext();
+        var run = await db.AutopilotRuns.SingleAsync(item => item.Id == runId);
+        Assert.Equal(1, run.ReconciliationCount);
+    }
+
+    [Fact]
+    public async Task Padded_pending_event_key_defers_recovery_of_the_run_it_belongs_to()
+    {
+        // The lease key is normalised, but the "is evidence still outstanding" test
+        // compared the run's trimmed key against the spelling intake persisted. A
+        // padded key therefore hid the outstanding event, and the watchdog re-drove a
+        // wave whose task was still in flight, spending recovery budget on it.
+        using var host = new LeaseHost(maxReconciliations: 5);
+        var runId = host.SeedStalledRun("wave-pad-pending", LastEvidenceUtc);
+        host.SeedCompletionEvent("  wave-pad-pending  ", "wave-pad-pending-task-1");
+
+        host.Clock.AdvanceTo(FirstPassUtc);
+        await host.ReconcileAsync("hourly_watchdog");
+
+        using var db = host.CreateContext();
+        var run = await db.AutopilotRuns.SingleAsync(item => item.Id == runId);
+        Assert.Equal(AutopilotRunStates.InProgress, run.State);
+        Assert.Equal(0, run.ReconciliationCount);
+        // The wave lease in this pass belongs to the event path, which legitimately
+        // applied the requeued signal; what recovery must not have done is any work on
+        // the run itself, so no watchdog audit may name this run as its target.
+        Assert.Empty(await db.AutopilotAuditEvents
+            .Where(item => item.TargetId == runId)
+            .ToListAsync());
+    }
+
     private sealed class LeaseHost : IDisposable
     {
         private readonly SqliteConnection connection = new("DataSource=:memory:");
@@ -233,6 +324,19 @@ public sealed class AutopilotWatchdogLeaseFenceTests : IDisposable
         }
 
         public AutopilotOptions Options { get; }
+
+        /// <summary>
+        /// Observes a lease the watchdog has just won, through a second database
+        /// context - the shape a completion event applied by another controller
+        /// instance takes. Returning from the hook leaves the exclusive section.
+        /// </summary>
+        public Func<string, Task>? LeaseAcquired { get; set; }
+
+        /// <summary>
+        /// Observes the instant before a lease is handed back, so a case can read what
+        /// the exclusive section had already made durable while it still owned the row.
+        /// </summary>
+        public Func<string, Task>? LeaseReleasing { get; set; }
 
         public SteppingClock Clock { get; }
 
@@ -376,7 +480,7 @@ public sealed class AutopilotWatchdogLeaseFenceTests : IDisposable
             using var db = CreateContext();
             var orchestrator = new AutopilotOrchestrator(
                 db,
-                new EfAutopilotLockService(db, Options),
+                new ObservedLockService(new EfAutopilotLockService(db, Options), LeaseAcquired, LeaseReleasing),
                 new IdleNextWaveService(),
                 Options,
                 Clock,
@@ -388,6 +492,26 @@ public sealed class AutopilotWatchdogLeaseFenceTests : IDisposable
         {
             connection.Close();
             connection.Dispose();
+        }
+    }
+
+    /// <summary>Lease service that lets a case act inside the exclusive section.</summary>
+    private sealed class ObservedLockService(
+        IAutopilotLockService inner,
+        Func<string, Task>? acquired,
+        Func<string, Task>? releasing) : IAutopilotLockService
+    {
+        public async Task<AutopilotLockHandle> AcquireAsync(string resourceKey, string heldBy, CancellationToken cancellationToken = default)
+        {
+            var handle = await inner.AcquireAsync(resourceKey, heldBy, cancellationToken);
+            if (handle.IsAcquired && acquired is not null) await acquired(resourceKey);
+            return handle;
+        }
+
+        public async Task<bool> ReleaseAsync(AutopilotLockHandle handle, CancellationToken cancellationToken = default)
+        {
+            if (releasing is not null) await releasing(handle.ResourceKey);
+            return await inner.ReleaseAsync(handle, cancellationToken);
         }
     }
 
