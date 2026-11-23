@@ -38,6 +38,14 @@ export function shouldPollResearchJob(job: GenerationJob | null) { return !!job 
 export function nextResearchPollDelay(job: GenerationJob | null, retryAttempt = 0) { return shouldPollResearchJob(job) ? Math.min(700 * Math.max(1, retryAttempt + 1), 2_800) : null; }
 export function canCancelResearchJob(job: GenerationJob | null) { return !!job && ["Pending", "Queued", "Running"].includes(job.status) && !job.cancellationRequested; }
 export function displayResearchProgress(job: GenerationJob | null) { if (!job) return 0; const value = Math.max(0, Math.min(100, job.progressPercent)); return isResearchTerminal(job) ? value : Math.min(value, 99); }
+export function hasRenderableResearchResult(result: ResearchJobResult | null) {
+  return !!result
+    && nonEmpty(result.assetId)
+    && nonEmpty(result.title)
+    && nonEmpty(result.executiveSummary)
+    && (result.sections?.length ?? 0) > 0
+    && (result.representations?.some((representation) => ["docx", "pdf"].includes(representation.type.toLowerCase())) ?? false);
+}
 export function researchStudioState(job: GenerationJob | null, result: ResearchJobResult | null): ResearchStudioState {
   if (!job) return "compose";
   if (job.status === "Pending") return "pending";
@@ -45,7 +53,7 @@ export function researchStudioState(job: GenerationJob | null, result: ResearchJ
   if (job.status === "Running") return "running";
   if (job.status === "Failed") return "failed";
   if (job.status === "Cancelled") return "cancelled";
-  return result?.assetId ? "succeeded" : "completed-unavailable";
+  return hasRenderableResearchResult(result) ? "succeeded" : "completed-unavailable";
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> { return typeof value === "object" && value !== null; }
