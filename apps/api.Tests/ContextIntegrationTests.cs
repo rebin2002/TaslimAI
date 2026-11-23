@@ -535,6 +535,46 @@ public sealed class ContextIntegrationTests : IClassFixture<ContextRecordingFact
         }
     }
 
+    [Fact]
+    public async Task A_stale_client_cannot_regenerate_a_response_another_answer_already_replaced()
+    {
+        // The context builder treats the newest completed assistant answer as the
+        // answer of record, but the regeneration guard only rejected a later *user*
+        // turn. A stale tab could therefore bill a provider call to re-answer an
+        // already-replaced response and have the new row silently displace the answer
+        // the user accepted.
+        using var client = factory.CreateClient();
+        var auth = await Register(client, "Stale Regeneration Owner");
+        var conversation = await CreateConversation(client, auth.PersonalWorkspace.Id, null);
+        var recorder = factory.Services.GetRequiredService<RecordingChatCompletionService>();
+        var initial = await SendWithCsrf<SendMessageResponse>(client, HttpMethod.Post, $"/api/conversations/{conversation.Id}/messages", new
+        {
+            content = "STALE_GUARD_USER",
+            requestId = Guid.NewGuid().ToString("N"),
+        });
+
+        var replacement = await SendWithCsrf(client, HttpMethod.Post, $"/api/conversations/{conversation.Id}/messages/{initial.AssistantMessage.Id}/regenerate", new { requestId = Guid.NewGuid().ToString("N") });
+        Assert.Equal(HttpStatusCode.OK, replacement.StatusCode);
+        using var replacementCompleted = ExtractEventData(await replacement.Content.ReadAsStringAsync(), "message.completed");
+        var answerOfRecordId = replacementCompleted.RootElement.GetProperty("assistantMessage").GetProperty("id").GetGuid();
+        var callsAfterReplacement = recorder.CallCount;
+
+        var staleAttempt = await SendWithCsrf(client, HttpMethod.Post, $"/api/conversations/{conversation.Id}/messages/{initial.AssistantMessage.Id}/regenerate", new { requestId = Guid.NewGuid().ToString("N") });
+        using var refused = ExtractEventData(await staleAttempt.Content.ReadAsStringAsync(), "message.failed");
+        Assert.Equal("MESSAGE_NOT_REGENERABLE", refused.RootElement.GetProperty("code").GetString());
+        Assert.Equal(callsAfterReplacement, recorder.CallCount);
+
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        var persistedAnswers = await db.ChatMessages.AsNoTracking()
+            .Where(message => message.ConversationId == conversation.Id && message.Role == ChatMessageRole.Assistant)
+            .ToListAsync();
+        Assert.Equal(2, persistedAnswers.Count);
+        var answerOfRecord = persistedAnswers.Single(message => message.Id == answerOfRecordId);
+        Assert.Equal(ChatMessageStatus.Completed, answerOfRecord.Status);
+        Assert.True(answerOfRecord.Sequence > persistedAnswers.Single(message => message.Id == initial.AssistantMessage.Id).Sequence);
+    }
+
     private async Task<AuthResponse> Register(HttpClient client, string displayName)
     {
         var response = await SendWithCsrf(client, HttpMethod.Post, "/api/auth/register", new

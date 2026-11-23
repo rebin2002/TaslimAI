@@ -194,6 +194,36 @@ public sealed class ChatController(
             return;
         }
 
+        // Liveness, not only turn order, decides what may be regenerated. The context
+        // builder treats the newest completed assistant answer as the answer of record,
+        // so the guard above left a hole: a stale tab or a replayed click on a response
+        // that has already been replaced passed validation, billed a provider call, and
+        // had its output appended as the newest row - silently superseding the answer
+        // the user had accepted. A failed or cancelled replacement does not lock the
+        // user out, because then no newer completed answer exists to refuse against.
+        // A retry of the regeneration attempt that produced the newer row is not a stale
+        // click: the shipped idempotency contract replays that answer without a second
+        // provider call, and the stream identifies that attempt by request id, so this
+        // guard has to stand aside for exactly that request.
+        var regenerationRequestId = request.RequestId.Trim();
+        var replayOfThisAttempt = await db.ChatMessages.AnyAsync(message =>
+            message.ConversationId == conversationId &&
+            message.RequestId == regenerationRequestId &&
+            message.Role == ChatMessageRole.Assistant &&
+            message.Status == ChatMessageStatus.Completed,
+            cancellationToken);
+        var newerCompletedAnswerExists = !replayOfThisAttempt && await db.ChatMessages.AnyAsync(message =>
+            message.ConversationId == conversationId &&
+            message.Role == ChatMessageRole.Assistant &&
+            message.Status == ChatMessageStatus.Completed &&
+            message.Sequence > assistant.Sequence,
+            cancellationToken);
+        if (newerCompletedAnswerExists)
+        {
+            await WriteEventAsync("message.failed", new { code = "MESSAGE_NOT_REGENERABLE", message = "Only the latest response can be regenerated." }, cancellationToken);
+            return;
+        }
+
         var sourceUser = await db.ChatMessages.AsNoTracking()
             .Where(message => message.ConversationId == conversationId && message.Role == ChatMessageRole.User && message.Sequence < assistant.Sequence)
             .OrderByDescending(message => message.Sequence)
@@ -280,8 +310,23 @@ public sealed class ChatController(
             if (usage is null) throw new AiGenerationException("AI response did not complete.");
             PersistRegenerationSuccess(conversation, assistant, new AiGenerationResult(content.ToString(), usage));
             await db.SaveChangesAsync(CancellationToken.None);
-            await usageLedger.CompleteAsync(usageTransaction, usage, CancellationToken.None);
+            // The answer is durable and paid for from this instant. Completion of the
+            // usage row is settled outside the failure-handling path below: a throw
+            // from the ledger used to fall into the catch-all with `persisted` still
+            // false, which erased an answer the user had been billed for, left the
+            // transaction Pending (neither complete nor failed), and re-exposed the
+            // rejected response to every later turn because its replacement had been
+            // rolled back to Failed. Accounting drift is logged and reconciled; it is
+            // not a reason to destroy a committed response.
             persisted = true;
+            try
+            {
+                await usageLedger.CompleteAsync(usageTransaction, usage, CancellationToken.None);
+            }
+            catch (Exception ledgerException)
+            {
+                logger.LogWarning(ledgerException, "Chat regeneration usage completion failed. ConversationId={ConversationId}; TraceId={TraceId}", conversation.Id, HttpContext.TraceIdentifier);
+            }
             await WriteEventAsync("message.completed", new SendMessageResponse(ToDto(conversation), ToMessageDto(sourceUser), ToMessageDto(assistant, usage.IsTestResponse)), cancellationToken);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested || HttpContext.RequestAborted.IsCancellationRequested)
