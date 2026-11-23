@@ -1,6 +1,7 @@
 using System.Text;
 using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using Taslim.Api.Ai;
 using Taslim.Api.Assets;
@@ -9,14 +10,13 @@ using Taslim.Api.Domain;
 using Taslim.Api.Files;
 using Taslim.Api.Generation;
 using Taslim.Api.Persistence;
-
 namespace Taslim.Api.Social;
-
 public sealed class SocialGenerationJobHandler(
     TaslimDbContext db,
     ISocialPromptBuilder promptBuilder,
     ISocialGenerationProvider provider,
-    IOptions<SocialGenerationOptions> socialOptions) : IGenerationJobHandler
+    IOptions<SocialGenerationOptions> socialOptions,
+    ILogger<SocialGenerationJobHandler> logger) : IGenerationJobHandler
 {
     private readonly SocialGenerationOptions settings = socialOptions.Value;
 
@@ -52,7 +52,12 @@ public sealed class SocialGenerationJobHandler(
         }
 
         var sources = files.Select(file => new SocialSourceContext(file.OriginalFileName, "source file", Trim(file.ExtractedText, settings.MaxContextCharacters), null, file.ContentType))
-            .Concat(assets.Select(asset => new SocialSourceContext(asset.Name, "asset", Trim(asset.StoredFile?.ExtractedText, settings.MaxContextCharacters), asset.AssetType, asset.MimeType)))
+            // An asset contributes its identity only, never its backing file's extracted
+            // text. SocialPromptBuilder already refuses to render content for kind "asset";
+            // not handing it the text closes the same disclosure path at both ends, which is
+            // what lets admission follow the platform's real file-visibility decision instead
+            // of an asset/file project-scope equality that legal write flows desynchronise.
+            .Concat(assets.Select(asset => new SocialSourceContext(asset.Name, "asset", null, asset.AssetType, asset.MimeType)))
             .ToArray();
 
         SocialGenerationPrompt prompt;
@@ -131,29 +136,75 @@ public sealed class SocialGenerationJobHandler(
     private async Task<IReadOnlyList<Asset>> LoadAssetsAsync(SocialGenerationInput input, Guid workspaceId, Guid userId, CancellationToken cancellationToken)
     {
         if (input.AssetIds.Count == 0) return [];
-        var assets = await db.Assets.AsNoTracking().Include(asset => asset.StoredFile).Where(asset => asset.WorkspaceId == workspaceId && input.AssetIds.Contains(asset.Id)).ToListAsync(cancellationToken);
-        if (assets.Count != input.AssetIds.Count || assets.Any(asset =>
-                asset.Status != AssetStatus.Active
-                || !SocialGenerationDefaults.SelectableAssetTypes.Contains(asset.AssetType)
-                || asset.StoredFileId is null
-                || asset.StoredFile is not { Status: StoredFileStatus.Ready }
-                || asset.StoredFile.WorkspaceId != workspaceId
-                // An asset and the file behind it must carry the same project
-                // scope. Asset reassignment can move Asset.ProjectId without
-                // moving StoredFile.ProjectId, and the extracted text of the
-                // backing file is fed into the prompt, so a mismatched pair is
-                // never an admissible selection - not even for the creator.
-                // Personal assets are unscoped on both sides and still match.
-                || asset.ProjectId != asset.StoredFile.ProjectId
-                // Project assets may be shared only when their backing file is
-                // also project-scoped. Personal and conversation-backed assets
-                // remain private to their creator.
-                || (asset.CreatedByUserId != userId && !asset.ProjectId.HasValue)
-                || (asset.CreatedByUserId != userId
-                    && (asset.StoredFile!.UserId != userId
-                        && (!asset.StoredFile.ProjectId.HasValue || asset.StoredFile.ConversationId.HasValue)))))
-            throw new SocialGenerationStageException(SocialGenerationStages.Context, GenerationJobErrorCodes.SocialContextUnavailable, "One or more selected assets are unavailable.");
+        // Selection is decided by the platform's own asset policy rather than by a parallel
+        // re-implementation of it. AssetVisibility already answers "may this workspace member
+        // use this asset and its backing file at all", including the cross-workspace integrity
+        // conjuncts (an asset whose project leaves the workspace, or a non-creator asset whose
+        // file is personal or conversation-backed, is not visible). The whole selection then
+        // has to survive, so a single inadmissible asset fails the job closed.
+        var assets = await db.Assets.AsNoTracking()
+            .Include(asset => asset.StoredFile)
+            .ThenInclude(storedFile => storedFile!.Project)
+            .Where(asset => asset.WorkspaceId == workspaceId && input.AssetIds.Contains(asset.Id))
+            .Where(AssetVisibility.ForWorkspaceMember(userId))
+            .ToListAsync(cancellationToken);
+        if (assets.Count != input.AssetIds.Count)
+            throw UnavailableAssets(workspaceId, userId, input.AssetIds.Except(assets.Select(asset => asset.Id)), "not present in this workspace or not visible to this member under the asset policy");
+        foreach (var asset in assets)
+        {
+            if (DescribeAssetRejection(asset, workspaceId, userId) is { } reason)
+                throw UnavailableAssets(workspaceId, userId, [asset.Id], reason);
+        }
         return input.AssetIds.Select(id => assets.First(asset => asset.Id == id)).ToArray();
+    }
+
+    /// <summary>
+    /// Why this asset cannot be used in a Social generation, or null when it can.
+    /// </summary>
+    /// <remarks>
+    /// Row #1128 originally added `asset.ProjectId == asset.StoredFile.ProjectId` here,
+    /// justified by the backing file's extracted text reaching the prompt. Neither half
+    /// holds, and the clause broke legal data:
+    /// - The text does not reach the prompt. <see cref="SocialPromptBuilder"/> renders only
+    ///   name, type and content type for kind "asset" (pinned by
+    ///   SocialGenerationUnitTests.Prompt_builder_keeps_asset_metadata_but_excludes_private_extracted_text),
+    ///   and this handler no longer even passes the text to the builder.
+    /// - Two supported write flows desynchronise the two columns, and neither can be repaired
+    ///   by a write: <c>AssetService.UpdateAsync</c> moves <c>Asset.ProjectId</c> alone, and
+    ///   <c>FileProcessingService.FinalizeGeneratedFileAsync</c> adopts the pre-existing
+    ///   same-hash row when it dedups generated output, so the asset legitimately points at a
+    ///   file whose scope belongs to whoever stored those bytes first. The unique index
+    ///   IX_StoredFiles_WorkspaceId_ContentHashSha256 (TaslimDbContext) forbids a per-project
+    ///   copy of the same content, which is exactly why the equality is unsatisfiable rather
+    ///   than merely inconvenient: every such asset stayed permanently unusable in Social
+    ///   Studio behind a generic "unavailable" error while the same member could still
+    ///   download that very file through the asset.
+    /// The guard that does carry the disclosure risk is the file-visibility decision the
+    /// download route and the read model's canDownload flag already share, so this now defers
+    /// to <see cref="AssetService.CanReadStoredFile"/>. That is no weaker: it still refuses a
+    /// cross-workspace file, and it now also refuses a personal or conversation-backed file the
+    /// caller does not own even when the asset is unscoped - the case the old equality let
+    /// through (both columns null matched), so this closes a hole rather than opening one.
+    /// </remarks>
+    private static string? DescribeAssetRejection(Asset asset, Guid workspaceId, Guid userId)
+    {
+        if (asset.Status != AssetStatus.Active) return "the asset is not active";
+        if (!SocialGenerationDefaults.SelectableAssetTypes.Contains(asset.AssetType)) return "the asset type is not selectable in Social Studio";
+        if (asset.StoredFileId is null) return "the asset has no backing file";
+        if (asset.StoredFile is not { Status: StoredFileStatus.Ready }) return "the backing file is not ready";
+        if (!AssetService.CanReadStoredFile(asset.StoredFile, userId, workspaceId)) return "the backing file is outside this member's file visibility";
+        return null;
+    }
+
+    /// <summary>
+    /// Fails the whole selection closed. Clients keep receiving the same static,
+    /// provider-neutral message so that asset existence cannot be probed through the error
+    /// text; the specific reason is recorded server-side only, and never carries content.
+    /// </summary>
+    private SocialGenerationStageException UnavailableAssets(Guid workspaceId, Guid userId, IEnumerable<Guid> assetIds, string reason)
+    {
+        logger.LogWarning("Social asset selection refused. WorkspaceId={WorkspaceId}; UserId={UserId}; AssetIds={AssetIds}; Reason={Reason}", workspaceId, userId, string.Join(',', assetIds), reason);
+        return new SocialGenerationStageException(SocialGenerationStages.Context, GenerationJobErrorCodes.SocialContextUnavailable, "One or more selected assets are unavailable.");
     }
 
     private static string NormalizeOutputLanguage(string draftLanguage, string requested) => draftLanguage is "en" or "ar" or "ku" ? draftLanguage : requested is "en" or "ar" or "ku" ? requested : "en";
