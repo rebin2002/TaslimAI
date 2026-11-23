@@ -199,7 +199,10 @@ public static class MovieProductionCheckpointAnalyzer
             .Where(item => !item.HasPublishedOutput)
             .OrderByDescending(item => item.Id)
             .FirstOrDefault();
-        var finalTake = takes.FirstOrDefault(item => item.IsFinal && item.HasAsset);
+        // FinalTakeId/FinalizedAt are persisted lifecycle markers and can be stale
+        // after a rejected or superseded take. Complete is reserved for the
+        // canonical selected state with both selection and finalization markers.
+        var finalTake = takes.FirstOrDefault(item => item.IsFinal && item.IsSelected && item.Status == MovieTakeStatuses.Selected && item.HasAsset);
         var selectedTake = takes.FirstOrDefault(item => item.IsSelected && item.HasAsset) ?? takes.FirstOrDefault(item => item.IsSelected);
         var approvedStoryboard = versions.Any(item => item.Stage == MovieProductionStages.ApprovedStoryboard && item.Status == MovieProductionVersionStatuses.Approved);
         var approvedKeyframe = versions.Any(item => item.Stage == MovieProductionStages.ApprovedKeyframe && item.Status == MovieProductionVersionStatuses.Approved);
