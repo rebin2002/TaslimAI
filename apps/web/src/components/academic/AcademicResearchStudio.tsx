@@ -134,6 +134,14 @@ export function AcademicWorkspace({ principal, initialState }: AcademicWorkspace
   const labels = useMemo(() => createAcademicLabels(ta), [ta]);
 
   /**
+   * Ownership is decided on the derived scope label, never on object identity: a host may
+   * legitimately rebuild the `principal` object on each render, and comparing references
+   * would then re-enter the reset below every single render and trip React's
+   * "too many re-renders" guard.
+   */
+  const ownerKey = academicOwnerKey(principal);
+
+  /**
    * The principal the in-memory state belongs to, plus whether the host seed has been
    * consumed for it. Nothing may be rendered for, read into, or persisted from this
    * instance unless it matches the current principal, so a reused instance cannot carry
@@ -142,7 +150,7 @@ export function AcademicWorkspace({ principal, initialState }: AcademicWorkspace
    * unmounted rather than merely reset; the fence below is what makes the guarantee hold
    * for any host that embeds the workspace directly.
    */
-  const [owner, setOwner] = useState<AcademicDraftPrincipal>(principal);
+  const [owner, setOwner] = useState(ownerKey);
   const [seedConsumed, setSeedConsumed] = useState(initialState !== undefined);
   const [state, setState] = useState<AcademicWorkspaceState>(() => initialState ?? createInitialWorkspaceState());
   const [draftStatus, setDraftStatus] = useState("");
@@ -153,27 +161,27 @@ export function AcademicWorkspace({ principal, initialState }: AcademicWorkspace
    * a callback captured under one identity cannot write under the next one. It is only
    * ever touched outside render, because render decisions belong to `owner` above.
    */
-  const liveOwnerRef = useRef<AcademicDraftPrincipal>(principal);
+  const liveOwnerRef = useRef(ownerKey);
 
   // Fail closed during render, before any commit: when the principal moves while this
   // instance stays mounted, the previous student's workspace is destroyed here rather
   // than painted and offered for saving. Setting state during render makes React re-run
   // this component immediately, so the stale value is never committed to the DOM, and the
   // host seed - which belongs to the identity that received it - is not carried over.
-  if (owner !== principal) {
-    setOwner(principal);
+  if (owner !== ownerKey) {
+    setOwner(ownerKey);
     setSeedConsumed(false);
     setState(createInitialWorkspaceState());
     setDraftStatus("");
   }
 
   useEffect(() => {
-    liveOwnerRef.current = principal;
-  }, [principal]);
+    liveOwnerRef.current = ownerKey;
+  }, [ownerKey]);
 
   const stateBelongsToPrincipal = useCallback(
-    () => liveOwnerRef.current === principal,
-    [principal],
+    () => liveOwnerRef.current === ownerKey,
+    [ownerKey],
   );
 
   /**
@@ -187,17 +195,17 @@ export function AcademicWorkspace({ principal, initialState }: AcademicWorkspace
    */
   useEffect(() => {
     if (initialState && seedConsumed) return;
-    const scheduledFor = principal;
+    const scheduledFor = ownerKey;
     let cancelled = false;
     queueMicrotask(() => {
       if (cancelled || scheduledFor !== liveOwnerRef.current) return;
-      const restored = readWorkspaceDraft(scheduledFor);
+      const restored = readWorkspaceDraft(principal);
       if (restored && liveOwnerRef.current === scheduledFor) setState(restored);
     });
     return () => {
       cancelled = true;
     };
-  }, [initialState, seedConsumed, principal]);
+  }, [initialState, seedConsumed, ownerKey, principal]);
 
   const brief = state.brief;
   const issues = useMemo(() => validateAcademicBrief(brief), [brief]);
@@ -210,9 +218,9 @@ export function AcademicWorkspace({ principal, initialState }: AcademicWorkspace
    * captured under a different identity.
    */
   const mutate = useCallback((updater: (current: AcademicWorkspaceState) => AcademicWorkspaceState) => {
-    if (liveOwnerRef.current !== principal) return;
+    if (liveOwnerRef.current !== ownerKey) return;
     setState(updater);
-  }, [principal]);
+  }, [ownerKey]);
 
   /** Replacing the library also drops evidence notes that referenced removed records. */
   const setSources = useCallback((next: AcademicSource[]) => {

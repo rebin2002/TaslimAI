@@ -265,5 +265,29 @@ for (const mode of ["studio", "workspace"] as const) {
       expect(alphaDrafts).toBeGreaterThan(0);
       expect(betaDrafts).toBeGreaterThan(0);
     });
+
+    /**
+     * The other direction of the same fence: an identity change must be recognised from
+     * the scope it carries, not from the object reference. A host may rebuild
+     * `{ userId, workspaceId }` on each render, and treating that as a new student would
+     * silently wipe the work of the student who is still signed in.
+     */
+    test("keeps the current student's work when the host re-renders with an equal scope", async ({ page }) => {
+      await openHarness(page, studentA, mode);
+      await questionField(page).fill(MARK_A_QUESTION);
+      await openTab(page, /^Sources/);
+      await addSource(page, MARK_A_SOURCE, "Alpha, A.");
+      await openTab(page, /^Chapters/);
+      await chapterNoteField(page).fill(MARK_A_NOTE);
+
+      // Same user, same workspace, a brand-new object - e.g. a session refresh.
+      await setIdentity(page, { ...studentA });
+
+      await expect(questionField(page)).toHaveValue(MARK_A_QUESTION);
+      await openTab(page, /^Sources/);
+      await expect(page.getByText(MARK_A_SOURCE).first()).toBeVisible();
+      await openTab(page, /^Chapters/);
+      await expect(chapterNoteField(page)).toHaveValue(MARK_A_NOTE);
+    });
   });
 }

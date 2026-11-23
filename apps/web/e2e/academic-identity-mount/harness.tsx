@@ -24,7 +24,7 @@
  * fixed head.
  */
 import { createRoot } from "react-dom/client";
-import { useMemo, type ReactElement } from "react";
+import { type ReactElement } from "react";
 import * as academicStudio from "@/components/academic/AcademicResearchStudio";
 import { useAuth } from "@/components/AuthProvider";
 import { AuthProviderStub, setHarnessIdentity, type HarnessIdentity } from "./harnessAuth";
@@ -55,10 +55,11 @@ const InnerWorkspace: NonNullable<StudioModule["AcademicWorkspace"]> =
 /** Host that changes `principal` without remounting the workspace instance. */
 function UnkeyedWorkspaceHost() {
   const { user, workspace } = useAuth();
-  const principal = useMemo(
-    () => ({ userId: user?.id ?? null, workspaceId: workspace?.id ?? null }),
-    [user?.id, workspace?.id],
-  );
+  // Deliberately unmemoized: a host is allowed to hand the workspace a fresh scope
+  // object on every render, so ownership must be decided on the identity it carries
+  // rather than on the reference. Memoizing here would hide an infinite-render
+  // hazard ("too many re-renders") behind the test.
+  const principal = { userId: user?.id ?? null, workspaceId: workspace?.id ?? null };
   return <InnerWorkspace principal={principal} />;
 }
 
