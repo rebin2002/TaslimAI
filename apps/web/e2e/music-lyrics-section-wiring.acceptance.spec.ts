@@ -31,6 +31,17 @@
  *      away-and-back a member performs between studio tabs), and a draft stored
  *      under a different workspace scope is never replayed into this one.
  *
+ *   4. the composer is actually painted, in a real engine, with the studio's own
+ *      field language: the card and the lyric textarea carry borders, the
+ *      contract's `aria-invalid` state is visible, keyboard focus produces the
+ *      studio's focus ring inside the composer, a blocked handoff button remains
+ *      clickable-and-focusable rather than being hidden by a stylesheet, and the
+ *      right-to-left mirror is proven by computed physical padding rather than by
+ *      trusting that logical properties were used. PR #1253 shipped all of these
+ *      classes with zero rules anywhere in `globals.css`, and a markup-only test
+ *      cannot see that gap; `src/app/musicLyricsStudioStyles.test.ts` pins the
+ *      stylesheet text, this test pins what a browser does with it.
+ *
  * English locale only, deliberately. This copy is not localized yet: step 3 of
  * docs/MUSIC_STUDIO_PREFLIGHT_UI.md reserves moving `musicStudioLyricsLabels.ts`
  * into the `i18n.ts` catalogs, so the composer, editor and panel strings below
@@ -420,6 +431,231 @@ test.describe("Music Studio structured-lyrics composer wiring", () => {
     // quiet rather than repeating yesterday's notice.
     await expect(page.locator("#music-lyrics-draft-notice")).toHaveCount(0);
     // Restoring private lyrics to a browser tab involves no request at all.
+    expect(jobSubmissions).toBe(0);
+  });
+
+  test("paints the composer with the studio's own field, focus and right-to-left language", async ({ authenticatedPage: page }) => {
+    let jobSubmissions = 0;
+    await page.route("**/api/music-generation/jobs", async (route) => {
+      jobSubmissions += 1;
+      await route.abort();
+    });
+    await page.addInitScript((locale) => {
+      window.localStorage.setItem("taslim-locale", locale);
+    }, "en");
+
+    await page.goto("/create/music");
+    const composer = page.getByRole("region", { name: composerCopy.heading });
+    const panel = composer.getByRole("region", { name: panelCopy.heading });
+    await composer.getByRole("button", { name: editorCopy.addVerse, exact: true }).click();
+    const verseRow = composer.getByRole("textbox", { name: editorCopy.verseRow });
+
+    // The composer is a studio card and the lyric row is a studio field, not a
+    // browser-default textarea on a dark page: `#1253` shipped with neither, and
+    // the studio scopes its field styling to `.music-primary-field` /
+    // `.music-choice-field`, so nothing was inherited either.
+    const cardStyle = await composer.evaluate((el) => {
+      const s = getComputedStyle(el);
+      return { display: s.display, borderTopWidth: s.borderTopWidth, borderRadius: s.borderRadius, backgroundColor: s.backgroundColor };
+    });
+    expect(cardStyle.display).toBe("flex");
+    expect(cardStyle.borderTopWidth).toBe("1px");
+    expect(cardStyle.borderRadius).toBe("14px");
+    // The same card surface the studio's reference panel already uses.
+    expect(cardStyle.backgroundColor).toContain("4, 10, 16");
+
+    // Empty row: the contract's `aria-invalid="true"` is stated in colour as well
+    // as in the `role="alert"` text the editor renders.
+    await expect(verseRow).toHaveAttribute("aria-invalid", "true");
+    const invalidFieldStyle = await verseRow.evaluate((el) => {
+      const s = getComputedStyle(el);
+      return { borderTopWidth: s.borderTopWidth, minHeight: s.minHeight, resize: s.resize, color: s.color, backgroundColor: s.backgroundColor, borderColor: s.borderTopColor };
+    });
+    expect(invalidFieldStyle.borderTopWidth).toBe("1px");
+    expect(invalidFieldStyle.minHeight).toBe("112px");
+    expect(invalidFieldStyle.resize).toBe("vertical");
+    // --music-text (#f4f8f8) on a dark field, so the lyric is legible: the default
+    // black-on-white box was the visible defect.
+    expect(invalidFieldStyle.color).toBe("rgb(244, 248, 248)");
+    expect(invalidFieldStyle.backgroundColor).toContain("7, 14, 21");
+    expect(invalidFieldStyle.borderColor).toContain("222, 119, 119");
+
+    // The mirrored issue list is rendered in the studio's monospace issue style,
+    // with the blocking text itself in the error colour.
+    const issueStyle = await panel.locator('[data-issue-code="section_empty"]').first().evaluate((el) => {
+      const s = getComputedStyle(el);
+      return { fontFamily: s.fontFamily, color: s.color };
+    });
+    expect(issueStyle.fontFamily).toContain("ui-monospace");
+    expect(issueStyle.color).toBe("rgb(241, 182, 182)");
+
+    // Keyboard focus reaches the composer with the studio's own ring. Tabbing (not
+    // `.focus()`) is what puts Chromium in keyboard modality, so this exercises
+    // `:focus-visible` rather than assuming programmatic focus qualifies.
+    await verseRow.focus();
+    await page.keyboard.press("Tab");
+    const focused = page.locator(":focus");
+    await expect(focused).toHaveCount(1);
+    const ring = await focused.evaluate((el) => {
+      const s = getComputedStyle(el);
+      return {
+        outlineColor: s.outlineColor,
+        outlineWidth: s.outlineWidth,
+        insideComposer: Boolean(el.closest(".music-lyrics-composition")),
+      };
+    });
+    expect(ring.insideComposer).toBe(true);
+    expect(ring.outlineColor).toBe("rgb(141, 224, 209)");
+    expect(ring.outlineWidth).toBe("2px");
+
+    // The panel keeps a blocked handoff in the sequential focus order by using
+    // `aria-disabled` instead of `disabled` (PR #772's decision). A stylesheet
+    // could undo that silently, so the browser - not just the CSS text - says
+    // the control is still reachable and still answers an activation attempt
+    // with its reason, while remaining fail-closed.
+    //
+    // `toBeEnabled()` is deliberately NOT used here: Playwright reads a
+    // present `aria-disabled="true"` as disabled, so asserting both the
+    // attribute and enabled-ness asks the browser for two contradictory
+    // things, and the second can only ever time out. What #772 actually
+    // guarantees about a blocked control is reachability (sequential focus
+    // order) and responsiveness (it responds rather than being inert), and
+    // both are measurable below. An *enabled* handoff is asserted with
+    // `toBeEnabled()` in the clean-handoff test above, where the panel drops
+    // the attribute (`MusicLyricsPreflightPanel.tsx`:
+    // `aria-disabled={handoff ? undefined : "true"}`).
+    const handoff = panel.getByRole("button", { name: panelCopy.handoffButton });
+    const status = panel.getByRole("status");
+    await expect(handoff).toHaveAttribute("aria-disabled", "true");
+
+    // Reachable, not hidden: the blocked control is still visible, still
+    // hit-testable, still fully opaque, still takes up its space in the panel.
+    const blockedStyle = await handoff.evaluate((el) => {
+      const s = getComputedStyle(el);
+      return { display: s.display, visibility: s.visibility, pointerEvents: s.pointerEvents, opacity: s.opacity };
+    });
+    expect(blockedStyle.display).not.toBe("none");
+    expect(blockedStyle.visibility).toBe("visible");
+    expect(blockedStyle.pointerEvents).toBe("auto");
+    expect(blockedStyle.opacity).toBe("1");
+
+    // Reachable by keyboard in both senses: the native `disabled` attribute
+    // would have taken it out of the sequential focus order, so Tab from the
+    // attestation has to land on it, and a programmatic focus has to take.
+    const lyricsRights = page.getByLabel(composerCopy.lyricsRights, { exact: true });
+    await lyricsRights.focus();
+    await page.keyboard.press("Tab");
+    await expect
+      .poll(async () => handoff.evaluate((el) => el === document.activeElement))
+      .toBe(true);
+    const focusBehaviour = await handoff.evaluate((el) => {
+      el.focus();
+      return {
+        hasNativeDisabledAttribute: el.hasAttribute("disabled"),
+        takesFocus: el === document.activeElement,
+        matchesFocusPseudoClass: el.matches(":focus"),
+      };
+    });
+    expect(focusBehaviour.hasNativeDisabledAttribute).toBe(false);
+    expect(focusBehaviour.takesFocus).toBe(true);
+    expect(focusBehaviour.matchesFocusPseudoClass).toBe(true);
+
+    // Fail-closed while responsive: a keyboard activation and the control's
+    // own click handler both run, which reports the reason instead of handing
+    // the draft over, and no request is made. The issue count is read off the
+    // list the panel renders - one `li[data-issue-code]` per entry of
+    // `result.issues`, which is exactly what `handoffWithheld` is given -
+    // rather than assumed, so this stays true whatever mix of contract issues
+    // this blocked draft happens to carry.
+    const blockedIssues = panel.locator(".music-lyrics-preflight-issues-live li[data-issue-code]");
+    const blockedIssueCount = await blockedIssues.count();
+    expect(blockedIssueCount).toBeGreaterThan(0);
+    await expect(blockedIssues.filter({ hasText: "section_empty" })).toHaveCount(1);
+    await expect(blockedIssues.filter({ hasText: "lyrics_rights_required" })).toHaveCount(1);
+
+    // `handoff.click()` is deliberately not used: Playwright's actionability
+    // contract refuses to click a control carrying `aria-disabled`, which is
+    // the very attribute this lane keeps on purpose, so that call can only
+    // wait out the test budget. Activation is therefore exercised the way the
+    // engine itself performs it - keyboard Enter on a focused button, and the
+    // `click()` DOM method a user press resolves to - so the component's
+    // handler runs while the fail-closed semantics stay untouched.
+    await handoff.press("Enter");
+    const withheldNotice = page.locator("#music-lyrics-draft-notice");
+    await expect(withheldNotice).toHaveText(
+      `Preflight withheld this draft: ${blockedIssueCount} contract issue${blockedIssueCount === 1 ? "" : "s"} to fix before it could ever be sent.`,
+    );
+    await handoff.evaluate((el) => (el as HTMLButtonElement).click());
+    await expect(page.locator("#music-lyrics-draft-notice")).toHaveText(
+      `Preflight withheld this draft: ${blockedIssueCount} contract issue${blockedIssueCount === 1 ? "" : "s"} to fix before it could ever be sent.`,
+    );
+    expect(jobSubmissions).toBe(0);
+    await expect(status).toHaveAttribute("data-ready", "false");
+    await expect(panel).toHaveAttribute("data-admissible", "false");
+
+    // And still no handoff was recorded: the notice is the withheld one, never
+    // the recorded sentence a successful press writes.
+    await expect(withheldNotice).not.toHaveText(composerCopy.handoffRecorded);
+
+    // Right-to-left, proven physically. The row gets its Sorani line first, so the
+    // only issue left is the missing attestation and the issue list is still
+    // rendered as `ul > li` (with no issues the panel swaps in a plain `p`, and
+    // `border-inline-start-width` would have nothing to measure). `ku` makes the
+    // panel render `dir="rtl"`, and the composer indents with
+    // `padding-inline-start` / `border-inline-start-width`, so the inset has to land
+    // on the right edge in Sorani and Arabic instead of staying glued to the left.
+    await verseRow.fill(verseLyric);
+    await page.getByText(studioCopy.moreOptions, { exact: true }).click();
+    await page.locator("#music-vocal-language").selectOption("ku");
+    const sectionsStyle = await panel.locator(".music-lyrics-preflight-sections").evaluate((el) => {
+      const s = getComputedStyle(el);
+      return { direction: s.direction, paddingLeft: s.paddingLeft, paddingRight: s.paddingRight };
+    });
+    expect(sectionsStyle.direction).toBe("rtl");
+    expect(sectionsStyle.paddingRight).toBe("16px");
+    expect(sectionsStyle.paddingLeft).toBe("0px");
+    const issueInset = await panel.locator(".music-lyrics-preflight-issues-live li").first().evaluate((el) => {
+      const s = getComputedStyle(el);
+      return { right: s.borderRightWidth, left: s.borderLeftWidth };
+    });
+    expect(issueInset.right).toBe("3px");
+    expect(issueInset.left).toBe("1px");
+
+    // Readiness, once styled: the panel's status line changes colour as well as
+    // text when `data-ready` flips, and flipping it still submitted nothing.
+    await page.getByLabel(composerCopy.lyricsRights, { exact: true }).check();
+    await expect(status).toHaveAttribute("data-ready", "true");
+    const readyStyle = await status.evaluate((el) => getComputedStyle(el).backgroundColor);
+    // --music-accent is rgba(101, 215, 198, …); the blocked state uses the amber
+    // notice palette instead, so the two states cannot look the same.
+    expect(readyStyle).toContain("101, 215, 198");
+
+    // Phone geometry, measured rather than read off the stylesheet text: the row's
+    // move/remove pair is the smallest control in the composer and the eight
+    // section pills are next, so both have to reach a 40px target at 390px, and the
+    // handoff has to take its own row instead of sitting as a 166px chip.
+    await page.setViewportSize({ width: 390, height: 844 });
+    const targets = await page.evaluate(() => {
+      const box = (sel: string) => {
+        const el = document.querySelector(sel);
+        if (!el) throw new Error(`missing ${sel}`);
+        const r = el.getBoundingClientRect();
+        return { width: Math.round(r.width), height: Math.round(r.height) };
+      };
+      return {
+        card: box(".music-lyrics-composition"),
+        rowButton: box(".lyrics-section-editor-item-actions button"),
+        addButton: box(".lyrics-section-editor-add button"),
+        handoff: box(".music-lyrics-preflight > button"),
+      };
+    });
+    expect(targets.rowButton.height).toBe(40);
+    expect(targets.rowButton.width).toBe(40);
+    expect(targets.addButton.height).toBeGreaterThanOrEqual(40);
+    // Full row means full row minus the composer and panel padding, not the
+    // desktop 166px chip the studio shipped with at #1253.
+    expect(targets.handoff.width).toBeGreaterThan(targets.card.width * 0.8);
+    expect(targets.handoff.height).toBe(40);
     expect(jobSubmissions).toBe(0);
   });
 });
