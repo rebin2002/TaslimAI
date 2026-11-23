@@ -55,7 +55,13 @@ builder.Services.AddHttpContextAccessor();
 builder.Services.AddOptions<HealthOptions>()
     .Bind(builder.Configuration.GetSection("Health"))
     .Validate(options => options.ProbeTimeoutSeconds is >= 1 and <= 60, "Health:ProbeTimeoutSeconds must be between 1 and 60 seconds.")
+    .Validate(options => options.WorkerProbeCacheSeconds is >= 0 and <= 60, "Health:WorkerProbeCacheSeconds must be between 0 and 60 seconds.")
     .ValidateOnStart();
+// Replica-wide so consecutive anonymous readiness probes share one bounded
+// heartbeat read instead of issuing one query each. It holds only a status
+// string, so a singleton here captures no scoped services.
+builder.Services.AddSingleton(sp => new WorkerLivenessProbeCache(
+    sp.GetRequiredService<IOptions<HealthOptions>>().Value.WorkerProbeCache));
 builder.Services.AddScoped<OperationalHealthService>();
 builder.Services.AddOptions<FileSettings>().Bind(builder.Configuration.GetSection("Files"));
 builder.Services.Configure<FormOptions>(options =>

@@ -60,6 +60,99 @@ public sealed class HealthOptions
     public int ProbeTimeoutSeconds { get; set; } = 5;
 
     public TimeSpan ProbeTimeout => TimeSpan.FromSeconds(Math.Clamp(ProbeTimeoutSeconds, 1, 60));
+
+    // The readiness route is anonymous and the worker verdict is advisory, so an
+    // external monitor fleet (or a retry storm against a 503) can ask the same
+    // question far faster than the worker pool can change its answer. This bounds
+    // how many database round-trips per replica that advice is worth; 0 disables
+    // the bound and restores one heartbeat read per probe.
+    public int WorkerProbeCacheSeconds { get; set; } = 2;
+
+    public TimeSpan WorkerProbeCache => TimeSpan.FromSeconds(Math.Clamp(WorkerProbeCacheSeconds, 0, 60));
+}
+
+/// <summary>
+/// Single-flight, short-lived memo for the advisory worker-liveness verdict,
+/// shared by every readiness probe on one replica. It exists to bound the
+/// database cost that <see cref="OperationalHealthService"/> adds to an
+/// unauthenticated route: the readiness endpoint carries no rate-limit policy
+/// (main's <c>RateLimiting.cs</c> has no health policy, and adding one is the
+/// separate scope of PR #249), so the concurrency of that read is otherwise
+/// whatever the caller can afford to send.
+/// </summary>
+/// <remarks>
+/// Only verdicts that are actual evidence about the worker pool are cached.
+/// <c>unknown</c> is the absence of evidence, and a stale verdict is never held
+/// past the window: an operator reading "degraded" while a worker is recovering
+/// must see recovery within a couple of seconds, not within a heartbeat window.
+/// The cached value is a bare status string, so this singleton never captures a
+/// scoped <see cref="Taslim.Api.Persistence.TaslimDbContext"/> or storage adapter.
+/// </remarks>
+public sealed class WorkerLivenessProbeCache(TimeSpan ttl, Func<DateTimeOffset>? nowProvider = null)
+{
+    private readonly SemaphoreSlim gate = new(1, 1);
+    private readonly Func<DateTimeOffset> now = nowProvider ?? (() => DateTimeOffset.UtcNow);
+    private string? verdict;
+    private DateTimeOffset validUntilUtc = DateTimeOffset.MinValue;
+    private long probeExecutions;
+
+    /// <summary>How many times this cache actually asked its source.</summary>
+    public long ProbeExecutions => Interlocked.Read(ref probeExecutions);
+
+    public TimeSpan Ttl => ttl;
+
+    public static bool IsWorkerPoolEvidence(string status) =>
+        status is "available" or "degraded" or "disabled";
+
+    /// <param name="probe">Runs the liveness query; receives a budget-only token.</param>
+    /// <param name="probeBudgetToken">
+    /// Timeout token for the shared query. It is deliberately not the caller's
+    /// request token: a client that disconnects mid-query must not cancel the
+    /// evidence that every waiting probe is about to reuse.
+    /// </param>
+    /// <param name="callerToken">This caller's own cancellation, so waiting is still responsive.</param>
+    public async Task<string> ObserveAsync(
+        Func<CancellationToken, Task<string>> probe,
+        CancellationToken probeBudgetToken,
+        CancellationToken callerToken)
+    {
+        if (ttl <= TimeSpan.Zero)
+        {
+            // Bounding disabled: the pre-fix behaviour, one query per probe.
+            Interlocked.Increment(ref probeExecutions);
+            return await probe(probeBudgetToken);
+        }
+
+        await gate.WaitAsync(callerToken);
+        try
+        {
+            var current = now();
+            var cached = verdict;
+            if (cached is not null && current < validUntilUtc)
+            {
+                return cached;
+            }
+
+            Interlocked.Increment(ref probeExecutions);
+            var status = await probe(probeBudgetToken);
+            if (IsWorkerPoolEvidence(status))
+            {
+                verdict = status;
+                validUntilUtc = current + ttl;
+            }
+            else
+            {
+                // Never serve the absence of evidence.
+                verdict = null;
+                validUntilUtc = DateTimeOffset.MinValue;
+            }
+            return status;
+        }
+        finally
+        {
+            gate.Release();
+        }
+    }
 }
 
 public sealed record OperationalHealthCheckDto(string Name, string Status, bool Required);
@@ -75,10 +168,18 @@ public sealed class OperationalHealthService(
     IOptions<HealthOptions> healthOptions,
     ILogger<OperationalHealthService> logger,
     IHostApplicationLifetime? applicationLifetime = null,
-    IOptions<GenerationJobOptions>? generationOptions = null)
+    IOptions<GenerationJobOptions>? generationOptions = null,
+    WorkerLivenessProbeCache? workerProbeCache = null)
 {
     private readonly HealthOptions settings = healthOptions.Value;
     private readonly IHostApplicationLifetime? lifetime = applicationLifetime;
+    // Supplied by production DI as a replica-wide singleton so consecutive
+    // probes share one bounded read. When it is absent — a hand-built service in
+    // a focused test, or a host that never registered it — the probe runs
+    // uncached, exactly as before: no existing expectation about freshness or
+    // per-call database work changes, and no test inherits another test's
+    // process-wide verdict.
+    private readonly WorkerLivenessProbeCache? workerProbe = workerProbeCache;
 
     // The worker probe shares the options that the worker itself uses to write
     // heartbeats, so readiness cannot drift away from the administrator
@@ -188,6 +289,27 @@ public sealed class OperationalHealthService(
             return "disabled";
         }
 
+        if (workerProbe is null)
+        {
+            // No replica-wide cache was supplied, so every probe reads through,
+            // inside the caller's own linked budget, exactly as before.
+            return await ProbeWorkerHeartbeatsAsync(probeCancellationToken, requestCancellationToken, requestId);
+        }
+
+        // The shared read gets its own budget instead of the caller's linked
+        // token: a monitor that hangs up mid-query must not cancel the verdict
+        // that the probes queued behind it are about to reuse, and an anonymous
+        // disconnect storm must not become a query relaunch storm. The window is
+        // still bounded by the same configured probe timeout.
+        using var sharedBudget = new CancellationTokenSource(settings.ProbeTimeout);
+        return await workerProbe.ObserveAsync(
+            token => ProbeWorkerHeartbeatsAsync(token, requestCancellationToken, requestId),
+            sharedBudget.Token,
+            requestCancellationToken);
+    }
+
+    private async Task<string> ProbeWorkerHeartbeatsAsync(CancellationToken probeCancellationToken, CancellationToken requestCancellationToken, string requestId)
+    {
         try
         {
             var staleAfter = GenerationWorkerLiveness.StaleWindow(generationSettings.HeartbeatStaleAfterSeconds);
