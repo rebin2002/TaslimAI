@@ -118,6 +118,18 @@ carry their delivery phase. The badge is the only control-free affordance in the
    another's draft and that a cleared draft is gone. The route is `force-dynamic`, gated by
    `requireAuthenticatedPage`, rendered inside `ProtectedPage`, and marked
    `noindex, nofollow, noarchive`.
+   Scoping the key is not sufficient on its own: a workspace that is already mounted keeps its
+   in-memory state across a principal change unless something destroys it, and the auth
+   provider does not key its children. The container therefore renders the workspace inside a
+   subtree keyed by `(user, workspace)`, so an identity change unmounts it — nested input
+   buffers included — and the workspace fails closed on its own as well: it records the scope
+   its state belongs to, drops that state the moment the scope moves, refuses a host seed that
+   belongs to another scope, and routes every mutation, save and clear through one ownership
+   check. Ownership is decided from the scope the object carries rather than its reference, so
+   a session refresh returning the same student does not discard that student's unsaved work.
+   `e2e/academic-identity-privacy.spec.ts` mounts the real component in a browser and switches
+   the principal underneath it: a next student with no draft, a returning student's own draft,
+   sign-out, rapid switching, and an equal-scope re-render.
 5. **Recovery without leakage.** The route `error.tsx` boundary announces with
    `role="alert"`/`aria-live="assertive"`, restores focus, offers retry and an Assets exit, and
    never renders `error.message` or `error.digest`, either of which can carry brief text.
@@ -146,6 +158,13 @@ honesty guarantees above. `page.test.tsx` pins the auth contract from the route 
 source, matching `src/app/create/research/page.test.tsx`.
 
 134 academic tests across 10 files. Full workspace suite: 1679 tests, 264 files, green.
+
+Mounted-identity behaviour is invisible to static markup, so it has its own browser
+regression. `e2e/academic-identity-privacy.spec.ts` builds the studio with the vite that
+already ships with vitest — no new dependency, no web server, no API: the academic surface
+makes no network call and the bundle is served to Chromium through request interception — and
+drives the principal through the host override the component documents. Synthetic data only.
+It runs inside the existing `npm run test:e2e` job.
 
 ## Follow-up integration (deliberately not in this PR)
 
