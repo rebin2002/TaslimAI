@@ -112,6 +112,99 @@ public sealed class StableAudioMusicGenerationProviderTests
     }
 
     [Fact]
+    public async Task Download_stream_transport_failure_is_normalized_to_provider_unavailable()
+    {
+        var handler = new StableAudioHandler((_, requestNumber) => requestNumber switch
+        {
+            1 => Json(HttpStatusCode.Accepted, "{\"id\":\"generation-transport\"}"),
+            2 => new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StreamContent(new FaultingStream()),
+            },
+            _ => throw new InvalidOperationException("unexpected request"),
+        });
+        // retryAttempts: 0 pins the re-fetch budget so this proves the immediate classification;
+        // the recovery path itself is proven by the re-fetch tests below.
+        var provider = CreateProvider(handler, maxPollAttempts: 1, retryAttempts: 0);
+
+        // The generation already exists and was billed, so even with a zero re-fetch budget this is
+        // the post-billing retrieval class, not a plain provider outage that invites a new request.
+        var failure = await Assert.ThrowsAsync<MusicOutputRetrievalFailedException>(() => provider.GenerateAsync(Input()));
+        Assert.IsAssignableFrom<MusicProviderUnavailableException>(failure);
+        Assert.Equal(2, handler.Requests.Count);
+    }
+
+    [Fact]
+    public async Task Download_stream_io_failure_is_normalized_to_provider_unavailable()
+    {
+        // A socket reset arrives as IOException/SocketException rather than HttpRequestException.
+        // Before the retry-classification lane, that type escaped the provider unclassified and
+        // reached the worker as an unexpected fault.
+        var handler = new StableAudioHandler((_, requestNumber) => requestNumber switch
+        {
+            1 => Json(HttpStatusCode.Accepted, "{\"id\":\"generation-io-fault\"}"),
+            2 => new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StreamContent(new IoFaultingStream()),
+            },
+            _ => throw new InvalidOperationException("unexpected request"),
+        });
+        var provider = CreateProvider(handler, maxPollAttempts: 1, retryAttempts: 0);
+
+        var failure = await Assert.ThrowsAsync<MusicOutputRetrievalFailedException>(() => provider.GenerateAsync(Input()));
+        Assert.IsAssignableFrom<MusicProviderUnavailableException>(failure);
+        Assert.Equal(2, handler.Requests.Count);
+    }
+
+    [Fact]
+    public async Task Faulted_result_body_is_re_fetched_with_a_get_without_a_second_billable_generation()
+    {
+        // The generation already exists and was billed once the result GET returned it, so the
+        // recovery must be another result GET - never a second text-to-audio POST.
+        var handler = new StableAudioHandler((_, requestNumber) => requestNumber switch
+        {
+            1 => Json(HttpStatusCode.Accepted, "{\"id\":\"generation-refetch\"}"),
+            2 => new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StreamContent(new FaultingStream()),
+            },
+            _ => Audio(HttpStatusCode.OK, ValidMp3(), "audio/mpeg"),
+        });
+        var provider = CreateProvider(handler, maxPollAttempts: 3, retryAttempts: 1, retryDelayMilliseconds: 1);
+
+        var result = await provider.GenerateAsync(Input());
+
+        Assert.Equal("mp3", result.Format);
+        Assert.Equal(3, handler.Requests.Count);
+        Assert.Single(handler.Requests, request => request.Method == HttpMethod.Post);
+        Assert.Contains("v2beta/audio/results/generation-refetch", handler.Requests[2].RequestUri!.ToString(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Persistent_result_transport_fault_exhausts_the_budget_without_a_second_generation()
+    {
+        var handler = new StableAudioHandler((_, requestNumber) => requestNumber switch
+        {
+            1 => Json(HttpStatusCode.Accepted, "{\"id\":\"generation-refetch-exhaust\"}"),
+            _ => new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StreamContent(new FaultingStream()),
+            },
+        });
+        var provider = CreateProvider(handler, maxPollAttempts: 6, retryAttempts: 2, retryDelayMilliseconds: 1);
+
+        // Exhaustion happens after the generation was created and billed, so it is reported as an
+        // isolated retrieval failure rather than the generic "please try again" provider outage:
+        // a retry of the generic class would POST a second billable generation.
+        var failure = await Assert.ThrowsAsync<MusicOutputRetrievalFailedException>(() => provider.GenerateAsync(Input()));
+        Assert.IsAssignableFrom<MusicProviderUnavailableException>(failure);
+
+        // one create POST plus three result GETs (the original and two bounded re-fetches)
+        Assert.Equal(4, handler.Requests.Count);
+        Assert.Single(handler.Requests, request => request.Method == HttpMethod.Post);
+    }
+
+    [Fact]
     public async Task Caller_cancellation_stops_async_polling_without_becoming_timeout()
     {
         var secondRequest = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -226,5 +319,36 @@ public sealed class StableAudioMusicGenerationProviderTests
             RequestBodies.Add(request.Content is null ? null : await request.Content.ReadAsStringAsync(cancellationToken));
             return await responder(request, Interlocked.Increment(ref requestCount), cancellationToken);
         }
+    }
+
+    private sealed class FaultingStream : Stream
+    {
+        public override bool CanRead => true;
+        public override bool CanSeek => false;
+        public override bool CanWrite => false;
+        public override long Length => 0;
+        public override long Position { get => 0; set => throw new NotSupportedException(); }
+        public override void Flush() => throw new NotSupportedException();
+        public override int Read(byte[] buffer, int offset, int count) => throw new HttpRequestException("synthetic stream failure");
+        public override ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default) => throw new HttpRequestException("synthetic stream failure");
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+    }
+
+    private sealed class IoFaultingStream : Stream
+    {
+        public override bool CanRead => true;
+        public override bool CanSeek => false;
+        public override bool CanWrite => false;
+        public override long Length => 0;
+        public override long Position { get => 0; set => throw new NotSupportedException(); }
+        public override void Flush() => throw new NotSupportedException();
+        public override int Read(byte[] buffer, int offset, int count) => throw new IOException("synthetic stream io failure");
+        public override ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default) =>
+            throw new IOException("synthetic stream io failure");
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
     }
 }

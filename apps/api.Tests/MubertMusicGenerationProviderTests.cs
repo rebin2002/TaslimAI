@@ -177,6 +177,82 @@ public sealed class MubertMusicGenerationProviderTests
         await Assert.ThrowsAsync<MusicProviderTimeoutException>(() => provider.GenerateAsync(Input()));
     }
 
+    [Fact]
+    public async Task Download_transport_failure_is_normalized_to_provider_unavailable()
+    {
+        var handler = new MubertHandler(
+            (_, requestNumber) => requestNumber switch
+            {
+                1 => Json(HttpStatusCode.OK, "{\"data\":{\"id\":\"track-transport\",\"session_id\":\"session\"}}"),
+                2 => Json(HttpStatusCode.OK, "{\"data\":{\"generations\":[{\"status\":\"completed\",\"url\":\"https://download.example/track.mp3\"}]}}"),
+                _ => throw new HttpRequestException("synthetic download transport failure"),
+            });
+        // retryAttempts: 0 pins the re-fetch budget so this proves the immediate classification.
+        var provider = CreateProvider(handler, maxPollAttempts: 1, retryAttempts: 0);
+
+        // The track was already created and reported complete, so a failed artifact download is a
+        // post-billing retrieval failure, not an outage inviting a second paid track request.
+        var failure = await Assert.ThrowsAsync<MusicOutputRetrievalFailedException>(() => provider.GenerateAsync(Input()));
+        Assert.IsAssignableFrom<MusicProviderUnavailableException>(failure);
+        Assert.Equal(3, handler.Requests.Count);
+    }
+
+    [Fact]
+    public async Task Download_stream_io_failure_after_headers_is_normalized_to_provider_unavailable()
+    {
+        // The request succeeds and headers arrive, then the body stream faults with IOException
+        // (SocketException inherits from it). This is the read-stage path, not the request-stage
+        // path covered by Download_transport_failure_is_normalized_to_provider_unavailable.
+        var handler = CompleteTrackHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StreamContent(new IoFaultingStream()),
+        });
+        var provider = CreateProvider(handler, maxPollAttempts: 1, retryAttempts: 0);
+
+        var failure = await Assert.ThrowsAsync<MusicOutputRetrievalFailedException>(() => provider.GenerateAsync(Input()));
+        Assert.IsAssignableFrom<MusicProviderUnavailableException>(failure);
+    }
+
+    [Fact]
+    public async Task Completed_track_is_re_fetched_with_a_get_without_a_second_billable_track()
+    {
+        // The first artifact GET faults mid-body. The track is already complete and billed, so the
+        // provider must recover it with the same GET rather than POSTing another track.
+        var handler = CompleteTrackHandler(requestNumber => requestNumber == 3
+            ? new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StreamContent(new IoFaultingStream()),
+            }
+            : Binary(HttpStatusCode.OK, "ID3-recovered-audio", "audio/mpeg"));
+        var provider = CreateProvider(handler, maxPollAttempts: 1, retryAttempts: 1, retryDelayMilliseconds: 1);
+
+        var result = await provider.GenerateAsync(Input());
+
+        Assert.Equal("audio/mpeg", result.ContentType);
+        Assert.Equal(4, handler.Requests.Count);
+        Assert.Single(handler.Requests, request => request.Method == HttpMethod.Post);
+        Assert.Contains("download.example", handler.Requests[3].RequestUri!.ToString(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Persistent_artifact_transport_fault_exhausts_the_budget_without_a_second_track()
+    {
+        var handler = CompleteTrackHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StreamContent(new IoFaultingStream()),
+        });
+        var provider = CreateProvider(handler, maxPollAttempts: 1, retryAttempts: 2, retryDelayMilliseconds: 1);
+
+        // Exhaustion of the bounded artifact GETs leaves the billed track undelivered; the generic
+        // provider-outage class would invite a retry that creates a second paid track.
+        var failure = await Assert.ThrowsAsync<MusicOutputRetrievalFailedException>(() => provider.GenerateAsync(Input()));
+        Assert.IsAssignableFrom<MusicProviderUnavailableException>(failure);
+
+        // create POST, status GET, then the artifact GET plus two bounded re-fetches
+        Assert.Equal(5, handler.Requests.Count);
+        Assert.Single(handler.Requests, request => request.Method == HttpMethod.Post);
+    }
+
     private static MubertMusicGenerationProvider CreateProvider(
         HttpMessageHandler handler,
         string customerId = "customer",
@@ -261,6 +337,22 @@ public sealed class MubertMusicGenerationProviderTests
             await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
             return 0;
         }
+    }
+
+    private sealed class IoFaultingStream : Stream
+    {
+        public override bool CanRead => true;
+        public override bool CanSeek => false;
+        public override bool CanWrite => false;
+        public override long Length => 0;
+        public override long Position { get => 0; set => throw new NotSupportedException(); }
+        public override void Flush() => throw new NotSupportedException();
+        public override int Read(byte[] buffer, int offset, int count) => throw new IOException("synthetic stream io failure");
+        public override ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default) =>
+            throw new IOException("synthetic stream io failure");
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
     }
 
     private static HttpResponseMessage Json(HttpStatusCode status, string body) => new(status)

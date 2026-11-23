@@ -484,6 +484,19 @@ public sealed class GenerationJobService(
             throw new GenerationJobValidationException("RETRY_SOURCE_NOT_TERMINAL", "Only failed or cancelled jobs can be retried.");
         if (string.IsNullOrWhiteSpace(idempotencyKey))
             throw new GenerationJobValidationException("RETRY_IDEMPOTENCY_REQUIRED", "A retry idempotency key is required.");
+        // Duplicate-paid-submission isolation. A music job that ended in MUSIC_OUTPUT_RETRIEVAL_FAILED
+        // already created (and was billed by the provider for) its generation; only delivery of the
+        // finished result failed. RetryAsync re-runs CreateAsync with the source input, which for
+        // music means a fresh POST to the provider, so this refusal is enforced here rather than
+        // left to the retry copy. Scoped to music and to this one code: every other terminal failure,
+        // including the provider-outage classes, keeps its existing retry behaviour.
+        if (string.Equals(source.JobType, GenerationJobTypes.MusicGenerate, StringComparison.OrdinalIgnoreCase)
+            && string.Equals(source.ErrorCode, GenerationJobErrorCodes.MusicOutputRetrievalFailed, StringComparison.Ordinal))
+        {
+            throw new GenerationJobValidationException(
+                GenerationJobErrorCodes.MusicRetrievalRetryBlocked,
+                "This retry was blocked because the music was already generated and only delivery failed. Generating again would create a duplicate.");
+        }
         if (string.Equals(source.JobType, GenerationJobTypes.ImageGenerate, StringComparison.OrdinalIgnoreCase) && !imageOptions.Value.Enabled)
             throw new GenerationJobValidationException(GenerationJobErrorCodes.ImageStudioUnavailable, "Image generation is not available right now.");
 
@@ -1383,8 +1396,21 @@ public sealed class GenerationJobWorker(
                 continue;
             }
 
+            // Post-billing duplicate-submission policy for music. The bounded re-queue below
+            // "executes the handler from the beginning" (its own comment), which for music.generate is a
+            // fresh billable POST to Stable Audio or Mubert: neither provider accepts an idempotency key
+            // on creation and the provider operation id only exists after the call returns, so recovery
+            // can neither replay nor re-fetch it. A worker that dies after submitting - crash loop, OOM
+            // kill, or a rollout mid-generation - would therefore pay for up to MaxAutomaticRetries extra
+            // generations behind a single customer request and orphan the first artifact, with nobody
+            // visible in the loop. Music therefore takes the existing token-fenced terminal instead of
+            // the re-queue, carrying a dedicated code that records the unknown submission outcome; the
+            // terminal is deliberately shared rather than duplicated so that the claim-token fencing
+            // contract (GenerationJobFinalizationSourceContractTests) keeps exactly one Running ->
+            // Failed write here. Every other job type keeps the current bounded recovery unchanged.
+            var automaticRedispatchAllowed = !string.Equals(job.JobType, GenerationJobTypes.MusicGenerate, StringComparison.OrdinalIgnoreCase);
             var maxAutomaticRetries = Math.Max(0, settings.MaxAutomaticRetries);
-            if (job.RetryCount < maxAutomaticRetries)
+            if (automaticRedispatchAllowed && job.RetryCount < maxAutomaticRetries)
             {
                 var recoveryToken = Guid.NewGuid();
                 var recovered = await db.GenerationJobs
@@ -1414,9 +1440,21 @@ public sealed class GenerationJobWorker(
                 continue;
             }
 
+            if (!automaticRedispatchAllowed)
+                logger.LogWarning("Music generation lease expired with the provider submission outcome unknown; automatic re-dispatch suppressed so no duplicate paid generation was created. JobId={JobId}; RetryCount={RetryCount}; MaxAutomaticRetries={MaxAutomaticRetries}",
+                    job.Id, job.RetryCount, maxAutomaticRetries);
+
+            // Music arrives here on its first expired lease because rebilling automatically is the
+            // hazard; every other lane arrives only after exhausting its bounded retries.
+            var terminalCode = automaticRedispatchAllowed
+                ? GenerationJobErrorCodes.Poisoned
+                : GenerationJobErrorCodes.MusicProviderSubmissionUnconfirmed;
+            var terminalMessage = terminalCode == GenerationJobErrorCodes.Poisoned
+                ? PoisonJobMessage
+                : GenerationJobErrorMessages.For(terminalCode) ?? PoisonJobMessage;
             var poisonTerminalToken = Guid.NewGuid();
             await using var poisonFinalization = await db.Database.BeginTransactionAsync(cancellationToken);
-            await movieExecutions.MarkFailedAsync(job.Id, expired.ConcurrencyToken, GenerationJobErrorCodes.Poisoned, cancellationToken);
+            await movieExecutions.MarkFailedAsync(job.Id, expired.ConcurrencyToken, terminalCode, cancellationToken);
             var poisoned = await db.GenerationJobs
                 .Where(item => item.Id == job.Id
                     && item.Status == GenerationJobStatus.Running
@@ -1426,8 +1464,8 @@ public sealed class GenerationJobWorker(
                     && item.ClaimExpiresAt < now)
                 .ExecuteUpdateAsync(setters => setters
                     .SetProperty(item => item.Status, GenerationJobStatus.Failed)
-                    .SetProperty(item => item.ErrorCode, GenerationJobErrorCodes.Poisoned)
-                    .SetProperty(item => item.ErrorMessage, PoisonJobMessage)
+                    .SetProperty(item => item.ErrorCode, terminalCode)
+                    .SetProperty(item => item.ErrorMessage, terminalMessage)
                     .SetProperty(item => item.FailedAt, now)
                     .SetProperty(item => item.ClaimExpiresAt, (DateTime?)null)
                     .SetProperty(item => item.ConcurrencyToken, poisonTerminalToken), cancellationToken);
@@ -1437,7 +1475,7 @@ public sealed class GenerationJobWorker(
                 continue;
             }
             var poisonUsage = await usage.BeginAsync(job, cancellationToken: cancellationToken);
-            await usage.FailAsync(poisonUsage, GenerationJobErrorCodes.Poisoned, cancellationToken: cancellationToken);
+            await usage.FailAsync(poisonUsage, terminalCode, cancellationToken: cancellationToken);
             await poisonFinalization.CommitAsync(cancellationToken);
             logger.LogError("Generation job moved to poison terminal state after bounded lease recovery. JobId={JobId}; RetryCount={RetryCount}; MaxAutomaticRetries={MaxAutomaticRetries}",
                 job.Id, job.RetryCount, maxAutomaticRetries);
@@ -2375,6 +2413,10 @@ var qualityFailure = exception as GenerationQualityControlException ?? exception
             return exception switch
             {
                 MusicRequestValidationException validation => validation.Code,
+                // Must precede the MusicProviderUnavailableException arm: the retrieval failure is
+                // deliberately a subclass so that existing unavailable guards still catch it, while
+                // the code mapping keeps it out of the "please try again" class.
+                MusicOutputRetrievalFailedException => GenerationJobErrorCodes.MusicOutputRetrievalFailed,
                 MusicProviderUnavailableException => GenerationJobErrorCodes.MusicProviderUnavailable,
                 MusicProviderTimeoutException => GenerationJobErrorCodes.MusicProviderTimeout,
                 MusicProviderRateLimitException => GenerationJobErrorCodes.MusicProviderRateLimited,
