@@ -510,12 +510,26 @@ test.describe("Music Studio structured-lyrics composer wiring", () => {
 
     // The panel keeps a blocked handoff in the sequential focus order by using
     // `aria-disabled` instead of `disabled` (PR #772's decision). A stylesheet
-    // could undo that silently, so the browser - not just the CSS text - says the
-    // control is still visible, still hit-testable, and still the thing that
-    // answers a click with its status notice.
+    // could undo that silently, so the browser - not just the CSS text - says
+    // the control is still reachable and still answers an activation attempt
+    // with its reason, while remaining fail-closed.
+    //
+    // `toBeEnabled()` is deliberately NOT used here: Playwright reads a
+    // present `aria-disabled="true"` as disabled, so asserting both the
+    // attribute and enabled-ness asks the browser for two contradictory
+    // things, and the second can only ever time out. What #772 actually
+    // guarantees about a blocked control is reachability (sequential focus
+    // order) and responsiveness (it responds rather than being inert), and
+    // both are measurable below. An *enabled* handoff is asserted with
+    // `toBeEnabled()` in the clean-handoff test above, where the panel drops
+    // the attribute (`MusicLyricsPreflightPanel.tsx`:
+    // `aria-disabled={handoff ? undefined : "true"}`).
     const handoff = panel.getByRole("button", { name: panelCopy.handoffButton });
+    const status = panel.getByRole("status");
     await expect(handoff).toHaveAttribute("aria-disabled", "true");
-    await expect(handoff).toBeEnabled();
+
+    // Reachable, not hidden: the blocked control is still visible, still
+    // hit-testable, still fully opaque, still takes up its space in the panel.
     const blockedStyle = await handoff.evaluate((el) => {
       const s = getComputedStyle(el);
       return { display: s.display, visibility: s.visibility, pointerEvents: s.pointerEvents, opacity: s.opacity };
@@ -524,6 +538,52 @@ test.describe("Music Studio structured-lyrics composer wiring", () => {
     expect(blockedStyle.visibility).toBe("visible");
     expect(blockedStyle.pointerEvents).toBe("auto");
     expect(blockedStyle.opacity).toBe("1");
+
+    // Reachable by keyboard in both senses: the native `disabled` attribute
+    // would have taken it out of the sequential focus order, so Tab from the
+    // attestation has to land on it, and a programmatic focus has to take.
+    const lyricsRights = page.getByLabel(composerCopy.lyricsRights, { exact: true });
+    await lyricsRights.focus();
+    await page.keyboard.press("Tab");
+    await expect
+      .poll(async () => handoff.evaluate((el) => el === document.activeElement))
+      .toBe(true);
+    const focusBehaviour = await handoff.evaluate((el) => {
+      el.focus();
+      return {
+        hasNativeDisabledAttribute: el.hasAttribute("disabled"),
+        takesFocus: el === document.activeElement,
+        matchesFocusPseudoClass: el.matches(":focus"),
+      };
+    });
+    expect(focusBehaviour.hasNativeDisabledAttribute).toBe(false);
+    expect(focusBehaviour.takesFocus).toBe(true);
+    expect(focusBehaviour.matchesFocusPseudoClass).toBe(true);
+
+    // Fail-closed while responsive: a keyboard activation and a mouse click
+    // both reach the handler, which reports the reason instead of handing the
+    // draft over, and no request is made. The issue count is read off the list
+    // the panel renders - one `li[data-issue-code]` per entry of
+    // `result.issues`, which is exactly what `handoffWithheld` is given -
+    // rather than assumed, so this stays true whatever mix of contract issues
+    // this blocked draft happens to carry.
+    const blockedIssues = panel.locator(".music-lyrics-preflight-issues-live li[data-issue-code]");
+    const blockedIssueCount = await blockedIssues.count();
+    expect(blockedIssueCount).toBeGreaterThan(0);
+    await expect(blockedIssues.filter({ hasText: "section_empty" })).toHaveCount(1);
+    await expect(blockedIssues.filter({ hasText: "lyrics_rights_required" })).toHaveCount(1);
+    await handoff.press("Enter");
+    await handoff.click();
+    await expect(page.locator("#music-lyrics-draft-notice")).toHaveText(
+      `Preflight withheld this draft: ${blockedIssueCount} contract issue${blockedIssueCount === 1 ? "" : "s"} to fix before it could ever be sent.`,
+    );
+    expect(jobSubmissions).toBe(0);
+    await expect(status).toHaveAttribute("data-ready", "false");
+    await expect(panel).toHaveAttribute("data-admissible", "false");
+
+    // And still no handoff was recorded: the notice is the withheld one, never
+    // the recorded sentence a successful press writes.
+    await expect(page.locator("#music-lyrics-draft-notice")).not.toHaveText(composerCopy.handoffRecorded);
 
     // Right-to-left, proven physically. The row gets its Sorani line first, so the
     // only issue left is the missing attestation and the issue list is still
@@ -552,7 +612,6 @@ test.describe("Music Studio structured-lyrics composer wiring", () => {
     // Readiness, once styled: the panel's status line changes colour as well as
     // text when `data-ready` flips, and flipping it still submitted nothing.
     await page.getByLabel(composerCopy.lyricsRights, { exact: true }).check();
-    const status = panel.getByRole("status");
     await expect(status).toHaveAttribute("data-ready", "true");
     const readyStyle = await status.evaluate((el) => getComputedStyle(el).backgroundColor);
     // --music-accent is rgba(101, 215, 198, …); the blocked state uses the amber

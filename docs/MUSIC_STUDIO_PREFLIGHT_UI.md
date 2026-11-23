@@ -286,8 +286,20 @@ from `LyricsSectionEditor.tsx`, `MusicLyricsPreflightPanel.tsx` and the composer
 fails the suite until it is styled. The fourth test of
 `e2e/music-lyrics-section-wiring.acceptance.spec.ts` reads what a browser does with
 the same rules: card and field geometry, the invalid-row colour, the keyboard focus
-ring inside the composer, a blocked handoff that stays visible and hit-testable,
+ring inside the composer, a blocked handoff that stays reachable and fail-closed,
 the RTL mirror measured physically, and 40px touch targets at 390px.
+
+That last pair is asserted as behaviour, not as an enabled/disabled flag. Playwright
+reads a present `aria-disabled="true"` as disabled, so asking the blocked handoff to
+be both `aria-disabled` and `toBeEnabled()` asks for two contradictory things and the
+second can only ever time out; the first hosted run of this pass failed exactly there
+(Browser E2E on `111f2995`, all six other jobs green). The control's real contract is
+that it stays in the sequential focus order and answers rather than being inert, so
+the test tabs from the attestation to it, checks that a focus attempt takes and that
+no native `disabled` attribute crept in, then presses Enter and clicks it and asserts
+the withheld notice, `data-ready="false"`, `data-admissible="false"` and a job-route
+counter of zero. The attribute is never weakened: an *enabled* handoff is still
+asserted with `toBeEnabled()` in the clean-handoff test, where the panel drops it.
 
 Still open, and deliberately not attempted here: an `ar` (Arabic) draft can never
 reach `data-ready="true"`, because the mirrored contract requires a dialect for
