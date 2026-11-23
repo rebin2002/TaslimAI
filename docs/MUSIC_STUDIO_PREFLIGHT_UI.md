@@ -244,3 +244,56 @@ acceptance spec, and
 `MusicLyricsDraftContractMirrorTests.StructuredLyricsEditorStaysSingleSourcedAndTheWiringFollowUpStaysRecorded`
 - which must keep passing with the pinned step-1 sentence gone, because the
 wiring is what carries it now.
+
+## Composer styling (the presentation pass on step 1)
+
+Step 1 put the composer on the studio, and PR #772's editor and panel shipped with
+20 class names that had no rule anywhere in `apps/web/src/app/globals.css`: the
+studio scopes its field styling to `.music-primary-field` / `.music-choice-field`,
+so nothing was inherited either. The lyric textareas fell back to browser defaults
+on a dark page, the eight add-section controls rendered as unspaced bare text, and
+every state the mirrored contract publishes through `data-*` attributes
+(`data-empty`, `data-invisible-only`, `data-ready`, `data-issue-code`,
+`aria-invalid`, `aria-disabled`) was invisible. The block appended at the end of
+`globals.css` closes that, using only the `--music-*` tokens declared on
+`.music-studio-page` and the same card, field, notice and error language the rest
+of the studio already uses.
+
+It is presentational only, which is why it is a safe next step and reviewable on
+its own:
+
+- it adds no submit path and touches no request. `MUSIC_STUDIO_PROVIDER_ACCESS`
+  stays `paused`, no cost-admission surface changes, and the paused provider
+  notice and the generate button are deliberately out of scope: their colours are
+  the studio's claim about capability, not a styling question.
+- it states contract facts and never authors them. Every visual state is keyed to
+  an attribute the mirrored contract or `LyricsSectionEditor` already renders, and
+  no `content` declaration generates prose, so a stylesheet cannot claim
+  readiness, a dialect, or a provider capability.
+- it preserves #772's accessibility decision. The blocked handoff control is
+  `aria-disabled` rather than `disabled` so that it stays in the sequential focus
+  order, so the block contains no `display: none`, `visibility: hidden` or
+  `pointer-events` rule anywhere, and it gives the composer the studio's `#8de0d1`
+  focus-visible ring, which before this pass was scoped to `.music-reference-panel`
+  and so left the composer with no keyboard focus indicator at all.
+- it is right-to-left safe by construction: logical properties only, so Sorani
+  (`ckb`) and Arabic indent and inset on the correct edge, asserted from computed
+  styles in the acceptance spec rather than assumed.
+
+`src/app/musicLyricsStudioStyles.test.ts` pins the block and derives the class list
+from `LyricsSectionEditor.tsx`, `MusicLyricsPreflightPanel.tsx` and the composer in
+`MusicStudioView.tsx` instead of restating it, so a class added to a component
+fails the suite until it is styled. The fourth test of
+`e2e/music-lyrics-section-wiring.acceptance.spec.ts` reads what a browser does with
+the same rules: card and field geometry, the invalid-row colour, the keyboard focus
+ring inside the composer, a blocked handoff that stays visible and hit-testable,
+the RTL mirror measured physically, and 40px touch targets at 390px.
+
+Still open, and deliberately not attempted here: an `ar` (Arabic) draft can never
+reach `data-ready="true"`, because the mirrored contract requires a dialect for
+`ar` and there is no dialect control. Follow-up 4 gates dialect enablement on the
+capability evidence in `docs/MUSIC_STUDIO_ARCHITECTURE.md`, and every provider's
+`SupportedLyricsDialects` is pinned empty by `MusicVocalCapabilityFailClosedTests`,
+so a picker today would advertise a capability no provider has. This pass makes
+that dead end legible - the `dialect_required` issue now reads as an issue -
+without pretending to fix it.
