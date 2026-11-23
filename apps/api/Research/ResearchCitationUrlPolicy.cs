@@ -73,11 +73,18 @@ public static class ResearchCitationUrlPolicy
         var host = uri.DnsSafeHost;
         if (string.IsNullOrWhiteSpace(host)) return false;
         if (IPAddress.TryParse(host, out var literal)) return IsPublicAddress(literal);
-        if (host.Equals("localhost", StringComparison.OrdinalIgnoreCase)) return false;
+        // A root dot makes a name fully qualified without changing what it resolves to, so it is
+        // removed before the reserved-name checks and before the fully-qualified test: "localhost."
+        // is the same loopback target as "localhost", and "nas." is the same single-label intranet
+        // name as "nas". Qualified public names keep working, "example.com." included.
+        var qualified = host.TrimEnd('.');
+        if (qualified.Equals("localhost", StringComparison.OrdinalIgnoreCase)) return false;
         // RFC 6761 reserves the .localhost suffix, which always resolves to loopback.
-        if (host.EndsWith(".localhost", StringComparison.OrdinalIgnoreCase)) return false;
-        // A public citation host is always fully qualified.
-        return host.Contains('.', StringComparison.Ordinal);
+        if (qualified.EndsWith(".localhost", StringComparison.OrdinalIgnoreCase)) return false;
+        // A public citation host has a name and a top-level label, so a single label is rejected
+        // whether or not it carries the root dot: it resolves only through a reader's private
+        // search domain or an intranet resolver, never through the public root.
+        return qualified.Contains('.', StringComparison.Ordinal);
     }
 
     private static bool IsPublicAddress(IPAddress address)

@@ -36,8 +36,8 @@ public sealed class ChatController(
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> CreateConversation(Guid workspaceId, CreateConversationRequest request, CancellationToken cancellationToken)
     {
+        if (!TryGetUserId(out var userId)) return Unauthorized();
         if (!ModelState.IsValid) return ApiResults.Validation(this);
-        var userId = GetUserId();
         if (!await access.IsMemberAsync(userId, workspaceId, cancellationToken)) return Forbid();
 
         if (request.ProjectId is not null)
@@ -66,7 +66,7 @@ public sealed class ChatController(
     [HttpGet("workspaces/{workspaceId:guid}/conversations")]
     public async Task<IActionResult> ListConversations(Guid workspaceId, [FromQuery] string? status, CancellationToken cancellationToken)
     {
-        var userId = GetUserId();
+        if (!TryGetUserId(out var userId)) return Unauthorized();
         if (!await access.IsMemberAsync(userId, workspaceId, cancellationToken)) return Forbid();
         var requestedStatus = string.Equals(status, ConversationStatus.Archived.ToString(), StringComparison.OrdinalIgnoreCase)
             ? ConversationStatus.Archived : ConversationStatus.Active;
@@ -81,6 +81,7 @@ public sealed class ChatController(
     [HttpGet("conversations/{conversationId:guid}")]
     public async Task<IActionResult> GetConversation(Guid conversationId, CancellationToken cancellationToken)
     {
+        if (!TryGetUserId(out _)) return Unauthorized();
         var conversation = await FindAuthorizedConversation(conversationId, cancellationToken);
         return conversation is null
             ? ApiResults.Error(this, StatusCodes.Status404NotFound, "CONVERSATION_NOT_FOUND", "Conversation not found.")
@@ -90,6 +91,7 @@ public sealed class ChatController(
     [HttpGet("conversations/{conversationId:guid}/messages")]
     public async Task<IActionResult> GetMessages(Guid conversationId, CancellationToken cancellationToken)
     {
+        if (!TryGetUserId(out _)) return Unauthorized();
         var conversation = await FindAuthorizedConversation(conversationId, cancellationToken);
         if (conversation is null) return ApiResults.Error(this, StatusCodes.Status404NotFound, "CONVERSATION_NOT_FOUND", "Conversation not found.");
         var messages = (await db.ChatMessages.AsNoTracking()
@@ -107,6 +109,7 @@ public sealed class ChatController(
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> RenameConversation(Guid conversationId, RenameConversationRequest request, CancellationToken cancellationToken)
     {
+        if (!TryGetUserId(out _)) return Unauthorized();
         if (!ModelState.IsValid) return ApiResults.Validation(this);
         var conversation = await FindAuthorizedConversation(conversationId, cancellationToken);
         if (conversation is null) return ApiResults.Error(this, StatusCodes.Status404NotFound, "CONVERSATION_NOT_FOUND", "Conversation not found.");
@@ -120,6 +123,7 @@ public sealed class ChatController(
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> ArchiveConversation(Guid conversationId, CancellationToken cancellationToken)
     {
+        if (!TryGetUserId(out _)) return Unauthorized();
         var conversation = await FindAuthorizedConversation(conversationId, cancellationToken);
         if (conversation is null) return ApiResults.Error(this, StatusCodes.Status404NotFound, "CONVERSATION_NOT_FOUND", "Conversation not found.");
         conversation.Status = ConversationStatus.Archived;
@@ -132,6 +136,7 @@ public sealed class ChatController(
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> DeleteConversation(Guid conversationId, CancellationToken cancellationToken)
     {
+        if (!TryGetUserId(out _)) return Unauthorized();
         var conversation = await FindAuthorizedConversation(conversationId, cancellationToken);
         if (conversation is null) return ApiResults.Error(this, StatusCodes.Status404NotFound, "CONVERSATION_NOT_FOUND", "Conversation not found.");
 
@@ -147,6 +152,14 @@ public sealed class ChatController(
     [EnableRateLimiting(RateLimiting.Chat)]
     public async Task RegenerateMessage(Guid conversationId, Guid messageId, RegenerateMessageRequest request, CancellationToken cancellationToken)
     {
+        // The principal is resolved before any streaming header is written: once the 200 and the
+        // event-stream content type are on the wire, the response can no longer carry a 401.
+        if (!TryGetUserId(out _))
+        {
+            Response.StatusCode = StatusCodes.Status401Unauthorized;
+            return;
+        }
+
         Response.StatusCode = StatusCodes.Status200OK;
         Response.ContentType = "text/event-stream; charset=utf-8";
         Response.Headers.CacheControl = "no-cache, no-transform";
@@ -310,6 +323,7 @@ public sealed class ChatController(
     [EnableRateLimiting(RateLimiting.Chat)]
     public async Task<IActionResult> SendMessage(Guid conversationId, SendMessageRequest request, CancellationToken cancellationToken)
     {
+        if (!TryGetUserId(out _)) return Unauthorized();
         if (!ModelState.IsValid) return ApiResults.Validation(this, "Please enter a message.");
         var prepared = await PrepareMessageAsync(conversationId, request, cancellationToken);
         if (prepared.Error is not null) return prepared.Error;
@@ -351,6 +365,14 @@ public sealed class ChatController(
     [EnableRateLimiting(RateLimiting.Chat)]
     public async Task StreamMessage(Guid conversationId, SendMessageRequest request, CancellationToken cancellationToken)
     {
+        // The principal is resolved before any streaming header is written: once the 200 and the
+        // event-stream content type are on the wire, the response can no longer carry a 401.
+        if (!TryGetUserId(out _))
+        {
+            Response.StatusCode = StatusCodes.Status401Unauthorized;
+            return;
+        }
+
         Response.StatusCode = StatusCodes.Status200OK;
         Response.ContentType = "text/event-stream; charset=utf-8";
         Response.Headers.CacheControl = "no-cache, no-transform";
@@ -776,13 +798,29 @@ public sealed class ChatController(
 
     private async Task<Conversation?> FindAuthorizedConversation(Guid conversationId, CancellationToken cancellationToken)
     {
-        var userId = GetUserId();
+        if (!TryGetUserId(out var userId)) return null;
         var conversation = await db.Conversations.FirstOrDefaultAsync(item => item.Id == conversationId, cancellationToken);
         if (conversation is null || conversation.UserId != userId) return null;
         return await access.IsMemberAsync(userId, conversation.WorkspaceId, cancellationToken) ? conversation : null;
     }
 
-    private Guid GetUserId() => Guid.Parse(User.FindFirst(ClaimTypes.NameIdentifier)?.Value ?? throw new InvalidOperationException("Authenticated user identifier is missing."));
+    /// <summary>
+    /// Resolves the calling principal fail-closed. This identifier scopes workspace membership,
+    /// conversation ownership, attachment selection and usage attribution, so a claim that is
+    /// missing, malformed or the zero GUID is never treated as a caller identity:
+    /// <c>Guid.Parse</c> accepts <c>00000000-0000-0000-0000-000000000000</c>, which let a forged
+    /// claim act as that default identity, and it throws <see cref="FormatException"/> for any
+    /// other unusable value, which the global handler surfaces as a 500 instead of a 401.
+    /// </summary>
+    private bool TryGetUserId(out Guid userId)
+    {
+        var value = User.FindFirst(ClaimTypes.NameIdentifier)?.Value;
+        return Guid.TryParse(value, out userId) && userId != Guid.Empty;
+    }
+
+    private Guid GetUserId() => TryGetUserId(out var userId)
+        ? userId
+        : throw new InvalidOperationException("Authenticated user identifier is missing or malformed.");
 
     private async Task WriteEventAsync(string type, object data, CancellationToken cancellationToken)
     {

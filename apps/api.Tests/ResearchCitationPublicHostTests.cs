@@ -33,6 +33,10 @@ public sealed class ResearchCitationPublicHostTests
     // "@" below the authority stays a legitimate citation character.
     [InlineData("https://example.gov/@handle/report")]
     [InlineData("https://example.gov/search?q=iraq%40gov")]
+    // A root dot qualifies a public name without changing what it resolves to, so it stays a valid
+    // citation target and the guard is not over-blocking legitimate fully-qualified spellings.
+    [InlineData("https://example.com./reports")]
+    [InlineData("https://sub.domain.example.com./q3")]
     public void Policy_admits_public_web_citation_targets(string value) =>
         Assert.True(ResearchCitationUrlPolicy.IsSafe(value));
     [Theory]
@@ -72,6 +76,15 @@ public sealed class ResearchCitationPublicHostTests
     // intranet hostname, never through the public root.
     [InlineData("http://nas/report")]
     [InlineData("http://router/admin")]
+    // A trailing root dot must not smuggle a reserved or single-label name past the checks:
+    // "localhost." and "db.localhost." resolve to loopback exactly like their unterminated
+    // spellings, and "nas." is the same single-label intranet name as "nas".
+    [InlineData("http://localhost./report")]
+    [InlineData("http://db.localhost./report")]
+    [InlineData("http://LOCALHOST./report")]
+    [InlineData("http://nas./admin")]
+    [InlineData("http://./report")]
+    [InlineData("http://.../report")]
     public void Policy_rejects_internal_and_non_public_citation_targets(string value) =>
         Assert.False(ResearchCitationUrlPolicy.IsSafe(value));
     [Theory]
