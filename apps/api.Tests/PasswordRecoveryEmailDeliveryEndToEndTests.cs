@@ -354,7 +354,9 @@ public sealed class PasswordRecoveryEmailDeliveryEndToEndTests
             {
                 services.RemoveAll<DbContextOptions<TaslimDbContext>>();
                 services.AddDbContext<TaslimDbContext>(options => options.UseSqlite(connectionString));
-                services.PostConfigure<DataProtectionTokenProviderOptions>(options => options.TokenLifespan = tokenLifetime);
+                // Only the password-reset purpose is shortened by this fixture; the
+                // shared Identity provider keeps its framework lifetime.
+                services.PostConfigure<PasswordResetTokenProviderOptions>(options => options.TokenLifespan = tokenLifetime);
             });
         }
 

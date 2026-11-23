@@ -98,7 +98,7 @@ builder.Services.AddDataProtection()
     .SetApplicationName("Taslim.Api")
     .PersistKeysToDbContext<TaslimDbContext>();
 
-builder.Services.AddIdentity<ApplicationUser, IdentityRole<Guid>>(options =>
+var identityBuilder = builder.Services.AddIdentity<ApplicationUser, IdentityRole<Guid>>(options =>
     {
         options.User.RequireUniqueEmail = true;
         options.Password.RequiredLength = 10;
@@ -112,6 +112,11 @@ builder.Services.AddIdentity<ApplicationUser, IdentityRole<Guid>>(options =>
     })
     .AddEntityFrameworkStores<TaslimDbContext>()
     .AddDefaultTokenProviders();
+// The recovery window must apply to password-reset tokens only. Configuring the
+// shared DataProtectionTokenProviderOptions would instead give email confirmation,
+// phone-change and two-factor tokens the same 60-minute lifetime, so the reset
+// purpose is routed through a provider with its own options and purpose chain.
+identityBuilder.AddPasswordResetTokenProvider();
 // The application already loads the current user on every authenticated request
 // for active-account enforcement. Validate Identity's security stamp on that
 // same cadence so password changes and explicit revocations do not leave other
@@ -125,7 +130,6 @@ builder.Services.AddAuthorization(options =>
 });
 builder.Services.AddScoped<IAuthorizationHandler, AdminUsageAuthorizationHandler>();
 builder.Services.AddRateLimiter(RateLimiting.Configure);
-builder.Services.Configure<DataProtectionTokenProviderOptions>(options => options.TokenLifespan = TimeSpan.FromMinutes(PasswordRecoveryOptions.PasswordResetTokenLifetimeMinutes));
 builder.Services.Configure<PasswordRecoveryOptions>(builder.Configuration.GetSection("PasswordRecovery"));
 builder.Services.Configure<SmtpEmailOptions>(builder.Configuration.GetSection("Email"));
 builder.Services.AddSingleton<IEmailSender, SmtpEmailSender>();
