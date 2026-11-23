@@ -204,8 +204,14 @@ and `MusicStudioView.tsx` was the most contended file in the area with 18
 claimants (`api.ts` 68, `i18n.ts` 63, `musicStudioState.ts` 17). Of the two lanes
 the original note named, PR #560 closed unmerged and PR #561 is still open on
 `ci: validate Music Studio workspace response freshness`, so this diff is the
-smaller one - four import blocks, one state block, one JSX section - and it must
-be rebased rather than re-derived if #561 lands first.
+smaller one - four import blocks, one contiguous state block, one new JSX
+section, and one `id="music-vocal-language"` attribute added to the studio's
+existing language select. That attribute is the only pre-existing line this lane
+edits, and it exists because a `<select>` wrapped in its own `<label>` folds its
+option text into its computed accessible name, so a browser test cannot address
+the field by label - the same reason `#document-output-format` is addressed by
+id elsewhere in the suite. The branch must be rebased, not re-derived, if #561
+lands first.
 
 ## Follow-ups, in order
 
