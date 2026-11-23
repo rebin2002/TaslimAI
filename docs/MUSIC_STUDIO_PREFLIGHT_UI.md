@@ -143,7 +143,7 @@ Deliberately untouched, with their owners:
 
 | Path | Owner | Why untouched |
 | --- | --- | --- |
-| `LyricsSectionEditor.tsx` (+ test) | draft PR #772 | The editor is that lane's deliverable; this panel consumes its row model (`id`, `type`, `text`) rather than duplicating it. |
+| `LyricsSectionEditor.tsx` (+ test) | PR #772 | The editor is that lane's deliverable; this panel consumes its row model (`id`, `type`, `text`) rather than duplicating it. |
 | `MusicStudioView.tsx`, `MusicStudioView.test.tsx` | open PR #560 (+ CI twin #561) | Studio wiring would replace that lane's work. |
 | `MusicGenerationContracts.cs`, `MusicGenerationRequestValidator.cs`, `MusicGenerationCapabilityCatalog.cs`, `MusicGenerationSongContractTests.cs`, `MusicInvisibleTextAdmissionTests.cs` | draft PR #709 (with #260, #812 as other claimants) | Read-only mirror assertions only. |
 | `MusicInvisibleLyricsCostAdmissionTests.cs` | draft PR #773 | Its red contract stays red until #813 lands. |
@@ -152,15 +152,19 @@ Deliberately untouched, with their owners:
 | `i18n.ts`, `api.ts`, `Program.cs` | multiple open lanes | No locale keys or client transport added; labels are inline with a prop override. |
 | Voice and Direct Video contracts | draft PR #837 | Different lane; no overlap. |
 
-`MusicLyricsDraftContractMirrorTests.StructuredLyricsEditorRemainsOwnedItsOwnOpenSlice`
-turns the one dependency that matters into a signal: the moment PR #772 lands,
-that assertion fails and points at the studio-wiring follow-up, so this panel
-cannot sit unused while two editors exist.
+`MusicLyricsDraftContractMirrorTests.StructuredLyricsEditorStaysSingleSourcedAndTheWiringFollowUpStaysRecorded`
+keeps the one dependency that matters in force after PR #772 landed its editor:
+exactly one structured lyrics editor may exist, it must mirror the contract
+vocabulary in `musicLyricsDraftPayload.ts` rather than restate it, and until
+`MusicStudioView.tsx` consumes it the step-1 sentence below must stay in this
+document - so this panel cannot sit unused and a second editor cannot appear.
 
 ## Follow-ups, in order
 
-1. Land #772 (editor) and wire it to this panel in `MusicStudioView.tsx` -
-   that wiring must be rebased onto whatever #560/#561 leave behind.
+1. **Wiring follow-up (open):** wire the landed #772 editor to this panel in
+   `MusicStudioView.tsx` - that wiring must be rebased onto whatever #560/#561
+   leave behind. That phrase is pinned by the contract-mirror test named above,
+   so it disappears only when the wiring actually exists.
 2. Land #709 with #813, then #773, which makes the server gate match the client
    gate this slice already applies.
 3. Locale keys for the panel copy, once `i18n.ts` is free of its open lanes.
