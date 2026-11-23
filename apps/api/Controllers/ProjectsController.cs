@@ -1,6 +1,7 @@
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
+using Taslim.Api.Activity;
 using Taslim.Api.Authorization;
 using Taslim.Api.Contracts;
 using Taslim.Api.Domain;
@@ -92,8 +93,16 @@ public sealed class ProjectsController(TaslimDbContext db, WorkspaceAccessServic
             .Where(asset => asset.ProjectId == projectId && asset.WorkspaceId == project.WorkspaceId && asset.Status == AssetStatus.Active);
         var conversations = db.Conversations.AsNoTracking()
             .Where(conversation => conversation.ProjectId == projectId && conversation.WorkspaceId == project.WorkspaceId && conversation.UserId == userId);
-        var activity = db.GenerationJobs.AsNoTracking()
-            .Where(job => job.ProjectId == projectId && job.WorkspaceId == project.WorkspaceId);
+        // GATE-PRIV-04: these rows are rendered through ActivityContractMapper, the same projection
+        // the Activity Center uses, so they must pass through the same creator-private fence. A
+        // Research record stays with its creator even when it is project-scoped, because the record
+        // carries the report title derived from that creator's private uploads; leaving this query
+        // unfiltered disclosed another member's research record in counts.activity and
+        // recentActivity while every other member-facing surface hid the same record.
+        var activity = CreatorPrivacyFence.VisibleToMember(
+            db.GenerationJobs.AsNoTracking()
+                .Where(job => job.ProjectId == projectId && job.WorkspaceId == project.WorkspaceId),
+            userId);
 
         var counts = new ProjectOverviewCountsDto(
             await files.CountAsync(cancellationToken),

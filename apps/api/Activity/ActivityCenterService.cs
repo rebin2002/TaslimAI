@@ -173,13 +173,12 @@ public sealed class ActivityCenterService(TaslimDbContext db, WorkspaceAccessSer
     // the jobType bucket expansion on main those records do reach this feed. The Research-only
     // predicate above therefore disagreed with the job read model: a co-member could list, count
     // and try to acknowledge another member's unscoped Social/Presentation jobs. This predicate is
-    // the translatable mirror of IsPrivateExecutionRecord; CreatorPrivateFenceEquivalenceTests
+    // the translatable mirror of IsPrivateExecutionRecord. GATE-PRIV-04: the predicate itself now
+    // lives once in CreatorPrivacyFence, because the project overview renders the same rows through
+    // the same mapper and had kept its own unfenced copy of the query; CreatorPrivateFenceEquivalenceTests
     // guards the two fences against drifting apart again and
     // ActivityUnscopedCreatorPrivacyHttpTests pins the observable HTTP behaviour. Project-scoped
     // jobs keep the intentional workspace sharing surface for both the record and the asset.
     private static IQueryable<GenerationJob> VisibleToMember(IQueryable<GenerationJob> jobs, Guid userId) =>
-        jobs.Where(job => job.CreatedByUserId == userId
-            || (job.JobType != GenerationJobTypes.ResearchGenerate
-                && (job.JobType != GenerationJobTypes.PresentationGenerate || job.ProjectId != null)
-                && (job.JobType != GenerationJobTypes.SocialGenerate || job.ProjectId != null)));
+        CreatorPrivacyFence.VisibleToMember(jobs, userId);
 }
