@@ -35,10 +35,19 @@ internal static class AcademicFixture
 
     public static HttpClient Client(ScriptedHandler handler) => new(handler) { Timeout = Timeout.InfiniteTimeSpan };
 
+    /// <summary>
+    /// Test options. Production leaves every switch off, so the ones these tests need are turned
+    /// on here explicitly: a default change cannot silently alter what is exercised, and the
+    /// fail-closed posture itself stays under direct test.
+    /// </summary>
     public static AcademicSourceDiscoveryOptions Defaults(Action<AcademicSourceDiscoveryOptions>? configure = null)
     {
         var options = new AcademicSourceDiscoveryOptions
         {
+            Enabled = true,
+            OpenAlexEnabled = true,
+            CrossrefEnabled = true,
+            OpenLibraryEnabled = true,
             BackoffBaseMilliseconds = 0,
             MaxRetryDelaySeconds = 0,
             RequestTimeoutSeconds = 10,
@@ -47,6 +56,50 @@ internal static class AcademicFixture
         };
         configure?.Invoke(options);
         return options.Normalize();
+    }
+
+    /// <summary>
+    /// Deterministic resolver: a fixed answer table, never the system resolver, so rebinding is
+    /// reproducible and no unit test depends on DNS.
+    /// </summary>
+    public sealed class StubResolver : IAcademicHostResolver
+    {
+        private readonly IReadOnlyList<IPAddress> _answers;
+
+        public StubResolver(params string[] answers) => _answers = [.. answers.Select(IPAddress.Parse)];
+
+        public List<string> ResolvedHosts { get; } = [];
+
+        public int ResolveCount => ResolvedHosts.Count;
+
+        public Task<IReadOnlyList<IPAddress>> ResolveAsync(string host, CancellationToken cancellationToken)
+        {
+            ResolvedHosts.Add(host);
+            return Task.FromResult(_answers);
+        }
+    }
+
+    /// <summary>
+    /// Stands in for the socket layer: records the exact endpoint the policy decided to dial and
+    /// never opens one, which is what makes "refused before connect" assertable.
+    /// </summary>
+    public sealed class RecordingTransport
+    {
+        public List<IPEndPoint> Dialed { get; } = [];
+
+        public ValueTask<Stream> ConnectAsync(IPAddress address, int port, CancellationToken cancellationToken)
+        {
+            Dialed.Add(new IPEndPoint(address, port));
+            throw new InvalidOperationException("stub transport never dials a socket");
+        }
+    }
+
+    /// <summary>Client whose defaults carry a bearer credential, like a caller that adds auth later.</summary>
+    public static HttpClient ClientWithAuthorization(ScriptedHandler handler)
+    {
+        var client = Client(handler);
+        client.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", "seeded-credential");
+        return client;
     }
 
     public static IOptions<AcademicSourceDiscoveryOptions> Wrapped(AcademicSourceDiscoveryOptions options) => Microsoft.Extensions.Options.Options.Create(options);

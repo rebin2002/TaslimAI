@@ -16,12 +16,23 @@ public sealed record AcademicJsonResponse(int StatusCode, JsonElement Root, bool
 /// from the caller's cancellation, bounded response size and JSON content type, retry with
 /// provider-supplied <c>Retry-After</c> clamped to a configured ceiling, and failure
 /// categorization that keeps provider payloads out of exceptions and logs. The backing
-/// <see cref="HttpClient"/> must be configured with <see cref="HttpClientHandler.AllowAutoRedirect"/>
-/// disabled and an infinite <see cref="HttpClient.Timeout"/>; all budgets are applied here.
+/// <see cref="HttpClient"/> must be configured with automatic redirects disabled and an infinite
+/// <see cref="HttpClient.Timeout"/>, and its transport must be the pinned handler from
+/// <see cref="AcademicSourceConnectionPolicy.CreatePinnedHandler"/> so each new connection —
+/// including the one for every hop — resolves and dials a public address. All budgets are applied
+/// here.
 /// </summary>
 public sealed class AcademicHttpGateway(HttpClient httpClient, AcademicSourceDiscoveryOptions options)
 {
     private readonly IReadOnlyCollection<string> allowedHosts = options.AllowedEndpointHosts();
+    private readonly IReadOnlyCollection<string> hostExceptions = options.EndpointHostExceptions;
+
+    /// <summary>Query keys that carry provider credentials and must never cross an authority.</summary>
+    private static readonly string[] CredentialQueryKeys =
+        ["key", "apikey", "api_key", "access_token", "token", "secret", "client_secret", "subscription", "code", "sig"];
+
+    /// <summary>Headers that must never be re-sent to a different authority.</summary>
+    private static readonly string[] CredentialHeaders = ["Authorization", "Cookie", "X-Goog-Api-Key", "X-Api-Key"];
 
     public async Task<AcademicJsonResponse> GetJsonAsync(
         Uri endpoint,
@@ -59,10 +70,29 @@ public sealed class AcademicHttpGateway(HttpClient httpClient, AcademicSourceDis
                         response.Dispose();
                         throw Reject(current, "too_many_redirects", (int)response.StatusCode);
                     }
-                    if (!AcademicSourceUrlGuard.IsAllowedEndpoint(target, allowedHosts))
+                    if (!AcademicSourceUrlGuard.IsAllowedEndpoint(target, allowedHosts, hostExceptions))
                     {
                         response.Dispose();
                         throw Reject(current, AcademicSourceFailureCategories.BlockedEndpoint, (int)response.StatusCode);
+                    }
+                    // A hop that leaves the original authority could carry the request's
+                    // credentials — including a Google Books key that rides the query string — to a
+                    // host the operator never associated with them. Same-authority hops are the
+                    // normal provider behaviour and stay untouched; a cross-authority hop is
+                    // refused unless explicitly configured, and when allowed it is rebuilt without
+                    // any credential parameter.
+                    if (!string.Equals(target!.Authority, current.Authority, StringComparison.OrdinalIgnoreCase))
+                    {
+                        response.Dispose();
+                        response = null;
+                        // HttpClient merges the client's default request headers into every send,
+                        // so a credential configured on the client cannot be stripped for one hop.
+                        // Refusing that hop is the only honest guarantee, and it is why the default
+                        // for cross-authority redirects stays off.
+                        if (!options.AllowCrossHostRedirects || CarriesClientCredentials())
+                            throw Reject(current, AcademicSourceFailureCategories.BlockedEndpoint, null);
+                        current = ScrubCredentials(target);
+                        continue;
                     }
                     response.Dispose();
                     response = null;
@@ -128,8 +158,41 @@ public sealed class AcademicHttpGateway(HttpClient httpClient, AcademicSourceDis
 
     private void ValidateEndpoint(Uri endpoint)
     {
-        if (!AcademicSourceUrlGuard.IsAllowedEndpoint(endpoint, allowedHosts))
+        if (!AcademicSourceUrlGuard.IsAllowedEndpoint(endpoint, allowedHosts, hostExceptions))
             throw new AcademicSourceRejectedException(Details(endpoint, AcademicSourceFailureCategories.BlockedEndpoint, null));
+    }
+
+    /// <summary>
+    /// Rebuilds a redirect target without credential-bearing query parameters. Nothing is dropped
+    /// for a same-authority hop; this runs only when the target host or port changed.
+    /// </summary>
+    internal static Uri ScrubCredentials(Uri target)
+    {
+        var pairs = target.Query.TrimStart('?').Split('&', StringSplitOptions.RemoveEmptyEntries);
+        if (pairs.Length == 0) return target;
+        var kept = pairs.Where(pair => !IsCredentialParameter(pair)).ToArray();
+        if (kept.Length == pairs.Length) return target;
+        var rebuilt = target.GetLeftPart(UriPartial.Path) + (kept.Length > 0 ? "?" + string.Join('&', kept) : string.Empty);
+        return new Uri(rebuilt, UriKind.Absolute);
+    }
+
+    private static bool IsCredentialParameter(string pair)
+    {
+        var index = pair.IndexOf('=');
+        var key = index < 0 ? pair : pair[..index];
+        return CredentialQueryKeys.Contains(Uri.UnescapeDataString(key), StringComparer.OrdinalIgnoreCase);
+    }
+
+    /// <summary>True when the composed client would attach a credential to any host it is told to reach.</summary>
+    private bool CarriesClientCredentials()
+    {
+        if (httpClient.DefaultRequestHeaders.Authorization is not null) return true;
+        foreach (var header in CredentialHeaders)
+        {
+            if (header == "Authorization") continue;
+            if (httpClient.DefaultRequestHeaders.Contains(header)) return true;
+        }
+        return false;
     }
 
     private AcademicSourceRejectedException Reject(Uri endpoint, string category, int? status) =>
