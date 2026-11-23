@@ -65,6 +65,7 @@ const en = {
   "draft.saved": "Draft saved on this device for your workspace.",
   "draft.unavailable": "This browser is blocking saved data, so the draft cannot be stored on this device.",
   "draft.cleared": "Draft cleared. A blank academic brief is ready.",
+  "draft.identityChanged": "The signed-in student changed, so nothing here was saved. Each workspace keeps its own draft.",
 
   "action.applyDiscipline": "Use common practice for this discipline",
   "action.applyDisciplineHint": "Fills typical methods, a typical style and accepted source types. Your programme's own rules still win.",
