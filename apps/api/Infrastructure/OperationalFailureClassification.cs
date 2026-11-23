@@ -35,6 +35,13 @@ public static class GenerationFailureClassifier
         if (normalized is GenerationJobErrorCodes.MusicOutputRetrievalFailed or GenerationJobErrorCodes.MusicRetrievalRetryBlocked)
             return new(normalized, "delivery", false);
 
+        // The worker died with the provider submission outcome unknown. Automatic re-dispatch is
+        // suppressed for music (see RecoverExpiredClaimsAsync), so this must not read as a retryable
+        // provider outage in operations data either, even though the customer may still retry once
+        // deliberately.
+        if (normalized == GenerationJobErrorCodes.MusicProviderSubmissionUnconfirmed)
+            return new(normalized, "provider", false);
+
         if (normalized.Contains("STORAGE", StringComparison.Ordinal))
             return new(normalized, "storage", true);
 

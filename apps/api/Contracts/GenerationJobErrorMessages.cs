@@ -78,6 +78,10 @@ public static class GenerationJobErrorMessages
             // re-delivery or a refund exists today.
             GenerationJobErrorCodes.MusicOutputRetrievalFailed => "Your music was generated, but the finished track could not be delivered. It was not generated a second time, because that would create a duplicate.",
             GenerationJobErrorCodes.MusicRetrievalRetryBlocked => "This retry was blocked because the track was already generated and only delivery failed. Please contact support to recover it.",
+            // Deliberate contrast with the two arms above: here the finished track is NOT known to
+            // exist, so nothing is deliverable and a single deliberate customer retry is the right
+            // recovery. What was suppressed is the automatic re-dispatch, not the customer's option.
+            GenerationJobErrorCodes.MusicProviderSubmissionUnconfirmed => "Music generation was interrupted before it finished, and it was not restarted automatically because the first attempt may already have reached the provider. Please try again.",
             GenerationJobErrorCodes.MusicCancelled => "The music generation was cancelled.",
             GenerationJobErrorCodes.VoiceProviderUnavailable or GenerationJobErrorCodes.VoiceProviderAuthentication => "Voice generation is temporarily unavailable. Please try again later.",
             GenerationJobErrorCodes.VoiceProviderRateLimited => "Voice generation is busy right now. Please try again later.",
