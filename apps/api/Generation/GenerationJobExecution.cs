@@ -2194,10 +2194,7 @@ var qualityFailure = exception as GenerationQualityControlException ?? exception
         // and the heartbeat monitor cancels on it, but the failure path consulted it not at all, so a
         // cancellation recorded after the monitor's last poll - or a genuine provider error that simply
         // won the race - replaced the outcome the cancellation contract promises.
-        var cancellationRecorded = await db.GenerationJobs.AsNoTracking().AnyAsync(
-            item => item.Id == job.Id && item.Status == GenerationJobStatus.Running
-                && item.ConcurrencyToken == concurrencyToken && item.CancellationRequested,
-            cancellationToken);
+        var cancellationRecorded = await db.GenerationJobs.AsNoTracking().AnyAsync(item => item.ConcurrencyToken == concurrencyToken && item.Id == job.Id && item.Status == GenerationJobStatus.Running && item.CancellationRequested, cancellationToken);
         if (cancellationRecorded)
         {
             await CancelRunningAsync(db, usage, job, concurrencyToken, cancellationToken);
