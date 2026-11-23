@@ -192,11 +192,15 @@ public sealed class MovieDirectorScenePlanValidator(
             ValidateText(findings, scene.EmotionalObjective, 2_000, "emotionalObjective");
             ValidateText(findings, scene.TransitionRelationship, 1_000, "transitionRelationship");
             ValidateText(findings, scene.ProductionIntent, 4_000, "productionIntent");
-            // Fail closed at admission on the per-scene ceiling. A scene longer than the largest unit the
-            // render path can actually produce is never honoured: MovieProductionPreflight and the
-            // generation orchestrators bill each shot from Math.Clamp(..., 1, 3_600) and provider clips are
-            // capped at ProviderCapabilityPricing.MaxDurationSeconds (default 3_600), so an admitted
-            // over-length scene would be silently shortened and underbilled rather than rejected.
+            // Fail closed at admission on the per-scene ceiling. A scene longer than that ceiling is never
+            // honoured: MovieProductionPreflight, the generation orchestrators and the clip cost path all
+            // derive the billed duration from Math.Clamp(..., 1, 3_600), so an admitted over-length scene
+            // would be silently shortened and underbilled rather than rejected. 3_600 is
+            // MovieDurationBudgetPolicy.MaxShotDurationSeconds, the same ceiling the movie cost estimator
+            // refuses above with duration_cap_exceeded. Treat it as an admission and billing invariant only:
+            // the per-provider capability limits enforced at dispatch are separate and can be far lower, and
+            // ProviderCapabilityPricing.MaxDurationSeconds is a pricing-route filter rather than a render
+            // bound, so clearing this check does not mean any provider can render the scene as one clip.
             // Bounded by targetDuration, so every plan legal under the configured ceiling behaves unchanged.
             var renderableSceneCeilingSeconds = Math.Min(targetDuration, MovieDurationBudgetPolicy.MaxShotDurationSeconds);
             AddIf(findings, scene.EstimatedDurationSeconds < 1 || scene.EstimatedDurationSeconds > renderableSceneCeilingSeconds, DirectorScenePlanValidationReasonCodes.RuntimeMismatch, "estimatedDurationSeconds");
