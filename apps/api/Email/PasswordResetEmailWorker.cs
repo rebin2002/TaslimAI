@@ -56,6 +56,7 @@ public sealed class PasswordResetEmailWorker(
         await using var scope = scopeFactory.CreateAsyncScope();
         var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
         var userManager = scope.ServiceProvider.GetRequiredService<UserManager<ApplicationUser>>();
+        var outbox = scope.ServiceProvider.GetRequiredService<PasswordResetOutboxService>();
         var now = timeProvider.GetUtcNow().UtcDateTime;
         var userIds = await db.PasswordResetEmailOutbox
             .AsNoTracking()
@@ -70,13 +71,14 @@ public sealed class PasswordResetEmailWorker(
         foreach (var userId in userIds)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            await ProcessEntryAsync(db, userManager, options, userId, cancellationToken);
+            await ProcessEntryAsync(db, userManager, outbox, options, userId, cancellationToken);
         }
     }
 
     private async Task ProcessEntryAsync(
         TaslimDbContext db,
         UserManager<ApplicationUser> userManager,
+        PasswordResetOutboxService outbox,
         PasswordRecoveryOptions options,
         Guid userId,
         CancellationToken cancellationToken)
@@ -101,6 +103,7 @@ public sealed class PasswordResetEmailWorker(
         }
 
         entry.Status = PasswordResetDeliveryStates.Processing;
+        var claimedLastRequestedAt = entry.LastRequestedAt;
         entry.LeaseExpiresAt = now.AddSeconds(options.LeaseSeconds);
         entry.AttemptCount++;
         try
@@ -109,6 +112,21 @@ public sealed class PasswordResetEmailWorker(
         }
         catch (DbUpdateConcurrencyException)
         {
+            db.Entry(entry).State = EntityState.Detached;
+            return;
+        }
+
+        // Supersede check, before any token is minted or mailed. A newer forgot
+        // request or a completed reset has already rewritten the row, so this claim
+        // describes an obsolete request: the newer request owns the row and will be
+        // claimed on its own schedule, and nothing is delivered for the old one.
+        // Without this rule a token minted for a superseded request could still be
+        // mailed, and reported as Delivered, after the account had moved on.
+        if (await outbox.IsClaimSupersededAsync(userId, claimedLastRequestedAt, cancellationToken))
+        {
+            logger.LogInformation(
+                "Password reset delivery claim superseded before send; message not sent. RequestedAt={ClaimedRequestedAt:o}",
+                claimedLastRequestedAt);
             db.Entry(entry).State = EntityState.Detached;
             return;
         }

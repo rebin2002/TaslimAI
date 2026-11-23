@@ -12,6 +12,7 @@ using Taslim.Api.Contracts;
 using Taslim.Api.Domain;
 using Taslim.Api.Email;
 using Taslim.Api.Infrastructure;
+using Taslim.Api.Localization;
 using Taslim.Api.Persistence;
 
 namespace Taslim.Api.Controllers;
@@ -87,10 +88,32 @@ public sealed class AuthController(
         if (user is null || !user.IsActive)
             return await PasswordResetRequestAcceptedAsync(requestTimer, cancellationToken);
 
-        await passwordResetOutbox.TryQueueAsync(
-            user.Id,
-            TimeSpan.FromMinutes(options.RequestCooldownMinutes),
-            cancellationToken);
+        try
+        {
+            await passwordResetOutbox.TryQueueAsync(
+                user.Id,
+                TimeSpan.FromMinutes(options.RequestCooldownMinutes),
+                cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception exception)
+        {
+            // Queuing is the only step that runs for an existing account and not for
+            // an unknown one, so an unmasked outbox or storage fault (missing table,
+            // unapplied migration, permission loss, constraint clash) answers 500 for
+            // exactly one class of address and becomes an account-enumeration oracle
+            // during an outage. The response is the same masked 202 as the unknown
+            // path; the fault is recorded server-side as a stable classification only,
+            // never an address, token or provider message.
+            logger.LogError(
+                "Password reset request queueing failed. TraceId={TraceId}; ErrorType={ErrorType}",
+                HttpContext.TraceIdentifier,
+                exception.GetType().Name);
+        }
+
         return await PasswordResetRequestAcceptedAsync(requestTimer, cancellationToken);
     }
 
@@ -128,6 +151,28 @@ public sealed class AuthController(
         // CSRF cookie ensures this response never leaves a request token bound
         // to the pre-reset browser session. The response deliberately issues no
         // authentication cookie; users must sign in again with the new password.
+        try
+        {
+            // The recovery is complete, so any still-queued or in-flight reset email
+            // for this account is obsolete and must not be delivered afterwards.
+            await passwordResetOutbox.CancelForUserAsync(user.Id, cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception exception)
+        {
+            // The password change already succeeded. Reporting a cancellation fault as
+            // a failed reset would mislead the user into retrying recovery, so it is
+            // logged as a classification only and the outcome of this request is not
+            // changed for any account, known or unknown.
+            logger.LogError(
+                "Password reset outbox cancellation failed. TraceId={TraceId}; ErrorType={ErrorType}",
+                HttpContext.TraceIdentifier,
+                exception.GetType().Name);
+        }
+
         ExpireCsrfCookie();
         return Ok(new { success = true });
     }
@@ -156,7 +201,7 @@ public sealed class AuthController(
     [EnableRateLimiting(RateLimiting.Authentication)]
     public async Task<IActionResult> Register(RegisterRequest request, CancellationToken cancellationToken)
     {
-        if (!ModelState.IsValid || string.IsNullOrWhiteSpace(request.DisplayName) || !IsSupportedLanguage(request.PreferredLanguage, allowEmpty: true))
+        if (!ModelState.IsValid || string.IsNullOrWhiteSpace(request.DisplayName) || !IsSupportedInterfaceLanguage(request.PreferredLanguage, allowEmpty: true))
             return ApiResults.Validation(this, "Please provide a valid name, email, password, and language.");
 
         var now = DateTime.UtcNow;
@@ -308,8 +353,8 @@ public sealed class AuthController(
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> UpdateProfile(UpdateProfileRequest request)
     {
-        if (!ModelState.IsValid || string.IsNullOrWhiteSpace(request.DisplayName) || !IsSupportedLanguage(request.PreferredLanguage)
-            || (request.DefaultGenerationLanguage is not null && !IsSupportedLanguage(request.DefaultGenerationLanguage))
+        if (!ModelState.IsValid || string.IsNullOrWhiteSpace(request.DisplayName) || !IsSupportedInterfaceLanguage(request.PreferredLanguage)
+            || (request.DefaultGenerationLanguage is not null && !IsSupportedGenerationLanguage(request.DefaultGenerationLanguage))
             || (request.TimeZone is not null && !TimeZoneInfo.GetSystemTimeZones().Any(zone => string.Equals(zone.Id, request.TimeZone.Trim(), StringComparison.Ordinal)))
             || (request.OutputPreference is not null && !OutputPreferences.Supported.Contains(request.OutputPreference.Trim())))
             return ApiResults.Validation(this, "Please provide valid profile and preference values.");
@@ -338,8 +383,8 @@ public sealed class AuthController(
         var displayName = request.DisplayName?.Trim();
         var intent = string.IsNullOrWhiteSpace(request.Intent) ? null : request.Intent.Trim().ToLowerInvariant();
         if (!ModelState.IsValid
-            || !IsSupportedLanguage(request.PreferredLanguage)
-            || !IsSupportedLanguage(request.DefaultGenerationLanguage)
+            || !IsSupportedInterfaceLanguage(request.PreferredLanguage)
+            || !IsSupportedGenerationLanguage(request.DefaultGenerationLanguage)
             || (displayName is not null && displayName.Length > 0 && displayName.Length < 2)
             || (intent is not null && !OnboardingIntents.Supported.Contains(intent)))
             return ApiResults.Validation(this, "Please provide valid onboarding preferences.");
@@ -348,7 +393,7 @@ public sealed class AuthController(
         if (user is null || !user.IsActive) return Unauthorized();
 
         if (!string.IsNullOrWhiteSpace(displayName)) user.DisplayName = displayName;
-        user.PreferredLanguage = request.PreferredLanguage.Trim().ToLowerInvariant();
+        user.PreferredLanguage = LanguagePackCatalog.NormalizeInterfaceLanguage(request.PreferredLanguage);
         user.DefaultGenerationLanguage = request.DefaultGenerationLanguage.Trim().ToLowerInvariant();
         user.OnboardingIntent = intent;
         user.OnboardingCompletedAt = DateTime.UtcNow;
@@ -413,10 +458,12 @@ public sealed class AuthController(
         Response.Headers.CacheControl = "no-store";
     }
 
-    private static bool IsSupportedLanguage(string? language, bool allowEmpty = false) =>
-        string.IsNullOrWhiteSpace(language) ? allowEmpty : LanguageCodes.Supported.Contains(language.Trim());
+    private static bool IsSupportedInterfaceLanguage(string? language, bool allowEmpty = false) =>
+        string.IsNullOrWhiteSpace(language) ? allowEmpty : LanguagePackCatalog.IsInterfaceLanguage(language);
+    private static bool IsSupportedGenerationLanguage(string? language) =>
+        !string.IsNullOrWhiteSpace(language) && LanguageCodes.Supported.Contains(language.Trim());
     private static string NormalizeLanguage(string? language) =>
-        string.IsNullOrWhiteSpace(language) ? LanguageCodes.English : language.Trim().ToLowerInvariant();
+        LanguagePackCatalog.NormalizeInterfaceLanguage(language);
     private static string[] ToPasswordFieldErrors(IEnumerable<IdentityError> errors) => errors
         .Select(error => error.Code)
         .Where(code => code is "PasswordTooShort" or "PasswordRequiresUpper" or "PasswordRequiresLower" or "PasswordRequiresDigit" or "PasswordRequiresNonAlphanumeric" or "PasswordRequiresUniqueChars")

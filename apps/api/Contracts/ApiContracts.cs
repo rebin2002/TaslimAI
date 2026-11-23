@@ -50,7 +50,7 @@ public sealed class RegisterRequest
     [Required]
     public string Password { get; set; } = string.Empty;
 
-    [StringLength(5)]
+    [StringLength(32)]
     public string? PreferredLanguage { get; set; }
 }
 
@@ -68,7 +68,7 @@ public sealed class UpdateProfileRequest
     [Required, StringLength(120, MinimumLength = 2)]
     public string DisplayName { get; set; } = string.Empty;
 
-    [Required, StringLength(5)]
+    [Required, StringLength(32)]
     public string PreferredLanguage { get; set; } = LanguageCodes.English;
 
     [StringLength(5)]
@@ -88,7 +88,7 @@ public sealed class CompleteOnboardingRequest
     [StringLength(120)]
     public string? DisplayName { get; set; }
 
-    [Required, StringLength(5)]
+    [Required, StringLength(32)]
     public string PreferredLanguage { get; set; } = LanguageCodes.English;
 
     [Required, StringLength(5)]

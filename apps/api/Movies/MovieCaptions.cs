@@ -158,7 +158,7 @@ public sealed class SrtMovieCaptionFormatAdapter : IMovieCaptionFormatAdapter
             builder.Append(index + 1).Append("\r\n")
                 .Append(MovieCaptionTimecode.FormatSrt(cue.StartMilliseconds)).Append(" --> ")
                 .Append(MovieCaptionTimecode.FormatSrt(cue.EndMilliseconds)).Append("\r\n")
-                .Append(cue.Text.Replace("\r\n", "\n", StringComparison.Ordinal).Replace("\n", "\r\n", StringComparison.Ordinal))
+                .Append(MovieCaptionTextFolding.Fold(cue.Text).Replace("\n", "\r\n", StringComparison.Ordinal))
                 .Append("\r\n\r\n");
         }
         return builder.ToString().TrimEnd('\r', '\n') + (ordered.Length == 0 ? string.Empty : "\r\n");
@@ -219,8 +219,11 @@ public sealed class WebVttMovieCaptionFormatAdapter : IMovieCaptionFormatAdapter
             builder.Append(index + 1).Append("\r\n")
                 .Append(MovieCaptionTimecode.FormatVtt(cue.StartMilliseconds)).Append(" --> ")
                 .Append(MovieCaptionTimecode.FormatVtt(cue.EndMilliseconds)).Append("\r\n");
-            var text = cue.Text.Replace("&", "&amp;", StringComparison.Ordinal).Replace("<", "&lt;", StringComparison.Ordinal).Replace(">", "&gt;", StringComparison.Ordinal).Replace("\r\n", "\n", StringComparison.Ordinal).Replace("\n", "\r\n", StringComparison.Ordinal);
-            builder.Append(cue.SpeakerName is null ? text : $"<v {WebUtility.HtmlEncode(cue.SpeakerName)}>{text}</v>")
+            var text = MovieCaptionTextFolding.Fold(cue.Text).Replace("&", "&amp;", StringComparison.Ordinal).Replace("<", "&lt;", StringComparison.Ordinal).Replace(">", "&gt;", StringComparison.Ordinal).Replace("\n", "\r\n", StringComparison.Ordinal);
+            // A voice label is one VTT tag attribute, never a physical cue line.
+            // Encode after collapsing whitespace so a stored CR/LF cannot split the <v> tag.
+            var speakerName = cue.SpeakerName is null ? null : Regex.Replace(cue.SpeakerName, @"\s+", " ").Trim();
+            builder.Append(speakerName is null ? text : $"<v {WebUtility.HtmlEncode(speakerName)}>{text}</v>")
                 .Append("\r\n\r\n");
         }
         return builder.ToString();
@@ -251,6 +254,9 @@ public sealed class MovieCaptionService(
     private const int MaxCueTextLength = 10_000;
     private const int MaxCueCount = 50_000;
     private const int MaxImportLength = 2_000_000;
+    // Matches the persisted MovieCaptionTrack.Language boundary (HasMaxLength(35));
+    // RFC 5646 caps a complete langtag at 35 characters.
+    private const int MaxLanguageTagLength = 35;
 
     public async Task<IReadOnlyList<MovieCaptionTrackDto>?> GetTracksAsync(Guid userId, Guid movieProjectId, CancellationToken cancellationToken)
     {
@@ -350,13 +356,19 @@ public sealed class MovieCaptionService(
         var project = await db.MovieProjects.AsNoTracking().FirstOrDefaultAsync(item => item.Id == movieProjectId, cancellationToken);
         if (project is null || !await collaboration.HasPermissionAsync(userId, movieProjectId, MoviePermissions.Edit, cancellationToken)) return null;
         ValidateDocument(document, project.DurationSeconds);
+        await using var transaction = await db.Database.BeginTransactionAsync(cancellationToken);
         var track = await CreateTrackAsync(userId, movieProjectId, new MovieCaptionTrackRequest
         {
             Name = request.Name, Language = request.Language, IsRtl = request.IsRtl, TrackType = request.TrackType,
             MovieAssemblyId = request.MovieAssemblyId, IsDefault = request.IsDefault, Status = request.Status,
             SourceFormat = format, SourceFileName = request.SourceFileName,
         }, cancellationToken);
-        if (track is null) return null;
+        if (track is null)
+        {
+            await transaction.RollbackAsync(cancellationToken);
+            return null;
+        }
+
         var entity = await db.MovieCaptionTracks.FirstAsync(item => item.Id == track.Id, cancellationToken);
         var now = DateTime.UtcNow;
         var importedCues = document.Cues.Select((cue, index) => new MovieCaptionCue
@@ -367,6 +379,7 @@ public sealed class MovieCaptionService(
         db.MovieCaptionCues.AddRange(importedCues);
         entity.UpdatedAt = now;
         await db.SaveChangesAsync(cancellationToken);
+        await transaction.CommitAsync(cancellationToken);
         return (await GetTrackAsync(userId, entity.Id, cancellationToken))!;
     }
 
@@ -452,7 +465,9 @@ public sealed class MovieCaptionService(
         if (string.IsNullOrWhiteSpace(value)) throw new MovieCaptionValidationException("Caption language is required.");
         var parts = value.Trim().Split('-', StringSplitOptions.RemoveEmptyEntries);
         if (parts.Length == 0 || parts[0].Length is < 2 or > 8 || parts.Any(part => part.Length is < 1 or > 8 || !part.All(char.IsLetterOrDigit))) throw new MovieCaptionValidationException("Caption language must be a valid BCP-47 language tag.");
-        return string.Join('-', parts.Select((part, index) => index == 0 ? part.ToLowerInvariant() : part.Length == 2 && part.All(char.IsLetter) ? part.ToUpperInvariant() : part));
+        var normalized = string.Join('-', parts.Select((part, index) => index == 0 ? part.ToLowerInvariant() : part.Length == 2 && part.All(char.IsLetter) ? part.ToUpperInvariant() : part));
+        if (normalized.Length > MaxLanguageTagLength) throw new MovieCaptionValidationException($"Caption language must be a valid BCP-47 language tag of {MaxLanguageTagLength} characters or fewer.");
+        return normalized;
     }
     private static string? Clean(string? value) => string.IsNullOrWhiteSpace(value) ? null : value.Trim();
     private static MovieCaptionTrackDto ToDto(MovieCaptionTrack track) => new(track.Id, track.MovieProjectId, track.MovieAssemblyId, track.Sequence, track.Name, track.TrackType, track.Language, track.IsRtl, track.IsDefault, track.Status, track.SourceFormat, track.SourceFileName, track.CreatedAt, track.UpdatedAt, track.Cues.OrderBy(item => item.Sequence).Select(ToCueDto).ToArray());

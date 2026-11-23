@@ -91,9 +91,15 @@ dotnet run --project apps/api --urls http://localhost:5000
 The API runs at `http://localhost:5000`. Health check:
 
 ```bash
-curl http://localhost:5000/health
-# {"status":"healthy","service":"Taslim API"}
+curl http://localhost:5000/health/live
+# liveness: HTTP 200 with status=alive and a process check
+
+curl -i http://localhost:5000/readiness
+# readiness: HTTP 200 with status=ready when the database and required
+# storage are available; otherwise HTTP 503 with status=not_ready
 ```
+
+Use `/health` or `/health/live` for process liveness and `/readiness` for deployment dependency readiness. Responses include a server-generated request ID and safe check statuses only; they do not expose credentials, connection strings, storage keys, provider details, or exception text.
 
 Swagger is available in Development at `/swagger`.
 
