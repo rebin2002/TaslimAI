@@ -174,13 +174,20 @@ test.describe("Music Studio structured-lyrics composer wiring", () => {
 
     // Author two rows through the editor's own add controls, then aim them at
     // Sorani. The vocal-language select lives inside
-    // `<details className="music-optional-controls">` in MusicStudioView.tsx;
-    // `<summary>` carries no Playwright-mapped implicit role and the header's own
-    // locale picker shares the accessible name "Language" (i18n.ts
-    // `navigation.language`), so the disclosure is opened by its label and the
-    // select addressed inside its own markup rather than page-wide.
+    // `<details className="music-optional-controls">` in MusicStudioView.tsx, and
+    // its `<select>` is wrapped in its `<label>` exactly like
+    // `#document-output-format` in e2e/document-draft-restore.acceptance.spec.ts.
+    // A wrapped select's computed accessible name carries its own option text
+    // ("Language Auto English Arabic Kurdish Sorani"), so `getByLabel(...,
+    // { exact: true })` matched nothing and both of these tests timed out waiting
+    // for it; the field's id is the stable handle, with the visible label asserted
+    // beside it rather than used to find it. `<summary>` has no Playwright-mapped
+    // implicit role, and the header's own locale picker is also named "Language"
+    // (i18n.ts `navigation.language`), so the disclosure is opened by its text.
     await page.getByText(studioCopy.moreOptions, { exact: true }).click();
-    const vocalLanguage = page.locator("details.music-optional-controls").getByLabel(studioCopy.language, { exact: true });
+    const vocalLanguage = page.locator("#music-vocal-language");
+    await expect(vocalLanguage).toHaveCount(1);
+    await expect(page.locator("details.music-optional-controls label.music-choice-field").filter({ has: vocalLanguage })).toContainText(studioCopy.language);
     await expect(vocalLanguage.getByRole("option", { name: studioCopy.soraniOption })).toBeAttached();
     await vocalLanguage.selectOption("ku");
     await expect(vocalLanguage).toHaveValue("ku");
@@ -269,7 +276,7 @@ test.describe("Music Studio structured-lyrics composer wiring", () => {
 
     await composer.getByRole("button", { name: editorCopy.addChorus, exact: true }).click();
     await page.getByText(studioCopy.moreOptions, { exact: true }).click();
-    await page.locator("details.music-optional-controls").getByLabel(studioCopy.language, { exact: true }).selectOption("ku");
+    await page.locator("#music-vocal-language").selectOption("ku");
     // The chorus row is the first (and only) row here, so `sectionType` reads
     // "Chorus 1" and `lyricsSectionAriaLabel` composes "Chorus 1 · 1".
     await composer.getByRole("textbox", { name: "Chorus 1" }).fill(chorusLyric);
