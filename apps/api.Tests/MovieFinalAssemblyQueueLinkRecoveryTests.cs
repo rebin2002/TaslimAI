@@ -293,6 +293,19 @@ public sealed class MovieFinalAssemblyQueueLinkRecoveryTests
     /// </summary>
     private sealed class DurableAssemblyJobService(TaslimDbContext db, bool ambiguous, bool foreignPayload) : IGenerationJobService
     {
+        // Pending-production phases (IGenerationJobService members added by #829) are outside what
+        // this #696 recovery double models: it drives the CreateAsync replay path only.
+        // Declared out of scope so the interface contract stays explicit and fail-fast, matching
+        // the idiom used by the other IGenerationJobService test doubles in this assembly.
+        public Task<GenerationJob> CreatePendingMovieProductionAsync(Guid userId, CreateGenerationJobRequest request, string idempotencyKey, CancellationToken cancellationToken = default, string? requestId = null) =>
+            throw new NotSupportedException("Issue #696 recovery coverage drives the request seam only.");
+
+        public Task<GenerationJob?> PublishPendingMovieProductionAsync(Guid userId, Guid jobId, CancellationToken cancellationToken = default) =>
+            throw new NotSupportedException("Issue #696 recovery coverage drives the request seam only.");
+
+        public Task<bool> AbortPendingMovieProductionAsync(Guid userId, Guid jobId, CancellationToken cancellationToken = default) =>
+            throw new NotSupportedException("Issue #696 recovery coverage drives the request seam only.");
+
         public int CreateCallCount { get; private set; }
 
         public async Task<GenerationJob> CreateAsync(

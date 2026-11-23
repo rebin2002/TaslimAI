@@ -370,6 +370,8 @@ public sealed class MovieFinalAssemblyQueueRedrive696Tests
         private static NotSupportedException OutOfScope(string member) =>
             new($"issue #696 scenario (a) re-drive tests only reach the pre-publication queue seam; {member} is out of scope");
 
+        public Task<GenerationJob> CreatePendingMovieProductionAsync(Guid userId, CreateGenerationJobRequest request, string idempotencyKey, CancellationToken cancellationToken = default, string? requestId = null) => throw OutOfScope(nameof(CreatePendingMovieProductionAsync));
+
         public Task<GenerationJob?> PublishPendingMovieProductionAsync(Guid userId, Guid jobId, CancellationToken cancellationToken = default) => throw OutOfScope(nameof(PublishPendingMovieProductionAsync));
         public Task<bool> AbortPendingMovieProductionAsync(Guid userId, Guid jobId, CancellationToken cancellationToken = default) => throw OutOfScope(nameof(AbortPendingMovieProductionAsync));
         public Task<GenerationJob?> RetryAsync(Guid userId, Guid jobId, CancellationToken cancellationToken = default, string? idempotencyKey = null, string? requestId = null) => throw OutOfScope(nameof(RetryAsync));
