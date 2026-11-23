@@ -10,6 +10,7 @@ using Taslim.Api.Controllers;
 using Taslim.Api.Contracts;
 using Taslim.Api.Domain;
 using Taslim.Api.Persistence;
+using Taslim.Api.Presentations;
 using Xunit;
 
 namespace Taslim.Api.Tests;
@@ -28,6 +29,18 @@ namespace Taslim.Api.Tests;
 /// at least one actual slide and the slide references, an optional re-opened
 /// deterministic title/content check, and a check that an outsider cannot obtain
 /// representation metadata as well as the blob. Those are added here.
+///
+/// The artifact-integrity half is now accepted against the PRODUCTION gate rather than
+/// only against this file's own checks: the bytes the owner downloads are handed to
+/// `PresentationOutputIntegrityValidator`, the same validator
+/// `PresentationGenerationJobHandler` runs before a rendered deck is stored, together with
+/// the representation metadata the owner is served. Two controls keep that acceptance
+/// honest: a one-relationship edit of the downloaded package must be REJECTED by that gate,
+/// and a junk ZIP satisfying exactly the `Length > 500` + `PK` probes the review rejected
+/// must be rejected by both the production gate and this file's package readback.
+/// The shipped `PresentationOutputIntegrityTests` cover the validator over a freshly
+/// rendered object; they do not cover the bytes returned by the asset download route,
+/// which is what these two additions test, so they are not duplicates of it.
 ///
 /// Scope stated honestly, per the same review: this is a synthetic, provider-free
 /// fixture. It does NOT qualify real Cloudflare R2 / production storage, PDF or PPTX
@@ -191,6 +204,85 @@ public sealed class PresentationExportWorkspaceIsolationTests : IClassFixture<Pr
         }
     }
 
+    [Fact]
+    public async Task Downloaded_package_satisfies_the_production_output_integrity_gate()
+    {
+        var export = await CreateExportAsync("Presentation Export Owner");
+        try
+        {
+            // The metadata behind the integrity claim is the metadata the owner is served,
+            // not literals chosen by this file, so the production gate is exercised over the
+            // real representation triple (type, file name, content type) plus the real bytes.
+            using var metadata = await export.Owner.GetAsync($"/api/assets/{export.AssetId}");
+            Assert.Equal(HttpStatusCode.OK, metadata.StatusCode);
+            using var metadataJson = JsonDocument.Parse(await metadata.Content.ReadAsStringAsync());
+            var representation = Assert.Single(metadataJson.RootElement.GetProperty("representations").EnumerateArray());
+
+            var served = new RenderedPresentation(
+                representation.GetProperty("representationType").GetString()!,
+                representation.GetProperty("fileName").GetString()!,
+                representation.GetProperty("contentType").GetString()!,
+                export.Bytes);
+
+            // The served representation is a .pptx OOXML presentation and the downloaded bytes
+            // pass the production output-integrity gate unchanged: if the asset route
+            // truncated, re-encoded or swapped the stored artifact, this is where it shows.
+            Assert.Equal("pptx", served.RepresentationType);
+            Assert.EndsWith(".pptx", served.FileName, StringComparison.OrdinalIgnoreCase);
+            Assert.Equal(PptxMediaType, served.ContentType);
+            PresentationOutputIntegrityValidator.Validate(served);
+        }
+        finally
+        {
+            export.Owner.Dispose();
+        }
+    }
+
+    [Fact]
+    public async Task The_production_gate_rejects_a_downloaded_package_with_one_broken_slide_reference()
+    {
+        var export = await CreateExportAsync("Presentation Export Owner");
+        try
+        {
+            // Control for the test above, so its acceptance is not vacuous: repointing the
+            // first slide relationship of the downloaded package at a non-existent rId must
+            // make the same gate fail.
+            var corrupted = RewritePackagePart(
+                export.Bytes,
+                "ppt/presentation.xml",
+                content => content.Replace("r:id=\"rId2\"", "r:id=\"rId999\"", StringComparison.Ordinal));
+            Assert.False(corrupted.SequenceEqual(export.Bytes), "Rewriting the slide reference did not change the package bytes.");
+
+            var served = new RenderedPresentation("pptx", $"{export.Title}.pptx", PptxMediaType, export.Bytes);
+            var broken = served with { Content = corrupted };
+
+            var exception = Assert.Throws<PresentationOutputIntegrityException>(
+                () => PresentationOutputIntegrityValidator.Validate(broken));
+            Assert.Contains("rId999", exception.Message, StringComparison.Ordinal);
+
+            // The junk package the review described fails BOTH the production gate and this
+            // file's own package readback, even though it clears the `Length > 500` + `PK`
+            // probes that were judged insufficient.
+            var junk = BuildJunkPackage();
+            Assert.True(junk.Length > 500, $"The junk package is only {junk.Length} bytes, so it would not have cleared the rejected length probe.");
+            Assert.Equal((byte)'P', junk[0]);
+            Assert.Equal((byte)'K', junk[1]);
+            var junkPresentation = served with { Content = junk };
+
+            var junkFailure = Record.Exception(() => PresentationOutputIntegrityValidator.Validate(junkPresentation));
+            Assert.IsType<PresentationOutputIntegrityException>(junkFailure);
+            Assert.Contains("ppt/presentation.xml", junkFailure!.Message, StringComparison.Ordinal);
+
+            var readbackFailure = Record.Exception(() => AssertPresentationPackageStructure(junk));
+            Assert.NotNull(readbackFailure);
+            Assert.Contains("ppt/presentation.xml", readbackFailure!.Message, StringComparison.Ordinal);
+        }
+        finally
+        {
+            export.Owner.Dispose();
+        }
+    }
+
     private sealed record ExportedPresentation(
         HttpClient Owner,
         AuthResponse OwnerAuth,
@@ -329,6 +421,72 @@ public sealed class PresentationExportWorkspaceIsolationTests : IClassFixture<Pr
             ?? throw new Xunit.Sdk.XunitException($"The exported package does not contain {name}.");
         using var reader = new StreamReader(entry.Open(), Encoding.UTF8);
         return reader.ReadToEnd();
+    }
+
+    /// <summary>
+    /// Copies a package while rewriting one text part, so a defect can be introduced into
+    /// the bytes the owner actually downloaded. Same technique as the shipped
+    /// `PresentationOutputIntegrityTests.RewriteArchive`, applied to served content instead
+    /// of freshly rendered content; parts are stored uncompressed so only the rewritten part
+    /// differs from the original bytes.
+    /// </summary>
+    private static byte[] RewritePackagePart(byte[] packageBytes, string part, Func<string, string> rewrite)
+    {
+        using var sourceStream = new MemoryStream(packageBytes, writable: false);
+        using var source = new ZipArchive(sourceStream, ZipArchiveMode.Read);
+        using var targetStream = new MemoryStream();
+        using (var target = new ZipArchive(targetStream, ZipArchiveMode.Create, leaveOpen: true))
+        {
+            foreach (var entry in source.Entries)
+            {
+                var copyEntry = target.CreateEntry(entry.FullName, CompressionLevel.NoCompression);
+                using var copyStream = copyEntry.Open();
+                if (string.Equals(entry.FullName, part, StringComparison.Ordinal))
+                {
+                    using var reader = new StreamReader(entry.Open(), Encoding.UTF8);
+                    using var writer = new StreamWriter(copyStream, new UTF8Encoding(false));
+                    writer.Write(rewrite(reader.ReadToEnd()));
+                }
+                else
+                {
+                    using var entryStream = entry.Open();
+                    entryStream.CopyTo(copyStream);
+                }
+            }
+        }
+
+        return targetStream.ToArray();
+    }
+
+    /// <summary>
+    /// A ZIP that satisfies a magic-byte and length probe but carries no OOXML parts.
+    /// </summary>
+    private static byte[] BuildJunkPackage()
+    {
+        using var stream = new MemoryStream();
+        using (var archive = new ZipArchive(stream, ZipArchiveMode.Create, leaveOpen: true))
+        {
+            var contentTypesEntry = archive.CreateEntry("[Content_Types].xml", CompressionLevel.NoCompression);
+            using (var writer = new StreamWriter(contentTypesEntry.Open(), new UTF8Encoding(false)))
+            {
+                writer.Write("<?xml version=\"1.0\" encoding=\"UTF-8\"?><Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\" />");
+            }
+
+            // The package root relationships part is present and well-formed, so the only
+            // thing wrong with this archive is the OOXML content the review described as
+            // missing: it carries no presentation part at all.
+            var packageRelsEntry = archive.CreateEntry("_rels/.rels", CompressionLevel.NoCompression);
+            using (var writer = new StreamWriter(packageRelsEntry.Open(), new UTF8Encoding(false)))
+            {
+                writer.Write("<?xml version=\"1.0\" encoding=\"UTF-8\"?><Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\" />");
+            }
+
+            var junkEntry = archive.CreateEntry("junk.bin", CompressionLevel.NoCompression);
+            using var junkStream = junkEntry.Open();
+            junkStream.Write(Encoding.UTF8.GetBytes(new string('k', 4096)));
+        }
+
+        return stream.ToArray();
     }
 
     private static async Task<AuthResponse> Register(HttpClient client, string displayName)

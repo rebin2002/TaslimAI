@@ -1,4 +1,5 @@
 import { createElement } from "react";
+import { readFileSync } from "node:fs";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import { HealthPlaceholderPage } from "@/components/HealthPlaceholderPage";
@@ -15,12 +16,16 @@ import { locales, translations, type Locale } from "@/lib/i18n";
  * assertions could not catch a regression in the application, and that its screen
  * guard rejected generic form controls (`<input`, `<form`, `<select`, checkboxes,
  * switches) even when they were unrelated to document previews. Both parts were
- * removed: this file drives the real component and the real dictionaries and keeps
- * only assertions that are true of the shipped UI, described as a placeholder.
+ * removed: this file drives the real component, the real route modules and the real
+ * dictionaries, and keeps only assertions that are true of the shipped UI.
  *
- * AUDIT CORRECTED AGAINST CURRENT MAIN (27ee26d2aab344f47bfa6510ea9f8553391e35f8).
+ * AUDIT RE-RUN AGAINST CURRENT MAIN (6d83cc70d2dc9973bd28210bf778ba6a047ce1a0; first
+ * corrected against 27ee26d2aab344f47bfa6510ea9f8553391e35f8). Every claim below was
+ * re-checked on the newer main, including the 19 commits that landed with integration PR
+ * #1249 and source PR #772, and it still holds: the panel has no non-test importer.
+ *
  * The earlier version of this header claimed "no consent state exists in `apps/web`
- * at all". That claim is FALSE and is withdrawn. Real shared state now ships:
+ * at all". That claim is FALSE and remains withdrawn. Real shared state ships:
  * - `apps/web/src/lib/healthCareConsentSelection.ts` — the deterministic controller:
  *   `reduceConsentSelection(state, { type: "revoke" })` clears `selection`, sets
  *   `preview` to `{ status: "unavailable", reason: "consent-revoked" }`, bumps
@@ -41,14 +46,24 @@ import { locales, translations, type Locale } from "@/lib/i18n";
  *   preview affordances immediately on withdrawal", driven through the same store the
  *   browser uses.
  * Restating those assertions in this file would be an already-shipped duplicate, so
- * this lane keeps only what main does NOT pin.
+ * this lane keeps only what main does NOT pin. Also already shipped, and deliberately
+ * not repeated here: the API-side revocation behaviour of report attachments
+ * (`apps/api.Tests/HealthCareReportAssetRevocationTests.cs`, source #729, and
+ * `HealthCareReportAuthorizationTests.cs`, merged with PR #1249), and the browser-level
+ * placeholder coverage in `apps/web/e2e/health-care.spec.ts` /
+ * `health-care-tile.spec.ts`, which run in the hosted `Browser E2E` job and already
+ * assert anonymous redirect, the "Coming soon" status, the disabled affordance count,
+ * RTL/Arabic/Kurdish headings and chooser-tile navigation to the route.
  *
  * What is still true, and what this file pins:
  * 1. The health routes are still placeholders: `/personal/health` and `/create/health`
  *    each render `HealthPlaceholderPage` (`apps/web/src/app/{personal,create}/health/page.tsx`),
  *    and nothing outside tests imports `HealthCareConsentSelectionPanel`. The real
  *    consent UI is therefore not reachable by a user yet, so no consent control can be
- *    granted, toggled or revoked from the shipped routes.
+ *    granted, toggled or revoked from the shipped routes. Claim 1 is now pinned by
+ *    reading those two route modules directly (precedent: the shipped
+ *    `apps/web/src/app/[department]/[feature]/page.test.ts` asserts against its own
+ *    route source), not by rendering a stand-in.
  * 2. Every control the placeholder renders is disabled and self-labels as unavailable,
  *    so no health-document action — the action a revocation would have to guard —
  *    can be taken from it.
@@ -68,9 +83,18 @@ import { locales, translations, type Locale } from "@/lib/i18n";
  * Remaining acceptance gap, stated rather than papered over: an END-TO-END user
  * revocation transition (grant in a real screen, revoke, observe the cleared state
  * through the route) cannot be tested until the consent panel is mounted on a health
- * route. When that routing lands, assertion 3 and assertion 4 are designed to fail and
- * must be replaced by a transition test through the mounted component, not by a model
- * living in this file.
+ * route. When that routing lands, assertion 3 and assertion 4 — and the two route-source
+ * tripwires at the end of this file — fail by design, and must be replaced by a
+ * transition test through the mounted component, not by a model living in this file.
+ *
+ * Routing ownership, recorded for coordination: mounting the consent UI is #714's
+ * remaining scope, and PR #1151 (`c258a01c`, base `65d1f59b`) is the open lane that adds
+ * `HealthCareConsentJourney` / `HealthCareScopedConsentJourney` and changes
+ * `apps/web/src/app/create/health/page.tsx` to mount them. This lane deliberately leaves
+ * those modules and that route file untouched so #1151 keeps sole ownership of the
+ * routing decision; whoever lands it owns replacing these tripwires with the real
+ * journey test. Note that #1151 was cut before `5d57f774` reached main and therefore
+ * re-presents files main already ships — that reconciliation belongs to #1151, not here.
  *
  * Test-only, synthetic-free: edits no source file, claims no owner-held path, mounts no
  * provider, and makes no API, model, storage or network call.
@@ -88,6 +112,45 @@ function renderPlaceholder(entry?: "create" | "personal"): string {
     ),
   );
 }
+
+/**
+ * Reads a shipped source file next to `apps/web/src`. The repository already uses this
+ * idiom to pin route modules: `apps/web/src/app/[department]/[feature]/page.test.ts`
+ * asserts `await requireAuthenticatedPage(...)` ordering against its own route source,
+ * and `apps/api.Tests/GenerationJobConcurrencyIdempotencyTests.cs` reads production
+ * source the same way. Used here so the health-route claims below are checked against
+ * the modules the app actually serves, not against a stand-in written in this file.
+ */
+function readWebSource(...segments: string[]): string {
+  return readFileSync(new URL(`../${segments.join("/")}`, import.meta.url), "utf8");
+}
+
+const ROUTE_SOURCES: Record<"personalHealth" | "createHealth", string> = {
+  personalHealth: readWebSource("app/personal/health/page.tsx"),
+  createHealth: readWebSource("app/create/health/page.tsx"),
+};
+
+const HEALTH_ROUTES = [
+  {
+    name: "personalHealth",
+    path: "/personal/health",
+    source: ROUTE_SOURCES.personalHealth,
+    element: "<HealthPlaceholderPage />",
+  },
+  {
+    name: "createHealth",
+    path: "/create/health",
+    source: ROUTE_SOURCES.createHealth,
+    element: '<HealthPlaceholderPage entry="create" />',
+  },
+] as const;
+
+const CONSENT_MODULE_REFERENCES = [
+  "HealthCareConsentSelectionPanel",
+  "healthCareConsentSelection",
+  "HealthCareConsentJourney",
+  "health-care-consent",
+];
 
 function renderedButtons(html: string): { tag: string; body: string }[] {
   const out: { tag: string; body: string }[] = [];
@@ -185,5 +248,44 @@ describe("issue #714 Health Care consent-revocation fence on the shipped placeho
         `${locale}: the consent precondition is not dropped`,
       ).toBeGreaterThan(0);
     }
+  });
+
+  it("keeps both health routes on the placeholder module and off the consent modules", () => {
+    // The real app transition, asserted against the real route modules rather than a model.
+    // Both health routes are dynamic, unindexed, authentication-gated pages whose rendered
+    // body is the placeholder, in the correct entry mode. If either route is ever pointed at
+    // the consent controller or panel, this test fails at the import/reference level instead
+    // of letting a half-wired consent surface ship behind a green placeholder suite.
+    for (const route of HEALTH_ROUTES) {
+      const { name, path, source, element } = route;
+      expect(source.length, `${name}: the route module was found`).toBeGreaterThan(0);
+      expect(source, `${name}: renders as a server-dynamic page`).toContain('export const dynamic = "force-dynamic";');
+      expect(source, `${name}: is excluded from indexing`).toContain("index: false");
+      expect(source, `${name}: imports the placeholder component`).toContain('from "@/components/HealthPlaceholderPage"');
+      expect(source, `${name}: authenticates against its own path`).toContain(`await requireAuthenticatedPage("${path}")`);
+      expect(source, `${name}: renders the placeholder element`).toContain(element);
+
+      const authIndex = source.indexOf("await requireAuthenticatedPage(");
+      const renderIndex = source.indexOf("return <ProtectedPage>");
+      expect(authIndex, `${name}: authentication call is present`).toBeGreaterThanOrEqual(0);
+      expect(renderIndex, `${name}: render statement is present`).toBeGreaterThan(authIndex);
+
+      for (const reference of CONSENT_MODULE_REFERENCES) {
+        expect(source, `${name}: must not reference ${reference} until a transition test exists`).not.toContain(reference);
+      }
+    }
+  });
+
+  it("pins the shipped consent panel as still unreferenced by any route source", () => {
+    // Mechanically pins the recorded remaining gap: the panel exists and is tested in
+    // isolation on main, but no route mounts it, so no user-reachable revocation
+    // transition can be asserted yet. This is the tripwire for that condition — it fails
+    // the moment routing lands, at which point a transition test through the mounted
+    // component must replace it. Ownership of that routing work is tracked on issue #714;
+    // PR #1151 is the open lane that would introduce a consent journey into the create
+    // route, so this lane deliberately does not touch those modules.
+    const mounted = HEALTH_ROUTES.filter((route) =>
+      CONSENT_MODULE_REFERENCES.some((reference) => route.source.includes(reference)));
+    expect(mounted.map((route) => route.name), "health routes that mount a consent module").toEqual([]);
   });
 });
