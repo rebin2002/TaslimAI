@@ -22,6 +22,7 @@ public sealed class PresentationRenderer : IPresentationRenderer
     private const string C = "http://schemas.openxmlformats.org/drawingml/2006/chart";
     private const int SlideWidth = 12_192_000;
     private const int SlideHeight = 6_858_000;
+    private const int MinColumnTextHeight = 120_000;
     private int shapeId;
 
     public RenderedPresentation Render(PresentationDraft draft, PresentationGenerationInput input, PresentationGenerationOptions options)
@@ -118,13 +119,74 @@ public sealed class PresentationRenderer : IPresentationRenderer
         var columns = block.Columns.ToArray();
         if (columns.Length == 0) return;
         var width = 10_200_000 / columns.Length;
+        var cardHeight = height - 130_000;
+        var topInset = 160_000;
+        var headingHeight = 420_000;
+        var headingGap = 100_000;
+        var bottomInset = 40_000;
+        if (cardHeight < topInset + headingHeight + headingGap + bottomInset + MinColumnTextHeight)
+        {
+            // Compact title, section, and closing blocks need smaller insets and heading space.
+            topInset = cardHeight / 6;
+            headingGap = cardHeight / 12;
+            bottomInset = Math.Min(bottomInset, cardHeight / 12);
+            var textHeight = cardHeight - topInset - headingGap - bottomInset;
+            headingHeight = Math.Clamp(textHeight * 2 / 5, MinColumnTextHeight, textHeight - MinColumnTextHeight);
+        }
+
+        var bodyTop = topInset + headingHeight + headingGap;
+        var bodyHeight = cardHeight - bodyTop - bottomInset;
         for (var index = 0; index < columns.Length; index++)
         {
             var x = 820_000 + index * width;
-            body.Append(Card(NextId(), x, y, width - 180_000, height - 130_000, "FFFFFF", "DCE6ED"));
-            body.Append(TextBox(NextId(), x + 140_000, y + 160_000, width - 460_000, 420_000, columns[index].Heading, "087E8B", 15, rtl, language, true, null));
-            body.Append(TextBox(NextId(), x + 140_000, y + 680_000, width - 460_000, height - 850_000, string.Join("\n", columns[index].Items.Select(item => $"• {item}")), "253B53", 13, rtl, language, false, null));
+            body.Append(Card(NextId(), x, y, width - 180_000, cardHeight, "FFFFFF", "DCE6ED"));
+            // Compact cards cannot hold a 15pt heading line plus several 13pt item lines inside their fixed
+            // boxes, and an explicit-size text box with no autofit element hands overflow to the application:
+            // PowerPoint (and LibreOffice) then draw every glyph past the box - across the card bottom. The
+            // rendered evidence for the #741 visual review measured 9-18% of column body ink outside cards on
+            // title/section/closing slides at 2-4 blocks in en/ar/ku. The emitter knows the text, box and
+            // metrics at render time, so it now ships the same "shrink text on overflow" answer PowerPoint
+            // would save: an explicit <a:normAutofit fontScale/> computed from a conservative line estimate.
+            // Box geometry is untouched, boxes that already fit at 100% keep the exact self-closed bodyPr
+            // (so the shipped full-height column contract, #887's caption geometry included, is byte-stable),
+            // and no text is ever truncated, split, or dropped.
+            var headingScale = ColumnTextFitScale(15, width - 460_000, headingHeight, rtl, [columns[index].Heading]);
+            var bodyScale = ColumnTextFitScale(13, width - 460_000, bodyHeight, rtl, columns[index].Items.Select(item => $"• {item}"));
+            body.Append(TextBox(NextId(), x + 140_000, y + topInset, width - 460_000, headingHeight, columns[index].Heading, "087E8B", 15, rtl, language, true, null, headingScale));
+            body.Append(TextBox(NextId(), x + 140_000, y + bodyTop, width - 460_000, bodyHeight, string.Join("\n", columns[index].Items.Select(item => $"• {item}")), "253B53", 13, rtl, language, false, null, bodyScale));
         }
+    }
+
+    // Returns a fontScale (percent x 1000, ECMA-376 CT_TextBody/CT_TextNormalAutofit) for a fixed-size
+    // column box, or 0 when the content already fits at 100% (emit no autofit element then). The estimate
+    // is deliberately conservative: 0.65 em average advance per character at the reduced size, and a line
+    // height of 1.25 em for the Latin font versus 1.50 em for Noto Sans Arabic, whose tall hhea metrics
+    // pushed RTL ink below the card in the pre-fix renders. Only the top default inset (45 720 EMU) is
+    // subtracted from the box: the bottom inset is not a clip line for drawn ink. The scan floors at 20%,
+    // where the remaining overflow lands inside the card's bottom inset band; pathological drafts beyond
+    // that still beat the shipped defect, which pushed every line past the card.
+    private static int ColumnTextFitScale(int sizePt, int boxCx, int boxCy, bool rtl, IEnumerable<string> lines)
+    {
+        var textWidth = boxCx - 182_880L; // default lIns + rIns
+        var textHeight = boxCy - 45_720L; // default tIns; bottom inset is not a clip line
+        if (textWidth <= 0 || textHeight <= 0) return 0;
+        var items = lines.ToArray();
+        var emu = (long)sizePt * 12_700L;
+        for (var scale = 100_000; scale >= 20_000; scale -= scale > 50_000 ? 5_000 : 2_500)
+        {
+            var charWidth = emu * 65L * scale / 10_000_000L;
+            var lineHeight = emu * (rtl ? 150L : 125L) * scale / 10_000_000L;
+            if (charWidth <= 0 || lineHeight <= 0) continue;
+            long total = 0;
+            foreach (var line in items)
+            {
+                var wrapped = (line.Length * charWidth + textWidth - 1) / textWidth;
+                total += Math.Max(1L, wrapped) * lineHeight;
+                if (total > textHeight) break;
+            }
+            if (total <= textHeight) return scale >= 100_000 ? 0 : scale;
+        }
+        return 20_000;
     }
 
     private void RenderMetrics(StringBuilder body, PresentationContentBlock block, int y, int height, bool rtl, string language)
@@ -215,9 +277,17 @@ public sealed class PresentationRenderer : IPresentationRenderer
 
     private string TextBox(int id, int x, int y, int cx, int cy, string text, string color, int size, bool rtl, string language, bool bold, string? fill)
     {
+        return TextBox(id, x, y, cx, cy, text, color, size, rtl, language, bold, fill, 0);
+    }
+
+    private string TextBox(int id, int x, int y, int cx, int cy, string text, string color, int size, bool rtl, string language, bool bold, string? fill, int fontScalePercent)
+    {
         var paragraphs = string.Join("", text.Replace("\r", "").Split('\n').Select(line => $"<a:p><a:pPr algn=\"{(rtl ? "r" : "l")}\" rtl=\"{(rtl ? "1" : "0")}\"/><a:r><a:rPr lang=\"{language}\" sz=\"{size * 100}\" b=\"{(bold ? "1" : "0")}\" typeface=\"{Font(language)}\"/><a:t>{Escape(line)}</a:t></a:r><a:endParaRPr lang=\"{language}\"/></a:p>"));
         var fillXml = fill is null ? "<a:noFill/>" : $"<a:solidFill><a:srgbClr val=\"{fill}\"/></a:solidFill>";
-        return $"<p:sp><p:nvSpPr><p:cNvPr id=\"{id}\" name=\"Text {id}\"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x=\"{x}\" y=\"{y}\"/><a:ext cx=\"{cx}\" cy=\"{cy}\"/></a:xfrm><a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom>{fillXml}<a:ln><a:noFill/></a:ln></p:spPr><p:txBody><a:bodyPr wrap=\"square\" rtlCol=\"{(rtl ? "1" : "0")}\"/><a:lstStyle/>{paragraphs}</p:txBody></p:sp>";
+        var bodyPr = fontScalePercent > 0
+            ? $"<a:bodyPr wrap=\"square\" rtlCol=\"{(rtl ? "1" : "0")}\"><a:normAutofit fontScale=\"{fontScalePercent}\"/></a:bodyPr>"
+            : $"<a:bodyPr wrap=\"square\" rtlCol=\"{(rtl ? "1" : "0")}\"/>";
+        return $"<p:sp><p:nvSpPr><p:cNvPr id=\"{id}\" name=\"Text {id}\"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x=\"{x}\" y=\"{y}\"/><a:ext cx=\"{cx}\" cy=\"{cy}\"/></a:xfrm><a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom>{fillXml}<a:ln><a:noFill/></a:ln></p:spPr><p:txBody>{bodyPr}<a:lstStyle/>{paragraphs}</p:txBody></p:sp>";
     }
 
     private int NextId() => ++shapeId;
