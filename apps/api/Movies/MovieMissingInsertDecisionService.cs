@@ -94,25 +94,56 @@ public sealed class MovieMissingInsertDecisionService(
         if (decision.Status != MovieMissingInsertDecisionStatuses.PendingReview)
             throw Invalid("MOVIE_INSERT_REVIEW_STATE_INVALID", "Only a pending missing-insert decision can be reviewed.");
 
-        decision.Status = outcome;
-        decision.ReviewedByUserId = userId;
-        decision.ReviewedAt = DateTime.UtcNow;
-        decision.ReviewNote = Clean(request.Comment);
-        decision.SelectedTakeId = null;
-        decision.SelectedSelectId = null;
+        // Approval sources are validated before anything is persisted, so a review that cannot
+        // produce a server-grounded source leaves the decision untouched in PendingReview.
+        Guid? selectedTakeId = null;
+        Guid? selectedSelectId = null;
         if (outcome == MovieMissingInsertDecisionStatuses.Approved)
         {
             var takeId = request.TakeId ?? decision.AnchorTakeId;
-            if (takeId is not Guid selectedTakeId)
+            if (takeId is not Guid groundedTakeId)
                 throw Invalid("MOVIE_INSERT_SOURCE_REQUIRED", "Approval requires a server-grounded selected take.");
-            if (decision.AnchorTakeId != selectedTakeId)
+            if (decision.AnchorTakeId != groundedTakeId)
                 throw Invalid("MOVIE_INSERT_SOURCE_NOT_GROUNDED", "The selected take must be the take grounded by the server planner.");
-            var selection = await ValidateSourceAsync(decision, selectedTakeId, request.SelectId ?? decision.AnchorSelectId, cancellationToken);
-            decision.SelectedTakeId = selection.TakeId;
-            decision.SelectedSelectId = selection.SelectId;
+            var selection = await ValidateSourceAsync(decision, groundedTakeId, request.SelectId ?? decision.AnchorSelectId, cancellationToken);
+            selectedTakeId = selection.TakeId;
+            selectedSelectId = selection.SelectId;
         }
-        await db.SaveChangesAsync(cancellationToken);
-        return ToDto(decision);
+
+        // Two reviewers can hold the same PendingReview row in their change trackers at the same
+        // time (each precheck above sees only its own context's view), and a review can even be
+        // delayed past an Apply. The write is therefore a compare-and-set: every review field is
+        // updated by one statement whose WHERE clause still requires Status = PendingReview. The
+        // loser observes zero matched rows and returns a conflict instead of silently overwriting
+        // the winning review - or an already applied - state, mirroring the atomic claim used by
+        // ApplyAsync below. See MovieMissingInsertDecisionReviewConcurrencyPostgresTests for the
+        // concurrent two-context regression on the same PostgreSQL engine CI runs.
+        var reviewedAt = DateTime.UtcNow;
+        var reviewNote = Clean(request.Comment);
+        Guid? reviewerId = userId;
+        var reviewed = await db.MovieMissingInsertDecisions
+            .Where(item => item.Id == decisionId && item.Status == MovieMissingInsertDecisionStatuses.PendingReview)
+            .ExecuteUpdateAsync(setters => setters
+                .SetProperty(item => item.Status, outcome)
+                .SetProperty(item => item.ReviewedByUserId, reviewerId)
+                .SetProperty(item => item.ReviewedAt, reviewedAt)
+                .SetProperty(item => item.ReviewNote, reviewNote)
+                .SetProperty(item => item.SelectedTakeId, selectedTakeId)
+                .SetProperty(item => item.SelectedSelectId, selectedSelectId), cancellationToken);
+        if (reviewed != 1)
+            throw Conflict("MOVIE_INSERT_REVIEW_RACE", "The missing-insert decision was reviewed or applied while this review was in progress.");
+
+        // Keep the tracked instance consistent with the committed row (same discipline as the
+        // claim in ApplyAsync) and answer from an independent read-back so the response cannot
+        // claim fields the database does not hold.
+        decision.Status = outcome;
+        decision.ReviewedByUserId = reviewerId;
+        decision.ReviewedAt = reviewedAt;
+        decision.ReviewNote = reviewNote;
+        decision.SelectedTakeId = selectedTakeId;
+        decision.SelectedSelectId = selectedSelectId;
+        var persisted = await db.MovieMissingInsertDecisions.AsNoTracking().SingleAsync(item => item.Id == decisionId, cancellationToken);
+        return ToDto(persisted);
     }
 
     public async Task<MovieMissingInsertDecisionDto?> ApplyAsync(Guid userId, Guid decisionId, CancellationToken cancellationToken)
