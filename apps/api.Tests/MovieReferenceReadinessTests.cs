@@ -128,6 +128,74 @@ public sealed class MovieReferenceReadinessTests
         Assert.True(result.BlocksGeneration);
     }
 
+    [Theory]
+    [InlineData("Props")]
+    [InlineData("Important")]
+    public void A_prop_named_after_the_placeholder_header_words_is_not_falsely_attached(string propName)
+    {
+        var result = MovieReferenceReadinessPolicy.EvaluatePropReference(
+            "Important props: . VFX: none. Production notes: none",
+            [Prop(propName)],
+            important: true);
+
+        Assert.Equal(MovieReferenceReadinessItemStates.Complete, result.State);
+        Assert.Null(result.SourceId);
+    }
+
+    [Fact]
+    public void Enumerated_director_prop_requirements_fail_closed_when_a_named_prop_is_missing()
+    {
+        var compassId = Guid.NewGuid();
+        var partial = MovieReferenceReadinessPolicy.EvaluatePropReference(
+            "Important props: compass, notebook. VFX: none. Production notes: none",
+            [Prop("Compass", compassId)],
+            important: true);
+
+        Assert.Equal(MovieReferenceReadinessItemStates.Missing, partial.State);
+        Assert.True(partial.BlocksGeneration);
+        Assert.False(partial.OverrideAllowed);
+
+        var complete = MovieReferenceReadinessPolicy.EvaluatePropReference(
+            "Important props: compass, notebook. VFX: none. Production notes: none",
+            [Prop("Compass", compassId), Prop("Notebook")],
+            important: true);
+
+        Assert.Equal(MovieReferenceReadinessItemStates.Complete, complete.State);
+        Assert.Equal(compassId, complete.SourceId);
+    }
+
+    [Fact]
+    public void An_enumerated_requirement_is_satisfied_by_a_more_specific_canonical_prop_name()
+    {
+        var propId = Guid.NewGuid();
+        var result = MovieReferenceReadinessPolicy.EvaluatePropReference(
+            "Important props: compass. VFX: none. Production notes: none",
+            [Prop("Brass Compass", propId)],
+            important: true);
+
+        Assert.Equal(MovieReferenceReadinessItemStates.Complete, result.State);
+        Assert.Equal(propId, result.SourceId);
+    }
+
+    [Fact]
+    public void Combining_marks_fold_inside_tokens_for_unicode_prop_matching()
+    {
+        var propId = Guid.NewGuid();
+        var decomposedAgainstPlain = MovieReferenceReadinessPolicy.EvaluatePropReference(
+            "Mara sips a cafe\u0301 before the crossing.",
+            [Prop("Cafe", propId)],
+            important: true);
+        Assert.Equal(MovieReferenceReadinessItemStates.Complete, decomposedAgainstPlain.State);
+        Assert.Equal(propId, decomposedAgainstPlain.SourceId);
+
+        var decomposedAgainstDecomposed = MovieReferenceReadinessPolicy.EvaluatePropReference(
+            "Mara sips a cafe\u0301 before the crossing.",
+            [Prop("cafe\u0301", propId)],
+            important: true);
+        Assert.Equal(MovieReferenceReadinessItemStates.Complete, decomposedAgainstDecomposed.State);
+        Assert.Equal(propId, decomposedAgainstDecomposed.SourceId);
+    }
+
     [Fact]
     public void Ten_reference_dimensions_are_aggregated_into_an_explainable_blocked_result()
     {

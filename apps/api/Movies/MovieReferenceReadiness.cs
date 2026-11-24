@@ -93,15 +93,48 @@ public static class MovieReferenceReadinessPolicy
         IReadOnlyCollection<MovieProductionPropReferenceDto> props,
         bool important)
     {
-        var text = shotText ?? string.Empty;
-        var matched = props.FirstOrDefault(prop => ContainsWord(text, prop.Name));
-        var propMentioned = ContainsAny(SignalText(text), "prop", "props", "object", "notebook", "compass", "key", "seed", "weapon");
+        var raw = shotText ?? string.Empty;
+        var enumerated = EnumeratedPropRequirements(raw);
+        if (enumerated.Count > 0)
+        {
+            // An explicit Director prop list is a set of named requirements: every
+            // enumerated prop must have a canonical World reference that covers it,
+            // otherwise the item fails closed for the unmatched names.
+            var unsatisfied = new List<string>();
+            MovieProductionPropReferenceDto? representative = null;
+            foreach (var requirement in enumerated)
+            {
+                var prop = props.FirstOrDefault(candidate => ContainsWord(requirement, candidate.Name) || ContainsWord(candidate.Name, requirement));
+                if (prop is null) unsatisfied.Add(requirement);
+                else representative ??= prop;
+            }
+            if (unsatisfied.Count > 0)
+                return new("props", "Prop references", MovieReferenceReadinessItemStates.Missing, important, important, !important, $"The shot explicitly requires {string.Join(", ", unsatisfied)}, but no named canonical World prop reference matches every required prop.", "world_prop");
+            return new("props", "Prop references", MovieReferenceReadinessItemStates.Complete, true, false, true, $"Canonical prop reference '{representative!.Name}' is attached to this shot.", "world_prop", representative.PropId);
+        }
+
+        var cleaned = SignalText(raw);
+        var matched = props.FirstOrDefault(prop => ContainsWord(cleaned, prop.Name));
+        var propMentioned = ContainsAny(cleaned, "prop", "props", "object", "notebook", "compass", "key", "seed", "weapon");
 
         if (!propMentioned && matched is null)
             return new("props", "Prop references", MovieReferenceReadinessItemStates.Complete, false, false, true, "No prop reference is applicable to this shot.");
         if (matched is not null)
             return new("props", "Prop references", MovieReferenceReadinessItemStates.Complete, true, false, true, $"Canonical prop reference '{matched.Name}' is attached to this shot.", "world_prop", matched.PropId);
         return new("props", "Prop references", MovieReferenceReadinessItemStates.Missing, important, important, !important, "The shot calls for a prop, but no named canonical World prop reference matches the shot.", "world_prop");
+    }
+
+    private static readonly Regex EnumeratedPropsHeader = new(
+        @"\bImportant\s+props:\s*(?<items>[^.\n]+)\.",
+        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+
+    private static List<string> EnumeratedPropRequirements(string text)
+    {
+        var match = EnumeratedPropsHeader.Match(text);
+        if (!match.Success) return [];
+        return match.Groups["items"].Value
+            .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .ToList();
     }
 
     // The Director shot-plan apply executor always emits an "Important props: ." header
@@ -155,7 +188,7 @@ public static class MovieReferenceReadinessPolicy
             }
             else if (runStart >= 0)
             {
-                tokens.Add(value.Substring(runStart, index - runStart));
+                tokens.Add(FoldToken(value.Substring(runStart, index - runStart)));
                 runStart = -1;
             }
         }
@@ -163,9 +196,38 @@ public static class MovieReferenceReadinessPolicy
     }
 
     // Intra-word Unicode marks (apostrophe, curly apostrophe, zero-width non-joiner)
-    // stay inside a token so names like "Mara's notebook" match as written.
+    // stay inside a token so names like "Mara's notebook" match as written, and
+    // combining marks attach to their base token and are then folded away, so an
+    // accented decomposed mention ("cafe" + U+0301) still matches the plain or
+    // identically marked canonical name. A full composed/decomposed equivalence
+    // map is unavailable here because this toolchain's reference assemblies omit
+    // System.Globalization normalization types.
+    private static string FoldToken(string token)
+    {
+        var anyMark = false;
+        foreach (var character in token)
+        {
+            if (IsCombiningMark(character)) { anyMark = true; break; }
+        }
+        if (!anyMark) return token;
+        var builder = new StringBuilder(token.Length);
+        foreach (var character in token)
+        {
+            if (!IsCombiningMark(character)) builder.Append(character);
+        }
+        return builder.ToString();
+    }
+
+    private static bool IsCombiningMark(char value) =>
+        System.Globalization.CharUnicodeInfo.GetUnicodeCategory(value)
+            is System.Globalization.UnicodeCategory.NonSpacingMark
+            or System.Globalization.UnicodeCategory.SpacingCombiningMark
+            or System.Globalization.UnicodeCategory.EnclosingMark;
+
     private static bool IsWordCharacter(char value) =>
-        char.IsLetterOrDigit(value) || value is '\'' or '\u2019' or '\u200C';
+        char.IsLetterOrDigit(value)
+        || value is '\'' or '\u2019' or '\u200C'
+        || IsCombiningMark(value);
 }
 
 public sealed class MovieReferenceReadinessOverrideRequest
