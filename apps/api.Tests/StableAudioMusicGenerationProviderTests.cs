@@ -74,15 +74,58 @@ public sealed class StableAudioMusicGenerationProviderTests
     }
 
     [Fact]
-    public async Task Polling_is_bounded_and_times_out_without_fabricating_audio()
+    public async Task Bounded_polling_of_an_accepted_generation_stops_without_a_second_billable_submission()
     {
+        // The text-to-audio POST was answered with a generation id, so Stability has accepted a paid
+        // generation; bounded polling then ran out with every result still 202. Charging state is
+        // unknown, so the retryable timeout class would instruct RetryAsync to re-run CreateAsync and
+        // post a second generation. The job stops on the terminal retrieval class with one POST, and no
+        // audio is fabricated.
         var handler = new StableAudioHandler((_, requestNumber) => requestNumber == 1
             ? Json(HttpStatusCode.Accepted, "{\"id\":\"generation-timeout\"}")
             : new HttpResponseMessage(HttpStatusCode.Accepted));
         var provider = CreateProvider(handler, maxPollAttempts: 2, pollIntervalMilliseconds: 1);
 
-        await Assert.ThrowsAsync<MusicProviderTimeoutException>(() => provider.GenerateAsync(Input()));
+        var failure = await Assert.ThrowsAsync<MusicOutputRetrievalFailedException>(() => provider.GenerateAsync(Input()));
+
+        Assert.IsAssignableFrom<MusicProviderUnavailableException>(failure);
         Assert.Equal(3, handler.Requests.Count);
+        Assert.Single(handler.Requests, request => request.Method == HttpMethod.Post);
+    }
+
+    [Fact]
+    public async Task Timeout_while_an_accepted_generation_is_still_pending_is_terminal_not_a_retryable_timeout()
+    {
+        // The generation id exists and every result GET still answers 202 - Stability has accepted the
+        // paid generation but its completion and charge are unconfirmed - when the provider's own bound
+        // expires underneath the wait for the next poll. Accepted-but-unconfirmed is not the retryable
+        // stage: a retry would pay for a second generation while the accepted one may still be running.
+        // A 2xx result with a hanging body would be the post-billing stage instead, so this fixture
+        // deliberately never answers 2xx.
+        var handler = new StableAudioHandler((_, requestNumber) => requestNumber == 1
+            ? Json(HttpStatusCode.Accepted, "{\"id\":\"generation-pending-timeout\"}")
+            : new HttpResponseMessage(HttpStatusCode.Accepted));
+        var provider = CreateProvider(handler, maxPollAttempts: 5, pollIntervalMilliseconds: 30_000, providerTimeoutSeconds: 1);
+
+        var failure = await Assert.ThrowsAsync<MusicOutputRetrievalFailedException>(() => provider.GenerateAsync(Input()));
+
+        Assert.IsAssignableFrom<MusicProviderUnavailableException>(failure);
+        Assert.Single(handler.Requests, request => request.Method == HttpMethod.Post);
+    }
+
+    [Fact]
+    public async Task Timeout_before_the_create_is_answered_stays_a_retryable_provider_timeout()
+    {
+        // The genuinely unsubmitted stage: the create POST never returns a body, so no generation id
+        // exists and nothing can have been charged. This is the one case that keeps the retryable class.
+        var handler = new StableAudioHandler((_, _) => new HttpResponseMessage(HttpStatusCode.Accepted)
+        {
+            Content = new StreamContent(new HangingStream()),
+        });
+        var provider = CreateProvider(handler, providerTimeoutSeconds: 1);
+
+        await Assert.ThrowsAsync<MusicProviderTimeoutException>(() => provider.GenerateAsync(Input()));
+        Assert.Single(handler.Requests, request => request.Method == HttpMethod.Post);
     }
 
     [Fact]
