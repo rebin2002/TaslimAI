@@ -54,6 +54,43 @@ public sealed class ImageGenerationUnitTests
         Assert.Equal("IMAGE_ASPECT_RATIO_UNSUPPORTED", exception.Code);
     }
 
+    [Theory]
+    [InlineData("mood", 121)]
+    [InlineData("background", 241)]
+    [InlineData("text in image", 501)]
+    public async Task Handler_rejects_oversized_persisted_optional_fields_before_provider_call(string field, int length)
+    {
+        var request = new ImageGenerationInput(
+            "A test image",
+            "auto",
+            "square",
+            "standard",
+            null,
+            field == "mood" ? new string('m', length) : null,
+            field == "background" ? new string('b', length) : null,
+            field == "text in image" ? new string('t', length) : null,
+            null,
+            null);
+        var provider = new CountingImageProvider();
+        var handler = new ImageGenerationJobHandler(
+            [provider],
+            new TaslimImagePromptBuilder(),
+            Options.Create(new ImageGenerationOptions { Enabled = true, ProviderKey = provider.Key }),
+            NullLogger<ImageGenerationJobHandler>.Instance);
+        var job = new GenerationJob
+        {
+            Id = Guid.NewGuid(),
+            JobType = GenerationJobTypes.ImageGenerate,
+            InputJson = System.Text.Json.JsonSerializer.Serialize(request),
+        };
+
+        var exception = await Assert.ThrowsAsync<ImageRequestValidationException>(() => handler.ExecuteAsync(job, new Progress<int>(), CancellationToken.None));
+
+        Assert.Equal(GenerationJobErrorCodes.ImageRequestInvalid, exception.Code);
+        Assert.Contains(field, exception.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(0, provider.CallCount);
+    }
+
     [Fact]
     public void Image_binary_inspector_accepts_png_and_rejects_non_image_payloads()
     {
@@ -230,6 +267,19 @@ public sealed class ImageGenerationUnitTests
         public bool IsAvailable => true;
         public Task<ImageProviderResult> GenerateAsync(ImageGenerationInput request, ImagePromptBuildResult prompt, CancellationToken cancellationToken = default) =>
             Task.FromResult(new ImageProviderResult("not-an-image"u8.ToArray(), "text/plain", "txt", null, null, new ImageProviderUsage(null, null, null, null, 0m)));
+    }
+
+    private sealed class CountingImageProvider : IImageGenerationProvider, IImageGenerationProviderReadiness
+    {
+        public string Key => "counting-image";
+        public bool IsAvailable => true;
+        public int CallCount { get; private set; }
+
+        public Task<ImageProviderResult> GenerateAsync(ImageGenerationInput request, ImagePromptBuildResult prompt, CancellationToken cancellationToken = default)
+        {
+            CallCount++;
+            throw new InvalidOperationException("The provider must not be called for an invalid persisted request.");
+        }
     }
 
     private sealed class StubImageResponseHandler(string body) : HttpMessageHandler
