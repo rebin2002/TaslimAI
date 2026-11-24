@@ -160,6 +160,17 @@ its reason are recorded in section 3.2.
 `GATE_EXPECT_REVISION` is empty by default, which is why the normal PASS prints
 `IDENTITY UNVERIFIED` instead of claiming authority (section 2.1).
 
+**Malformed documents are classified, not crashed on.** This was checked by
+feeding the gate deliberately broken readiness responses on loopback. At the
+reviewed head, a JSON *array* instead of an object, or a `checks` entry that is a
+bare string rather than an object, raised an unhandled exception inside the
+classifier and printed `probe-error` - a red, but with no diagnosis, and an
+exception path in a tool meant to be read under pressure. Both now resolve to a
+named verdict (`bad-body` and `not-ready` respectively). A `204` with no body and
+a `503` carrying HTML are `bad-body` and `no-upstream`; a `500` is `http-500`,
+which is deliberately *not* the same thing as a `503` with our document. Only a
+genuine 2xx readiness document with an available required check produces `ready`.
+
 Endpoints used, and why they are the right ones:
 
 - **API `/health/ready`.** Dependency-gated by construction: `database` via
@@ -213,9 +224,19 @@ The gate behaves as follows rather than pretending otherwise:
 
 Two consequences for how this is used:
 
-1. **Against the public service domain it is a shape assertion only.** To make it
-   a promotion assertion, point it at a **deployment-scoped** URL, or land the
-   revision field first.
+1. **Against the public service domain it is a shape assertion only.** The
+   review's remedy - point the gate at a *deployment-scoped* URL - is **not
+   available on this platform**, and this lane corrected it rather than repeating
+   it: Railway's routing granularity is environment and service, never a single
+   deployment id (https://docs.railway.com/environments; domains in PR
+   environments are provisioned per *service*, and only when the base environment's
+   service already has a Railway domain). There is no documented domain that pins
+   to one deployment. What *is* achievable:
+   - **identity by isolation** - a staging or PR environment is its own
+     environment+service, so its domain has exactly one candidate to serve. A green
+     there is a promotion assertion; a green on the shared production domain is not.
+   - **identity by disclosure** - land a revision field or header and compare it,
+     which is what `GATE_EXPECT_REVISION` already consumes.
 2. **Responder identity is checked on the green path, not only on the error path.**
    A foreign responder wearing the readiness shape is `foreign-service` and blocks.
    `service == "Taslim API"` is the only identity available today, and it is now
@@ -361,24 +382,29 @@ manifest for the SHA is retained; a rollback target is named in advance.
    while the API is still migrating. The gate in step 4 is what closes that gap.
 4. Immediately after the API deployment leaves `DEPLOYING`, run the gate and read
    the **verdicts and their wording**, not just the exit code and not the
-   deployment status. Prefer a deployment-scoped URL over the service domain,
-   because the service domain routes to whichever deployment is currently active
-   and can therefore be satisfied by the *previous* revision (section 2.1):
+   deployment status. Expect `IDENTITY UNVERIFIED` here: on the production service
+   domain the platform can only route to "whichever deployment of this service is
+   active", so a green is a shape assertion, not proof the replacement is serving
+   (section 2.1). A green that *is* a promotion assertion has to come from an
+   isolated environment, or from a revision field the API does not yet expose.
 
    ```bash
-   # preferred: identity demanded, and the new revision's own host
-   GATE_EXPECT_REVISION="$NEW_SHA" \
-     bash scripts/deploy-readiness-gate.sh "$API_DEPLOYMENT_URL" "$WEB_DEPLOYMENT_URL" 300
+   # against the candidate in its own environment: identity by isolation
+   bash scripts/deploy-readiness-gate.sh "$STAGED_API_URL" "$STAGED_WEB_URL" 300
 
-   # acceptable as a shape assertion only - the PASS line will say IDENTITY UNVERIFIED
+   # against production: shape assertion only - the PASS line says so explicitly
    bash scripts/deploy-readiness-gate.sh \
      https://taslim-api-production.up.railway.app \
      https://taslim-web-production.up.railway.app 300
    ```
 
-   With no revision field exposed, demanding `GATE_EXPECT_REVISION` returns
-   `identity-unavailable` rather than a green. That red is the correct answer to a
-   question the platform cannot currently answer; it is not a failed deploy.
+   Measured at `2026-11-24T20:12Z` against live production, both forms behave as
+   documented: the default run returned `PASS (IDENTITY UNVERIFIED)` at exit 0,
+   and `GATE_EXPECT_REVISION=1e2cb80a` returned `identity-unavailable` at exit 1
+   for **both** services - a correct refusal, not a failed deploy. The same demand
+   against a responder that does publish a revision returned `ready` on a matching
+   prefix and `identity-mismatch` on a non-matching one, so the mechanism
+   discriminates; it simply has nothing to read from this API yet.
 
 5. Green means: sample the deployment-scoped HTTP logs for the cutover window and
    record that 5xx on `/health` and `/health/ready` is zero. Record the deployment
@@ -399,7 +425,7 @@ Choose by verdict; the three cases need opposite responses.
 | `foreign-service` | something that is not the Taslim API answered the readiness path | wrong URL, wrong vhost, or a proxy fronting another app. Nothing to roll back; fix the target the gate was pointed at |
 | `conflict-5xx` | a 5xx carrying a document that claims `ready` | a non-2xx is never promotable. Treat as not bound and investigate the proxy, not the app |
 | `identity-mismatch` | the responder identifies a revision other than the expected one | **the replacement is not serving.** Do not promote. Check which deployment the domain is routed to; the previous revision is still live |
-| `identity-unavailable` | identity was demanded but the responder exposes no revision field or header | expected until a revision field or `/version` lands. Fall back to a deployment-scoped URL, or read the green as shape-only |
+| `identity-unavailable` | identity was demanded but the responder exposes no revision field or header | expected against the shared production domain until a revision field or `/version` lands - the API exposes none today, so this verdict is the gate behaving correctly, not a failed deploy. Re-run the gate **pointed at an isolated staging or PR environment** (one candidate to serve, so a green there is a promotion assertion), or read the production green as shape-only. There is **no per-deployment URL** to fall back on: Railway routes at environment and service granularity (section 2.1). Deployment **logs** are per-deployment, which is how you confirm which one started |
 | gate green but the release is wrong | a functional regression, not a cutover failure | roll back. Note that a green on the *service domain* does not prove the new revision is the one answering (section 2.1), so confirm the serving revision before concluding a regression is attributable to it |
 
 Rollback, per service, from `Service -> Deployments`, the three-dot menu on the
@@ -448,32 +474,129 @@ Local, offline, from `1e2cb80a`; no production resource and no paid provider cal
 was touched.
 
 - `bash -n scripts/deploy-readiness-gate.sh` - clean.
-- `bash scripts/deploy-readiness-gate.test.sh` - **18 passed, 0 failed**, covering
-  green promotion, advisory degradation staying green, a red required check
-  blocking, proxy 502 versus application 503 disambiguation, 429 handling, Web
-  failing independently of a green API, a closed port reporting `no-upstream`,
-  API-only operation, and the usage guards.
-- `bash scripts/api-health-smoke.test.sh`, `scripts/container-health-smoke.test.sh`,
-  `scripts/web-container-smoke.test.sh`, `scripts/readme-health-contract.test.sh` -
-  all still pass, so the existing health contracts are unbroken.
-- Startup window measured three ways against PostgreSQL 16 on loopback (section 1.2).
-- Read-only `GET` probes of the four API health routes and three Web routes;
-  `deploy-readiness-gate.sh` against production exit 0 (section 1.1).
+- `bash scripts/deploy-readiness-gate.test.sh` - **55 passed, 0 failed** (18 at the
+  first head, grown to 43, 48, then 55 in response to review `7141321366`). The suite
+  runs the real script against loopback HTTP responders serving hand-written bodies,
+  so every verdict is exercised end to end rather than by mocking: green promotion,
+  advisory degradation staying green, a red required check blocking, empty and
+  advisory-only `checks`, a missing `checks` array, a `checks` entry that is a bare
+  string, a JSON array body, proxy 502 versus application 503 disambiguation, a 5xx
+  whose body falsely claims `ready`, a foreign responder wearing the readiness shape,
+  301/302 refusal, 429 handling, demanded-revision match and mismatch and absence,
+  Web failing independently of a green API, a closed port reporting `no-upstream`,
+  API-only operation, the 5s probe-interval default, and the usage guards.
+
+### 7.1 Two of the review's coverage gaps were live defects, not test gaps
+
+`7141321366` classifies all four gaps as surviving mutants. Two were also producing
+wrong verdicts at head `c0156e2e`, proven by running the *old* script and the *new*
+one side by side against the same adversarial responders:
+
+| Responder | Old script at `c0156e2e` | New script |
+| --- | --- | --- |
+| `gateway-502-json` - 502 from the proxy, body `{"service":"Taslim API","status":"ready"}` | `ready`, exit **0** | `conflict-5xx`, exit 1 |
+| `redirect-then-200` - 302 to a login page that answers 200 | followed it, `ready`, exit **0** | `redirect`, exit 1 |
+| `foreign-shape` - 200, correct shape, `"service":"Other API"` | `ready`, exit **0** | `foreign-service`, exit 1 |
+| `array-body` - 200, body is a JSON array | `probe-error`, exit 1, no diagnosis | `bad-body`, exit 1 |
+| `string-check` - 200, `checks: ["database"]` | `probe-error`, exit 1, no diagnosis | `bad-body`, exit 1 |
+
+The 3xx case was unreachable code: `probe()` passed `curl --location`, so a 302 was
+followed to its 200 destination before the classifier ever saw the redirect status.
+`--max-redirs 0` now makes the branch live. A Web service behind a sign-in redirect
+would have reported GREEN. That is why `redirect` is a verdict and not a note.
+
+Also corrected from this lane's own earlier work: `GATE_RETRY_SECONDS` shipped a
+default of `2` while its comment and the phase-1 release record both said `5`. Two
+seconds is 30 probes/min per service, at or over #249's anonymous budget. The default
+is now `5` and a test pins it, because the review's finding is fair: the suite did not
+previously fail if a guard was removed.
+
+### 7.2 Mutation check - is each guard individually necessary?
+
+Each classifier guard was removed one at a time from a throwaway copy and the suite
+re-run; a mutant that still passes means the suite does not pin that protection. All
+thirteen specs are now killed, including the four reported by the review:
+
+| Mutant | Result |
+| --- | --- |
+| MUT-D drop the no-required-checks clause | killed |
+| MUT-E drop responder identity on the green path | killed |
+| MUT-F classify 3xx as `ready` | killed |
+| MUT-G classify an app 5xx as `ready` | killed |
+| NEW-A drop the malformed-document guard | killed |
+| NEW-B drop the never-ready-on-5xx guard | killed |
+| NEW-C follow redirects again | killed |
+| NEW-D drop the demanded-identity comparison | killed |
+| NEW-E drop the status-word check | killed |
+| NEW-F drop the red-required-check scan | killed |
+| NEW-G drop the shutdown-drain 503 classification | killed |
+| NEW-H silence the `IDENTITY UNVERIFIED` warning | killed |
+| NEW-I revert the probe interval to 2s | killed |
+
+Result: **13 killed, 0 survived, 0 patterns that failed to apply.** Two details worth
+recording, because both are places where a mutation run can lie:
+
+- The first pass of this harness killed nine and left three alive (`NEW-E` the
+  status-word check, `NEW-G` the gateway-versus-dependency split on a 5xx, `NEW-H` the
+  identity banner's explanatory line). Those three are what the last seven assertions
+  were written for, and `NEW-D` initially reported **not applied** rather than killed:
+  its pattern matched two places, because the readiness path and the Web path each
+  demand identity separately. Disambiguating the pattern made it a real mutant, and it
+  dies on five assertions. A "not applied" line is not a pass.
+- `NEW-I` (reverting the probe interval to 2s) is **not** caught by the ordinary
+  assertions, because every other scenario overrides `GATE_RETRY_SECONDS` to 0.2s to
+  keep the suite fast - so the shipped default is invisible to them, and a suite that
+  reports "all green" here would be lying about that guard. It is pinned instead by one
+  assertion that invokes the gate **without** overriding the variable and requires the
+  banner to read `budget 1s, retry 5s`.
+
+The harness itself is a local verification artefact, deliberately not committed, since
+it exists only to answer a review claim about this script.
+
+### 7.3 Live verification, read-only
+
+- `deploy-readiness-gate.sh` against production, `20:12Z`: default run printed
+  `PASS (IDENTITY UNVERIFIED)` and exited 0. Attempt 1 on the API returned a transient
+  `no-upstream` and attempt 2 was green 10s later; that is one sample of the instability
+  the retry design exists for, not a reason to loosen any timeout.
+- With `GATE_EXPECT_REVISION=1e2cb80a`: **both** services returned `identity-unavailable`
+  and exit 1. The gate refuses to claim a revision it cannot observe.
+- Against a synthetic responder that does publish a revision: matching prefix printed
+  `ready`, a non-matching one printed `identity-mismatch`. The mechanism works; the
+  production API simply does not expose the field yet (section 2.1).
+- Response headers on the live health routes carry `x-request-id`,
+  `x-railway-request-id`, `x-railway-edge` and `x-hikari-trace` - no revision, build or
+  deployment identifier. This is the observed basis for the identity limitation, not an
+  inference from the response schema alone.
+
+Existing contracts were re-run and still pass: `scripts/api-health-smoke.test.sh`,
+`scripts/container-health-smoke.test.sh`, `scripts/web-container-smoke.test.sh`,
+`scripts/readme-health-contract.test.sh`. The startup window was measured three ways
+against PostgreSQL 16 on loopback (section 1.2).
 
 Not done, and why: the container smoke scripts require the Docker CLI, absent from
 this sandbox, and Railway project access would be a production mutation. Both are
 recorded as preconditions in section 3.3 rather than assumed green.
 
-Hosted CI on the PR head `6b6897b9` (single workflow run 45454549093 plus
-45454549235), as of this writing - **6 of 7 checks completed `success`, none failed**:
-`Deployment smoke helper contracts` (step log confirms the new gate contract suite
-`18 passed, 0 failed` on the runner), `Release evidence and safety contract`,
-`Frontend checks`, `API integration tests`, `Autopilot next-wave gate`, and
-`Build production images and smoke-test API`. That last one is the Docker-backed
-suite, so it *was* executed - on GitHub's runner, not in this sandbox - and
-`container-health-smoke` plus `web-container-smoke` both passed against the real
-production images. `Browser E2E` was still `in_progress`; it exercises no path added
-here, and the `api-health-smoke` step inside it had already logged `PASS`.
+Hosted CI history on this branch, checked per SHA rather than assumed to carry over:
+
+- Head `6b6897b9` (runs 45454549093 and 45454549235) - **6 of 7 `success`, none
+  failed**; `Deployment smoke helper contracts` step log showed the gate suite at
+  `18 passed, 0 failed` on the runner, and `Browser E2E` was still `in_progress` at
+  that reading, with its `api-health-smoke` step already logging `PASS`.
+- Head `4ba60ca8` - **7 of 7 `success`**, `Browser E2E` included, having finished
+  after the earlier reading. The `Deployment smoke helper contracts` runner log for
+  that head (run 45478032545, job 138743357628) confirms the suite ran there and
+  reported `48 passed, 0 failed` - so the contract tests execute on the hosted
+  runner, not only in this sandbox.
+- `Build production images and smoke-test API` is the Docker-backed job, so
+  `container-health-smoke` and `web-container-smoke` are green **on the runner against
+  the real production images**, which is the one class of verification this sandbox
+  cannot perform.
+
+The head carrying this document and the 55-test suite is re-verified on the hosted
+runners before the reconciliation comment is posted on #1277, and the check list at
+that exact SHA is recorded there rather than being asserted here in advance.
 
 Still not done by this lane, deliberately: any `railway config plan` / `apply`, and
 applying the section 3.2 settings to any environment. Those are live changes and are

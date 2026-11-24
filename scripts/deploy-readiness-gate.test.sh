@@ -67,6 +67,16 @@ FOREIGN = {"status": "ready", "service": "Not The Taslim API", "requestId": "r7"
 # MUT-G payload: a 5xx whose own document contradicts its status code.
 CONFLICT = {"status": "ready", "service": "Taslim API", "requestId": "r8",
             "checks": [{"name": "database", "status": "available", "required": True}]}
+# A document that says not_ready while every required check reads available. The
+# status word and the checks can disagree in either direction, and both must
+# block: trusting the checks alone is how a draining or half-probed instance
+# gets promoted.
+STATUS_RED_CHECKS_GREEN = {"status": "not_ready", "service": "Taslim API", "requestId": "r10",
+                           "checks": [{"name": "database", "status": "available", "required": True}]}
+# A 5xx from a responder that is not the Taslim API. This is a gateway-shaped
+# failure, not our dependency verdict, and the guidance must say so.
+NOT_READY_FOREIGN = {"status": "not_ready", "service": "Not The Taslim API", "requestId": "r11",
+                     "checks": [{"name": "database", "status": "available", "required": True}]}
 REVISION = dict(READY, revision="abc123def456")
 
 class Handler(http.server.BaseHTTPRequestHandler):
@@ -108,6 +118,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return self._send(200, json.dumps(FOREIGN))
         if scenario == "conflict-503-ready":
             return self._send(503, json.dumps(CONFLICT))
+        if scenario == "status-red-checks-green":
+            return self._send(200, json.dumps(STATUS_RED_CHECKS_GREEN))
+        if scenario == "app-503-foreign":
+            return self._send(503, json.dumps(NOT_READY_FOREIGN))
         if scenario == "redirect":
             return self._send(302, "", "text/plain",
                               extra_headers={"Location": "https://example.invalid/elsewhere"})
@@ -327,6 +341,19 @@ api_case conflict-503-ready
 run_case "503 with ready body blocks promotion" 1
 expect_out "503 with ready body" "Self-contradictory"
 expect_absent "503 with ready body" "PASS"
+# The mirror image of MUT-G: a body that DENIES readiness while all its checks
+# look green. Trusting the checks array alone would promote it, which is what the
+# removed status-word check allowed.
+api_case status-red-checks-green
+run_case "status not_ready with green checks blocks" 1
+expect_out "status not_ready with green checks" "no required dependency check"
+# A 5xx from a foreign responder is a transport/gateway verdict, not "our
+# dependency is red". Both exit 1, so this is pinned on the WORDING: sending an
+# operator to investigate database/storage for a wrong vhost wastes the outage.
+api_case app-503-foreign
+run_case "503 from foreign responder blocks" 1
+expect_out "503 from foreign responder" "Verify the healthcheck port"
+expect_absent "503 from foreign responder" "no required dependency check"
 stop_servers
 
 echo
@@ -337,6 +364,11 @@ api_case ready
 run_case "no identity demanded stays green" 0
 expect_out "no identity demanded" "IDENTITY UNVERIFIED"
 expect_out "no identity demanded" "NOT a promotion authority"
+# Pinned on the explanation, not just the headline: a warning that says "not an
+# authority" without saying why is not actionable during an incident, and an
+# earlier mutant that deleted only that middle line still passed.
+expect_out "no identity demanded" "cannot distinguish the"
+expect_out "no identity demanded" "still-active previous deployment"
 expect_absent "no identity demanded" "revision identity verified"
 # Demanding identity against a responder that exposes none must go RED rather
 # than guess, which is the false-green the review flagged.
