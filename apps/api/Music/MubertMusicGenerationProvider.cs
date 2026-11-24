@@ -57,11 +57,14 @@ public sealed class MubertMusicGenerationProvider(
         // generation, but whether it finished - and whether it was charged - is unknown to us until a
         // status poll says so. This middle stage is deliberately distinct from "nothing was submitted":
         // reporting MUSIC_PROVIDER_TIMEOUT here invites the job layer's automatic retry, which re-runs
-        // CreateAsync and POSTs a second track while the first may still be running and billing. Until
-        // the provider exposes a way to enumerate accepted tracks by our own request id, the policy is
-        // to stop the machine from submitting again (the terminal retrieval class, retry-blocked at
-        // GenerationJobExecution.RetryAsync) and to leave the track id in the log so the pending
-        // generation can be reconciled by hand.
+        // CreateAsync and POSTs a second track while the first may still be running and billing. It is
+        // equally not the retrieval class, whose customer copy states that the music WAS generated -
+        // nothing here establishes that. Until the provider exposes a way to enumerate accepted tracks
+        // by our own request id, the policy is to stop the machine from submitting again (the terminal
+        // MUSIC_PROVIDER_SUBMISSION_UNCONFIRMED code, whose automatic re-dispatch is suppressed) and to
+        // leave the track id in the log so the pending generation can be reconciled by hand. A customer
+        // who is told the outcome is unknown may still choose to retry once deliberately, which is the
+        // shipped policy for that code.
         var providerSubmissionAccepted = false;
         string? providerTrackId = null;
 
@@ -89,13 +92,47 @@ public sealed class MubertMusicGenerationProvider(
             MubertGenerationResource? generation = null;
             for (pollAttempts = 1; pollAttempts <= Math.Max(1, settings.MubertMaxPollAttempts); pollAttempts++)
             {
-                var statusBody = await SendJsonWithRetryAsync(
-                    HttpMethod.Get,
-                    new Uri(baseUri, $"tracks/{Uri.EscapeDataString(created.Id)}"),
-                    null,
-                    timeout.Token);
-                var status = ReadEnvelope<MubertTrackStatusResource>(statusBody)?.Data
-                    ?? throw new MusicProviderFailureException();
+                string statusBody;
+                try
+                {
+                    statusBody = await SendJsonWithRetryAsync(
+                        HttpMethod.Get,
+                        new Uri(baseUri, $"tracks/{Uri.EscapeDataString(created.Id)}"),
+                        null,
+                        timeout.Token);
+                }
+                catch (Exception exception) when (providerSubmissionAccepted && exception is MusicProviderUnavailableException or MusicProviderFailureException)
+                {
+                    // The bounded status GET retries ran out while Mubert still holds an accepted
+                    // track: transport faults, a persistent 5xx, or a non-transient 4xx from the
+                    // helper. Left as they are these propagate as the retryable outage or generic
+                    // failure codes, and the job layer's replay POSTs a SECOND billable track while
+                    // the accepted one may still be running and billing. Neither class is evidence
+                    // that nothing was created, so the outcome is reported as unconfirmed instead.
+                    // MusicProviderAuthenticationException and MusicProviderQuotaException derive from
+                    // the unavailable class and are deliberately included: losing the ability to ask
+                    // leaves the outcome unknown, it does not prove the track never finished.
+                    throw CreateSubmissionUnconfirmed("status request", exception, providerTrackId, pollAttempts);
+                }
+
+                MubertTrackStatusResource? status;
+                try
+                {
+                    status = ReadEnvelope<MubertTrackStatusResource>(statusBody)?.Data;
+                }
+                catch (MusicProviderFailureException exception)
+                {
+                    // A status answer that cannot be parsed says nothing about the accepted track.
+                    throw CreateSubmissionUnconfirmed("status payload", exception, providerTrackId, pollAttempts);
+                }
+
+                if (status is null)
+                {
+                    // The envelope was readable but carried no track data: still no observed outcome,
+                    // so this is the unconfirmed posture rather than the generic retryable failure.
+                    throw CreateSubmissionUnconfirmed("status payload", new MusicProviderFailureException(), providerTrackId, pollAttempts);
+                }
+
                 generation = status.Generations?.LastOrDefault(item => !string.IsNullOrWhiteSpace(item.Url))
                     ?? status.Generations?.LastOrDefault();
 
@@ -123,7 +160,7 @@ public sealed class MubertMusicGenerationProvider(
                     providerTrackId,
                     pollAttempts);
                 throw providerSubmissionAccepted
-                    ? new MusicOutputRetrievalFailedException()
+                    ? new MusicProviderSubmissionUnconfirmedException()
                     : new MusicProviderTimeoutException();
             }
 
@@ -179,7 +216,7 @@ public sealed class MubertMusicGenerationProvider(
                     Key,
                     settings.Model,
                     providerTrackId);
-                throw new MusicOutputRetrievalFailedException();
+                throw new MusicProviderSubmissionUnconfirmedException();
             }
 
             logger.LogWarning("Mubert music provider timed out. ProviderKey={ProviderKey}; ModelKey={ModelKey}", Key, settings.Model);
@@ -381,6 +418,27 @@ public sealed class MubertMusicGenerationProvider(
     {
         var delay = Math.Clamp(settings.MubertRetryBaseDelayMilliseconds, 25, 10_000) * Math.Pow(2, attempt);
         await Task.Delay(TimeSpan.FromMilliseconds(Math.Min(delay, 30_000)), cancellationToken);
+    }
+
+    /// <summary>
+    /// Builds the exception for a track Mubert accepted but whose outcome was never observed, after
+    /// logging the accepted operation id so the pending generation can be reconciled by hand. Only
+    /// reached once the create POST returned a track id, so an unknown outcome is never reported as
+    /// the retryable outage class (whose replay would POST a second billable track) and never as a
+    /// completed track (which is what the retrieval-failure copy asserts). No provider payload,
+    /// URL, or credential is carried in the message.
+    /// </summary>
+    private Exception CreateSubmissionUnconfirmed(string stage, Exception cause, string? providerTrackId, int attempts)
+    {
+        logger.LogWarning(
+            cause,
+            "Mubert music provider lost the outcome of an accepted track during {Stage}; the generation was not re-submitted automatically. ProviderKey={ProviderKey}; ModelKey={ModelKey}; ProviderOperationId={ProviderOperationId}; PollAttempts={PollAttempts}",
+            stage,
+            Key,
+            settings.Model,
+            providerTrackId,
+            attempts);
+        return new MusicProviderSubmissionUnconfirmedException();
     }
 
     private string BuildPrompt(MusicGenerationInput request)

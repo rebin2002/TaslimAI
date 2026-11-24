@@ -85,3 +85,23 @@ public sealed class MusicOutputRetrievalFailedException : MusicProviderUnavailab
     {
     }
 }
+
+/// <summary>
+/// The provider accepted a billable generation - it answered the create call with a track or
+/// generation id - but its outcome was never observed: polling timed out, ran out of bounded
+/// attempts, or kept failing transiently, so it is unknown whether the track finished and whether
+/// it was charged. This is deliberately NOT the retrieval-failure class, whose copy states that
+/// the music was generated: nothing here establishes that. It maps to the public code the lease
+/// recovery already uses for the same unknown outcome, so the customer sees one truthful message
+/// and no automatic path re-posts; the accepted provider operation id stays in the log for
+/// reconciliation. Deriving from <see cref="MusicProviderUnavailableException"/> keeps the existing
+/// provider-unavailable guards and catches working unchanged. Nothing provider-specific (URLs,
+/// keys, payloads) is carried in the message.
+/// </summary>
+public sealed class MusicProviderSubmissionUnconfirmedException : MusicProviderUnavailableException
+{
+    public MusicProviderSubmissionUnconfirmedException()
+        : base("The music provider accepted the generation, but its outcome could not be confirmed.")
+    {
+    }
+}

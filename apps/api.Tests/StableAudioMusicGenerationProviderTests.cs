@@ -79,14 +79,14 @@ public sealed class StableAudioMusicGenerationProviderTests
         // The text-to-audio POST was answered with a generation id, so Stability has accepted a paid
         // generation; bounded polling then ran out with every result still 202. Charging state is
         // unknown, so the retryable timeout class would instruct RetryAsync to re-run CreateAsync and
-        // post a second generation. The job stops on the terminal retrieval class with one POST, and no
-        // audio is fabricated.
+        // post a second generation. The job stops on the unconfirmed-submission class with one POST - the
+        // id proves acceptance, not a finished track - and no audio is fabricated.
         var handler = new StableAudioHandler((_, requestNumber) => requestNumber == 1
             ? Json(HttpStatusCode.Accepted, "{\"id\":\"generation-timeout\"}")
             : new HttpResponseMessage(HttpStatusCode.Accepted));
         var provider = CreateProvider(handler, maxPollAttempts: 2, pollIntervalMilliseconds: 1);
 
-        var failure = await Assert.ThrowsAsync<MusicOutputRetrievalFailedException>(() => provider.GenerateAsync(Input()));
+        var failure = await Assert.ThrowsAsync<MusicProviderSubmissionUnconfirmedException>(() => provider.GenerateAsync(Input()));
 
         Assert.IsAssignableFrom<MusicProviderUnavailableException>(failure);
         Assert.Equal(3, handler.Requests.Count);
@@ -99,7 +99,8 @@ public sealed class StableAudioMusicGenerationProviderTests
         // The generation id exists and every result GET still answers 202 - Stability has accepted the
         // paid generation but its completion and charge are unconfirmed - when the provider's own bound
         // expires underneath the wait for the next poll. Accepted-but-unconfirmed is not the retryable
-        // stage: a retry would pay for a second generation while the accepted one may still be running.
+        // stage: a replay would pay for a second generation while the accepted one may still be running,
+        // and it is not the retrieval stage either, because no 2xx result ever proved completion.
         // A 2xx result with a hanging body would be the post-billing stage instead, so this fixture
         // deliberately never answers 2xx.
         var handler = new StableAudioHandler((_, requestNumber) => requestNumber == 1
@@ -107,7 +108,7 @@ public sealed class StableAudioMusicGenerationProviderTests
             : new HttpResponseMessage(HttpStatusCode.Accepted));
         var provider = CreateProvider(handler, maxPollAttempts: 5, pollIntervalMilliseconds: 30_000, providerTimeoutSeconds: 1);
 
-        var failure = await Assert.ThrowsAsync<MusicOutputRetrievalFailedException>(() => provider.GenerateAsync(Input()));
+        var failure = await Assert.ThrowsAsync<MusicProviderSubmissionUnconfirmedException>(() => provider.GenerateAsync(Input()));
 
         Assert.IsAssignableFrom<MusicProviderUnavailableException>(failure);
         Assert.Single(handler.Requests, request => request.Method == HttpMethod.Post);
@@ -125,6 +126,54 @@ public sealed class StableAudioMusicGenerationProviderTests
         var provider = CreateProvider(handler, providerTimeoutSeconds: 1);
 
         await Assert.ThrowsAsync<MusicProviderTimeoutException>(() => provider.GenerateAsync(Input()));
+        Assert.Single(handler.Requests, request => request.Method == HttpMethod.Post);
+    }
+
+    [Fact]
+    public async Task Repeated_transient_result_failures_after_an_accepted_generation_are_unconfirmed_not_a_retryable_outage()
+    {
+        // Stability accepted the generation (the text-to-audio POST answered 202 with an id) and the
+        // result endpoint then keeps answering 503 until the bounded GET retries run out. MapFailureAsync
+        // classifies a persistent 5xx as MusicProviderUnavailableException, which the job layer reports
+        // as MUSIC_PROVIDER_UNAVAILABLE: a retryable code whose replay posts a SECOND paid generation
+        // while the accepted one may still be running and billing. The accepted-stage guard must catch
+        // it, and nothing may claim a finished track, because no 2xx result was ever read.
+        var handler = new StableAudioHandler((_, requestNumber) => requestNumber == 1
+            ? Json(HttpStatusCode.Accepted, "{\"id\":\"generation-503\"}")
+            : new HttpResponseMessage(HttpStatusCode.ServiceUnavailable)
+            {
+                Content = new StringContent("{\"errors\":[\"private upstream payload\"]}"),
+            });
+        var provider = CreateProvider(handler, maxPollAttempts: 2, pollIntervalMilliseconds: 1, retryAttempts: 1, retryDelayMilliseconds: 1);
+
+        var failure = await Assert.ThrowsAsync<MusicProviderSubmissionUnconfirmedException>(() => provider.GenerateAsync(Input()));
+
+        Assert.IsAssignableFrom<MusicProviderUnavailableException>(failure);
+        Assert.IsNotType<MusicProviderTimeoutException>(failure);
+        Assert.DoesNotContain("generated", failure.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("completed", failure.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("private upstream payload", failure.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Single(handler.Requests, request => request.Method == HttpMethod.Post);
+        // The retries were spent on the idempotent result GET; the billable POST was never repeated.
+        Assert.True(handler.Requests.Count > 2, $"expected retried result polling, saw {handler.Requests.Count} requests");
+    }
+
+    [Fact]
+    public async Task Result_transport_exhaustion_after_an_accepted_generation_is_unconfirmed_not_a_retryable_outage()
+    {
+        // The other exhaustion shape: the result GET keeps failing at the transport level, so
+        // SendWithBoundedRetryAsync throws MusicProviderUnavailableException after its budget instead of
+        // returning a status. Post-acceptance that is again an unknown outcome, not a safe retry.
+        var handler = new StableAudioHandler((_, requestNumber) =>
+        {
+            if (requestNumber == 1) return Json(HttpStatusCode.Accepted, "{\"id\":\"generation-transport-503\"}");
+            throw new HttpRequestException("connection reset by peer");
+        });
+        var provider = CreateProvider(handler, maxPollAttempts: 2, pollIntervalMilliseconds: 1, retryAttempts: 1, retryDelayMilliseconds: 1);
+
+        var failure = await Assert.ThrowsAsync<MusicProviderSubmissionUnconfirmedException>(() => provider.GenerateAsync(Input()));
+
+        Assert.IsAssignableFrom<MusicProviderUnavailableException>(failure);
         Assert.Single(handler.Requests, request => request.Method == HttpMethod.Post);
     }
 
