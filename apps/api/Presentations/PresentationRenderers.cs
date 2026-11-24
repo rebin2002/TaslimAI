@@ -241,9 +241,19 @@ public sealed class PresentationRenderer : IPresentationRenderer
     private int NextId() => ++shapeId;
     private static string Font(string language) => language is "ar-SA" or "ku-Arab" ? "Noto Sans Arabic" : "Aptos";
     private static string Escape(string value) => SecurityElement.Escape(value) ?? string.Empty;
+    // ZipArchive stamps a new entry with DateTimeOffset.Now unless told otherwise, and the MS-DOS field
+    // carrying it resolves to two seconds. Two renders of a byte-identical draft then differ by one entry
+    // header byte whenever they straddle that boundary, so a package that is otherwise a pure function of
+    // its draft is not reproducible. 1980-01-01 is the epoch the format is built on, the earliest value it
+    // can represent, so pinning to it loses no range and takes the wall clock out of the output entirely.
+    // Verified timezone-independent: the pinned DOS fields are identical under UTC, Asia/Erbil and
+    // America/New_York. Declared here, next to its only use, so the fix does not touch the shared
+    // constant block that other open Presentation work (#741 / #1239) edits.
+    private static readonly DateTimeOffset ArchiveEntryTimestamp = new(1980, 1, 1, 0, 0, 0, TimeSpan.Zero);
     private static void Write(ZipArchive archive, string path, string content)
     {
         var entry = archive.CreateEntry(path, CompressionLevel.Optimal);
+        entry.LastWriteTime = ArchiveEntryTimestamp;
         using var writer = new StreamWriter(entry.Open(), new UTF8Encoding(false));
         writer.Write(content);
     }
