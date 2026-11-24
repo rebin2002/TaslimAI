@@ -191,6 +191,32 @@ public sealed class MubertMusicGenerationProvider(
                 pollAttempts);
             return new MusicProviderResult(download.Content, contentType, format, request.DurationSeconds, usage);
         }
+        catch (OperationCanceledException exception) when (cancellationToken.IsCancellationRequested && providerSubmissionAccepted)
+        {
+            // F-36: the caller cancelled, and the filter proves the create POST was already answered
+            // with a track id. Nothing cancels that accepted generation at Mubert - no provider-side
+            // cancellation is established for this integration - so the accepted track stands. The
+            // timeout filter below deliberately excludes caller cancellation; without this arm the
+            // cancellation escapes as a plain cancellation, the job is recorded as MUSIC_CANCELLED, and
+            // RetryAsync (which allows cancelled jobs and assumes nothing is in flight) would post a
+            // SECOND paid generation. It stays a cancellation - that is what the member asked for - but
+            // a typed one, so the worker records the unknown outcome and refuses the retry.
+            if (billableOutputReceived)
+            {
+                logger.LogWarning(
+                    exception,
+                    "Mubert music provider generation was cancelled while delivering an already-completed track; the finished track was not re-generated. ProviderKey={ProviderKey}; TrackId={TrackId}",
+                    Key,
+                    providerTrackId);
+                throw new MusicProviderCancellationWithAcceptedSubmissionException(providerTrackId, outputConfirmedComplete: true);
+            }
+            logger.LogWarning(
+                exception,
+                "Mubert music provider generation was cancelled after the provider accepted it; the accepted outcome is unconfirmed and was not re-submitted. ProviderKey={ProviderKey}; TrackId={TrackId}",
+                Key,
+                providerTrackId);
+            throw new MusicProviderCancellationWithAcceptedSubmissionException(providerTrackId, outputConfirmedComplete: false);
+        }
         catch (OperationCanceledException exception) when (!cancellationToken.IsCancellationRequested)
         {
             if (billableOutputReceived)

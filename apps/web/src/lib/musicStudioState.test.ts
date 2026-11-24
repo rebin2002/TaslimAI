@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { GenerationJob } from "./api";
-import { canCancelMusicJob, isMusicJob, isMusicOutcomeUnconfirmed, isMusicProviderUnavailable, musicStudioFailureCopy, parseMusicJobResult, safeMusicJobView } from "./musicStudioState";
+import { canCancelMusicJob, isMusicCancellationUnresolved, isMusicJob, isMusicOutcomeUnconfirmed, isMusicProviderUnavailable, musicStudioFailureCopy, parseMusicJobResult, safeMusicJobView } from "./musicStudioState";
 import { locales, translations } from "./i18n";
 
 function job(overrides: Partial<GenerationJob> = {}): GenerationJob {
@@ -51,6 +51,45 @@ describe("music studio state", () => {
       for (const other of ["music.failureText", "music.cancelledText"]) {
         expect(text).not.toEqual(translations[locale][other]);
       }
+    }
+  });
+  it("refuses the retry affordance for a cancellation of an accepted submission, and keeps it for a plain one", () => {
+    // F-36: the panel is the only place a member can start a second paid generation after cancelling,
+    // so the affordance must follow the server's refusal instead of the job status.
+    expect(musicStudioFailureCopy(job({ status: "Cancelled", errorCode: "MUSIC_CANCELLED_UNCONFIRMED_SUBMISSION" }), (key) => key))
+      .toEqual({ title: "music.cancelledUnconfirmedTitle", text: "music.cancelledUnconfirmedText", allowRetry: false });
+    expect(musicStudioFailureCopy(job({ status: "Cancelled", errorCode: "MUSIC_CANCELLED_UNDELIVERED_OUTPUT" }), (key) => key))
+      .toEqual({ title: "music.cancelledUndeliveredTitle", text: "music.cancelledUndeliveredText", allowRetry: false });
+    // A cancellation before the provider accepted anything is genuinely safe to redo and keeps its copy
+    // and its action, as does a cancelled job whose code was never set.
+    expect(musicStudioFailureCopy(job({ status: "Cancelled", errorCode: "MUSIC_CANCELLED" }), (key) => key))
+      .toEqual({ title: "music.cancelledTitle", text: "music.cancelledText", allowRetry: true });
+    expect(musicStudioFailureCopy(job({ status: "Cancelled", errorCode: null }), (key) => key).allowRetry).toBe(true);
+    expect(isMusicCancellationUnresolved(job({ status: "Cancelled", errorCode: "MUSIC_CANCELLED" }))).toBe(false);
+    expect(isMusicCancellationUnresolved(job({ status: "Cancelled", errorCode: "MUSIC_CANCELLED_UNCONFIRMED_SUBMISSION" }))).toBe(true);
+    expect(isMusicCancellationUnresolved(job({ status: "Failed", errorCode: "MUSIC_CANCELLED_UNCONFIRMED_SUBMISSION" }))).toBe(false);
+    // The failure family predicate is unchanged, so an accepted-but-unconfirmed FAILED job keeps its own
+    // copy instead of being relabelled as a cancellation.
+    expect(musicStudioFailureCopy(job({ status: "Failed", errorCode: "MUSIC_PROVIDER_SUBMISSION_UNCONFIRMED" }), (key) => key))
+      .toEqual({ title: "music.unconfirmedTitle", text: "music.unconfirmedText", allowRetry: false });
+    for (const locale of locales) {
+      const unconfirmed = translations[locale]["music.cancelledUnconfirmedText"];
+      const undelivered = translations[locale]["music.cancelledUndeliveredText"];
+      expect(typeof unconfirmed).toBe("string");
+      expect(typeof undelivered).toBe("string");
+      expect(unconfirmed.length).toBeGreaterThan(0);
+      expect(undelivered.length).toBeGreaterThan(0);
+      // Neither cancellation copy may invite another submission.
+      expect(unconfirmed).not.toMatch(/try again|please retry/i);
+      expect(undelivered).not.toMatch(/try again|please retry/i);
+      // The unknown-outcome copy must not assert that audio exists, and must be distinct from every
+      // neighbouring music message in the same locale.
+      expect(unconfirmed).not.toMatch(/was generated|has been created/i);
+      const neighbours = ["music.cancelledText", "music.unconfirmedText", "music.failureText", "music.cancelledUndeliveredText"];
+      for (const other of neighbours) {
+        expect(unconfirmed).not.toEqual(translations[locale][other]);
+      }
+      expect(undelivered).not.toEqual(translations[locale]["music.cancelledText"]);
     }
   });
 

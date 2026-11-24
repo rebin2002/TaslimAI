@@ -88,6 +88,15 @@ public static class GenerationJobErrorMessages
             GenerationJobErrorCodes.MusicProviderSubmissionUnconfirmed => "Music generation stopped before its outcome could be confirmed: the first attempt may already have reached the provider. It was not restarted automatically, and this job cannot be retried while that outcome is unconfirmed, so you are not billed a second time for it.",
             GenerationJobErrorCodes.MusicSubmissionRetryBlocked => "This retry was blocked because the first attempt may already have reached the provider and its outcome has not been reconciled yet. Starting another would risk a duplicate paid generation.",
             GenerationJobErrorCodes.MusicCancelled => "The music generation was cancelled.",
+            // F-36: both arms distinguish a cancellation that happened AFTER the provider accepted the
+            // paid generation from the ordinary one above, where nothing was submitted. Neither asserts
+            // an outcome that was never observed and neither invites another submission - the accepted
+            // attempt may still be running and billing, so RetryAsync refuses the retry (see
+            // GenerationJobExecution.RetryAsync) and the copy points at reconciliation instead.
+            GenerationJobErrorCodes.MusicCancelledUnconfirmedSubmission => "The music generation was cancelled after the provider had already accepted it, so the first attempt may still finish and may still be charged. It was not started again, and it will not be retried until that attempt has been reconciled. Please contact support if the track does not appear.",
+            // Here the finished track IS established - polling saw it complete - and only the delivery
+            // was lost to the cancellation, so the copy may say so without claiming a second generation.
+            GenerationJobErrorCodes.MusicCancelledUndeliveredOutput => "Your music was generated, but the cancellation stopped it before the finished track could be delivered. It was not generated a second time. Please contact support to recover it.",
             GenerationJobErrorCodes.VoiceProviderUnavailable or GenerationJobErrorCodes.VoiceProviderAuthentication => "Voice generation is temporarily unavailable. Please try again later.",
             GenerationJobErrorCodes.VoiceProviderRateLimited => "Voice generation is busy right now. Please try again later.",
             GenerationJobErrorCodes.VoiceProviderTimeout => "Voice generation took too long to complete. Please try again.",

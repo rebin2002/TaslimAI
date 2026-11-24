@@ -27,12 +27,13 @@ public static class GenerationFailureClassifier
         if (normalized is GenerationJobErrorCodes.Poisoned or "RETRY_EXHAUSTED")
             return new(normalized, "recovery", false);
 
-        // Isolated ahead of the STORAGE / OUTPUT / PROVIDER heuristics. These two codes mean the
-        // provider already produced and billed the result and only delivery failed, so they must
+        // Isolated ahead of the STORAGE / OUTPUT / PROVIDER heuristics. These codes mean the provider
+        // already produced and billed the result and only delivery failed, including cancellation after
+        // a completed output was observed, so they must
         // never read as a retryable provider outage: a retry would create a duplicate paid
         // submission. Retryable is currently log-only for generation jobs, which is exactly why
         // the refusal is also enforced in GenerationJobService.RetryAsync.
-        if (normalized is GenerationJobErrorCodes.MusicOutputRetrievalFailed or GenerationJobErrorCodes.MusicRetrievalRetryBlocked)
+        if (normalized is GenerationJobErrorCodes.MusicOutputRetrievalFailed or GenerationJobErrorCodes.MusicRetrievalRetryBlocked or GenerationJobErrorCodes.MusicCancelledUndeliveredOutput)
             return new(normalized, "delivery", false);
 
         // The provider submission outcome is unknown: automatic re-dispatch is suppressed for music
@@ -41,7 +42,8 @@ public static class GenerationFailureClassifier
         // produce the duplicate paid submission. The retry-refusal code names the same event and takes
         // the same posture.
         if (normalized is GenerationJobErrorCodes.MusicProviderSubmissionUnconfirmed
-            or GenerationJobErrorCodes.MusicSubmissionRetryBlocked)
+            or GenerationJobErrorCodes.MusicSubmissionRetryBlocked
+            or GenerationJobErrorCodes.MusicCancelledUnconfirmedSubmission)
             return new(normalized, "provider", false);
 
         if (normalized.Contains("STORAGE", StringComparison.Ordinal))

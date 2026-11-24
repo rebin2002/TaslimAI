@@ -118,7 +118,11 @@ public sealed class MubertMusicGenerationProviderTests
         await handler.WaitForRequestAsync(2);
         cancellation.Cancel();
 
-        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => generation);
+        // F-36: the create POST was already answered with a track id, so this is not an ordinary
+        // cancellation - it is the accepted-submission posture, whose retry is refused downstream.
+        var cancellationFault = await Assert.ThrowsAsync<MusicProviderCancellationWithAcceptedSubmissionException>(() => generation);
+        Assert.False(cancellationFault.OutputConfirmedComplete);
+        Assert.Equal("track-4", cancellationFault.ProviderOperationId);
     }
 
     [Fact]
@@ -236,8 +240,72 @@ public sealed class MubertMusicGenerationProviderTests
         await handler.WaitForRequestAsync(3);
         cancellation.Cancel();
 
-        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => generation);
+        // F-36: still a cancellation, and still exactly one billable POST - but the typed one, because
+        // the finished track was never delivered. The worker records
+        // MUSIC_CANCELLED_UNDELIVERED_OUTPUT, which RetryAsync refuses with the retrieval-failure
+        // posture instead of generating a second paid track next to the finished one.
+        var cancellationFault = await Assert.ThrowsAsync<MusicProviderCancellationWithAcceptedSubmissionException>(() => generation);
+        Assert.True(cancellationFault.OutputConfirmedComplete);
         Assert.Single(handler.Requests, request => request.Method == HttpMethod.Post);
+    }
+
+    [Fact]
+    public async Task User_cancellation_of_an_accepted_track_leaves_exactly_one_billable_post()
+    {
+        // The reported gap (F-36), reproduced at the provider boundary: Mubert accepts the paid
+        // generation (the create POST returns a track id), the status poll is still blocked, and the
+        // MEMBER cancels. This integration never calls a provider-side cancel, so the accepted track may
+        // still finish and may still bill. Before the fix the cancellation escaped as a plain
+        // OperationCanceledException, the job was terminalized as MUSIC_CANCELLED, and RetryAsync -
+        // which permits cancelled jobs on the assumption that nothing is in flight - would have run
+        // CreateAsync again: a second paid POST while the first track was still generating. The provider
+        // now surfaces the accepted outcome on the cancellation itself, and the POST count is the money
+        // assertion. The job-level form of this test is
+        // MusicRetryPostureIsolationTests.Member_cancelling_an_accepted_music_job_is_refused_on_retry_and_never_posts_a_second_generation.
+        var handler = new MubertHandler((_, requestNumber) => requestNumber switch
+        {
+            1 => Json(HttpStatusCode.OK, "{\"data\":{\"id\":\"track-user-cancel\",\"session_id\":\"session-user-cancel\"}}"),
+            _ => new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StreamContent(new BlockingStream()),
+            },
+        });
+        var provider = CreateProvider(handler, pollIntervalMilliseconds: 50);
+        using var cancellation = new CancellationTokenSource();
+        var generation = provider.GenerateAsync(Input(), cancellation.Token);
+        await handler.WaitForRequestAsync(2);
+        cancellation.Cancel();
+
+        var failure = await Assert.ThrowsAsync<MusicProviderCancellationWithAcceptedSubmissionException>(() => generation);
+        Assert.False(failure.OutputConfirmedComplete);
+        Assert.Equal("track-user-cancel", failure.ProviderOperationId);
+        // Nothing about the accepted operation is asserted as complete, and the provider was billed for
+        // at most the one generation it accepted.
+        Assert.DoesNotContain("generated", failure.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("completed", failure.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Single(handler.Requests, request => request.Method == HttpMethod.Post);
+    }
+
+    [Fact]
+    public async Task User_cancellation_before_the_create_is_answered_stays_an_ordinary_cancellation()
+    {
+        // The required contrast case: while the billable create POST is still unanswered, acceptance is
+        // NOT established, so this stays the deliberate-abort posture the retry path treats as safe. The
+        // typed unconfirmed cancellation must not leak into the pre-submission stage, or a member who
+        // cancels too early would be stranded behind a refusal for a job that never reached anyone.
+        var handler = new MubertHandler((_, _) => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StreamContent(new BlockingStream()),
+        });
+        var provider = CreateProvider(handler);
+        using var cancellation = new CancellationTokenSource();
+        var generation = provider.GenerateAsync(Input(), cancellation.Token);
+        await handler.WaitForRequestAsync(1);
+        cancellation.Cancel();
+
+        var failure = await Record.ExceptionAsync(() => generation);
+        Assert.IsAssignableFrom<OperationCanceledException>(failure);
+        Assert.IsNotType<MusicProviderCancellationWithAcceptedSubmissionException>(failure);
     }
 
     [Fact]

@@ -337,7 +337,95 @@ public sealed class StableAudioMusicGenerationProviderTests
         await secondRequest.Task.WaitAsync(TimeSpan.FromSeconds(2));
         cancellation.Cancel();
 
-        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => generation);
+        // F-36: the create POST was already answered with a generation id, so this is not an ordinary
+        // cancellation - it is the post-acceptance posture, whose retry the worker must refuse.
+        var cancellationFault = await Assert.ThrowsAsync<MusicProviderCancellationWithAcceptedSubmissionException>(() => generation);
+        Assert.False(cancellationFault.OutputConfirmedComplete);
+        Assert.Equal("generation-cancel", cancellationFault.ProviderOperationId);
+        Assert.Single(handler.Requests, request => request.Method == HttpMethod.Post);
+    }
+
+    [Fact]
+    public async Task User_cancellation_of_an_accepted_generation_leaves_exactly_one_billable_post()
+    {
+        // F-36, Stable Audio side of the reported gap: the generation was accepted, the result endpoint
+        // never answered completion, and the caller cancelled mid-poll. No provider-side cancellation is
+        // established for this integration, so the accepted generation may still finish and still bill;
+        // a retry would post a SECOND paid generation beside it, which is what the typed cancellation
+        // exists to prevent. The POST count is the money assertion; the job-level form of the same
+        // scenario is MusicRetryPostureIsolationTests.
+        var secondRequest = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var handler = new StableAudioHandler(async (_, requestNumber, cancellationToken) =>
+        {
+            if (requestNumber == 1) return Json(HttpStatusCode.Accepted, "{\"id\":\"generation-user-cancel\"}");
+            secondRequest.TrySetResult();
+            await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+            return new HttpResponseMessage(HttpStatusCode.Accepted);
+        });
+        var provider = CreateProvider(handler, pollIntervalMilliseconds: 1);
+        using var cancellation = new CancellationTokenSource();
+        var generation = provider.GenerateAsync(Input(), cancellation.Token);
+        await secondRequest.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        cancellation.Cancel();
+
+        var failure = await Assert.ThrowsAsync<MusicProviderCancellationWithAcceptedSubmissionException>(() => generation);
+        Assert.False(failure.OutputConfirmedComplete);
+        Assert.Equal("generation-user-cancel", failure.ProviderOperationId);
+        Assert.DoesNotContain("generated", failure.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("completed", failure.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Single(handler.Requests, request => request.Method == HttpMethod.Post);
+    }
+
+    [Fact]
+    public async Task User_cancellation_while_reading_a_billed_result_is_typed_and_never_reposts()
+    {
+        // F-36 contrast inside the accepted stage: the result endpoint answered 2xx, so the generation is
+        // known finished and billed and only delivery was lost to the cancellation. That is the
+        // terminal-KNOWN posture (OutputConfirmedComplete -> MUSIC_CANCELLED_UNDELIVERED_OUTPUT, refused
+        // with the retrieval-failure copy), not the unknown-outcome one - and it still carries exactly
+        // one billable POST.
+        var resultSeen = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var handler = new StableAudioHandler(async (_, requestNumber, cancellationToken) =>
+        {
+            if (requestNumber == 1) return Json(HttpStatusCode.Accepted, "{\"id\":\"generation-billed-cancel\"}");
+            resultSeen.TrySetResult();
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StreamContent(new HangingStream()),
+            };
+        });
+        var provider = CreateProvider(handler, maxPollAttempts: 3, pollIntervalMilliseconds: 1);
+        using var cancellation = new CancellationTokenSource();
+        var generation = provider.GenerateAsync(Input(), cancellation.Token);
+        await resultSeen.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        await Task.Delay(50);
+        cancellation.Cancel();
+
+        var failure = await Assert.ThrowsAsync<MusicProviderCancellationWithAcceptedSubmissionException>(() => generation);
+        Assert.True(failure.OutputConfirmedComplete);
+        Assert.Equal("generation-billed-cancel", failure.ProviderOperationId);
+        Assert.Single(handler.Requests, request => request.Method == HttpMethod.Post);
+    }
+
+    [Fact]
+    public async Task User_cancellation_before_the_generation_is_answered_stays_an_ordinary_cancellation()
+    {
+        // F-36 required separation: cancellation while the billable POST is still unanswered proves
+        // nothing was accepted, so the ordinary cancellation posture - which RetryAsync still permits -
+        // must survive untouched.
+        var handler = new StableAudioHandler((_, _) => new HttpResponseMessage(HttpStatusCode.Accepted)
+        {
+            Content = new StreamContent(new HangingStream()),
+        });
+        var provider = CreateProvider(handler, maxPollAttempts: 3, pollIntervalMilliseconds: 1);
+        using var cancellation = new CancellationTokenSource();
+        var generation = provider.GenerateAsync(Input(), cancellation.Token);
+        await Task.Delay(50);
+        cancellation.Cancel();
+
+        var failure = await Record.ExceptionAsync(() => generation);
+        Assert.IsAssignableFrom<OperationCanceledException>(failure);
+        Assert.IsNotType<MusicProviderCancellationWithAcceptedSubmissionException>(failure);
     }
 
     [Theory]

@@ -490,25 +490,31 @@ public sealed class GenerationJobService(
         // music means a fresh POST to the provider, so this refusal is enforced here rather than
         // left to the retry copy. Two music codes are refused and they cover the two unknown states:
         // the result is known to exist but could not be delivered, and the submission was accepted but
-        // its outcome was never observed. Every other terminal failure - including the provider-outage
-        // classes, a provider-declared rejection, and a cancellation the member asked for - keeps its
-        // existing retry behaviour, because those states are evidence that nothing is in flight.
+        // its outcome was never observed. Each family also covers the cancellation that proves the very
+        // same state (F-36): cancelling after the provider reported completion leaves an undelivered
+        // finished track, exactly like a delivery timeout, and cancelling an accepted generation that
+        // was never observed leaves an unknown outcome, exactly like a polling timeout. Every other
+        // terminal state - the provider-outage classes, a provider-declared rejection, and a
+        // cancellation before anything was accepted - keeps its existing retry behaviour, because those
+        // states are evidence that nothing is in flight.
         if (string.Equals(source.JobType, GenerationJobTypes.MusicGenerate, StringComparison.OrdinalIgnoreCase)
-            && string.Equals(source.ErrorCode, GenerationJobErrorCodes.MusicOutputRetrievalFailed, StringComparison.Ordinal))
+            && source.ErrorCode is GenerationJobErrorCodes.MusicOutputRetrievalFailed or GenerationJobErrorCodes.MusicCancelledUndeliveredOutput)
         {
             throw new GenerationJobValidationException(
                 GenerationJobErrorCodes.MusicRetrievalRetryBlocked,
                 "This retry was blocked because the music was already generated and only delivery failed. Generating again would create a duplicate.");
         }
-        // Accepted-but-unconfirmed: the provider took the submission and we never saw the outcome.
-        // A retry here would be a SECOND paid submission, so the endpoint refuses it until the first
-        // attempt is reconciled (explicit user policy 15:59Z: avoid duplicate charges over immediate
-        // retry). This supersedes the earlier informed-customer-retry posture: "you may retry once"
-        // was truthful about the risk but still let the duplicate happen, and there is no verified
-        // safe-recovery path for the accepted generation today - RecoverExpiredClaimsAsync already
-        // refuses to re-dispatch music, so nothing on this branch can reattach to the first attempt.
+        // Accepted-but-unconfirmed: the provider took the submission and we never saw its outcome -
+        // either because polling lost contact with it (MUSIC_PROVIDER_SUBMISSION_UNCONFIRMED) or because
+        // the member cancelled it (MUSIC_CANCELLED_UNCONFIRMED_SUBMISSION, F-36). A retry would be a
+        // SECOND paid submission in both cases, so the endpoint refuses it until the first attempt is
+        // reconciled (explicit user policy 15:59Z: avoid duplicate charges over immediate retry). This
+        // supersedes the earlier informed-customer-retry posture: "you may retry once" was truthful
+        // about the risk but still let the duplicate happen, and there is no verified safe-recovery path
+        // for an accepted generation today - RecoverExpiredClaimsAsync already refuses to re-dispatch
+        // music, so nothing on this branch can reattach to the first attempt.
         if (string.Equals(source.JobType, GenerationJobTypes.MusicGenerate, StringComparison.OrdinalIgnoreCase)
-            && string.Equals(source.ErrorCode, GenerationJobErrorCodes.MusicProviderSubmissionUnconfirmed, StringComparison.Ordinal))
+            && source.ErrorCode is GenerationJobErrorCodes.MusicProviderSubmissionUnconfirmed or GenerationJobErrorCodes.MusicCancelledUnconfirmedSubmission)
         {
             throw new GenerationJobValidationException(
                 GenerationJobErrorCodes.MusicSubmissionRetryBlocked,
@@ -1815,7 +1821,7 @@ public sealed class GenerationJobWorker(
                 await dialogueExecutions.MarkCancelledAsync(claimedJob.Id, CancellationToken.None);
             await CancelRunningAsync(db, usage, claimedJob, claimedJob.ConcurrencyToken, stoppingToken);
         }
-        catch (OperationCanceledException) when (cancellation.IsCancellationRequested)
+        catch (OperationCanceledException cancellationException) when (cancellation.IsCancellationRequested)
         {
             if (!publicationCommitted)
                 foreach (var publication in publications) await publisher.DiscardAsync(publication, CancellationToken.None);
@@ -1830,10 +1836,24 @@ public sealed class GenerationJobWorker(
                 await dialogueExecutions.MarkCancelledAsync(claimedJob.Id, CancellationToken.None);
             if (providerAttempt is not null)
                 await budget.CompleteAttemptAsync(providerAttempt, null, false, GenerationProviderAttemptStatus.Cancelled, GenerationJobErrorCodes.Cancelled, CancellationToken.None);
+            // F-36: WHICH cancellation was it? A music cancellation raised after the provider accepted
+            // the paid submission carries a distinct terminal code, because nothing cancels the accepted
+            // operation at the provider: the attempt may still finish and may still bill, so the retry
+            // endpoint must refuse it instead of treating it like an ordinary cancellation. Every other
+            // cancellation - including a music cancellation before acceptance - keeps its existing
+            // per-type code and stays retryable, which MusicRetryPostureIsolationTests pins both ways.
+            // The provider-attempt telemetry above deliberately keeps the generic Cancelled status: it
+            // records how the attempt ended for operators, not the customer-facing outcome.
+            var (cancelCode, cancelMessage) = cancellationException switch
+            {
+                MusicProviderCancellationWithAcceptedSubmissionException { OutputConfirmedComplete: true } => (GenerationJobErrorCodes.MusicCancelledUndeliveredOutput, "The music generation was cancelled before the finished track could be delivered."),
+                MusicProviderCancellationWithAcceptedSubmissionException { OutputConfirmedComplete: false } => (GenerationJobErrorCodes.MusicCancelledUnconfirmedSubmission, "The music generation was cancelled after the provider accepted it, so its outcome has not been reconciled."),
+                _ => (CancellationCode(claimedJob), "The job was cancelled."),
+            };
             // Host shutdown cancels stoppingToken before this handler exits. Durable
             // cancellation must still commit so the job does not remain Running until
             // lease recovery on the next process.
-            await CancelRunningAsync(db, usage, claimedJob, claimedJob.ConcurrencyToken, CancellationToken.None);
+            await CancelRunningAsync(db, usage, claimedJob, claimedJob.ConcurrencyToken, CancellationToken.None, cancelCode, cancelMessage);
             logger.LogInformation(
                 "Generation job execution cancelled. JobId={JobId}; JobType={JobType}; RequestId={RequestId}; ElapsedMs={ElapsedMs}; UsageFinalized={UsageFinalized}",
                 claimedJob.Id, claimedJob.JobType, claimedJob.RequestId, (long)Stopwatch.GetElapsedTime(executionStarted).TotalMilliseconds, true);
@@ -2204,15 +2224,18 @@ var qualityFailure = exception as GenerationQualityControlException ?? exception
         }
     }
 
-    private static async Task CancelRunningAsync(TaslimDbContext db, IGenerationJobUsageService usage, GenerationJob job, Guid concurrencyToken, CancellationToken cancellationToken)
+    private static async Task CancelRunningAsync(TaslimDbContext db, IGenerationJobUsageService usage, GenerationJob job, Guid concurrencyToken, CancellationToken cancellationToken, string? terminalCode = null, string? terminalMessage = null)
     {
         var now = DateTime.UtcNow;
         await using var finalization = await db.Database.BeginTransactionAsync(cancellationToken);
+        // terminalCode is only supplied by the caller that KNOWS more than "the member cancelled" -
+        // today that is the accepted-but-unresolved music cancellation (F-36). Everything else keeps the
+        // existing per-type cancellation code and its retryability.
         var cancelled = await db.GenerationJobs.Where(item => item.Id == job.Id && item.Status == GenerationJobStatus.Running && item.ConcurrencyToken == concurrencyToken)
             .ExecuteUpdateAsync(setters => setters
                 .SetProperty(item => item.Status, GenerationJobStatus.Cancelled)
-                .SetProperty(item => item.ErrorCode, CancellationCode(job))
-                .SetProperty(item => item.ErrorMessage, "The job was cancelled.")
+                .SetProperty(item => item.ErrorCode, terminalCode ?? CancellationCode(job))
+                .SetProperty(item => item.ErrorMessage, terminalMessage ?? "The job was cancelled.")
                 .SetProperty(item => item.CancelledAt, now)
                 .SetProperty(item => item.ClaimExpiresAt, (DateTime?)null), cancellationToken);
         if (cancelled == 0)
@@ -2231,7 +2254,9 @@ var qualityFailure = exception as GenerationQualityControlException ?? exception
             await db.MovieSoundTracks.Where(track => track.GenerationJobId == job.Id)
                 .ExecuteUpdateAsync(setters => setters.SetProperty(track => track.Status, MovieSoundStatuses.Cancelled).SetProperty(track => track.UpdatedAt, now), cancellationToken);
         var transaction = await usage.BeginAsync(job, cancellationToken: cancellationToken);
-        await usage.CancelAsync(transaction, CancellationCode(job), cancellationToken);
+        // The usage ledger records the same code the job row carries, so a reconciliation pass sees the
+        // unknown submission outcome in both places rather than only in the job.
+        await usage.CancelAsync(transaction, terminalCode ?? CancellationCode(job), cancellationToken);
         await finalization.CommitAsync(cancellationToken);
     }
 
