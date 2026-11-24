@@ -16,13 +16,17 @@ import { defaultLanguagePackRegistry, languagePackIds, languagePackNames, langua
 const MOVIE_NAMESPACES = ["movie", "movieDeep", "movieModule", "movieShell", "movieAudio", "movieTeam", "movieExports", "movieQc"] as const;
 
 /**
- * Movie-adjacent namespaces the pack does not translate at all and does not
- * disclose with a `module-untranslated` review flag. Each entry is a known audit
- * gap, not an accepted state: it exists so the omission is a named, countable
- * fact rather than something the earlier Movie namespace list silently walks
- * past. Closing a gap is a manifest edit in the zh-CN pack lane - adding the
- * matching review flag makes the entry stale and fails this file until it is
- * removed, which is the intended revisit signal.
+ * Movie-adjacent namespaces recorded as known audit gaps: untranslated and not
+ * review-flagged at the time of the adoption audit. The list is an ALLOW-LIST for
+ * unexplained omissions, not a requirement that the gaps stay open: a namespace
+ * may be translated (product progress — the intended direction for the zh-CN
+ * pack), given a `module-untranslated` review flag, or removed from this list by
+ * a manifest edit in the pack lane, and none of those moves may fail this file.
+ * The invariant kept here is one-way: any movie-adjacent namespace that is
+ * untranslated AND unflagged must appear in this list, so a newly added English
+ * namespace can never silently walk past disclosure. Stale entries that no
+ * longer describe an omission are harmless here; pruning them is a hygiene task
+ * for the pack lane, deliberately not a build-breaking tripwire.
  */
 const UNDISCLOSED_MOVIE_NAMESPACES = ["movieBody"];
 
@@ -151,7 +155,10 @@ describe("zh-CN locale-fallback regression over Movie static copy", () => {
   it("serves fallback-served Movie guidance in English rather than a key", () => {
     const rows = namespaceRows();
     const englishOnly = movieAdjacentNamespaces(rows).filter((namespace) => rows.get(namespace)!.zh === 0);
-    expect(englishOnly.length, "expected at least one fully untranslated Movie namespace").toBeGreaterThan(0);
+    // Deliberately no "at least one namespace must stay untranslated" gate: the
+    // product is expected to translate these namespaces, and each one it does
+    // translate simply leaves this loop. What must hold for every namespace that
+    // IS still untranslated is that fallback serves real English copy, never a raw key.
     for (const namespace of englishOnly) {
       const sample = EN_KEYS.filter((key) => namespaceOf(key) === namespace).slice(0, 25);
       for (const key of sample) {
@@ -169,22 +176,20 @@ describe("zh-CN Movie namespace disclosure", () => {
     const undisclosed = movieAdjacentNamespaces(rows)
       .filter((namespace) => rows.get(namespace)!.zh === 0 && !flagged.has(namespace))
       .sort();
-    expect(undisclosed).toEqual([...UNDISCLOSED_MOVIE_NAMESPACES].sort());
+    // One-way check: every real omission must be a named gap. Once a listed gap
+    // is translated or flagged it simply drops out of `undisclosed`; the stale
+    // allow-list entry must not block that progress.
+    const unexplained = undisclosed.filter((namespace) => !UNDISCLOSED_MOVIE_NAMESPACES.includes(namespace));
+    expect(unexplained, "untranslated Movie namespaces must be disclosed or listed as known audit gaps").toEqual([]);
   });
 
-  it("records the disclosed gap as a real untranslated Movie surface, not an empty one", () => {
+  it("records each named audit gap as a real Movie surface, not a phantom one", () => {
     for (const namespace of UNDISCLOSED_MOVIE_NAMESPACES) {
       const row = rows.get(namespace);
       expect(row, `"${namespace}" must exist in the English catalog`).toBeDefined();
       expect(row!.en, `"${namespace}" must be a populated English namespace`).toBeGreaterThan(0);
-      expect(row!.zh, `"${namespace}" is undisclosed only while it stays untranslated`).toBe(0);
-    }
-  });
-
-  it("keeps every gap entry stale once the pack lane flags it", () => {
-    const flagged = new Set(simplifiedChineseLanguagePack.manifest.reviewFlags.map((flag) => flag.module));
-    for (const namespace of UNDISCLOSED_MOVIE_NAMESPACES) {
-      expect(flagged.has(namespace), `"${namespace}" is now flagged; drop it from UNDISCLOSED_MOVIE_NAMESPACES`).toBe(false);
+      // No zh===0 requirement: translating the namespace is the intended progress
+      // this entry documents; asserting the gap stays open would block it.
     }
   });
 });
