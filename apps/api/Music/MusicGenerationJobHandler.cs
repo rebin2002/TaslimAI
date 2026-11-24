@@ -17,14 +17,44 @@ public interface IMusicGenerationProvider
     Task<MusicProviderResult> GenerateAsync(
         MusicGenerationInput request,
         CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// F-36.1: the same submission with a durable acceptance sink, invoked with the provider's own
+    /// operation id the moment the paid create call is answered. The default implementation forwards
+    /// to the sinkless overload, so a provider that has not adopted the evidence - including every
+    /// existing test double - behaves exactly as it did before this member existed.
+    /// </summary>
+    Task<MusicProviderResult> GenerateAsync(
+        MusicGenerationInput request,
+        CancellationToken cancellationToken,
+        Func<string, Task>? onSubmissionAccepted)
+        => GenerateAsync(request, cancellationToken);
+}
+
+/// <summary>
+/// F-36.1: a handler that runs a paid provider submission accepts the worker's durable acceptance
+/// sink. The worker owns the database and the provider-attempt row, so the record that a provider
+/// accepted paid work is written where lease recovery can still read it after this process is gone;
+/// the handler only forwards it to the provider it is about to call.
+/// </summary>
+public interface IAcceptsMusicSubmissionEvidence
+{
+    Func<string, Task>? AcceptedSubmissionSink { get; set; }
 }
 
 public sealed class MusicGenerationJobHandler(
     IEnumerable<IMusicGenerationProvider> providers,
     IOptions<MusicGenerationOptions> options,
-    ILogger<MusicGenerationJobHandler> logger) : IGenerationJobHandler
+    ILogger<MusicGenerationJobHandler> logger) : IGenerationJobHandler, IAcceptsMusicSubmissionEvidence
 {
     private readonly MusicGenerationOptions settings = options.Value;
+
+    /// <summary>
+    /// F-36.1: supplied by the generation worker before this handler runs and forwarded to the
+    /// provider call. Null when no evidence sink was attached, in which case providers take their
+    /// pre-F-36.1 path unchanged.
+    /// </summary>
+    public Func<string, Task>? AcceptedSubmissionSink { get; set; }
 
     public bool CanHandle(string jobType) => string.Equals(jobType, GenerationJobTypes.MusicGenerate, StringComparison.OrdinalIgnoreCase);
 
@@ -51,7 +81,7 @@ public sealed class MusicGenerationJobHandler(
 
         logger.LogInformation("Music generation started. JobId={JobId}; ProviderKey={ProviderKey}", job.Id, provider.Key);
         progress.Report(25);
-        var generated = await provider.GenerateAsync(request, cancellationToken);
+        var generated = await provider.GenerateAsync(request, cancellationToken, AcceptedSubmissionSink);
         cancellationToken.ThrowIfCancellationRequested();
         progress.Report(82);
 

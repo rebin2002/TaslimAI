@@ -472,6 +472,56 @@ public sealed class StableAudioMusicGenerationProviderTests
         Assert.Single(handler.Requests, request => request.Method == HttpMethod.Post);
     }
 
+    [Fact]
+    public async Task Accepted_generation_id_reaches_the_submission_sink_before_the_first_result_request()
+    {
+        // F-36.1 ordering contract, Stability side: the accepted generation id is reported as durable
+        // evidence after the billable text-to-audio POST is answered and before the first result poll,
+        // so a process lost anywhere in the polling window still leaves an operation id behind.
+        var sinkCalls = new List<string?>();
+        var requestsWhenSinkRan = -1;
+        var handler = new StableAudioHandler((_, requestNumber) => requestNumber switch
+        {
+            1 => Json(HttpStatusCode.Accepted, "{\"id\":\"generation-sink-order\"}"),
+            _ => Audio(HttpStatusCode.OK, ValidMp3(), "audio/mpeg"),
+        });
+        var provider = CreateProvider(handler, pollIntervalMilliseconds: 1);
+        var result = await provider.GenerateAsync(
+            Input(),
+            CancellationToken.None,
+            operationId =>
+            {
+                sinkCalls.Add(operationId);
+                requestsWhenSinkRan = handler.Requests.Count;
+                return Task.CompletedTask;
+            });
+        Assert.Equal("audio/mpeg", result.ContentType);
+        Assert.Equal(new[] { "generation-sink-order" }, sinkCalls);
+        Assert.Equal(1, requestsWhenSinkRan);
+        Assert.Single(handler.Requests, request => request.Method == HttpMethod.Post);
+        Assert.True(handler.Requests.Count >= 2, "polling must resume after the evidence was reported");
+    }
+    [Fact]
+    public async Task Unpersistable_submission_evidence_fails_closed_instead_of_looking_unsubmitted()
+    {
+        // Stability side of the same fail-closed contract: a sink that cannot persist the acceptance
+        // surfaces as the unconfirmed class rather than a silent success, and the provider does not go
+        // on to poll - let alone re-post - the generation it just failed to record.
+        var handler = new StableAudioHandler((_, requestNumber) => requestNumber switch
+        {
+            1 => Json(HttpStatusCode.Accepted, "{\"id\":\"generation-sink-fault\"}"),
+            _ => Audio(HttpStatusCode.OK, ValidMp3(), "audio/mpeg"),
+        });
+        var provider = CreateProvider(handler, pollIntervalMilliseconds: 1);
+        var failure = await Record.ExceptionAsync(() => provider.GenerateAsync(
+            Input(),
+            CancellationToken.None,
+            _ => Task.FromException(new MusicProviderSubmissionUnconfirmedException())));
+        Assert.IsType<MusicProviderSubmissionUnconfirmedException>(failure);
+        Assert.Single(handler.Requests);
+        Assert.Single(handler.Requests, request => request.Method == HttpMethod.Post);
+    }
+
     private static StableAudioMusicGenerationProvider CreateProvider(
         HttpMessageHandler handler,
         bool enabled = true,

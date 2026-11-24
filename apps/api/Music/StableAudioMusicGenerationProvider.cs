@@ -31,9 +31,15 @@ public sealed class StableAudioMusicGenerationProvider(
 
     public string Key => "stable-audio";
 
-    public async Task<MusicProviderResult> GenerateAsync(
+    public Task<MusicProviderResult> GenerateAsync(
         MusicGenerationInput request,
         CancellationToken cancellationToken = default)
+        => GenerateAsync(request, cancellationToken, onSubmissionAccepted: null);
+
+    public async Task<MusicProviderResult> GenerateAsync(
+        MusicGenerationInput request,
+        CancellationToken cancellationToken,
+        Func<string, Task>? onSubmissionAccepted)
     {
         if (!settings.Enabled
             || !string.Equals(settings.ProviderKey, Key, StringComparison.OrdinalIgnoreCase)
@@ -75,6 +81,12 @@ public sealed class StableAudioMusicGenerationProvider(
             var generationId = ReadGenerationId(createdBody);
             providerSubmissionAccepted = true;
             providerGenerationId = generationId;
+
+            // F-36.1: make the acceptance durable before the first poll. Anything after this point can
+            // lose the process (crash, OOM kill, a rollout mid-generation), and the only surviving
+            // evidence that a paid generation exists is the provider operation id on the attempt row.
+            // A sink that cannot persist is a fail-closed signal, never a silent success.
+            if (onSubmissionAccepted is not null) await onSubmissionAccepted(generationId);
 
             byte[]? output = null;
             string? contentType = null;
