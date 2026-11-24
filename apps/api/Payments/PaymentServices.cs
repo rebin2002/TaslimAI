@@ -426,14 +426,15 @@ public sealed class PaymentLifecycleService(TaslimDbContext db, ICreditLedgerSer
     // plan.MonthlyCreditAllowance and the audit reason is still the caller's string.
     //
     // Rows created before this derivation are unaffected: the lookup above still finds them first and
-    // their stored id keeps producing the historical grant key. Kind is deliberately not part of the
-    // name, because two representations of the same instant denote the same renewal period - exactly
-    // what the unique index on (SubscriptionId, StartsAt) enforces.
+    // their stored id keeps producing the historical grant key. The name is over the instant at the
+    // resolution the store keeps it at, because two representations of one instant denote one renewal
+    // period - exactly what the unique index on (SubscriptionId, StartsAt) enforces. The quantising
+    // that makes that true on both sides of the persistence boundary is StoreResolutionTicks.
     internal static Guid RenewalPeriodIdentity(Guid subscriptionId, DateTime periodStart)
     {
         var name = Encoding.UTF8.GetBytes(string.Create(
             CultureInfo.InvariantCulture,
-            $"taslim:billing-period:v1:{subscriptionId:N}:{periodStart.Ticks}"));
+            $"taslim:billing-period:v1:{subscriptionId:N}:{StoreResolutionTicks(periodStart)}"));
         var digest = SHA1.HashData(name);
         digest[6] = (byte)((digest[6] & 0x0F) | 0x50); // version 5 (name-based)
         digest[8] = (byte)((digest[8] & 0x3F) | 0x80); // RFC 4122 variant
@@ -442,6 +443,46 @@ public sealed class PaymentLifecycleService(TaslimDbContext db, ICreditLedgerSer
         // silently constant identity would be worse than the bug this replaces, so the derivation is
         // pinned by a golden value in BillingRenewalPeriodIdentityTests.
         return Guid.Parse(Convert.ToHexString(digest.AsSpan(0, 16)).ToLowerInvariant());
+    }
+
+    // The ticks a renewal period is named over, expressed at the resolution a BillingPeriod row can
+    // actually hold.
+    //
+    // A .NET DateTime carries 100-nanosecond ticks; the timestamp column the period is stored in
+    // carries microseconds, and the provider discards the finer digits on the way in - measured
+    // against this exact stack rather than assumed: a start at base+7 ticks is stored as base, while
+    // base+15 is stored as base+10. So a boundary that reaches this derivation still holding
+    // sub-microsecond precision - one computed in memory by the renewal path instead of read back
+    // from the row it describes - names a value no stored row can ever reproduce.
+    //
+    // That matters because the identity is the second line of defence, not the first. The durable
+    // unique index on (SubscriptionId, StartsAt) is what actually refuses a duplicate allowance; the
+    // identity exists so a duplicate delivery collides on the BillingPeriod primary key as well,
+    // which is the defence PR #1094 proved was missing while the period id was per-delivery entropy.
+    // A derivation the store cannot recompute quietly removes that second collision: the two
+    // deliveries mint two keys, the primary key accepts both, and the invariant rests on one index
+    // again. Quantising to the stored resolution makes the collision real for every representation
+    // of the same persisted instant.
+    //
+    // Nothing that works today changes. Whole-second boundaries - what an activation or a renewal
+    // computes, and what every existing row holds - are already multiples of ten ticks, so existing
+    // ids, the grant keys derived from them and the golden value pinned by
+    // BillingRenewalPeriodIdentityTests are byte-identical before and after this.
+    private const long TicksPerMicrosecond = 10;
+    internal static long StoreResolutionTicks(DateTime value)
+    {
+        // Normalise the spelling before quantising, so the name is over one instant rather than over
+        // whichever representation of it arrived: a local value is converted, and a value that names
+        // no offset is read as UTC, the same way the provider reads it when writing this column.
+        // Without this, a payload parsed into a local representation and a redelivery read back as
+        // UTC would name two different renewals of one period.
+        var instant = value.Kind switch
+        {
+            DateTimeKind.Utc => value,
+            DateTimeKind.Local => value.ToUniversalTime(),
+            _ => DateTime.SpecifyKind(value, DateTimeKind.Utc),
+        };
+        return instant.Ticks / TicksPerMicrosecond * TicksPerMicrosecond;
     }
 
     private async Task<PaymentAttempt> GetAttemptAsync(Guid workspaceId, Guid id, CancellationToken cancellationToken) =>
@@ -492,7 +533,16 @@ public sealed class PaymentLifecycleService(TaslimDbContext db, ICreditLedgerSer
 
     private static void ValidatePeriod(DateTime start, DateTime end)
     {
-        if (end <= start) throw new ArgumentException("The billing period must end after it starts.");
+        // Compared on the normalised instants rather than on the raw DateTime values: the built-in
+        // ordering ignores Kind, so a start arriving as the offset-bearing form a webhook payload
+        // parses into and an end arriving in UTC can be ordered by their wall-clock digits instead of
+        // by time whenever the host offset is not the one the payload carried. Both sides go through
+        // the same normalising the identity uses, so the ordering decision and the identity decision
+        // are taken on one representation of the period.
+        if (StoreResolutionTicks(end) <= StoreResolutionTicks(start))
+        {
+            throw new ArgumentException("The billing period must end after it starts.");
+        }
     }
 }
 
