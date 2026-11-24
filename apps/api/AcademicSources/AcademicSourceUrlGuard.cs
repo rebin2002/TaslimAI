@@ -119,6 +119,13 @@ public static class AcademicSourceUrlGuard
     /// IPv4-mapped spellings of those ranges. DNS-level rebinding of an allow-listed hostname is
     /// closed by <see cref="AcademicSourceConnectionPolicy"/>, which resolves the host and dials
     /// only an address that passes this classifier; a URL allow list alone is not sufficient.
+    /// Native v6 special-use space is refused as its own set of rules rather than by hostname:
+    /// fc00::/6 (unique local, the unicast link-local remainder and multicast/reserved),
+    /// 2001::/23 (IETF Protocol Assignments, which contains PCP/LWP/FFA anycast, benchmarking,
+    /// ORCHID and ORCHIDv2), 2620:4f80::/32 (ORCHIDv2 configuration use), 2001:db8::/32
+    /// (documentation), 100::/64 (discard-only), 2002::/16 (6to4), 3ffe::/16 (legacy 6bone) and
+    /// the NAT64 / IPv4-translatable prefixes 64:ff9b::/96 and 64:ff9b:1::/48, whose embedded v4
+    /// destination is only reachable through a translator and is therefore refused outright.
     /// </summary>
     public static bool IsPubliclyRoutable(IPAddress address)
     {
@@ -149,10 +156,27 @@ public static class AcademicSourceUrlGuard
             // provider space either. 6to4 (2002::/16) embeds a v4 address and is refused outright
             // rather than inheriting whatever the embedded v4 looks like.
             if (bytes[0] >= 0xfc) return false;
+            // NAT64 / IPv4-translatable space (RFC 6052 well-known 64:ff9b::/96 and RFC 8215
+            // local-use 64:ff9b:1::/48) also embeds a v4 destination, but the reduction above only
+            // covers ::/96 and ::ffff:0:0/96, so 64:ff9b::a9fe:a9fe — the metadata address reached
+            // through a translator — looked like native public v6. It is refused outright, exactly
+            // as 6to4 is: an operator who means to read a public service configures its hostname,
+            // and a literal in translator space cannot be verified as that service.
+            if (IsNat64Translatable(bytes)) return false;
+            // 2001::/23 is the IETF Protocol Assignments block (RFC 8215): PCP/LWP/FFA anycast
+            // 2001:1::/32, benchmarking 2001:2::/48, ORCHID 2001:10::/28 and ORCHIDv2
+            // 2001:20::/28 all live inside it, and Teredo 2001:0::/32 is already refused above.
+            // The /23 stops short of the documentation row below and of real provider space such
+            // as 2001:448::/32 or 2001:4860::/32, whose second byte is above 0x01.
+            if (bytes[0] == 0x20 && bytes[1] == 0x01 && bytes[2] <= 0x01) return false;
             if (bytes[0] == 0x20 && bytes[1] == 0x01 && bytes[2] == 0x0d && bytes[3] == 0xb8) return false;
             if (bytes[0] == 0x01 && bytes[1] == 0x00 && bytes[2] == 0 && bytes[3] == 0) return false;
             if (bytes[0] == 0x20 && bytes[1] == 0x02) return false;
             if (bytes[0] == 0x3f && bytes[1] == 0xfe) return false;                      // v6-only loopback range
+            // ORCHIDv2 configuration-use allocation (RFC 7560). This is the only newly refused
+            // range that sits inside globally routable 2000::/3; the neighbouring 2620:4f7f::/32
+            // and 2620:4f81::/32 must stay public.
+            if (bytes[0] == 0x26 && bytes[1] == 0x20 && bytes[2] == 0x4f && bytes[3] == 0x80) return false;
             return true;
         }
 
@@ -194,6 +218,19 @@ public static class AcademicSourceUrlGuard
     private static bool IsV4Compatible(byte[] bytes)
     {
         for (var i = 0; i < 12; i++) if (bytes[i] != 0) return false;
+        return true;
+    }
+
+    /// <summary>
+    /// True for the well-known NAT64 prefix 64:ff9b::/96 (RFC 6052) and the local-use
+    /// IPv4-translatable prefix 64:ff9b:1::/48 (RFC 8215). Neither names a publicly routable v6
+    /// unicast destination: traffic to them only reaches its target through a stateful translator.
+    /// </summary>
+    private static bool IsNat64Translatable(byte[] bytes)
+    {
+        if (bytes[0] != 0x00 || bytes[1] != 0x64 || bytes[2] != 0xff || bytes[3] != 0x9b) return false;
+        if (bytes[4] == 0x00 && bytes[5] == 0x01) return true;              // 64:ff9b:1::/48
+        for (var i = 4; i < 12; i++) if (bytes[i] != 0) return false;       // 64:ff9b::/96
         return true;
     }
 

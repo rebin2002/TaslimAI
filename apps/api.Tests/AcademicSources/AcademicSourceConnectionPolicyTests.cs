@@ -59,6 +59,22 @@ public sealed class AcademicSourceConnectionPolicyTests
     [InlineData("::a00:1")]
     [InlineData("::c000:201")]
     [InlineData("::")]
+    // Translator and IETF/ORCHID assignment space: a hostname that rebinds into one of these is
+    // dialled at a non-public destination even though the address is not flagged by
+    // IsIPv6LinkLocal/SiteLocal/Teredo and is not in the fc00::/6 tail. The NAT64 rows are the
+    // metadata, loopback, RFC1918 and v4-documentation addresses reached through a v6 prefix whose
+    // embedded v4 is not reduced by the ::/96 rule, so they used to be pinned and dialled.
+    [InlineData("64:ff9b::a9fe:a9fe")]
+    [InlineData("64:ff9b::7f00:1")]
+    [InlineData("64:ff9b::a00:1")]
+    [InlineData("64:ff9b::c000:201")]
+    [InlineData("64:ff9b:1::8.8.8.8")]
+    [InlineData("64:ff9b:1::a9fe:a9fe")]
+    [InlineData("2001:1::1")]
+    [InlineData("2001:2::1")]
+    [InlineData("2001:10::1")]
+    [InlineData("2001:20::1")]
+    [InlineData("2620:4f80::1")]
     public async Task Allow_listed_hostname_that_rebinds_to_non_public_space_is_refused_before_connect(string answer)
     {
         var resolver = new AcademicFixture.StubResolver(answer);
@@ -88,6 +104,12 @@ public sealed class AcademicSourceConnectionPolicyTests
     [InlineData("2001:448:1234::5")]                          // academic IPv6 must not be false-blocked
     [InlineData("::10a0:1")]                                   // ::/96 spelling of public 16.160.0.1
     [InlineData("::d5c6:d6d7")]                                // ::/96 spelling of public 213.198.214.215
+    // Real v6 provider space adjacent to the newly refused assignments must stay pinned: these are
+    // the addresses an over-broad fix would false-block.
+    [InlineData("2001:200::1")]                                // first /20 above 2001::/23
+    [InlineData("2001:4860:4860::8888")]                       // public recursive DNS in v6 space
+    [InlineData("2620:4f7f:ffff::1")]                          // just below 2620:4f80::/32
+    [InlineData("2620:4f81::1")]                               // just above it
     public async Task Public_answers_are_pinned_to_the_address_that_was_validated(string answer)
     {
         var resolver = new AcademicFixture.StubResolver(answer);
@@ -144,6 +166,13 @@ public sealed class AcademicSourceConnectionPolicyTests
     [InlineData("[ff02::1]")]
     [InlineData("[fe00::1]")]
     [InlineData("[::a9fe:a9fe]")]
+    [InlineData("[64:ff9b::a9fe:a9fe]")]
+    [InlineData("[64:ff9b:1::a9fe:a9fe]")]
+    [InlineData("[2001:1::1]")]
+    [InlineData("[2001:2::1]")]
+    [InlineData("[2001:10::1]")]
+    [InlineData("[2001:20::1]")]
+    [InlineData("[2620:4f80::1]")]
     public async Task Ip_literals_are_classified_without_consulting_dns(string literal)
     {
         var resolver = new AcademicFixture.StubResolver("8.8.8.8");

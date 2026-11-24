@@ -75,6 +75,16 @@ public sealed class AcademicSourceUrlGuardTests
         Assert.NotEmpty(new AcademicSourceDiscoveryOptions { CrossrefBaseUrl = "https://[ff02::1]" }.Validate());
         Assert.NotEmpty(new AcademicSourceDiscoveryOptions { OpenLibraryBaseUrl = "https://[fe00::1]" }.Validate());
         Assert.NotEmpty(new AcademicSourceDiscoveryOptions { GoogleBooksBaseUrl = "https://[::a00:1]" }.Validate());
+        // Same story for the translator and IETF/ORCHID assignments: a base URL written in one of
+        // these prefixes used to validate clean and put egress on a non-public destination.
+        Assert.NotEmpty(new AcademicSourceDiscoveryOptions { OpenAlexBaseUrl = "https://[64:ff9b::a9fe:a9fe]" }.Validate());
+        Assert.NotEmpty(new AcademicSourceDiscoveryOptions { CrossrefBaseUrl = "https://[64:ff9b:1::a9fe:a9fe]" }.Validate());
+        Assert.NotEmpty(new AcademicSourceDiscoveryOptions { OpenLibraryBaseUrl = "https://[2001:2::1]" }.Validate());
+        Assert.NotEmpty(new AcademicSourceDiscoveryOptions { GoogleBooksBaseUrl = "https://[2001:20::1]" }.Validate());
+        Assert.NotEmpty(new AcademicSourceDiscoveryOptions { OpenAlexBaseUrl = "https://[2620:4f80::1]" }.Validate());
+        // Neighbouring public space must still validate, or the guard has become an over-block.
+        Assert.Empty(new AcademicSourceDiscoveryOptions { OpenAlexBaseUrl = "https://[2620:4f81::1]" }.Validate());
+        Assert.Empty(new AcademicSourceDiscoveryOptions { OpenAlexBaseUrl = "https://[2001:200::1]" }.Validate());
         Assert.Empty(new AcademicSourceDiscoveryOptions().Validate());
     }
 
@@ -91,12 +101,21 @@ public sealed class AcademicSourceUrlGuardTests
         Assert.False(AcademicSourceUrlGuard.IsAllowedEndpoint(new Uri("http://169.254.169.254/latest/meta-data/"), options.AllowedEndpointHosts()));
         // The same exclusion must hold for the IPv6 spellings that used to be admitted: a configured
         // base URL in the special-use tail never reaches the endpoint allow list.
-        foreach (var literal in new[] { "[::a9fe:a9fe]", "[ff02::1]", "[fe00::1]", "[::7f00:1]" })
+        foreach (var literal in new[] { "[::a9fe:a9fe]", "[ff02::1]", "[fe00::1]", "[::7f00:1]",
+                     "[64:ff9b::a9fe:a9fe]", "[64:ff9b:1::8.8.8.8]", "[2001:1::1]", "[2001:10::1]",
+                     "[2001:20::1]", "[2620:4f80::1]" })
         {
             var admitted = new AcademicSourceDiscoveryOptions { OpenAlexBaseUrl = "https://" + literal }
                 .Normalize().AllowedEndpointHosts();
             Assert.DoesNotContain(literal.TrimStart('[').TrimEnd(']'), admitted);
         }
+        // ...while a genuinely public v6 literal in the same neighbourhood is still admitted.
+        Assert.Contains("2620:4f81::1", new AcademicSourceDiscoveryOptions
+        { OpenAlexBaseUrl = "https://[2620:4f81::1]" }.Normalize().AllowedEndpointHosts());
+        Assert.True(AcademicSourceUrlGuard.IsAllowedEndpoint(
+            new Uri("https://[2620:4f81::1]/"), ["2620:4f81::1"]));
+        Assert.False(AcademicSourceUrlGuard.IsAllowedEndpoint(
+            new Uri("https://[64:ff9b::a9fe:a9fe]/"), ["64:ff9b::a9fe:a9fe"]));
     }
 
     [Fact]
@@ -171,6 +190,42 @@ public sealed class AcademicSourceUrlGuardTests
     [InlineData("::10a0:1", true)]    // 16.160.0.1
     [InlineData("::d5c6:d6d7", true)] // 213.198.214.215
     public void Publicly_routable_ipv6_classification(string address, bool expected)
+        => Assert.Equal(expected, AcademicSourceUrlGuard.IsPubliclyRoutable(IPAddress.Parse(address)));
+
+    // Residual of the same rule set: v6 space that is special-use but sits in the globally-routed
+    // 0000::/8 and 2000::/3 regions, so neither IsIPv6LinkLocal nor the fc00::/6 tail catches it.
+    // NAT64 / IPv4-translatable prefixes embed a v4 destination that is only reachable through a
+    // stateful translator, and 2001::/23 plus 2620:4f80::/32 are IETF/ORCHID assignments.
+    [Theory]
+    [InlineData("64:ff9b::a9fe:a9fe", false)] // NAT64 of 169.254.169.254, the metadata address
+    [InlineData("64:ff9b::7f00:1", false)]    // NAT64 of 127.0.0.1
+    [InlineData("64:ff9b::a00:1", false)]     // NAT64 of 10.0.0.1
+    [InlineData("64:ff9b::ac10:1", false)]    // NAT64 of 172.16.0.1
+    [InlineData("64:ff9b::c000:201", false)]  // NAT64 of 192.0.2.1, v4 documentation
+    [InlineData("64:ff9b::d5c6:d6d7", false)] // NAT64 of a public v4: translator space, refused
+    [InlineData("64:ff9b::", false)]          // the /96 prefix itself
+    [InlineData("64:ff9b:1::8.8.8.8", false)] // 64:ff9b:1::/48 local-use, even embedding a public v4
+    [InlineData("64:ff9b:1::a9fe:a9fe", false)]
+    [InlineData("2001:1::1", false)]          // PCP anycast
+    [InlineData("2001:1::4", false)]          // LWP/FFA anycast
+    [InlineData("2001:2::1", false)]          // IPv6 benchmarking
+    [InlineData("2001:10::1", false)]         // ORCHID
+    [InlineData("2001:1f::ffff", false)]      // last address of the ORCHID /28
+    [InlineData("2001:20::1", false)]         // ORCHIDv2
+    [InlineData("2001:2f::1", false)]         // last address of the ORCHIDv2 /28
+    [InlineData("2001:1::ffff:ffff", false)]  // inside 2001::/23, not the Teredo /32
+    [InlineData("2620:4f80::1", false)]       // ORCHIDv2 configuration use
+    // Boundaries: the assignments above must not swallow neighbouring real provider space.
+    [InlineData("2620:4f7f:ffff::1", true)]   // immediately below 2620:4f80::/32
+    [InlineData("2620:4f81::1", true)]        // immediately above it
+    [InlineData("2001:200::1", true)]          // first /20 above 2001::/23
+    [InlineData("2001:448:1234::5", true)]     // academic provider space
+    [InlineData("2001:4860:4860::8888", true)] // public DNS64/v6 provider space
+    [InlineData("5f00::1", true)]              // unassigned but globally routable: stays public
+    [InlineData("2002:c000:204::1", false)]    // 6to4 stays refused (unchanged behaviour)
+    [InlineData("3ffe:1::1", false)]           // legacy 6bone stays refused (unchanged behaviour)
+    [InlineData("2001:db8::1", false)]         // documentation stays refused (unchanged behaviour)
+    public void Special_use_ipv6_transition_and_assignment_space_is_not_public(string address, bool expected)
         => Assert.Equal(expected, AcademicSourceUrlGuard.IsPubliclyRoutable(IPAddress.Parse(address)));
 
     [Fact]
