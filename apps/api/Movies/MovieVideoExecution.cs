@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Data.Common;
 using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
@@ -83,6 +84,8 @@ public sealed class MovieVideoProviderExecution
 public sealed class MovieVideoExecutionStore(TaslimDbContext db, IOptions<MovieVideoOptions> options)
 {
     private readonly MovieVideoOptions settings = options.Value;
+    private const string ApprovedProductionClaimEvent = "provider_submission_claimed";
+    private const string SubmissionClaimConflictCode = "MOVIE_PRODUCTION_SUBMISSION_CLAIM_CONFLICT";
 
     public async Task<MovieVideoProviderExecution> GetOrCreateAsync(GenerationJob job, Guid movieClipId, string providerKey, CancellationToken cancellationToken)
     {
@@ -208,6 +211,226 @@ public sealed class MovieVideoExecutionStore(TaslimDbContext db, IOptions<MovieV
             .SetProperty(item => item.StatusChangedAt, now)
             .SetProperty(item => item.UpdatedAt, now), cancellationToken);
     }
+
+    /// <summary>
+    /// Serializes the first provider submission for an approved Movie ProductionRender
+    /// against the review-side conditional version update. Legacy and unmarked Movie
+    /// jobs retain their existing execution behavior.
+    /// A successful return confirms only that the exact durable claim exists; it does not
+    /// authorize this call to submit. Every provider submission must next pass through the
+    /// one-shot MarkSubmissionAttemptAsync gate before SubmitAsync.
+    /// </summary>
+    public async Task ClaimApprovedProductionSubmissionAsync(
+        Guid generationJobId,
+        Guid workerConcurrencyToken,
+        CancellationToken cancellationToken)
+    {
+        var initialJob = await db.GenerationJobs.AsNoTracking()
+            .SingleOrDefaultAsync(item => item.Id == generationJobId, cancellationToken);
+        if (initialJob is null) throw new MovieVideoStaleWorkerException();
+
+        var initialMarker = GenerationJobPublicationContract.ReadMarker(initialJob.InputJson);
+        if (!initialMarker.HasMarker) return;
+        if (!initialMarker.IsApprovedMovieProduction
+            || !string.Equals(initialJob.JobType, GenerationJobTypes.MovieClipGenerate, StringComparison.OrdinalIgnoreCase))
+            throw SubmissionClaimConflict();
+
+        try
+        {
+            await using var transaction = await db.Database.BeginTransactionAsync(cancellationToken);
+            var job = await db.GenerationJobs.AsNoTracking()
+                .SingleOrDefaultAsync(item => item.Id == generationJobId, cancellationToken);
+            if (job is null
+                || job.Status != GenerationJobStatus.Running
+                || job.ConcurrencyToken != workerConcurrencyToken)
+                throw new MovieVideoStaleWorkerException();
+
+            var marker = GenerationJobPublicationContract.ReadMarker(job.InputJson);
+            if (!marker.IsApprovedMovieProduction
+                || !string.Equals(job.JobType, GenerationJobTypes.MovieClipGenerate, StringComparison.OrdinalIgnoreCase)
+                || !await GenerationJobPublicationContract.HasDurableApprovedMovieLinksAsync(db, job, cancellationToken))
+                throw SubmissionClaimConflict();
+
+            MovieGenerationInput? input;
+            try { input = JsonSerializer.Deserialize<MovieGenerationInput>(job.InputJson); }
+            catch (JsonException) { input = null; }
+            if (input is null
+                || !input.MovieShotId.HasValue
+                || !input.SourceProductionVersionId.HasValue
+                || !input.MovieSceneId.HasValue)
+                throw SubmissionClaimConflict();
+
+            var executions = await db.MovieVideoProviderExecutions.AsNoTracking()
+                .Where(item => item.GenerationJobId == job.Id)
+                .Take(2)
+                .ToListAsync(cancellationToken);
+            if (executions.Count != 1
+                || executions[0].MovieClipId != input.MovieClipId
+                || !string.IsNullOrWhiteSpace(executions[0].ProviderJobId))
+                throw SubmissionClaimConflict();
+
+            var versions = await db.MovieProductionVersions.AsNoTracking()
+                .Where(version => version.GenerationJobId == job.Id
+                    && version.MovieShotId == input.MovieShotId.Value
+                    && version.SourceVersionId == input.SourceProductionVersionId.Value
+                    && version.Stage == MovieProductionStages.ProductionRender
+                    && version.Status == MovieProductionVersionStatuses.PendingApproval
+                    && version.CreatedByUserId == job.CreatedByUserId)
+                .Take(2)
+                .ToListAsync(cancellationToken);
+            if (versions.Count != 1) throw SubmissionClaimConflict();
+            var version = versions[0];
+
+            var claimEvents = await db.MovieProductionStageTransitions.AsNoTracking()
+                .Where(item => item.MovieProductionVersionId == version.Id
+                    && item.EventType == ApprovedProductionClaimEvent)
+                .Take(2)
+                .ToListAsync(cancellationToken);
+            if (claimEvents.Count > 0)
+            {
+                if (claimEvents.Count == 1 && IsMatchingSubmissionClaim(claimEvents[0], job, version)) return;
+                throw SubmissionClaimConflict();
+            }
+            if (executions[0].AttemptCount != 0) throw SubmissionClaimConflict();
+
+            var observedUpdatedAt = version.UpdatedAt;
+            DateTime nextUpdatedAt;
+            try
+            {
+                var minimumNext = observedUpdatedAt.AddMilliseconds(1);
+                var utcNow = DateTime.UtcNow;
+                nextUpdatedAt = utcNow > minimumNext ? utcNow : minimumNext;
+            }
+            catch (ArgumentOutOfRangeException)
+            {
+                throw SubmissionClaimConflict();
+            }
+
+            var updated = await db.MovieProductionVersions
+                .Where(item => item.Id == version.Id
+                    && item.MovieShotId == input.MovieShotId.Value
+                    && item.GenerationJobId == job.Id
+                    && item.SourceVersionId == input.SourceProductionVersionId.Value
+                    && item.Stage == MovieProductionStages.ProductionRender
+                    && item.Status == MovieProductionVersionStatuses.PendingApproval
+                    && item.CreatedByUserId == job.CreatedByUserId
+                    && item.UpdatedAt == observedUpdatedAt)
+                .ExecuteUpdateAsync(setters => setters.SetProperty(item => item.UpdatedAt, nextUpdatedAt), cancellationToken);
+            if (updated != 1)
+            {
+                await transaction.RollbackAsync(cancellationToken);
+                await transaction.DisposeAsync();
+                db.ChangeTracker.Clear();
+                if (await HasCommittedSubmissionClaimAsync(generationJobId, workerConcurrencyToken, CancellationToken.None)) return;
+                throw SubmissionClaimConflict();
+            }
+
+            var persistedUpdatedAt = await db.MovieProductionVersions.AsNoTracking()
+                .Where(item => item.Id == version.Id)
+                .Select(item => item.UpdatedAt)
+                .SingleAsync(cancellationToken);
+            if (persistedUpdatedAt <= observedUpdatedAt) throw SubmissionClaimConflict();
+
+            db.MovieProductionStageTransitions.Add(new MovieProductionStageTransition
+            {
+                Id = Guid.NewGuid(),
+                MovieShotId = input.MovieShotId.Value,
+                MovieProductionVersionId = version.Id,
+                FromStage = MovieProductionStages.ProductionRender,
+                ToStage = MovieProductionStages.ProductionRender,
+                EventType = ApprovedProductionClaimEvent,
+                SourceVersionId = input.SourceProductionVersionId.Value,
+                GenerationJobId = job.Id,
+                ActorUserId = job.CreatedByUserId,
+                CreatedAt = DateTime.UtcNow,
+            });
+            await db.SaveChangesAsync(cancellationToken);
+
+            try
+            {
+                await transaction.CommitAsync(cancellationToken);
+            }
+            catch (Exception)
+            {
+                // A transport error can arrive after the database committed. Submit
+                // only when a fresh read proves the exact job's claim event exists.
+                await transaction.DisposeAsync();
+                db.ChangeTracker.Clear();
+                if (await HasCommittedSubmissionClaimAsync(generationJobId, workerConcurrencyToken, CancellationToken.None)) return;
+                throw SubmissionClaimConflict();
+            }
+        }
+        catch (Exception exception) when (exception is DbException or DbUpdateException)
+        {
+            db.ChangeTracker.Clear();
+            try
+            {
+                if (await HasCommittedSubmissionClaimAsync(generationJobId, workerConcurrencyToken, CancellationToken.None)) return;
+            }
+            catch (Exception) { }
+            throw SubmissionClaimConflict();
+        }
+    }
+
+    private async Task<bool> HasCommittedSubmissionClaimAsync(
+        Guid generationJobId,
+        Guid workerConcurrencyToken,
+        CancellationToken cancellationToken)
+    {
+        var job = await db.GenerationJobs.AsNoTracking()
+            .SingleOrDefaultAsync(item => item.Id == generationJobId, cancellationToken);
+        if (job is null
+            || job.Status != GenerationJobStatus.Running
+            || job.ConcurrencyToken != workerConcurrencyToken
+            || !GenerationJobPublicationContract.ReadMarker(job.InputJson).IsApprovedMovieProduction
+            || !await GenerationJobPublicationContract.HasDurableApprovedMovieLinksAsync(db, job, cancellationToken))
+            return false;
+
+        MovieGenerationInput? input;
+        try { input = JsonSerializer.Deserialize<MovieGenerationInput>(job.InputJson); }
+        catch (JsonException) { input = null; }
+        if (input?.MovieShotId is not Guid shotId || input.SourceProductionVersionId is not Guid sourceVersionId)
+            return false;
+
+        var version = await db.MovieProductionVersions.AsNoTracking()
+            .SingleOrDefaultAsync(item => item.GenerationJobId == job.Id
+                && item.MovieShotId == shotId
+                && item.SourceVersionId == sourceVersionId
+                && item.Stage == MovieProductionStages.ProductionRender
+                && item.Status == MovieProductionVersionStatuses.PendingApproval
+                && item.CreatedByUserId == job.CreatedByUserId,
+                cancellationToken);
+        if (version is null) return false;
+
+        var matchingEvents = await db.MovieProductionStageTransitions.AsNoTracking()
+            .Where(item => item.MovieProductionVersionId == version.Id
+                && item.GenerationJobId == job.Id
+                && item.EventType == ApprovedProductionClaimEvent
+                && item.MovieShotId == shotId
+                && item.SourceVersionId == sourceVersionId
+                && item.FromStage == MovieProductionStages.ProductionRender
+                && item.ToStage == MovieProductionStages.ProductionRender
+                && item.ActorUserId == job.CreatedByUserId)
+            .Take(2)
+            .CountAsync(cancellationToken);
+        return matchingEvents == 1;
+    }
+
+    private static bool IsMatchingSubmissionClaim(
+        MovieProductionStageTransition transition,
+        GenerationJob job,
+        MovieProductionVersion version) =>
+        transition.GenerationJobId == job.Id
+        && transition.MovieShotId == version.MovieShotId
+        && transition.MovieProductionVersionId == version.Id
+        && transition.SourceVersionId == version.SourceVersionId
+        && transition.FromStage == MovieProductionStages.ProductionRender
+        && transition.ToStage == MovieProductionStages.ProductionRender
+        && transition.EventType == ApprovedProductionClaimEvent
+        && transition.ActorUserId == job.CreatedByUserId;
+
+    private static GenerationJobValidationException SubmissionClaimConflict() =>
+        new(SubmissionClaimConflictCode, "The approved Movie production submission claim could not be confirmed.");
 
     public async Task MarkReadyAsync(Guid jobId, Guid concurrencyToken, Guid? assetId, Guid? storedFileId, int? durationSeconds, string? metadataJson, CancellationToken cancellationToken)
     {
@@ -459,6 +682,11 @@ public sealed class MovieVideoGenerationJobHandler(
         if (!output.ContentType.StartsWith("video/", StringComparison.OrdinalIgnoreCase))
             throw new MovieVideoProviderOutputException();
         if (string.IsNullOrWhiteSpace(output.FileName) || output.FileName.Length > 255)
+            throw new MovieVideoProviderOutputException();
+        // A clip cannot enter the ready state without measured temporal evidence.
+        // Otherwise downstream timeline/QC work silently trusts the requested
+        // duration even when the provider returned no usable duration.
+        if (output.DurationSeconds is null or <= 0 or > 3_600)
             throw new MovieVideoProviderOutputException();
     }
 }
