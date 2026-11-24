@@ -88,39 +88,58 @@ public static class AcademicExportFileValidator
             using var document = PdfDocument.Open(new MemoryStream(bytes));
             if (document.NumberOfPages < 1) violations.Add("pdf-zero-pages");
             var firstPageText = document.GetPage(1).Text ?? string.Empty;
-            // PdfPig concatenates positioned words without guaranteeing inter-word spaces, so the
-            // containment check ignores whitespace rather than pretending the extractor preserves it.
-            var wanted = Collapse(report.Title);
-            var anyPageHasTitle = Enumerable.Range(1, document.NumberOfPages).Any(number =>
-                Collapse(document.GetPage(number).Text ?? string.Empty).Contains(wanted, StringComparison.Ordinal));
-            if (!anyPageHasTitle) violations.Add("pdf-title-missing");
+            var pages = Enumerable.Range(1, document.NumberOfPages).Select(number => document.GetPage(number)).ToList();
+            // Two readings of the same artifact. `banded` keeps body numerals and only drops the
+            // running number where it sits in the margin band; `unnumbered` drops every standalone
+            // numeral. A sentence that wraps across a page break is split by the folio in between:
+            // the chicago-humanities-monograph rows print their page number about 103pt from the
+            // foot — outside the 100pt band, and it is the position QuestPDF chooses for a
+            // bottom-aligned footer on that geometry — so "…was not accessed in this / workspace."
+            // read back as "…inthis4workspace." and the gate reported pdf-access-note-missing on
+            // an export that printed the note correctly. Presence of prose must not depend on where
+            // the template happens to put a page number, so a wanted string that quotes no bare
+            // numeral is matched against the unnumbered reading; one that does quote a number (say
+            // "founded in 1912") keeps the banded reading so a dropped numeral cannot fake a match.
+            // Inter-word spacing is not guaranteed by the extractor, so both sides are whitespace-free.
+            var banded = Collapse(string.Concat(pages.Select(PageText)));
+            var unnumbered = Collapse(string.Concat(pages.Select(page => string.Concat(page.GetWords()
+                .Where(word => !word.Text.All(char.IsDigit))
+                .Select(word => word.Text + " ")))));
+
+            bool Holds(string raw) => HoldsInText(raw, banded, unnumbered, StringComparison.Ordinal);
+
+            // Case-insensitive, because the PDF draws the transform rather than storing it. A
+            // design with H1Uppercase (the chicago-humanities-monograph registry rows, including
+            // the heads=caps variant) renders the title as ToUpperInvariant(), and a run-level
+            // uppercase is not applied to extracted text the way w:caps is handled by a Word
+            // reader: the glyphs that come back are simply uppercase. An ordinal match therefore
+            // reported pdf-title-missing on a correct export whenever the title appeared only on
+            // the cover and RunningHeadContent was "none" — a real title in the artifact was
+            // refused. The DOCX side stays ordinal on purpose: it emits w:caps over the original
+            // text, so the stored characters are the report's own and an exact comparison is the
+            // honest one there. This gate asserts presence, not letter case.
+            if (!HoldsInText(report.Title, banded, unnumbered, StringComparison.OrdinalIgnoreCase))
+                violations.Add("pdf-title-missing");
             // The cover must render: if the first page has zero extractable characters, layout failed.
             if (string.IsNullOrWhiteSpace(firstPageText) && document.NumberOfPages == 1) violations.Add("pdf-empty");
 
-            var everyPage = Collapse(string.Concat(Enumerable.Range(1, document.NumberOfPages)
-                .Select(number => PageText(document.GetPage(number)))));
-            if (!everyPage.Contains(Collapse(report.Labels.IntegrityNote), StringComparison.Ordinal))
-                violations.Add("pdf-integrity-note-missing");
-            if (!everyPage.Contains(Collapse(report.Labels.ReferencesHeading), StringComparison.Ordinal))
-                violations.Add("pdf-bibliography-heading-missing");
-            if (!everyPage.Contains(Collapse(report.Labels.DisclosureHeading), StringComparison.Ordinal))
-                violations.Add("pdf-disclosure-heading-missing");
+            if (!Holds(report.Labels.IntegrityNote)) violations.Add("pdf-integrity-note-missing");
+            if (!Holds(report.Labels.ReferencesHeading)) violations.Add("pdf-bibliography-heading-missing");
+            if (!Holds(report.Labels.DisclosureHeading)) violations.Add("pdf-disclosure-heading-missing");
             if (report.CitedCitationIds.Count > 0
-                && !report.CitedCitationIds.Any(id => everyPage.Contains(Collapse($"[{id}]"), StringComparison.Ordinal)))
+                && !report.CitedCitationIds.Any(id => Holds($"[{id}]")))
                 violations.Add("pdf-citations-missing");
             foreach (var source in report.Sources.Where(source => !string.IsNullOrWhiteSpace(source.AccessNote)))
-                if (!everyPage.Contains(Collapse(source.AccessNote), StringComparison.Ordinal))
+                if (!Holds(source.AccessNote!))
                     violations.Add($"pdf-access-note-missing-{source.CitationId}");
             // A two-item list used to abort the render, and an untitled section used to vanish; both
             // are content the student paid to have filed, so the reopened PDF has to show it.
             foreach (var item in report.Sections.SelectMany(section => section.Blocks)
                          .SelectMany(block => block.Items ?? Array.Empty<string>()).Take(6))
-                if (!everyPage.Contains(Collapse(item), StringComparison.Ordinal))
-                    violations.Add("pdf-list-item-missing");
+                if (!Holds(item)) violations.Add("pdf-list-item-missing");
             foreach (var untitled in report.Sections.Where(section => string.IsNullOrWhiteSpace(section.Heading))
                          .SelectMany(section => section.Blocks).Where(block => !string.IsNullOrWhiteSpace(block.Text)).Select(block => block.Text!).Take(3))
-                if (!everyPage.Contains(Collapse(untitled), StringComparison.Ordinal))
-                    violations.Add("pdf-untitled-section-content-missing");
+                if (!Holds(untitled)) violations.Add("pdf-untitled-section-content-missing");
         }
         catch (Exception exception)
         {
@@ -153,4 +172,21 @@ public static class AcademicExportFileValidator
             })
             .Select(word => word.Text + " "));
     }
+
+    /// <summary>
+    /// True when the saved text quotes a number as its own word ("in 1912", "over 4 weeks"). Such a
+    /// claim has to be looked for in a reading of the document that still contains its numerals,
+    /// otherwise deleting every digit would turn "in" into a match for "in 1912".
+    /// </summary>
+    private static bool QuotesBareNumber(string raw) => raw
+        .Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries)
+        .Any(token => token.All(char.IsDigit));
+
+    private static bool HoldsInText(string raw, string banded, string unnumbered, StringComparison comparison)
+    {
+        var wanted = Collapse(raw);
+        var haystack = QuotesBareNumber(raw) ? banded : unnumbered;
+        return haystack.Contains(wanted, comparison);
+    }
+
 }

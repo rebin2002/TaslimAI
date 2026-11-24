@@ -228,6 +228,256 @@ public sealed class AcademicExportFidelityTests : IClassFixture<TaslimApiFactory
 
     private static string Collapse(string value) => string.Join(' ', value.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
 
+    // ── table geometry: valid saved data whose rows do not agree on a width ─────────────
+
+    /// <summary>
+    /// The handler-shaped envelope with the two table geometries the reviewers reproduced: a block whose
+    /// FIRST saved row has an empty Cells array followed by wider rows, and a block whose row widths grow
+    /// (2 then 3). Both pass ResearchDraftValidator, which bounds the row count and the cell text length
+    /// but never checks that the rows agree on a width, so this is valid saved data reaching the renderers
+    /// rather than corrupt data that should be refused.
+    /// </summary>
+    private static string RaggedTableResultJson() => JsonSerializer.Serialize(new
+    {
+        researchType = "research",
+        title = "Assessment Load and Revision Quality",
+        subtitle = (string?)null,
+        language = "en",
+        executiveSummary = "Two timed samples place workload and revision depth together [S1].",
+        keyFindings = new List<ResearchReportBlock>(),
+        sections = new List<ResearchSection>
+        {
+            new()
+            {
+                Heading = "Empty first row",
+                Blocks =
+                [
+                    new()
+                    {
+                        Type = ResearchBlockTypes.Table,
+                        Text = "Table 1. First row carries no cells.",
+                        Rows =
+                        [
+                            new() { Cells = new List<string>() },
+                            new() { Cells = ["ALPHA7"] },
+                            new() { Cells = ["BRAVO9", "CHARLIE3"] },
+                        ],
+                        CitationIds = ["S1"],
+                    },
+                ],
+            },
+            new()
+            {
+                Heading = "Growing widths",
+                Blocks =
+                [
+                    new()
+                    {
+                        Type = ResearchBlockTypes.Table,
+                        Text = (string?)null,
+                        Rows =
+                        [
+                            new() { Cells = ["DELTA5", "ECHO2"] },
+                            new() { Cells = ["FOXTROT4", "GOLF6", "HOTEL8"] },
+                        ],
+                        CitationIds = ["S2", "S3"],
+                    },
+                ],
+            },
+        },
+        conclusion = "Workload budgeting deserves the same scrutiny as content selection.",
+        sourceCount = 3,
+        sources = Array.Empty<object>(),
+    });
+
+    private Guid SeedRaggedTableJob(Guid workspaceId, Guid userId)
+    {
+        using var scope = _factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        var jobId = Guid.NewGuid();
+        var now = new DateTime(2026, 11, 21, 9, 0, 0, DateTimeKind.Utc);
+        db.GenerationJobs.Add(new GenerationJob
+        {
+            Id = jobId,
+            WorkspaceId = workspaceId,
+            CreatedByUserId = userId,
+            JobType = "research.generate",
+            Status = GenerationJobStatus.Succeeded,
+            Title = "Assessment Load and Revision Quality",
+            InputJson = "{}",
+            ResultJson = RaggedTableResultJson(),
+            CreatedAt = now,
+            CompletedAt = now,
+        });
+        db.ResearchSources.AddRange(
+            new ResearchSource
+            {
+                Id = Guid.NewGuid(), WorkspaceId = workspaceId, GenerationJobId = jobId,
+                CitationId = "S1", SourceType = "web", Rank = 1, RetrievedAt = now, IsSelected = true,
+                Title = "Workload and depth in timed samples", Domain = "journals.example",
+                Publisher = "Example Press", Url = "https://journals.example/workload-depth",
+                Snippet = "Weighted workload tracked revision depth.",
+            },
+            new ResearchSource
+            {
+                Id = Guid.NewGuid(), WorkspaceId = workspaceId, GenerationJobId = jobId,
+                CitationId = "S2", SourceType = "web", Rank = 2, RetrievedAt = now, IsSelected = true,
+                Title = "Revision Strategies Handbook", Domain = "catalog.example",
+                Publisher = "University Catalogue", Url = "https://catalog.example/revision-strategies",
+            },
+            new ResearchSource
+            {
+                Id = Guid.NewGuid(), WorkspaceId = workspaceId, GenerationJobId = jobId,
+                CitationId = "S3", SourceType = "uploaded", Rank = 3, RetrievedAt = now, IsSelected = true,
+                Title = "Course workload export", Domain = "uploaded file", Snippet = "Export excerpt.",
+            });
+        db.SaveChanges();
+        return jobId;
+    }
+
+    [Fact]
+    public async Task Ragged_saved_rows_export_as_rectangular_docx_tables()
+    {
+        var (userId, workspaceId, client) = await RegisterAsync("Ragged Table Docx Owner");
+        var jobId = SeedRaggedTableJob(workspaceId, Guid.Parse(userId));
+        var bytes = await ExportAsync(client, jobId, ClassicConfiguration, "docx");
+
+        using var package = WordprocessingDocument.Open(new MemoryStream(bytes), false);
+        var body = package.MainDocumentPart!.Document!.Body!;
+        var tables = body.Descendants<DocumentFormat.OpenXml.Wordprocessing.Table>().ToList();
+        Assert.Equal(2, tables.Count);
+
+        // Width comes from the widest saved row, and every w:tr agrees with w:tblGrid — the shape
+        // OpenXmlValidator accepts and the shape in which a cell cannot drift into the next row.
+        var firstColumns = tables[0].GetFirstChild<DocumentFormat.OpenXml.Wordprocessing.TableGrid>()!
+            .ChildElements.OfType<DocumentFormat.OpenXml.Wordprocessing.GridColumn>().Count();
+        Assert.Equal(2, firstColumns);
+        var firstRows = tables[0].Descendants<DocumentFormat.OpenXml.Wordprocessing.TableRow>().ToList();
+        Assert.Equal(3, firstRows.Count);
+        var firstTexts = firstRows.Select(row => string.Join('|',
+            row.Descendants<DocumentFormat.OpenXml.Wordprocessing.TableCell>().Select(cell => cell.InnerText))).ToList();
+        Assert.All(firstTexts, text => Assert.Equal(1, text.Count(character => character == '|')));
+        Assert.Contains("ALPHA7", firstTexts[1], StringComparison.Ordinal);
+        Assert.Equal("BRAVO9|CHARLIE3", firstTexts[2]);
+
+        var secondColumns = tables[1].GetFirstChild<DocumentFormat.OpenXml.Wordprocessing.TableGrid>()!
+            .ChildElements.OfType<DocumentFormat.OpenXml.Wordprocessing.GridColumn>().Count();
+        Assert.Equal(3, secondColumns);
+        var secondRows = tables[1].Descendants<DocumentFormat.OpenXml.Wordprocessing.TableRow>().ToList();
+        Assert.All(secondRows, row => Assert.Equal(3,
+            row.Descendants<DocumentFormat.OpenXml.Wordprocessing.TableCell>().Count()));
+        Assert.Equal("DELTA5|ECHO2|", string.Join('|', secondRows[0]
+            .Descendants<DocumentFormat.OpenXml.Wordprocessing.TableCell>().Select(cell => cell.InnerText)));
+        Assert.Equal("FOXTROT4|GOLF6|HOTEL8", string.Join('|', secondRows[1]
+            .Descendants<DocumentFormat.OpenXml.Wordprocessing.TableCell>().Select(cell => cell.InnerText)));
+
+        // The schema is still clean with the padded grid, and the citations stay where the fix put them:
+        // attached to the caption when there is one, on their own line when the block has none.
+        Assert.Empty(new OpenXmlValidator().Validate(package).Select(error => error.Description));
+        var flat = DocxText(bytes);
+        Assert.Contains("Table 1. First row carries no cells. [S1]", flat, StringComparison.Ordinal);
+        Assert.Contains("[S2] [S3]", flat, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Ragged_saved_rows_survive_the_pdf_grid_and_reopen_with_every_cell()
+    {
+        var (userId, workspaceId, client) = await RegisterAsync("Ragged Table Pdf Owner");
+        var jobId = SeedRaggedTableJob(workspaceId, Guid.Parse(userId));
+        // ExportAsync asserts the HTTP 200, which is itself half the regression: before the column count
+        // came from the widest row, QuestPDF was handed cells with no column definitions (empty first row)
+        // or more cells than columns (widening rows), and the export either threw or laid the grid out so
+        // that a cell landed in the following row.
+        var flat = Collapse(PdfText(await ExportAsync(client, jobId, ClassicConfiguration, "pdf")));
+        foreach (var cell in new[] { "ALPHA7", "BRAVO9", "CHARLIE3", "DELTA5", "ECHO2", "FOXTROT4", "GOLF6", "HOTEL8" })
+            Assert.Contains(cell, flat, StringComparison.Ordinal);
+        Assert.Contains("Table 1. First row carries no cells.", flat, StringComparison.Ordinal);
+        Assert.Contains("[S2] [S3]", flat, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Rectangularize_pads_to_the_widest_row_and_reports_zero_for_an_empty_block()
+    {
+        var padded = AcademicReportDocxRenderer.Rectangularize(
+            new IReadOnlyList<string>[]
+            {
+                Array.Empty<string>(),
+                new[] { "one" },
+                new[] { "two", "three" },
+            },
+            out var width);
+        Assert.Equal(2, width);
+        Assert.Equal(3, padded.Count);
+        Assert.All(padded, row => Assert.Equal(2, row.Count));
+        Assert.Equal(new[] { string.Empty, string.Empty }, padded[0].ToArray());
+        Assert.Equal(new[] { "one", string.Empty }, padded[1].ToArray());
+        Assert.Equal(new[] { "two", "three" }, padded[2].ToArray());
+
+        Assert.Equal(0, AcademicReportDocxRenderer.Rectangularize(
+            new IReadOnlyList<string>[] { Array.Empty<string>(), Array.Empty<string>() }, out var emptyWidth)
+            .Count);
+        Assert.Equal(0, emptyWidth);
+
+        // A rectangular block is returned unchanged rather than rebuilt.
+        var already = new IReadOnlyList<string>[] { new[] { "a", "b" }, new[] { "c", "d" } };
+        Assert.Same(already, AcademicReportDocxRenderer.Rectangularize(already, out var sameWidth));
+        Assert.Equal(2, sameWidth);
+    }
+
+        [Fact]
+    public async Task Uppercased_cover_title_passes_pdf_validation_in_every_monograph_configuration()
+    {
+        // The chicago-humanities-monograph registry rows set heads=caps, so the PDF draws the title as
+        // ToUpperInvariant(). Where that cover is the only place the title appears, the gate compared it
+        // case-sensitively against report.Title and refused a correctly rendered artefact with
+        // pdf-title-missing. Iterating every configuration of the real template keeps the title preserved
+        // in both variants instead of pinning one spelling, and the words are read from the page rather
+        // than from PdfPig's concatenated Text, which joins a wrapped line without its space.
+        var configurations = AcademicTemplateRegistry.Configurations
+            .Where(configuration => configuration.ConfigurationId.StartsWith("chicago-humanities-monograph", StringComparison.Ordinal))
+            .ToList();
+        Assert.NotEmpty(configurations);
+
+        var (userId, workspaceId, client) = await RegisterAsync("Caps Title Owner");
+        var jobId = SeedHandlerShapedJob(workspaceId, Guid.Parse(userId));
+        foreach (var configuration in configurations)
+        {
+            var spec = AcademicTemplateRegistry.Configurations
+                .First(entry => entry.ConfigurationId == configuration.ConfigurationId).Spec;
+            var bytes = await ExportAsync(client, jobId, configuration.ConfigurationId, "pdf");
+            using var document = UglyToad.PdfPig.PdfDocument.Open(bytes);
+            var coverWords = document.GetPage(1).GetWords().Select(word => word.Text).ToList();
+            var upper = "ASSESSMENT LOAD AND REVISION QUALITY".Split(' ');
+            var original = "Assessment Load and Revision Quality".Split(' ');
+            Assert.True(spec.H1Uppercase
+                ? ContainsRun(coverWords, upper)
+                : ContainsRun(coverWords, original), $"{configuration.ConfigurationId}: [{string.Join("|", coverWords)}]");
+            // The opposite spelling must not be what the cover shows: heads=caps draws the transform and
+            // heads=regular must not, so neither variant can quietly overwrite the student's title.
+            Assert.False(spec.H1Uppercase
+                ? ContainsRun(coverWords, original)
+                : ContainsRun(coverWords, upper), $"{configuration.ConfigurationId}: unexpected casing");
+        }
+    }
+
+    private static bool ContainsRun(IReadOnlyList<string> words, string[] run)
+    {
+        for (var start = 0; start + run.Length <= words.Count; start++)
+        {
+            var matched = true;
+            for (var offset = 0; offset < run.Length; offset++)
+            {
+                if (!string.Equals(words[start + offset], run[offset], StringComparison.Ordinal))
+                {
+                    matched = false;
+                    break;
+                }
+            }
+            if (matched) return true;
+        }
+        return false;
+    }
+
     // ── the reader decodes the persisted spelling ───────────────────────────────────────
 
     [Fact]

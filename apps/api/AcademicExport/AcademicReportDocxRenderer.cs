@@ -205,9 +205,16 @@ public static class AcademicReportDocxRenderer
                     // floating below the grid; a caption-less table has nothing to append to, so its ids
                     // become their own line directly after the grid.
                     var hasCaption = !string.IsNullOrWhiteSpace(block.Text);
+                    // The saved row shape is model output that the draft validator admits with unequal
+                    // widths (it bounds row count and cell length, not row geometry), so the grid width
+                    // comes from the widest row and short rows are padded — see Rectangularize. A block
+                    // whose rows hold no cells at all has no grid to draw, but its caption and citation
+                    // markers below still render, so nothing the student saved disappears.
+                    var gridRows = Rectangularize(tableRows, out var gridWidth);
                     if (hasCaption)
                         yield return Paragraph(WithCitations(block.Text, block.CitationIds), null, spec);
-                    yield return BuildTable(spec, tableRows);
+                    if (gridWidth > 0)
+                        yield return BuildTable(spec, gridRows);
                     if (!hasCaption && block.CitationIds.Count > 0)
                         yield return Paragraph(CitationMarkers(block.CitationIds), null, spec, italic: true);
                 }
@@ -235,6 +242,53 @@ public static class AcademicReportDocxRenderer
         => citations is null || citations.Count == 0
             ? string.Empty
             : string.Join(' ', citations.Select(citation => $"[{citation}]"));
+
+    /// <summary>
+    /// Pads a persisted table block into a rectangular grid and reports the resulting width, which is
+    /// what both the OOXML <c>w:tblGrid</c> and QuestPDF's column definitions require. Deriving the
+    /// width from <c>rows[0]</c> alone is the bug this closes: an empty first row used to yield a
+    /// zero-column grid feeding a non-empty body, and a row wider than the first silently shifted its
+    /// extra cells into the following row. Every cell survives — the width is the maximum across rows
+    /// and short rows are padded with empty cells — and an all-empty block reports zero columns so the
+    /// caller can skip the grid instead of emitting an empty table element.
+    /// </summary>
+    public static IReadOnlyList<IReadOnlyList<string>> Rectangularize(
+        IReadOnlyList<IReadOnlyList<string>> rows,
+        out int columnCount)
+    {
+        columnCount = 0;
+        for (var index = 0; index < rows.Count; index++)
+        {
+            if (rows[index].Count > columnCount) columnCount = rows[index].Count;
+        }
+        if (columnCount == 0) return Array.Empty<IReadOnlyList<string>>();
+
+        var needsPadding = false;
+        for (var index = 0; index < rows.Count; index++)
+        {
+            if (rows[index].Count != columnCount)
+            {
+                needsPadding = true;
+                break;
+            }
+        }
+        if (!needsPadding) return rows;
+
+        var normalized = new List<IReadOnlyList<string>>(rows.Count);
+        foreach (var row in rows)
+        {
+            if (row.Count == columnCount)
+            {
+                normalized.Add(row);
+                continue;
+            }
+            var cells = new string[columnCount];
+            for (var index = 0; index < columnCount; index++)
+                cells[index] = index < row.Count ? row[index] : string.Empty;
+            normalized.Add(cells);
+        }
+        return normalized;
+    }
 
     private static Paragraph TocField(AcademicDesignSpec spec)
     {

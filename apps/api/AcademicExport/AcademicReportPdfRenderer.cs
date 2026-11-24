@@ -284,6 +284,12 @@ public static class AcademicReportPdfRenderer
                 // overwrite the earlier children, and a table with a caption threw outright.
                 // Same citation shape as the DOCX renderer: ids ride the caption when there is one,
                 // and become a line of their own below the grid when there is nothing to append to.
+                // Column count is taken from the widest saved row rather than rows[0]: the persisted
+                // payload is model output that the draft validator admits with unequal widths, and a
+                // first row with no Cells used to produce a table with zero column definitions whose
+                // remaining cells were still emitted — QuestPDF throws or lays the grid out wrongly.
+                // Padding preserves every cell and keeps each in its own column in both formats.
+                var gridRows = AcademicReportDocxRenderer.Rectangularize(rows, out var gridWidth);
                 container.Column(tableBlock =>
                 {
                     tableBlock.Spacing((float)(spec.ParagraphAfterPt / 2));
@@ -291,22 +297,23 @@ public static class AcademicReportPdfRenderer
                     var captioned = AcademicReportDocxRenderer.WithCitations(block.Text, block.CitationIds);
                     if (hasCaption)
                         tableBlock.Item().Text(captioned);
-                    tableBlock.Item().Table(table =>
-                    {
-                        table.ColumnsDefinition(columns =>
+                    if (gridWidth > 0)
+                        tableBlock.Item().Table(table =>
                         {
-                            for (var index = 0; index < rows[0].Count; index++)
-                                columns.RelativeColumn();
+                            table.ColumnsDefinition(columns =>
+                            {
+                                for (var index = 0; index < gridWidth; index++)
+                                    columns.RelativeColumn();
+                            });
+                            table.Header(header =>
+                            {
+                                foreach (var cell in gridRows[0])
+                                    header.Cell().Background(accentColor).Padding(4).Text(cell).FontSize((float)(spec.BodySizePt * 0.9));
+                            });
+                            foreach (var row in gridRows.Skip(1))
+                                foreach (var cell in row)
+                                    table.Cell().BorderTop(0.5f).BorderColor("#999999").Padding(4).Text(cell);
                         });
-                        table.Header(header =>
-                        {
-                            foreach (var cell in rows[0])
-                                header.Cell().Background(accentColor).Padding(4).Text(cell).FontSize((float)(spec.BodySizePt * 0.9));
-                        });
-                        foreach (var row in rows.Skip(1))
-                            foreach (var cell in row)
-                                table.Cell().BorderTop(0.5f).BorderColor("#999999").Padding(4).Text(cell);
-                    });
                     var trailing = AcademicReportDocxRenderer.CitationMarkers(block.CitationIds);
                     if (!hasCaption && trailing.Length > 0)
                         tableBlock.Item().Text(trailing).Italic();
