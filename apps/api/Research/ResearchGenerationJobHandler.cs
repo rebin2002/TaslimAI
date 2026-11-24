@@ -113,6 +113,17 @@ public sealed class ResearchGenerationJobHandler(
         sourceCandidates = ResearchCitationUrlPolicy.FilterAdmissibleSourceLinks(sourceCandidates).ToList();
         if (sourceCandidates.Count == 0)
             throw new ResearchGenerationStageException(ResearchGenerationStages.Search, GenerationJobErrorCodes.ResearchSourceUnavailable, "No usable research sources were found.", usage);
+        // Evidence is normalized against the source list before this point, so it can
+        // still carry citations for sources the fetch stage dropped or the guard above
+        // just removed. Left unreconciled, provider evidence gathered from a removed
+        // source - for example one pointing at an internal metadata endpoint - would
+        // still be sent to the paid report provider, describing a source no reader can
+        // ever open. The prompt boundary must match the citation boundary; persistence
+        // already skips orphan evidence rows, and the draft validator below already
+        // reconciles against these surviving identifiers.
+        var survivingCitationIds = sourceCandidates.Select(source => source.CitationId).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        if (evidenceCandidates.Any(item => !survivingCitationIds.Contains(item.CitationId)))
+            evidenceCandidates = evidenceCandidates.Where(item => survivingCitationIds.Contains(item.CitationId)).ToList();
         progress.Report(50);
 
         var sourcesStaged = false;
