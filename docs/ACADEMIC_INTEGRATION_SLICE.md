@@ -53,7 +53,12 @@ nine tables and nothing else; the migration does not touch any other worker's sc
 
 All routes require authentication and workspace membership. Unknown-or-foreign project
 ids answer the identical 404; non-member access to a *known* project answers 403.
-Every mutation is antiforgery-validated like the rest of the API surface.
+Every mutation is antiforgery-validated like the rest of the API surface, and every
+mutation route also carries the platform's existing abuse-boundary policies via
+`[EnableRateLimiting]`: intake and checkpoint decisions ride the generation policy,
+`run` — the route that spends stage work once provider lanes connect — rides the
+expensive-AI policy, and a spend-ceiling raise rides account security. Reads stay on
+the global limiter only (asserted by `AcademicProjectsApiTests`).
 
 | Route | Behavior |
 | --- | --- |
@@ -99,6 +104,18 @@ ceilings and spend, which the intake budget the workspace itself supplied.
 - **Approval and budget actions** are themselves checkpointed (`approval|…`,
   `budget-raise|…` keys), so replayed decisions and replayed raises are no-ops by
   construction, not by convention.
+- **Combined tree (committed snapshot + derived Phase B tables + projection
+  watermark)**: evidence projections run one-at-a-time per project behind an
+  in-process gate (`AcademicProjectionGate`), and inside the gate the durable
+  store — not the caller's copy — decides what is projected. A projection call
+  whose snapshot revision no longer matches the committed tip is refused outright
+  (no derived rewrite, no watermark claim), a resume that lost the checkpoint race
+  never projects its rejected copy, and the watermark advances only while the
+  committed tip still matches exactly what was just written. The monotonic
+  `EvidenceProjectedRevision` can therefore never certify rows produced by a stale
+  writer; a tree left honestly stale self-heals on the next run, as before.
+  Behavior pinned by
+  `Stale_projection_calls_are_refused_until_the_current_revision_is_projected`.
 
 ## Citation-verification boundaries across the seam
 

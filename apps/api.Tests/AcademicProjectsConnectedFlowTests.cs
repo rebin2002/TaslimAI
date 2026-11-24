@@ -352,6 +352,72 @@ public sealed class AcademicProjectsConnectedFlowTests : IClassFixture<AcademicC
         Assert.Equal(cellsAfterHeal, await MatrixCellCountAsync(projectId));
     }
 
+    /// <summary>
+    /// The combined-tree guard for mutations. A budget raise commits a newer revision
+    /// without projecting it, so the tree sits honestly stale: committed r+1, watermark r.
+    /// A projection call carrying the older copy of the tree must be refused outright —
+    /// the previous behavior reported "already projected" (true) for a revision the
+    /// durable tree had already moved past, which is exactly the certification a slow
+    /// losing writer relied on while rewriting derived rows under the newer watermark.
+    /// The same call with the CURRENT committed copy must project and claim the watermark,
+    /// and only then may reads report evidenceCurrent again.
+    /// </summary>
+    [Fact]
+    public async Task Stale_projection_calls_are_refused_until_the_current_revision_is_projected()
+    {
+        var (client, workspaceId) = await RegisterAsync();
+        var projectId = await CreateAsync(client, workspaceId, "stale-writer", "Stale projection guard question");
+        await RunAsync(client, projectId);
+        await ApproveAsync(client, projectId, "Plan");
+        var withSources = await RunAsync(client, projectId);
+        Assert.True(withSources.GetProperty("evidenceCurrent").GetBoolean());
+
+        Guid workspace = workspaceId;
+        AcademicWorkflowSnapshot stale;
+        using (var scope = _factory.Services.CreateScope())
+        {
+            var service = scope.ServiceProvider.GetRequiredService<AcademicProjectsService>();
+            stale = (await service.LoadFencedAsync(workspace, projectId, CancellationToken.None))!;
+        }
+
+        // Commit a newer revision on the same project without projecting it.
+        var raise = await PostJsonAsync(client, $"/api/academic-projects/{projectId}/budget",
+            new { maxTotalUsd = 250.0, maxTotalCalls = 1000 });
+        Assert.Equal(HttpStatusCode.OK, raise.StatusCode);
+        var raised = await raise.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal("BUDGET_RAISED", raised.GetProperty("code").GetString());
+        var committed = raised.GetProperty("project").GetProperty("revision").GetInt64();
+        Assert.Equal(stale.Revision + 1, committed);
+
+        // The read path reports the tree as stale; nothing has been laundered.
+        var detail = await DetailAsync(client, projectId);
+        Assert.False(detail.GetProperty("evidenceCurrent").GetBoolean());
+        var cellsBefore = await MatrixCellCountAsync(projectId);
+
+        // A writer still holding the older copy is refused: no derived rewrite, no claim.
+        using (var scope = _factory.Services.CreateScope())
+        {
+            var service = scope.ServiceProvider.GetRequiredService<AcademicProjectsService>();
+            Assert.False(await service.ProjectEvidenceAsync(stale, CancellationToken.None));
+        }
+
+        Assert.False((await DetailAsync(client, projectId)).GetProperty("evidenceCurrent").GetBoolean());
+        Assert.Equal(cellsBefore, await MatrixCellCountAsync(projectId));
+
+        // The current committed copy projects and claims the watermark; the tree is
+        // current again and the rebuild stayed idempotent.
+        using (var scope = _factory.Services.CreateScope())
+        {
+            var service = scope.ServiceProvider.GetRequiredService<AcademicProjectsService>();
+            var current = (await service.LoadFencedAsync(workspace, projectId, CancellationToken.None))!;
+            Assert.Equal(committed, current.Revision);
+            Assert.True(await service.ProjectEvidenceAsync(current, CancellationToken.None));
+        }
+
+        Assert.True((await DetailAsync(client, projectId)).GetProperty("evidenceCurrent").GetBoolean());
+        Assert.Equal(cellsBefore, await MatrixCellCountAsync(projectId));
+    }
+
     [Fact]
     public async Task Metadata_only_and_abstract_access_boundaries_survive_the_full_pipeline()
     {

@@ -1,11 +1,15 @@
 using System.Net;
 using System.Net.Http.Json;
+using System.Reflection;
 using System.Text;
 using System.Text.Json;
+using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Taslim.Api.AcademicIntegration;
 using Taslim.Api.AcademicIntegration.Persistence;
+using Taslim.Api.Infrastructure;
 using Taslim.Api.Contracts;
 using Taslim.Api.Persistence;
 using Xunit;
@@ -275,6 +279,50 @@ public class AcademicProjectsApiTests : IClassFixture<TaslimApiFactory>
         // Cookie is attached by the client handler, but the CSRF header is absent.
         var response = await client.SendAsync(request);
         Assert.False(response.IsSuccessStatusCode);
+    }
+
+    /// <summary>
+    /// The abuse-boundary contract for this lane's mutations, asserted the same way
+    /// ApiAbuseBoundaryTests pins the older controllers: every POST that moves academic
+    /// project state names an existing platform rate policy and still requires the CSRF
+    /// header. Intake and checkpoint decisions ride the generation policy, a resume rides
+    /// the expensive-AI policy (it is the route that spends stage work once lanes connect),
+    /// and a spend-ceiling raise rides account security. Reads must stay unannotated: the
+    /// matrix/verification/checkpoint surfaces are polling endpoints under the global
+    /// limiter only.
+    /// </summary>
+    [Theory]
+    [InlineData(nameof(AcademicProjectsController.Create), RateLimiting.Generation)]
+    [InlineData(nameof(AcademicProjectsController.Run), RateLimiting.ExpensiveAi)]
+    [InlineData(nameof(AcademicProjectsController.Approve), RateLimiting.Generation)]
+    [InlineData(nameof(AcademicProjectsController.RaiseBudget), RateLimiting.AccountSecurity)]
+    public void Academic_project_mutations_carry_the_existing_rate_policies(string actionName, string expectedPolicy)
+    {
+        var action = typeof(AcademicProjectsController).GetMethod(
+            actionName, BindingFlags.Instance | BindingFlags.Public | BindingFlags.DeclaredOnly);
+        Assert.NotNull(action);
+        Assert.NotEmpty(action!.GetCustomAttributes<HttpPostAttribute>(inherit: true));
+        Assert.NotNull(action.GetCustomAttribute<ValidateAntiForgeryTokenAttribute>(inherit: true));
+        var policy = action.GetCustomAttribute<EnableRateLimitingAttribute>(inherit: true);
+        Assert.NotNull(policy);
+        Assert.Equal(expectedPolicy, policy!.PolicyName);
+    }
+
+    [Fact]
+    public void Academic_project_reads_stay_on_the_global_limiter()
+    {
+        var annotated = typeof(AcademicProjectsController)
+            .GetMethods(BindingFlags.Instance | BindingFlags.Public | BindingFlags.DeclaredOnly)
+            .Where(method => method.GetCustomAttributes<HttpGetAttribute>(inherit: true).Any())
+            .Select(method => method.Name)
+            .ToArray();
+        Assert.NotEmpty(annotated);
+        foreach (var name in annotated)
+        {
+            var action = typeof(AcademicProjectsController).GetMethod(
+                name, BindingFlags.Instance | BindingFlags.Public | BindingFlags.DeclaredOnly);
+            Assert.Null(action!.GetCustomAttribute<EnableRateLimitingAttribute>(inherit: true));
+        }
     }
 
     [Fact]

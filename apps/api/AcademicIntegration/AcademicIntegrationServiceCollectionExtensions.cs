@@ -38,6 +38,10 @@ public static class AcademicIntegrationServiceCollectionExtensions
 
         services.Configure<AcademicWorkflowEngineOptions>(configuration.GetSection(AcademicWorkflowOptions.SectionName));
 
+        // One in-flight evidence projection per project inside this process; the
+        // integration service fences its combined-tree writes behind this gate.
+        services.TryAddSingleton<AcademicProjectionGate>();
+
         services.AddScoped<EfAcademicWorkflowStateStore>();
         services.TryAddScoped<IAcademicWorkflowStateStore>(provider =>
             provider.GetRequiredService<EfAcademicWorkflowStateStore>());

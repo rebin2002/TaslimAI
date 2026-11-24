@@ -86,6 +86,7 @@ public sealed class AcademicProjectsService(
     AcademicEvidenceProjector projector,
     TimeProvider clock,
     IEnumerable<IAcademicStageHandler> stageHandlers,
+    AcademicProjectionGate projectionGate,
     ILogger<AcademicProjectsService> logger)
 {
     /// <summary>Intake ceilings enforced before validation, so a bad value aborts rather than shrinks.</summary>
@@ -249,7 +250,12 @@ public sealed class AcademicProjectsService(
             };
         }
 
-        var projected = await ProjectEvidenceAsync(run.Snapshot, cancellationToken);
+        // A resume that lost the checkpoint race returns the loser's copy of the tree.
+        // Projecting it here would rewrite the derived evidence tables from state the
+        // durable store already rejected, so the conflict path never projects; the
+        // winner's response projected the committed revision.
+        var projected = run.Status != AcademicWorkflowRunStatus.RevisionConflict
+            && await ProjectEvidenceAsync(run.Snapshot, cancellationToken);
         return new AcademicProjectServiceResult
         {
             Status = AcademicProjectServiceStatus.Ok,
@@ -428,18 +434,46 @@ public sealed class AcademicProjectsService(
     /// Best-effort projection into the evidence lane with a durable watermark: if the
     /// request dies after the workflow commit but before the watermark advances, the next
     /// run re-projects the same state (rebuild semantics make it a no-op rewrite).
+    ///
+    /// Concurrency contract for the combined tree (committed snapshot + derived Phase B
+    /// tables + watermark): two successful mutations can project overlapping revisions
+    /// only if each writes the CURRENT committed revision, at most one writes per project
+    /// at a time, and the watermark is claimed only while the tree still matches what was
+    /// written. Without these fences a stale writer's rebuild rewrites the derived tables
+    /// under a newer watermark — the monotonic claim silently swallows the late advance
+    /// while the reads keep reporting <c>evidenceCurrent</c> for the wrong content.
     /// </summary>
     public async Task<bool> ProjectEvidenceAsync(AcademicWorkflowSnapshot snapshot, CancellationToken cancellationToken)
     {
         if (!AcademicEvidenceProjector.HasProjectableArtifacts(snapshot)) return false;
-        var watermark = await store.GetProjectedRevisionAsync(snapshot.ProjectId, cancellationToken);
-        if (watermark >= snapshot.Revision) return true;
+        return await projectionGate.RunAsync(snapshot.ProjectId, () => ProjectFencedAsync(snapshot, cancellationToken), cancellationToken);
+    }
+
+    /// <summary>
+    /// The projection attempt itself, always taken under the per-project gate so two
+    /// concurrent mutations can never interleave their derived-table writes. Inside the
+    /// gate the durable store — not the caller's copy — decides what is projected.
+    /// </summary>
+    private async Task<bool> ProjectFencedAsync(AcademicWorkflowSnapshot snapshot, CancellationToken cancellationToken)
+    {
+        var current = await store.LoadAsync(snapshot.ProjectId, cancellationToken);
+        if (current is null) return false;
+
+        var watermark = await store.GetProjectedRevisionAsync(current.ProjectId, cancellationToken);
+        if (watermark >= current.Revision) return true;
+
+        if (current.Revision != snapshot.Revision)
+        {
+            // A concurrent mutation committed newer state while this caller's snapshot was
+            // in flight. Rewriting the tables from the older copy would leave the combined
+            // tree stale under a watermark that claims it is current, so the tree honestly
+            // stays stale and the newer writer's projection (or the next run) lands it.
+            return false;
+        }
 
         try
         {
-            await projector.ProjectAsync(snapshot, clock.GetUtcNow(), cancellationToken);
-            await store.SetProjectedRevisionAsync(snapshot.ProjectId, snapshot.Revision, cancellationToken);
-            return true;
+            await projector.ProjectAsync(current, clock.GetUtcNow(), cancellationToken);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -454,6 +488,15 @@ public sealed class AcademicProjectsService(
                 snapshot.ProjectId, snapshot.Revision);
             return false;
         }
+
+        // Claim the watermark only while the committed tree still matches exactly what was
+        // just written; a commit that landed during the writes makes this claim (and these
+        // rows) stale, and the newer revision's own caller owns the next projection.
+        var afterWrite = await store.LoadAsync(snapshot.ProjectId, cancellationToken);
+        if (afterWrite is null || afterWrite.Revision != current.Revision) return false;
+
+        await store.SetProjectedRevisionAsync(current.ProjectId, current.Revision, cancellationToken);
+        return true;
     }
 
     /// <summary>True when the snapshot has unprojected committed state the evidence lane should hold.</summary>
@@ -501,5 +544,35 @@ internal static class AcademicIntegrationCheckpointKeys
         var fingerprint = System.Security.Cryptography.SHA256.HashData(
             System.Text.Encoding.UTF8.GetBytes($"{policy.MaxTotalUsd:0.####}|{policy.MaxStageUsd:0.####}|{policy.MaxTotalProviderCalls}|{policy.MaxStageProviderCalls}"));
         return $"{projectId:N}|{revision}|{Convert.ToHexString(fingerprint).ToLowerInvariant()}";
+    }
+}
+
+/// <summary>
+/// Per-project serialization of evidence-projection attempts inside this process: the
+/// combined tree may have at most one in-flight projection per project, so the fenced
+/// revision check and the derived-table writes cannot interleave with a competing
+/// writer's. One instance handles the whole deployment (single Railway API service);
+/// durable correctness still rests on the store's CAS commits and monotonic watermark,
+/// which keep crash replays and cross-process writers honest even without the gate.
+/// Gates are cheap and keyed per project id; they are intentionally never evicted, so
+/// a waiter can never race a gate that is being removed underneath it.
+/// </summary>
+public sealed class AcademicProjectionGate
+{
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<Guid, SemaphoreSlim> gates = new();
+
+    public async Task<T> RunAsync<T>(Guid projectId, Func<Task<T>> action, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(action);
+        var gate = gates.GetOrAdd(projectId, static _ => new SemaphoreSlim(1, 1));
+        await gate.WaitAsync(cancellationToken);
+        try
+        {
+            return await action();
+        }
+        finally
+        {
+            gate.Release();
+        }
     }
 }

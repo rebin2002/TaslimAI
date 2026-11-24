@@ -2,6 +2,7 @@ using System.Security.Claims;
 using System.Text.Json;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
 using Taslim.Api.AcademicEvidence.Persistence;
 using Taslim.Api.AcademicIntegration.Persistence;
@@ -159,7 +160,11 @@ public sealed record AcademicCheckpointDto(
 /// Every route resolves the owning workspace from stored state and requires membership;
 /// unknown projects and projects in foreign workspaces both answer the identical 404
 /// envelope so project ids cannot be enumerated across tenants. Mutations run behind
-/// CSRF like the rest of the API. None of these routes reaches a scholarly catalog or an
+/// CSRF like the rest of the API, and every mutation carries the same existing
+/// abuse-boundary policies the comparable lanes use: intake and checkpoint decisions sit
+/// behind the generation policy, a resume (which spends stage work when lanes connect)
+/// behind the expensive-AI policy, and a spend-ceiling raise behind account security.
+/// Reads stay on the global limiter only. None of these routes reaches a scholarly catalog or an
 /// export renderer: until those lanes register stage handlers, <c>run</c> reports the
 /// exact missing stage instead of pretending, and reads return whatever the committed
 /// checkpoints actually hold.
@@ -189,6 +194,7 @@ public sealed class AcademicProjectsController(
 
     [HttpPost("api/workspaces/{workspaceId:guid}/academic-projects")]
     [ValidateAntiForgeryToken]
+    [EnableRateLimiting(RateLimiting.Generation)]
     public async Task<IActionResult> Create(
         Guid workspaceId,
         AcademicProjectCreateRequest request,
@@ -226,6 +232,7 @@ public sealed class AcademicProjectsController(
 
     [HttpPost("api/academic-projects/{projectId:guid}/run")]
     [ValidateAntiForgeryToken]
+    [EnableRateLimiting(RateLimiting.ExpensiveAi)]
     public async Task<IActionResult> Run(Guid projectId, CancellationToken cancellationToken)
     {
         var (snapshot, failure) = await FencedLoadAsync(projectId, cancellationToken);
@@ -258,6 +265,7 @@ public sealed class AcademicProjectsController(
 
     [HttpPost("api/academic-projects/{projectId:guid}/approvals/{kind}")]
     [ValidateAntiForgeryToken]
+    [EnableRateLimiting(RateLimiting.Generation)]
     public async Task<IActionResult> Approve(
         Guid projectId,
         string kind,
@@ -285,6 +293,7 @@ public sealed class AcademicProjectsController(
 
     [HttpPost("api/academic-projects/{projectId:guid}/budget")]
     [ValidateAntiForgeryToken]
+    [EnableRateLimiting(RateLimiting.AccountSecurity)]
     public async Task<IActionResult> RaiseBudget(
         Guid projectId,
         AcademicBudgetRequestDto request,
