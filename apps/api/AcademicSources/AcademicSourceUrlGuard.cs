@@ -115,7 +115,8 @@ public static class AcademicSourceUrlGuard
 
     /// <summary>
     /// Rejects loopback, private, link-local (including the cloud metadata address), site-local,
-    /// multicast and unspecified addresses. DNS-level rebinding of an allow-listed hostname is
+    /// multicast, reserved and unspecified addresses, including the IPv4-compatible ::/96 and
+    /// IPv4-mapped spellings of those ranges. DNS-level rebinding of an allow-listed hostname is
     /// closed by <see cref="AcademicSourceConnectionPolicy"/>, which resolves the host and dials
     /// only an address that passes this classifier; a URL allow list alone is not sufficient.
     /// </summary>
@@ -130,12 +131,24 @@ public static class AcademicSourceUrlGuard
                 var mapped = new byte[] { bytes[12], bytes[13], bytes[14], bytes[15] };
                 return IsPubliclyRoutable(new IPAddress(mapped));
             }
+            // Deprecated IPv4-compatible ::/96 encodes a v4 address in the low 32 bits; a stack
+            // that still honours the spelling would route it as that v4 destination (for example
+            // ::a9fe:a9fe is 169.254.169.254, the metadata address), so it inherits the v4 rules
+            // rather than counting as native v6 public space. :: and ::1 land on 0.0.0.0/8 below.
+            if (IsV4Compatible(bytes))
+            {
+                var embedded = new byte[] { bytes[12], bytes[13], bytes[14], bytes[15] };
+                return IsPubliclyRoutable(new IPAddress(embedded));
+            }
             if (address.IsIPv6LinkLocal || address.IsIPv6SiteLocal || address.IsIPv6Teredo
                 || IPAddress.IPv6Loopback.Equals(address) || IPAddress.IPv6Any.Equals(address)) return false;
-            // Unique local fc00::/7, documentation 2001:db8::/32 and discard-only 100::/64 are
-            // not publicly routable provider space. 6to4 (2002::/16) embeds a v4 address and is
-            // refused outright rather than inheriting whatever the embedded v4 looks like.
-            if (bytes[0] is 0xfc or 0xfd) return false;
+            // fc00::/6 is the whole special-use tail of the address space: unique local fc00::/7,
+            // unicast link-local fe00::/9 — only fe80::/10 is flagged by IsIPv6LinkLocal, so the
+            // rest of the range would otherwise look public — and multicast/reserved ff00::/8.
+            // Documentation 2001:db8::/32 and discard-only 100::/64 are not publicly routable
+            // provider space either. 6to4 (2002::/16) embeds a v4 address and is refused outright
+            // rather than inheriting whatever the embedded v4 looks like.
+            if (bytes[0] >= 0xfc) return false;
             if (bytes[0] == 0x20 && bytes[1] == 0x01 && bytes[2] == 0x0d && bytes[3] == 0xb8) return false;
             if (bytes[0] == 0x01 && bytes[1] == 0x00 && bytes[2] == 0 && bytes[3] == 0) return false;
             if (bytes[0] == 0x20 && bytes[1] == 0x02) return false;
@@ -176,6 +189,12 @@ public static class AcademicSourceUrlGuard
     {
         for (var i = 0; i < 10; i++) if (bytes[i] != 0) return false;
         return bytes[10] == 0xff && bytes[11] == 0xff;
+    }
+
+    private static bool IsV4Compatible(byte[] bytes)
+    {
+        for (var i = 0; i < 12; i++) if (bytes[i] != 0) return false;
+        return true;
     }
 
 }
