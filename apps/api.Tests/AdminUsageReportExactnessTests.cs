@@ -55,6 +55,38 @@ public sealed class AdminUsageReportExactnessTests
     }
 
     /// <summary>
+    /// The bound this report does NOT have, pinned so that no future note on the aggregate can
+    /// re-assert one. Accumulating currency through a double looks safe while the total is small, but
+    /// 0.10 has no exact binary representation at all, so a rounding error enters on the first
+    /// addition and then grows with the number of rows summed rather than with the size of the total.
+    /// A hundred thousand rows of 0.10 sum to a magnitude four orders below any representability
+    /// limit a double has, and still land on the wrong number - and normalising to the stored scale,
+    /// which is what AdminUsageService.LedgerAmount does, does not repair it because the residual
+    /// sits at the eighth decimal.
+    /// </summary>
+    [Fact]
+    public void Double_accumulation_of_representable_magnitudes_still_drifts()
+    {
+        const decimal rowAmount = 0.10m;
+        const int rowCount = 100_000;
+        var exactTotal = rowCount * rowAmount;
+        var accumulated = 0d;
+        for (var index = 0; index < rowCount; index++) accumulated += (double)rowAmount;
+        // Premise first: this total is nowhere near the integer-exactness limit of a double, which at
+        // the ledger's scale of 8 decimal places is 90,071,992.547409912.
+        Assert.Equal(10_000.00m, exactTotal);
+        Assert.True(exactTotal < 90_071_992.547409912m);
+        // The accumulation disagrees with the exact decimal sum.
+        Assert.NotEqual((double)exactTotal, accumulated);
+        Assert.Equal("10000.000000018848", accumulated.ToString(CultureInfo.InvariantCulture));
+        // And the report's own normalisation renders a figure of 10000.00000002 for a total of
+        // exactly 10000.00, so the reported aggregate is an indication, never a settlement number.
+        var reported = decimal.Round((decimal)accumulated, 8);
+        Assert.Equal(10000.00000002m, reported);
+        Assert.NotEqual(exactTotal, reported);
+    }
+
+    /// <summary>
     /// The wire form is what an export renders, so it is pinned directly: an invariant,
     /// non-exponential decimal at the ledger scale rather than binary rounding noise.
     /// </summary>

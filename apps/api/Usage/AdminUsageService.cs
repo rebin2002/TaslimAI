@@ -19,19 +19,25 @@ public sealed class AdminUsageService(TaslimDbContext db) : IAdminUsageService
     // places. SQLite cannot translate SUM(decimal), so the aggregates below accumulate
     // through the portable double type and cast the result back; that round trip leaks
     // binary rounding noise into the response (64 stored rows of 0.12345679 reported
-    // 7.90123455999999 instead of 7.90123456). Rounding an aggregate back to the stored scale
-    // removes that artifact, and the claim is deliberately bounded rather than absolute: a
-    // double holds an integer exactly only up to 2^53, so the accumulation is exact while the
-    // scaled total stays under 2^53 at scale 8 - 90,071,992.5474 USD per aggregate. Beyond that
-    // the residual is no longer pure representation noise, rounding cannot be relied on to
-    // recover it, and what accumulates is a rounding error per addition, so it grows with the
-    // number of rows summed rather than with their sizes. Production aggregates are orders of
-    // magnitude below the bound (CustomerChargingEnabled is false at this head, so the customer
-    // totals are not being accumulated from real charges at all), but the bound is a property of
-    // the type, not of the deployment, and it is stated here so nobody reads this as a proof.
-    // Aggregating in decimal where the provider supports it - PostgreSQL does, and is the
-    // production engine - removes the bound outright; that is a reporting-lane follow-up against
-    // PR #1145 and is intentionally not folded into this integration branch.
+    // 7.90123455999999 instead of 7.90123456). Rounding an aggregate back to the stored scale hides
+    // most of that noise, and this file deliberately claims nothing stronger than that: a binary
+    // float cannot hold a decimal amount in the first place - 0.10 is not representable - so the
+    // accumulated double can drift from the exact decimal sum at ANY magnitude, not merely near a
+    // large one. A hundred thousand rows of 0.10 totals 10,000.00, comfortably inside every
+    // representability bound a float has, and still accumulates to 10000.000000018848 as a double,
+    // which the report then renders as 10000.00000002 (pinned by
+    // AdminUsageReportExactnessTests.Double_accumulation_of_representable_magnitudes_still_drifts).
+    // Rounding back to
+    // scale 8 does not hide even that case, because the residual sits AT the eighth decimal: the
+    // report shows 10000.00000002 for a total of exactly 10000.00. Normalising to the stored scale
+    // removes representation noise finer than that scale; it bounds nothing, and none of this is a
+    // guarantee of agreement with the exact decimal sum. What accumulates is a rounding error per
+    // addition, so the drift grows with the number of rows summed rather than with their sizes.
+    // The only sound fix is to stop accumulating money in a float: SUM in decimal/numeric, which
+    // PostgreSQL - the production engine - supports directly, leaving SQLite as the portable-test
+    // special case. That is a reporting-lane follow-up against PR #1145 and is intentionally not
+    // folded into this integration branch. Until it lands, treat an admin aggregate as accurate to
+    // roughly the eighth decimal place, and never as a settlement figure.
     // This is the same guard UsageController applies to the customer charge total, so the admin
     // report and the customer report can no longer disagree about the same rows.
     // It normalises the reported projection only: no stored amount, debit or credit is
