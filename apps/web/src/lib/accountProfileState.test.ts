@@ -193,3 +193,14 @@ describe("reconcileAccountProfileDraft", () => {
     expect(accountProfileDraftsMatch(local, echoB)).toBe(true);
   });
 });
+
+
+describe("Chinese language-pack profile preservation", () => {
+  it("keeps the zh-CN interface selection while generation language remains independent", () => {
+    const user = { ...owner, preferredLanguage: "zh-CN" as const, defaultGenerationLanguage: "ar" as const };
+    const draft = accountProfileDraftFromUser(user);
+    expect(draft.preferredLanguage).toBe("zh-CN");
+    expect(draft.defaultGenerationLanguage).toBe("ar");
+    expect(reconcileAccountProfileDraft({ local: draft, baseline: draft, server: { ...draft, timeZone: "Asia/Baghdad" } })).toMatchObject({ preferredLanguage: "zh-CN", defaultGenerationLanguage: "ar", timeZone: "Asia/Baghdad" });
+  });
+});

@@ -13,7 +13,7 @@ export type User = {
   id: string;
   email: string;
   displayName: string;
-  preferredLanguage: "en" | "ar" | "ku";
+  preferredLanguage: string;
   personalWorkspaceId: string;
   createdAt: string;
   defaultGenerationLanguage: "en" | "ar" | "ku";
@@ -70,7 +70,7 @@ export type LoginInput = { email: string; password: string };
 export type OnboardingIntent = "project" | "chat" | "image" | "document" | "presentation" | "research";
 export type OnboardingInput = {
   displayName?: string;
-  preferredLanguage: "en" | "ar" | "ku";
+  preferredLanguage: string;
   defaultGenerationLanguage: "en" | "ar" | "ku";
   intent?: OnboardingIntent;
 };
@@ -746,7 +746,11 @@ export type Asset = {
   archivedAt: string | null;
   representations: AssetRepresentation[];
 };
-export type AssetRepresentation = { id: string; representationType: string; fileName: string; contentType: string; sizeBytes: number; createdAt: string };
+// canDownload mirrors the read model's per-representation availability (#1030): the download
+// route answers 409 for any representation whose stored file is not Ready, so the row is only
+// linked when the flag is true. Optional so payloads from an older API stay usable (assumed
+// downloadable, which is exactly the pre-#1030 behavior).
+export type AssetRepresentation = { id: string; representationType: string; fileName: string; contentType: string; sizeBytes: number; createdAt: string; canDownload?: boolean };
 export type AssetList = { items: Asset[]; page: number; pageSize: number; totalCount: number; totalPages: number };
 export type AssetSort = "recent" | "oldest" | "name" | "size";
 export type AssetFilters = { projectId?: string; assetType?: AssetType; status?: AssetStatus; search?: string; sort?: AssetSort; page?: number; pageSize?: number };
