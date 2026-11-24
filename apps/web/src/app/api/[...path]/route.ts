@@ -20,6 +20,23 @@ type RouteContext = { params: Promise<{ path: string[] }> };
 
 const bodyMethods = new Set(["POST", "PUT", "PATCH", "DELETE"]);
 
+// encodeURIComponent() leaves "." and ".." untouched, so a relative segment
+// supplied to the catch-all survives into the target string and the URL parser
+// collapses it out of the forwarded namespace: `/api/v1/../../admin` is parsed
+// as `/admin`. That request line still carries the caller's cookies, so the
+// proxy must refuse relative segments instead of rewriting them away.
+function isRelativeSegment(segment: string): boolean {
+  if (segment === "." || segment === "..") return true;
+  try {
+    const decoded = decodeURIComponent(segment);
+    return decoded === "." || decoded === "..";
+  } catch {
+    // Malformed percent-encoding is not a relative segment; the existing
+    // per-segment encoding keeps it inside a single `/api/` path segment.
+    return false;
+  }
+}
+
 function splitCombinedSetCookieHeader(value: string): string[] {
   return value.split(/,(?=\s*[^;,=\s]+=[^;,]*)/).map(cookie => cookie.trim()).filter(Boolean);
 }
@@ -65,7 +82,8 @@ async function readBoundedBody(request: Request): Promise<ArrayBuffer | Response
 
 async function forward(request: Request, context: RouteContext): Promise<Response> {
   const { path } = await context.params;
-  const target = `${apiOrigin}/api/${path.map((segment) => encodeURIComponent(segment)).join("/")}${new URL(request.url).search}`;
+  const forwardedPath = path.filter((segment) => !isRelativeSegment(segment)).map((segment) => encodeURIComponent(segment)).join("/");
+  const target = `${apiOrigin}/api/${forwardedPath}${new URL(request.url).search}`;
   const headers = new Headers(request.headers);
   headers.delete("host");
   headers.delete("content-length");
