@@ -339,14 +339,20 @@ test.describe("basic accessibility smoke", () => {
 
   // Destinations main moved behind requireAuthenticatedPage
   // (apps/web/src/lib/serverAuth.ts): #1247 gated /create/document, /create/image and
-  // /projects, and main later gated /create/movie the same way. A full reload re-checks the
-  // real taslim.auth cookie server-side, rejects this mock-only session and redirects to the
-  // login page with the return path. Grow this set together with the server-side gate; every
-  // other destination stays client-gated in this test's mock-only scope.
+  // /projects, and main later gated /create/movie the same way. The uplift onto the batch-2
+  // server gates (79f2dc99, carried into this branch with main 2e740469) additionally gated
+  // /create/presentation, which is why the Presentation leg of this matrix was the only one
+  // red at the combined head: the reload really is redirected, and the assertion has to expect
+  // that redirect rather than the studio route. A full reload re-checks the real taslim.auth
+  // cookie server-side, rejects this mock-only session and redirects to the login page with the
+  // return path. Grow this set together with the server-side gate - the authoritative list is
+  // every page calling requireAuthenticatedPage; every other destination stays client-gated in
+  // this test's mock-only scope.
   const serverAuthenticatedDestinations = new Set([
     "/create/document",
     "/create/image",
     "/create/movie",
+    "/create/presentation",
     "/projects",
   ]);
 
