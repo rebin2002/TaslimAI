@@ -106,22 +106,44 @@ public static class MovieReferenceReadinessPolicy
             // canonical prop can be spent on at most one requirement. A generic
             // "compass" therefore cannot satisfy "brass compass", and one "compass"
             // cannot satisfy "compass, compass".
-            var pool = new List<MovieProductionPropReferenceDto>(props);
-            var unsatisfied = new List<string>();
-            MovieProductionPropReferenceDto? representative = null;
-            foreach (var requirement in enumerated)
+            // Matching is order-independent maximum bipartite matching (Kuhn's
+            // augmenting paths): "compass, brass compass" against
+            // ["Brass Compass", "Silver Compass"] satisfies the shot via the valid
+            // assignment compass→Silver Compass, brass compass→Brass Compass;
+            // naive greedy consumption would falsely block it.
+            var propList = props.ToList();
+            var covers = enumerated
+                .Select(requirement => Enumerable.Range(0, propList.Count)
+                    .Where(index => ContainsWord(propList[index].Name, requirement))
+                    .ToArray())
+                .ToArray();
+            var propToRequirement = new int[propList.Count];
+            Array.Fill(propToRequirement, -1);
+            bool TryAssign(int requirementIndex, bool[] visited)
             {
-                var prop = pool.FirstOrDefault(candidate => ContainsWord(candidate.Name, requirement));
-                if (prop is null) unsatisfied.Add(requirement);
-                else
+                foreach (var propIndex in covers[requirementIndex])
                 {
-                    pool.Remove(prop);
-                    representative ??= prop;
+                    if (visited[propIndex]) continue;
+                    visited[propIndex] = true;
+                    if (propToRequirement[propIndex] == -1 || TryAssign(propToRequirement[propIndex], visited))
+                    {
+                        propToRequirement[propIndex] = requirementIndex;
+                        return true;
+                    }
                 }
+                return false;
             }
+            for (var requirementIndex = 0; requirementIndex < enumerated.Count; requirementIndex++)
+                TryAssign(requirementIndex, new bool[propList.Count]);
+            var assignedRequirements = propToRequirement.Where(index => index >= 0).ToHashSet();
+            var unsatisfied = enumerated
+                .Where((_, requirementIndex) => !assignedRequirements.Contains(requirementIndex))
+                .ToList();
             if (unsatisfied.Count > 0)
                 return new("props", "Prop references", MovieReferenceReadinessItemStates.Missing, important, important, !important, $"The shot explicitly requires {string.Join(", ", unsatisfied)}, but no named canonical World prop reference matches every required prop.", "world_prop");
-            return new("props", "Prop references", MovieReferenceReadinessItemStates.Complete, true, false, true, $"Canonical prop reference '{representative!.Name}' is attached to this shot.", "world_prop", representative.PropId);
+            var representativeIndex = Array.IndexOf(propToRequirement, 0);
+            var representative = propList[representativeIndex >= 0 ? representativeIndex : 0];
+            return new("props", "Prop references", MovieReferenceReadinessItemStates.Complete, true, false, true, $"Canonical prop reference '{representative.Name}' is attached to this shot.", "world_prop", representative.PropId);
         }
 
         var cleaned = SignalText(raw);

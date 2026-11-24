@@ -213,6 +213,32 @@ public sealed class MovieReferenceReadinessTests
     }
 
     [Fact]
+    public void Enumerated_matching_finds_a_valid_assignment_regardless_of_greedy_order()
+    {
+        var brassId = Guid.NewGuid();
+        var silverId = Guid.NewGuid();
+        var result = MovieReferenceReadinessPolicy.EvaluatePropReference(
+            "Important props: compass, brass compass. VFX: none. Production notes: none",
+            [Prop("Brass Compass", brassId), Prop("Silver Compass", silverId)],
+            important: true);
+
+        // Greedy matching would give Brass Compass to the generic "compass" term
+        // and then fail "brass compass"; the valid assignment (compass→Silver,
+        // brass compass→Brass) must instead satisfy the shot.
+        Assert.Equal(MovieReferenceReadinessItemStates.Complete, result.State);
+        Assert.False(result.BlocksGeneration);
+        Assert.NotNull(result.SourceId);
+
+        var unresolvable = MovieReferenceReadinessPolicy.EvaluatePropReference(
+            "Important props: compass, brass compass, silver compass. VFX: none. Production notes: none",
+            [Prop("Brass Compass", brassId), Prop("Silver Compass", silverId)],
+            important: true);
+
+        Assert.Equal(MovieReferenceReadinessItemStates.Missing, unresolvable.State);
+        Assert.True(unresolvable.BlocksGeneration);
+    }
+
+    [Fact]
     public void Combining_marks_fold_inside_tokens_for_unicode_prop_matching()
     {
         var propId = Guid.NewGuid();
