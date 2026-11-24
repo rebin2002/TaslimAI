@@ -61,30 +61,70 @@ public sealed class MovieStoryService(TaslimDbContext db, MovieCollaborationAcce
             db.MovieStories.Add(story);
         }
 
-        var previousCurrent = story.CurrentRevisionId.HasValue
-            ? story.Revisions.SingleOrDefault(item => item.Id == story.CurrentRevisionId.Value)
+        var revisionParentId = request.ParentRevisionId ?? story.CurrentRevisionId;
+        var observedCurrentRevisionId = story.CurrentRevisionId;
+        var previousCurrent = observedCurrentRevisionId.HasValue
+            ? story.Revisions.SingleOrDefault(item => item.Id == observedCurrentRevisionId.Value)
             : null;
-        if (previousCurrent is not null && previousCurrent.Status == MovieStoryRevisionStatuses.Draft)
+        // Only the revision this new one actually replaces loses its draft status. Branching from
+        // an older parent must never silently supersede an unrelated collaborator's current draft.
+        if (previousCurrent is not null && previousCurrent.Id == revisionParentId
+            && previousCurrent.Status == MovieStoryRevisionStatuses.Draft)
             previousCurrent.Status = MovieStoryRevisionStatuses.Superseded;
 
         var revision = new MovieStoryRevision
         {
-            Id = Guid.NewGuid(), MovieStoryId = story.Id, ParentRevisionId = request.ParentRevisionId ?? story.CurrentRevisionId,
+            Id = Guid.NewGuid(), MovieStoryId = story.Id, ParentRevisionId = revisionParentId,
             CreatedByUserId = userId, RevisionNumber = story.Revisions.Count == 0 ? 1 : story.Revisions.Max(item => item.RevisionNumber) + 1,
             Premise = request.Premise.Trim(), Logline = request.Logline.Trim(), Synopsis = request.Synopsis.Trim(), Treatment = request.Treatment.Trim(),
             Status = MovieStoryRevisionStatuses.Draft, Authorship = request.Authorship.Trim(), ChangeSummary = Clean(request.ChangeSummary), CreatedAt = now, UpdatedAt = now,
         };
         AddScenes(revision, request.Scenes, now);
         db.MovieStoryRevisions.Add(revision);
-        story.Premise = revision.Premise;
-        story.Logline = revision.Logline;
-        story.Synopsis = revision.Synopsis;
-        story.Treatment = revision.Treatment;
-        story.CurrentRevisionId = revision.Id;
-        story.ApprovalState = MovieStoryApprovalStates.Draft;
-        story.UpdatedAt = now;
-        await db.SaveChangesAsync(cancellationToken);
+        await using var transaction = await db.Database.BeginTransactionAsync(cancellationToken);
+        try
+        {
+            // Insert the revision first: MovieStory.CurrentRevisionId carries a foreign key.
+            await db.SaveChangesAsync(cancellationToken);
+            if (!await TryAdvanceCurrentRevisionAsync(db, story.Id, observedCurrentRevisionId, revision, now, cancellationToken))
+                throw new MovieStoryRevisionConflictException(
+                    "The Story current revision changed while this revision was being created. Reload the Story and propose again.");
+            await transaction.CommitAsync(cancellationToken);
+        }
+        catch
+        {
+            await transaction.RollbackAsync(cancellationToken);
+            throw;
+        }
+        // The guarded update moved the row behind the change tracker; drop the stale instance.
+        db.Entry(story).State = EntityState.Detached;
         return await GetAsync(userId, movieProjectId, cancellationToken);
+    }
+
+    /// <summary>
+    /// Atomic compare-and-set for <see cref="MovieStory.CurrentRevisionId"/>: the pointer moves only
+    /// while it still holds the value the caller observed, so two concurrent creates from the same
+    /// base cannot both advance it and silently hide one another's revision.
+    /// </summary>
+    internal static async Task<bool> TryAdvanceCurrentRevisionAsync(
+        TaslimDbContext db,
+        Guid storyId,
+        Guid? expectedCurrentRevisionId,
+        MovieStoryRevision revision,
+        DateTime now,
+        CancellationToken cancellationToken)
+    {
+        var advanced = await db.MovieStories
+            .Where(item => item.Id == storyId && item.CurrentRevisionId == expectedCurrentRevisionId)
+            .ExecuteUpdateAsync(setters => setters
+                .SetProperty(item => item.CurrentRevisionId, revision.Id)
+                .SetProperty(item => item.Premise, revision.Premise)
+                .SetProperty(item => item.Logline, revision.Logline)
+                .SetProperty(item => item.Synopsis, revision.Synopsis)
+                .SetProperty(item => item.Treatment, revision.Treatment)
+                .SetProperty(item => item.ApprovalState, MovieStoryApprovalStates.Draft)
+                .SetProperty(item => item.UpdatedAt, now), cancellationToken);
+        return advanced == 1;
     }
 
     public async Task<MovieStoryRevisionDto?> UpdateDraftAsync(Guid userId, Guid movieProjectId, Guid revisionId, MovieStoryRevisionRequest request, CancellationToken cancellationToken)
@@ -249,6 +289,7 @@ public sealed class MovieStoryService(TaslimDbContext db, MovieCollaborationAcce
 }
 
 public sealed class MovieStoryValidationException(string message) : Exception(message);
+public sealed class MovieStoryRevisionConflictException(string message) : Exception(message);
 public sealed class MovieStoryWorkflowException(string code, string message) : Exception(message)
 {
     public string Code { get; } = code;
