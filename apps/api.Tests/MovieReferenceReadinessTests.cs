@@ -196,6 +196,44 @@ public sealed class MovieReferenceReadinessTests
         Assert.Equal(propId, decomposedAgainstDecomposed.SourceId);
     }
 
+    [Theory]
+    [InlineData("玛拉拿起指南针然后离开。", "指南针")]
+    [InlineData("마라가 나침반을 든다", "나침반")]
+    [InlineData("มาราหยิบสว่านออกจากกระเป๋า", "สว่าน")]
+    public void A_prop_name_in_a_spaceless_script_matches_inside_an_unsegmented_sentence(string shotText, string propName)
+    {
+        var propId = Guid.NewGuid();
+        var result = MovieReferenceReadinessPolicy.EvaluatePropReference(shotText, [Prop(propName, propId)], important: true);
+
+        Assert.Equal(MovieReferenceReadinessItemStates.Complete, result.State);
+        Assert.Equal(propId, result.SourceId);
+    }
+
+    [Fact]
+    public void Arabic_prop_names_match_regardless_of_diacritic_marks()
+    {
+        var propId = Guid.NewGuid();
+        var result = MovieReferenceReadinessPolicy.EvaluatePropReference(
+            "أدارت مفتاحَ الحرف بحذر.",
+            [Prop("مفتاح", propId)],
+            important: true);
+
+        Assert.Equal(MovieReferenceReadinessItemStates.Complete, result.State);
+        Assert.Equal(propId, result.SourceId);
+    }
+
+    [Fact]
+    public void A_chinese_prop_mention_without_a_canonical_match_blocks_an_important_shot()
+    {
+        var result = MovieReferenceReadinessPolicy.EvaluatePropReference(
+            "玛拉需要一件道具放在桌上。",
+            [Prop("笔记本")],
+            important: true);
+
+        Assert.Equal(MovieReferenceReadinessItemStates.Missing, result.State);
+        Assert.True(result.BlocksGeneration);
+    }
+
     [Fact]
     public void Ten_reference_dimensions_are_aggregated_into_an_explainable_blocked_result()
     {

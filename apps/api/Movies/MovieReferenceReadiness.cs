@@ -115,7 +115,13 @@ public static class MovieReferenceReadinessPolicy
 
         var cleaned = SignalText(raw);
         var matched = props.FirstOrDefault(prop => ContainsWord(cleaned, prop.Name));
-        var propMentioned = ContainsAny(cleaned, "prop", "props", "object", "notebook", "compass", "key", "seed", "weapon");
+        // English terms match whole tokens; CJK/Hangul/Thai terms match as
+        // contiguous character sequences (compact scripts); Arabic terms match
+        // whole tokens after diacritic folding.
+        var propMentioned = ContainsAny(cleaned,
+            "prop", "props", "object", "notebook", "compass", "key", "seed", "weapon",
+            "道具", "物品", "笔记本", "罗盘", "指南针", "钥匙", "种子", "武器",
+            "مفتاح", "أداة", "سلاح");
 
         if (!propMentioned && matched is null)
             return new("props", "Prop references", MovieReferenceReadinessItemStates.Complete, false, false, true, "No prop reference is applicable to this shot.");
@@ -155,7 +161,17 @@ public static class MovieReferenceReadinessPolicy
     private static bool ContainsWord(string? text, string? value)
     {
         if (string.IsNullOrWhiteSpace(text) || string.IsNullOrWhiteSpace(value)) return false;
-        var phrase = Tokenize(value.Trim());
+        value = value.Trim();
+        // Scripts that do not separate words with spaces (Han, Kana, Hangul with
+        // agglutinative particles, Thai, Lao, Khmer, Myanmar) must match by
+        // contiguous character sequence, ignoring combining marks; a whole Chinese
+        // sentence tokenizes as one "word", so token equality alone would miss
+        // canonical props such as "指南针" inside "玛拉拿起指南针然后离开".
+        // Space-delimited scripts (Latin, Cyrillic, Greek, Arabic, Hebrew, Indic)
+        // keep strict token boundaries, preserving the key/monkey fix.
+        if (IsCompactPhrase(value))
+            return FoldText(text).Contains(FoldText(value), StringComparison.OrdinalIgnoreCase);
+        var phrase = Tokenize(value);
         if (phrase.Count == 0) return false;
         var tokens = Tokenize(text);
         for (var start = 0; start + phrase.Count <= tokens.Count; start++)
@@ -172,6 +188,43 @@ public static class MovieReferenceReadinessPolicy
             if (matches) return true;
         }
         return false;
+    }
+
+    private static bool IsCompactPhrase(string value)
+    {
+        var sawCompact = false;
+        foreach (var character in value)
+        {
+            if (IsCompactScriptCharacter(character)) { sawCompact = true; continue; }
+            if (IsCombiningMark(character) || character is ' ' or '\'' or '\u2019' or '\u200C') continue;
+            return false;
+        }
+        return sawCompact;
+    }
+
+    // CJK, Kana, Hangul, Thai, Lao, Khmer and Myanmar ranges: written without
+    // inter-word spaces.
+    private static bool IsCompactScriptCharacter(char value) =>
+        value is >= '\u0E00' and <= '\u0E7F'   // Thai
+            or >= '\u0E80' and <= '\u0EFF'     // Lao
+            or >= '\u1000' and <= '\u109F'     // Myanmar
+            or >= '\u1780' and <= '\u17FF'     // Khmer
+            or >= '\u2E80' and <= '\u303F'     // CJK radicals, Kangxi, punctuation
+            or >= '\u3040' and <= '\u30FF'     // Hiragana, Katakana
+            or >= '\u3100' and <= '\u312F'     // Bopomofo
+            or >= '\u3400' and <= '\u4DBF'     // Han extension A
+            or >= '\u4E00' and <= '\u9FFF'     // Han
+            or >= '\uAC00' and <= '\uD7A3'     // Hangul
+            or >= '\uF900' and <= '\uFAFF';    // CJK compatibility
+
+    private static string FoldText(string value)
+    {
+        var builder = new StringBuilder(value.Length);
+        foreach (var character in value)
+        {
+            if (!IsCombiningMark(character)) builder.Append(character);
+        }
+        return builder.ToString();
     }
 
     private static bool ContainsAny(string? text, params string[] terms) => terms.Any(term => ContainsWord(text, term));
