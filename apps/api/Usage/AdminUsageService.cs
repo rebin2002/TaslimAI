@@ -19,12 +19,23 @@ public sealed class AdminUsageService(TaslimDbContext db) : IAdminUsageService
     // places. SQLite cannot translate SUM(decimal), so the aggregates below accumulate
     // through the portable double type and cast the result back; that round trip leaks
     // binary rounding noise into the response (64 stored rows of 0.12345679 reported
-    // 7.90123455999999 instead of 7.90123456). Rounding an aggregate back to the stored
-    // scale is lossless for a correct total and removes only the binary artifact. This is
-    // the same guard UsageController applies to the customer charge total, so the admin
+    // 7.90123455999999 instead of 7.90123456). Rounding an aggregate back to the stored scale
+    // removes that artifact, and the claim is deliberately bounded rather than absolute: a
+    // double holds an integer exactly only up to 2^53, so the accumulation is exact while the
+    // scaled total stays under 2^53 at scale 8 - 90,071,992.5474 USD per aggregate. Beyond that
+    // the residual is no longer pure representation noise, rounding cannot be relied on to
+    // recover it, and what accumulates is a rounding error per addition, so it grows with the
+    // number of rows summed rather than with their sizes. Production aggregates are orders of
+    // magnitude below the bound (CustomerChargingEnabled is false at this head, so the customer
+    // totals are not being accumulated from real charges at all), but the bound is a property of
+    // the type, not of the deployment, and it is stated here so nobody reads this as a proof.
+    // Aggregating in decimal where the provider supports it - PostgreSQL does, and is the
+    // production engine - removes the bound outright; that is a reporting-lane follow-up against
+    // PR #1145 and is intentionally not folded into this integration branch.
+    // This is the same guard UsageController applies to the customer charge total, so the admin
     // report and the customer report can no longer disagree about the same rows.
     // It normalises the reported projection only: no stored amount, debit or credit is
-    // recalculated here.
+    // recalculated here, and no numeric behaviour changes.
     private const int LedgerScale = 8;
 
     // Breakdown ranks are re-read by operators and rendered into exports, so a tied row
