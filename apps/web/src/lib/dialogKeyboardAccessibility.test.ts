@@ -1,3 +1,12 @@
+import {
+  closeDialog,
+  dialogStackSize,
+  isTabbableElement,
+  isTopDialog,
+  openDialog,
+  raiseDialog,
+  shouldHandleDialogKey,
+} from "./useDialogAccessibility";
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
@@ -84,5 +93,229 @@ describe("AssetsView dialog contracts", () => {
     expect(file).toContain('id="asset-edit-title"');
     expect(file).toContain("data-dialog-autofocus");
     expect(file).toContain("startEdit(asset, detailOpenerRef.current)");
+  });
+});
+
+describe("useDialogAccessibility focusability filter (independent review findings)", () => {
+  // The shared hook must only enumerate nodes the browser itself can move
+  // sequential focus into. These cases reproduce every gap the review found:
+  // CSS visibility through ancestors, hidden ancestors, disabled fieldsets
+  // and inert subtrees.
+  class FakeElement {
+    tagName: string;
+    attrs = new Map<string, string>();
+    children: FakeElement[] = [];
+    parent: FakeElement | null = null;
+    hidden = false;
+    disabled = false;
+    type = "";
+    checkVisibilityValue: boolean | null | "absent" | "throws" = null;
+    constructor(tagName: string, attrs: string[] = []) {
+      this.tagName = tagName;
+      for (const attr of attrs) this.attrs.set(attr, "");
+    }
+    set(attr: string, value = ""): this {
+      this.attrs.set(attr, value);
+      if (attr === "hidden") this.hidden = true;
+      if (attr === "disabled") this.disabled = true;
+      return this;
+    }
+    append(child: FakeElement): this {
+      child.parent = this;
+      this.children.push(child);
+      return this;
+    }
+    getAttribute(name: string): string | null {
+      return this.attrs.get(name) ?? null;
+    }
+    matches(matcher: string): boolean {
+      if (matcher === "[hidden]" && this.attrs.has("hidden")) return true;
+      if (matcher === '[aria-hidden="true"]' && this.attrs.get("aria-hidden") === "true") return true;
+      if (matcher === "[inert]" && this.attrs.has("inert")) return true;
+      if (matcher === "fieldset[disabled]" && this.tagName === "FIELDSET" && this.attrs.has("disabled")) return true;
+      if (matcher === "legend" && this.tagName === "LEGEND") return true;
+      return false;
+    }
+    closest(matcher: string): FakeElement | null {
+      if (this.matches(matcher)) return this;
+      return this.parent ? this.parent.closest(matcher) : null;
+    }
+    get parentElement(): FakeElement | null {
+      return this.parent;
+    }
+  }
+  type StyleMap = Partial<Record<string, { display?: string; visibility?: string }>>;
+  function evaluate(element: FakeElement, styles: StyleMap = {}) {
+    const probe = element as unknown as HTMLElement;
+    if (element.checkVisibilityValue === "absent") {
+      delete (probe as { checkVisibility?: unknown }).checkVisibility;
+    } else if (element.checkVisibilityValue === "throws") {
+      (probe as { checkVisibility: unknown }).checkVisibility = () => {
+        throw new Error("no options support");
+      };
+    } else if (element.checkVisibilityValue !== null) {
+      (probe as { checkVisibility: unknown }).checkVisibility = () => element.checkVisibilityValue;
+    }
+    const readStyle = (node: Element) => {
+      const target = node as unknown as FakeElement;
+      const key = `${target.tagName}#${target.getAttribute("id") ?? ""}`;
+      const entry = styles[key] ?? {};
+      return { display: entry.display ?? "block", visibility: entry.visibility ?? "visible" };
+    };
+    return isTabbableElement(probe, readStyle);
+  }
+  function probe(id: string, tagName = "BUTTON", attrs: string[] = []): FakeElement {
+    const element = new FakeElement(tagName, attrs);
+    element.set("id", id);
+    return element;
+  }
+
+  it("keeps ordinary enabled, rendered controls tabbable", () => {
+    const button = probe("plain");
+    button.checkVisibilityValue = true;
+    expect(evaluate(button)).toBe(true);
+    expect(evaluate(probe("link", "A", ["href"]), { "A#link": { display: "block" } })).toBe(true);
+  });
+
+  it("excludes the hidden attribute on the element and on ancestors", () => {
+    const hiddenSelf = probe("hidden-self");
+    hiddenSelf.hidden = true;
+    hiddenSelf.checkVisibilityValue = true;
+    expect(evaluate(hiddenSelf)).toBe(false);
+    const parent = new FakeElement("DIV", ["hidden"]);
+    const child = probe("inside-hidden-ancestor");
+    child.checkVisibilityValue = true;
+    parent.append(child);
+    expect(evaluate(child)).toBe(false);
+  });
+
+  it("excludes aria-hidden on the element and on ancestors", () => {
+    const self = probe("aria-self");
+    self.set("aria-hidden", "true");
+    self.checkVisibilityValue = true;
+    expect(evaluate(self)).toBe(false);
+    const wrapper = new FakeElement("DIV").set("aria-hidden", "true");
+    const inside = probe("aria-ancestor");
+    inside.checkVisibilityValue = true;
+    wrapper.append(inside);
+    expect(evaluate(inside)).toBe(false);
+  });
+
+  it("excludes inert subtrees", () => {
+    const background = new FakeElement("SECTION", ["inert"]);
+    const inside = probe("inside-inert");
+    inside.checkVisibilityValue = true;
+    background.append(inside);
+    expect(evaluate(inside)).toBe(false);
+  });
+
+  it("excludes disabled controls, disabled fieldset members and hidden inputs", () => {
+    const disabledButton = probe("disabled-btn");
+    disabledButton.set("disabled");
+    disabledButton.checkVisibilityValue = true;
+    expect(evaluate(disabledButton)).toBe(false);
+    const fieldset = new FakeElement("FIELDSET").set("disabled");
+    const textInput = probe("fieldset-input", "INPUT");
+    textInput.checkVisibilityValue = true;
+    fieldset.append(textInput);
+    expect(evaluate(textInput)).toBe(false);
+    const legend = new FakeElement("LEGEND");
+    fieldset.append(legend);
+    const legendButton = probe("legend-button");
+    legendButton.checkVisibilityValue = true;
+    legend.append(legendButton);
+    expect(evaluate(legendButton)).toBe(true);
+    const hiddenInput = probe("secret", "INPUT");
+    hiddenInput.type = "hidden";
+    hiddenInput.checkVisibilityValue = true;
+    expect(evaluate(hiddenInput)).toBe(false);
+  });
+
+  it("excludes negative tabindex values", () => {
+    const minusOne = probe("minus-one");
+    minusOne.set("tabindex", "-1");
+    minusOne.checkVisibilityValue = true;
+    expect(evaluate(minusOne)).toBe(false);
+    const minusTwo = probe("minus-two", "A", ["href"]).set("tabindex", "-2");
+    minusTwo.checkVisibilityValue = true;
+    expect(evaluate(minusTwo)).toBe(false);
+    const zero = probe("zero");
+    zero.set("tabindex", "0");
+    zero.checkVisibilityValue = true;
+    expect(evaluate(zero)).toBe(true);
+  });
+
+  it("excludes CSS-invisible controls via checkVisibility and via the ancestor-walk fallback", () => {
+    const viaApi = probe("vis-hidden-check");
+    viaApi.set("id", "vis-hidden-check");
+    viaApi.checkVisibilityValue = false;
+    expect(evaluate(viaApi, {})).toBe(false);
+    const wrapper = new FakeElement("DIV");
+    wrapper.set("id", "gone-wrapper");
+    const child = probe("under-display-none", "INPUT");
+    child.set("id", "under-display-none");
+    child.checkVisibilityValue = "absent";
+    wrapper.append(child);
+    expect(evaluate(child, { "DIV#gone-wrapper": { display: "none" } })).toBe(false);
+    const visWrapper = new FakeElement("DIV");
+    visWrapper.set("id", "vis-wrapper");
+    const visChild = probe("under-visibility", "INPUT");
+    visChild.set("id", "under-visibility");
+    visChild.checkVisibilityValue = "absent";
+    visWrapper.append(visChild);
+    expect(evaluate(visChild, { "DIV#vis-wrapper": { visibility: "hidden" } })).toBe(false);
+    const throwing = probe("old-engine");
+    throwing.checkVisibilityValue = "throws";
+    expect(evaluate(throwing)).toBe(true);
+    const fullyVisible = probe("normal-input", "INPUT");
+    fullyVisible.checkVisibilityValue = "absent";
+    expect(evaluate(fullyVisible)).toBe(true);
+  });
+});
+
+describe("useDialogAccessibility multi-instance stack gating", () => {
+  // Two dialog hooks mounted at once (AssetsView carries a filter sheet and
+  // an edit modal) previously processed the same Escape and pulled focus in
+  // opposite directions. Exactly one instance — the top of the stack — may
+  // answer a document-level key now, which makes both failure modes
+  // structurally impossible.
+  const makeHandle = () => ({ token: Symbol("dialog") });
+  it("admits each open instance once and keeps a single top of stack", () => {
+    const first = makeHandle();
+    const second = makeHandle();
+    openDialog(first);
+    openDialog(first);
+    openDialog(second);
+    expect(dialogStackSize()).toBe(2);
+    expect(isTopDialog(second)).toBe(true);
+    expect(isTopDialog(first)).toBe(false);
+    raiseDialog(first);
+    expect(isTopDialog(first)).toBe(true);
+    expect(isTopDialog(second)).toBe(false);
+    raiseDialog(makeHandle());
+    expect(dialogStackSize()).toBe(2);
+    closeDialog(first);
+    expect(isTopDialog(second)).toBe(true);
+    closeDialog(second);
+    expect(dialogStackSize()).toBe(0);
+  });
+  it("routes Escape and Tab to exactly one instance at a time", () => {
+    const outer = makeHandle();
+    const inner = makeHandle();
+    openDialog(outer);
+    openDialog(inner);
+    const handlers = [outer, inner].filter((handle) => shouldHandleDialogKey(handle, "Escape"));
+    expect(handlers).toHaveLength(1);
+    expect(shouldHandleDialogKey(inner, "Escape")).toBe(true);
+    expect(shouldHandleDialogKey(outer, "Escape")).toBe(false);
+    expect(shouldHandleDialogKey(outer, "Tab")).toBe(false);
+    expect(shouldHandleDialogKey(inner, "Enter")).toBe(false);
+    raiseDialog(outer);
+    expect(shouldHandleDialogKey(outer, "Escape")).toBe(true);
+    expect(shouldHandleDialogKey(inner, "Escape")).toBe(false);
+    closeDialog(outer);
+    closeDialog(inner);
+    expect(dialogStackSize()).toBe(0);
+    expect(shouldHandleDialogKey(inner, "Escape")).toBe(false);
   });
 });
