@@ -20,9 +20,34 @@
 # It performs read-only GETs only. It writes nothing, mutates no platform
 # setting, and never emits a credential, connection string, or provider detail.
 #
+# WHAT THIS GATE IS NOT
+# ---------------------
+# It is NOT a promotion authority on its own. Pointed at a service domain the
+# platform routes that request to whichever deployment is *currently active*, so
+# a green verdict proves only "an endpoint of the expected shape is answering at
+# this URL", not "the replacement revision is answering". Against the public
+# domain during a cutover that is a false-green: the old revision can satisfy
+# every check here. See the identity rules below and docs/DEPLOYMENT_CUTOVER.md
+# section 2.1.
+#
+# Identity rules
+# --------------
+#   GATE_EXPECT_SERVICE (default "Taslim API")  a readiness document must belong
+#       to the Taslim API, not to any other JSON endpoint that happens to answer
+#       at the path. Enforced on the 2xx path as well as the 5xx path.
+#   GATE_EXPECT_REVISION (default empty)        demand proof of which revision is
+#       serving, matched against a readiness body field (revision, buildSha,
+#       gitCommit, version) or a response header (x-taslim-revision, x-revision,
+#       x-build-sha, x-git-sha, x-commit-sha). Unset means identity is NOT
+#       verified and the PASS line says so out loud. The shipped API exposes no
+#       such field or header today, so setting this against production yields
+#       identity-unavailable rather than a false green.
+#
 # Exit codes
-#   0  both gates green inside the budget: promotion to the new revision is safe
-#   1  budget exhausted: do not promote; keep the previous deployment serving
+#   0  both gates green inside the budget; safe to promote. If identity was not
+#      demanded the PASS line states that identity is unverified.
+#   1  budget exhausted or a red verdict: do not promote; keep the previous
+#      deployment serving.
 #   2  usage or argument error
 set -uo pipefail
 
@@ -30,15 +55,18 @@ API_BASE_URL="${1:-${API_BASE_URL:-}}"
 WEB_BASE_URL="${2:-${WEB_BASE_URL:-}}"
 BUDGET_SECONDS="${3:-${GATE_BUDGET_SECONDS:-300}}"
 
-GATE_RETRY_SECONDS="${GATE_RETRY_SECONDS:-2}"
-# A 5s default keeps the gate at 12 probes/minute per source address. The
-# health rate-limit policy proposed in PR #249 (open, unmerged) caps anonymous
-# health traffic at 30 requests/minute per client IP, so a tighter loop here
-# would make the gate throttle itself and report a false RED. If #249 lands,
-# do not lower this value below ~3s without re-checking that budget.
+# 5s default keeps the gate at 12 probes/minute per service, 24/minute for the
+# pair. The health rate-limit policy proposed in PR #249 (open, unmerged) caps
+# anonymous health traffic at 30 requests/minute per client IP, so a tighter
+# loop here would make the gate throttle itself and report a false RED. Do not
+# lower this below ~5s while sharing a source address with a platform health
+# check or CI smoke without re-checking that budget.
+GATE_RETRY_SECONDS="${GATE_RETRY_SECONDS:-5}"
 GATE_CONNECT_TIMEOUT_SECONDS="${GATE_CONNECT_TIMEOUT_SECONDS:-2}"
 GATE_REQUEST_TIMEOUT_SECONDS="${GATE_REQUEST_TIMEOUT_SECONDS:-10}"
 GATE_SKIP_WEB="${GATE_SKIP_WEB:-0}"
+GATE_EXPECT_SERVICE="${GATE_EXPECT_SERVICE-Taslim API}"
+GATE_EXPECT_REVISION="${GATE_EXPECT_REVISION:-}"
 
 die() { printf '[cutover-gate] %s\n' "$1" >&2; exit 2; }
 
@@ -50,6 +78,10 @@ fi
 [[ "$GATE_RETRY_SECONDS" =~ ^[0-9]+([.][0-9]+)?$ ]] || die "GATE_RETRY_SECONDS must be non-negative"
 [[ "$GATE_CONNECT_TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ ]] || die "GATE_CONNECT_TIMEOUT_SECONDS must be positive"
 [[ "$GATE_REQUEST_TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ ]] || die "GATE_REQUEST_TIMEOUT_SECONDS must be positive"
+if [[ -n "$GATE_EXPECT_REVISION" ]]; then
+    [[ "$GATE_EXPECT_REVISION" =~ ^[A-Za-z0-9._-]{4,128}$ ]] \
+        || die "GATE_EXPECT_REVISION must be a short revision token, not arbitrary text"
+fi
 
 for base in "$API_BASE_URL" "$WEB_BASE_URL"; do
     [[ -n "$base" ]] || continue
@@ -65,14 +97,18 @@ trap 'rm -rf "$TMP_DIR"' EXIT
 
 # Classify one probe. The distinction between "nothing is listening" and
 # "something is listening and refuses to be ready" is the whole point of this
-# gate, so the classifier reads the terminal response body as well as the code.
+# gate, so the classifier reads the terminal response body and headers as well
+# as the status code. No verdict may be produced from the status code alone.
 classify() {
-    local endpoint="$1" body_file="$2" http_code="$3" curl_rc="$4"
-    python3 - "$endpoint" "$body_file" "$http_code" "$curl_rc" <<'PY'
+    local endpoint="$1" body_file="$2" http_code="$3" curl_rc="$4" header_file="$5"
+    python3 - "$endpoint" "$body_file" "$http_code" "$curl_rc" "$header_file" \
+        "$GATE_EXPECT_SERVICE" "$GATE_EXPECT_REVISION" <<'PY'
 import json
+import re
 import sys
 
-endpoint, body_file, http_code, curl_rc = sys.argv[1:5]
+endpoint, body_file, http_code, curl_rc, header_file = sys.argv[1:6]
+expect_service, expect_revision = sys.argv[6], sys.argv[7]
 
 if curl_rc != "0":
     # 7 = refused, 28 = timed out, 52 = empty reply: none of these is an
@@ -82,6 +118,54 @@ if curl_rc != "0":
 
 code = int(http_code) if http_code.isdigit() else -1
 raw = open(body_file, "r", errors="replace").read() if body_file != "-" else ""
+headers = {}
+try:
+    for line in open(header_file, "r", errors="replace"):
+        m = re.match(r"^([A-Za-z0-9_-]+)\s*:\s*(.*)$", line.rstrip("\r\n"))
+        if m:
+            headers[m.group(1).lower()] = m.group(2).strip()
+except OSError:
+    pass
+
+
+def doc():
+    try:
+        payload = json.loads(raw)
+    except (json.JSONDecodeError, ValueError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def revision_from(payload):
+    for key in ("revision", "buildSha", "build_sha", "gitCommit", "version"):
+        value = payload.get(key) if isinstance(payload, dict) else None
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
+
+
+def identity(payload, verdict_if_ok):
+    """Confirm the responder is who we think it is, then, if demanded, which
+    revision it is. Only ever called on a would-be GREEN, so the failure modes
+    are red verdicts rather than a silently promoted wrong answer."""
+    if expect_revision:
+        found = revision_from(payload) if payload else ""
+        if not found:
+            for key in ("x-taslim-revision", "x-revision", "x-build-sha",
+                        "x-git-sha", "x-commit-sha"):
+                if headers.get(key):
+                    found = headers[key]
+                    break
+        if not found:
+            # The operator asked for proof and the responder cannot supply it.
+            # Refuse rather than guess: an unprovable identity is not a green.
+            print("identity-unavailable")
+            return
+        if not found.lower().startswith(expect_revision.lower()):
+            print("identity-mismatch")
+            return
+    print(verdict_if_ok)
+
 
 if code == 429:
     print("throttled")
@@ -89,26 +173,52 @@ if code == 429:
 if code in (502, 503, 504):
     # A gateway 502/504 carries no Taslim readiness document. An application 503
     # does, and that document is what makes it a dependency verdict instead.
-    try:
-        payload = json.loads(raw)
-    except json.JSONDecodeError:
+    payload = doc()
+    if payload is None:
         print("no-upstream")
         sys.exit(0)
-    if isinstance(payload, dict) and payload.get("service") == "Taslim API":
-        print("not-ready" if payload.get("status") != "ready" else "ready")
-    else:
+    if expect_service and payload.get("service") != expect_service:
+        # Some other service answered at this path. Not our readiness document.
         print("gateway-error")
+        sys.exit(0)
+    if payload.get("status") == "ready":
+        # A 5xx whose body claims ready is self-contradictory. Never allow a
+        # non-2xx to produce a green, whatever the document asserts.
+        print("conflict-5xx")
+        sys.exit(0)
+    print("not-ready")
     sys.exit(0)
 if 200 <= code < 300:
     if endpoint in ("/health/ready", "/readiness"):
-        try:
-            payload = json.loads(raw)
-        except json.JSONDecodeError:
+        payload = doc()
+        if payload is None:
             print("bad-body")
             sys.exit(0)
-        checks = payload.get("checks") or []
-        required = [c for c in checks if c.get("required") is True]
-        if payload.get("status") != "ready" or not required:
+        if expect_service and payload.get("service") != expect_service:
+            # Foreign JSON that merely looks ready must not pass. This is the
+            # only place a responder identity is checkable on the green path.
+            print("foreign-service")
+            sys.exit(0)
+        # Guards below are deliberately ONE decision each, so every one of them
+        # is individually necessary: a mutation harness removes a line and the
+        # suite must go red. An earlier draft merged the malformed-document and
+        # empty-check-set cases into one guard, which made the "no required
+        # checks" test pass even when the `or not required` clause was deleted.
+        checks = payload.get("checks")
+        if not isinstance(checks, list):
+            # A readiness document without a checks array is contract drift, not
+            # a dependency verdict: something is answering that is not shaped
+            # like this API's readiness document at all.
+            print("bad-body")
+            sys.exit(0)
+        required = [c for c in checks if isinstance(c, dict) and c.get("required") is True]
+        if not required:
+            # Covers checks == [] and an advisory-only list alike. Proving
+            # nothing is not the same as proving "not ready", but it is equally
+            # unpromotable, and this is the clause the review found unpinned.
+            print("not-ready")
+            sys.exit(0)
+        if payload.get("status") != "ready":
             print("not-ready")
             sys.exit(0)
         # An advisory check (required is False) must never block promotion; this
@@ -116,11 +226,20 @@ if 200 <= code < 300:
         if any(c.get("status") != "available" for c in required):
             print("not-ready")
             sys.exit(0)
-        print("ready")
+        identity(payload, "ready")
     else:
-        print("ready")
+        # Non-readiness paths (Web "/") carry no identity document. Honour a
+        # demanded revision only through a response header; otherwise the
+        # caller is told plainly in the summary that identity is unverified.
+        if expect_revision:
+            identity(None, "ready")
+        else:
+            print("ready")
     sys.exit(0)
 if 300 <= code < 400:
+    # Reached only because the probe does not follow redirects. A redirect is
+    # not a 2xx: a login redirect that lands on a 200 page would otherwise read
+    # as a green container.
     print("redirect")
     sys.exit(0)
 print(f"http-{code}")
@@ -130,15 +249,18 @@ PY
 probe() {
     local base="$1" endpoint="$2" label="$3" body_file="$4"
     local code rc
-    code="$(curl --silent --show-error --location \
+    # No --location on purpose: following a redirect would let a 3xx land on a
+    # 200 page and be classified as a healthy service.
+    code="$(curl --silent --show-error --max-redirs 0 \
         --connect-timeout "$GATE_CONNECT_TIMEOUT_SECONDS" \
         --max-time "$GATE_REQUEST_TIMEOUT_SECONDS" \
+        --dump-header "$TMP_DIR/${label}.headers" \
         --output "$body_file" \
         --write-out '%{http_code}' \
         "${base}${endpoint}" 2>"$TMP_DIR/${label}.curl.error")"
     rc=$?
     [[ -n "$code" ]] || code="000"
-    classify "$endpoint" "$body_file" "$code" "$rc"
+    classify "$endpoint" "$body_file" "$code" "$rc" "$TMP_DIR/${label}.headers"
 }
 
 # One gate per service: retry inside the shared budget until green or exhausted.
@@ -163,11 +285,16 @@ run_gate() {
     done
     printf '[cutover-gate] %s RED after %ds: last verdict %s (%s)\n' "$label" "$BUDGET_SECONDS" "$last" "$endpoint" >&2
     case "$last" in
-        no-upstream)    printf '[cutover-gate] %s: the revision never bound its HTTP port inside the budget. Do not promote: the gateway is answering for the app. Check the startup migration window and the service healthcheck port.\n' "$label" >&2 ;;
-        not-ready)      printf '[cutover-gate] %s: the revision is serving but a required dependency check is not available. Do not promote: investigate database/storage, not the deployment.\n' "$label" >&2 ;;
-        throttled)      printf '[cutover-gate] %s: the probe budget was exhausted by the health rate limiter. Raise the interval or the per-source budget before retrying.\n' "$label" >&2 ;;
-        gateway-error)  printf '[cutover-gate] %s: the gateway returned a 5xx without a Taslim readiness document. Verify the healthcheck port and the service domain.\n' "$label" >&2 ;;
-        *)              printf '[cutover-gate] %s: unexpected verdict %s.\n' "$label" "$last" >&2 ;;
+        no-upstream)          printf '[cutover-gate] %s: the revision never bound its HTTP port inside the budget. Do not promote: the gateway is answering for the app. Check the startup migration window and the service healthcheck port.\n' "$label" >&2 ;;
+        not-ready)            printf '[cutover-gate] %s: the revision is serving but no required dependency check is satisfiable. Do not promote: investigate database/storage, not the deployment.\n' "$label" >&2 ;;
+        throttled)            printf '[cutover-gate] %s: the probe budget was exhausted by the health rate limiter. Raise the interval or the per-source budget before retrying.\n' "$label" >&2 ;;
+        gateway-error)        printf '[cutover-gate] %s: the gateway returned a 5xx without a Taslim readiness document. Verify the healthcheck port and the service domain.\n' "$label" >&2 ;;
+        foreign-service)      printf '[cutover-gate] %s: a responder that is not "%s" answered the readiness path. Wrong URL, wrong vhost, or a proxy serving another app. Do not promote.\n' "$label" "$GATE_EXPECT_SERVICE" >&2 ;;
+        conflict-5xx)         printf '[cutover-gate] %s: a 5xx carrying a document that claims ready. Self-contradictory response; a non-2xx is never promotable. Do not promote.\n' "$label" >&2 ;;
+        identity-mismatch)    printf '[cutover-gate] %s: the responder identifies a revision other than the expected one. The replacement is NOT serving. Do not promote.\n' "$label" >&2 ;;
+        identity-unavailable) printf '[cutover-gate] %s: identity was demanded but the responder exposes no revision field or header, so it cannot be proven. Do not treat this as green; use a deployment-scoped URL or land the revision field first.\n' "$label" >&2 ;;
+        bad-body)             printf '[cutover-gate] %s: a 2xx readiness document that is not shaped like one (no checks array). Contract drift or a responder that is not this API. Do not promote.\n' "$label" >&2 ;;
+        *)                    printf '[cutover-gate] %s: unexpected verdict %s.\n' "$label" "$last" >&2 ;;
     esac
     return 1
 }
@@ -182,7 +309,14 @@ if [[ "$GATE_SKIP_WEB" != "1" ]]; then
 fi
 
 if (( rc == 0 )); then
-    printf '[cutover-gate] PASS — readiness-gated cutover is clear for both services.\n'
+    if [[ -n "$GATE_EXPECT_REVISION" ]]; then
+        printf '[cutover-gate] PASS — readiness green and revision identity verified against %s.\n' "$GATE_EXPECT_REVISION"
+    else
+        printf '[cutover-gate] PASS (IDENTITY UNVERIFIED) — shape is green but this is NOT a promotion authority:\n'
+        printf '[cutover-gate] no revision identity was demanded, so these verdicts cannot distinguish the\n'
+        printf '[cutover-gate] replacement revision from the still-active previous deployment on a shared domain.\n'
+        printf '[cutover-gate] Confirm which deployment is answering out of band, or set GATE_EXPECT_REVISION.\n'
+    fi
 else
     printf '[cutover-gate] FAIL — keep the previous deployments active and follow the recovery path.\n' >&2
 fi

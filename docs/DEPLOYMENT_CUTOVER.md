@@ -103,16 +103,22 @@ timeout proposed in §3.2 rather than near it.
 
 ### 1.3 Unresolved, and how to settle it
 
-This lane cannot see the Railway service settings, so the following stays open
-until someone reads the dashboard. Reading is not mutating.
+Provenance matters here, so it is stated per item: the first two were **resolved
+after this document was first written**, by evidence this lane did not generate
+itself. Comment #7141321366 section 4 relays `describe_service` output showing
+that **both deploy configs carry no `healthcheckPath` and no `healthcheckTimeout`
+and there are no staged changes**, with both public target ports at **8080**. That
+is a second-hand read of the live platform, consistent with the 502 signature, but
+this lane has not opened the dashboard and does not present it as its own
+observation. Confirm independently before acting on it.
 
-1. **Is a healthcheck path configured on either service?** With `healthcheckPath`
-   set, Railway polls the new container and switches only on a 2xx, so the previous
-   deployment keeps serving and no proxy 502 is possible. The observed 502s are the
-   expected signature of **no healthcheck path**, or of one pointed at the wrong
-   port. Settle it on the dashboard: service `Settings` pane (`Deploy` section) and
-   the deployment detail page, which shows a file icon for any value that came from
-   config in code.
+1. **Is a healthcheck path configured on either service?** *Resolved as no by the
+   evidence above.* With `healthcheckPath` set, Railway polls the new container and
+   switches only on a 2xx, so the previous deployment keeps serving and no proxy 502
+   is possible. The observed 502s are the expected signature of **no healthcheck
+   path**, or of one pointed at the wrong port. Re-confirm it on the dashboard: the
+   service `Settings` pane (`Deploy` section) and the deployment detail page, which
+   shows a file icon for any value that came from config in code.
 2. **Is the healthcheck port right?** Railway probes the injected `PORT`. The API
    image pins `ASPNETCORE_HTTP_PORTS=8080` (`apps/api/Dockerfile:19`) and does not
    read `PORT`. If the service port and the probe port disagree, Railway reports
@@ -128,13 +134,31 @@ until someone reads the dashboard. Reading is not mutating.
 demonstrably serving. Its verdict taxonomy is deliberate: an application 503 and a
 proxy 502 mean opposite things and must not be merged into one failure.
 
+**The gate and the platform healthcheck deliberately use different API
+endpoints.** This script is an *operator* decision aid and reads `/health/ready`,
+because a human benefits from seeing which dependency is red and why. The
+automatic promotion gate in section 3.2 is recommended as `/health/live`, because a
+machine that blocks promotion on a storage blip converts an observability gap into
+an outage. Reading these two as one decision is the mistake to avoid; the split and
+its reason are recorded in section 3.2.
+
 | Verdict | Meaning | Promote? |
 | --- | --- | --- |
 | `ready` | 2xx and every `required: true` check is `available` | yes |
 | `not-ready` | bound, but a required dependency check is red | no; investigate the dependency |
 | `no-upstream` | refused / timeout / empty reply, or a 5xx carrying no Taslim readiness document | no; the revision never bound |
 | `throttled` | 429 from the health limiter | no; back the probe rate off |
-| `redirect`, `http-N`, `bad-body` | route or contract drift | no; inspect before retrying |
+| `redirect` | 3xx. Reached only because the probe **does not follow redirects**: following one lands on a 200 page and would be classified green | no; a redirect is not a serving endpoint |
+| `foreign-service` | a 2xx readiness document whose `service` is not the expected one | no; wrong URL, wrong vhost, or a proxy answering with another app's JSON |
+| `conflict-5xx` | a 5xx whose own body claims `ready` | no; self-contradictory, and no non-2xx is ever promotable |
+| `identity-mismatch` | a revision is demanded and the responder names a different one | no; the replacement is not serving |
+| `identity-unavailable` | a revision is demanded but the responder exposes no revision field or header | no; proof was asked for and cannot be produced - see section 2.1 |
+| `http-N`, `bad-body` | route or contract drift | no; inspect before retrying |
+
+`GATE_EXPECT_SERVICE` defaults to `Taslim API` and is what makes the
+`foreign-service` check possible; setting it empty opts out deliberately.
+`GATE_EXPECT_REVISION` is empty by default, which is why the normal PASS prints
+`IDENTITY UNVERIFIED` instead of claiming authority (section 2.1).
 
 Endpoints used, and why they are the right ones:
 
@@ -159,6 +183,52 @@ Advisory checks never block promotion. `worker` is being added as
 fails only on checks whose `required` is literally `true`. A degraded worker is a
 reason to investigate, not a reason to keep the old revision serving.
 
+### 2.1 What the gate is NOT: promotion authority without identity
+
+**A green verdict is not proof that the replacement revision is serving.** The
+platform routes a *service* domain to whichever deployment is currently active, so
+during a cutover the previous revision can answer every check in this gate and
+produce a green. The gate's honest claim is narrower than its name:
+
+> an endpoint of the expected shape and identity is answering at this URL
+
+not
+
+> the replacement revision is answering.
+
+Confirmed against the shipped response at `1e2cb80a`, sampled live at
+`2026-11-24T19:34:39Z`: the readiness document carries only `status`, `service`,
+`requestId` and `checks`, and the headers carry only per-request identifiers
+(`x-request-id`, `x-railway-request-id`) plus platform routing metadata
+(`x-railway-edge`, `x-hikari-trace`). **No revision, build SHA or deployment id is
+observable from outside the container**, so there is currently nothing to compare.
+
+The gate behaves as follows rather than pretending otherwise:
+
+| `GATE_EXPECT_REVISION` | Behaviour |
+| --- | --- |
+| unset (default) | green is green, but the PASS line prints `PASS (IDENTITY UNVERIFIED)` and states that this is **not a promotion authority** |
+| set, responder exposes a revision | compared against `revision`/`buildSha`/`gitCommit`/`version` in the body, or `x-taslim-revision`/`x-revision`/`x-build-sha`/`x-git-sha`/`x-commit-sha` in the headers. Match → `revision identity verified`; mismatch → RED `identity-mismatch` |
+| set, responder exposes no identity at all | **RED `identity-unavailable`**, not a green. Demanding proof and not receiving it is a failure, because the alternative is the false green described above |
+
+Two consequences for how this is used:
+
+1. **Against the public service domain it is a shape assertion only.** To make it
+   a promotion assertion, point it at a **deployment-scoped** URL, or land the
+   revision field first.
+2. **Responder identity is checked on the green path, not only on the error path.**
+   A foreign responder wearing the readiness shape is `foreign-service` and blocks.
+   `service == "Taslim API"` is the only identity available today, and it is now
+   pinned by tests.
+
+Making revision identity provable needs an application change this lane
+deliberately does not make: adding `revision`/`buildSha` to
+`OperationalHealthResponse`, or exposing `/version`, edits
+`apps/api/Infrastructure/OperationalObservability.cs` - the file lane **#1028** is
+already editing for the advisory `worker` check - so it belongs in a follow-up once
+#1028 has landed, not in this diff. The gate is already built to consume that field
+the moment it exists; nothing here has to change to accept it.
+
 ## 3. Configuration change
 
 ### 3.1 Do not add `railway.json`
@@ -174,27 +244,59 @@ dashboard values.
 
 ### 3.2 Exact settings to apply, and their values
 
-| Service | Setting | Value | Why |
-| --- | --- | --- | --- |
-| Taslim API | Healthcheck Path | `/health/ready` | gates promotion on dependencies, not on process liveness |
-| Taslim API | Healthcheck Timeout | `300` | documented default; case A needed 21.6s locally, so 300s is a wide margin |
-| Taslim API | Restart policy | `ON_FAILURE`, max retries `10` | unchanged from the platform default; a failed healthcheck marks the deploy failed, it does not restart a healthy process |
-| Taslim Web | Healthcheck Path | `/` | public, non-paid, matches the existing smoke contract |
-| Taslim Web | Healthcheck Timeout | `120` | `next start` binds without a migration chain |
+Applied **one service at a time**, in this order, each verified before the next.
+Values are reconciled with the independent review in #7141321366 section 5; where
+that review and the first draft of this document disagreed, the disagreement and
+its resolution are recorded immediately below the table rather than quietly
+adopted.
+
+| Order | Service | Setting | Value | Why |
+| --- | --- | --- | --- | --- |
+| 1 | Taslim Web | Healthcheck Path | `/` | public, non-paid, matches the existing smoke contract |
+| 1 | Taslim Web | Healthcheck Timeout | `30` | `next start` binds without a migration chain |
+| 2 | Taslim API | Healthcheck Path | **`/health/live`** | see the reversal below |
+| 2 | Taslim API | Healthcheck Timeout | **`60` minimum** | measured cold window is 21.6s worst case; the reviewer's floor of 60s leaves ~3x margin plus image start |
+| 2 | Taslim API | Restart policy | `ON_FAILURE`, max retries `10` | unchanged from the platform default; a failed healthcheck marks the deploy failed, it does not restart a healthy process |
 | both | Overlap seconds | `30` | keeps the previous deployment answering while clients finish in-flight work |
 | both | Draining seconds | `10` | graceful SIGTERM window; the readiness endpoint already returns 503 while stopping |
+| both | `targetPort` | `8080`, **unchanged** | the API image pins `ASPNETCORE_HTTP_PORTS=8080`; do not "fix" the port by editing the image during a cutover |
 
-Equivalent IaC, for when the project is migrated deliberately (this file is **not**
-added by this lane, because `railway config apply` would take ownership of the whole
-project graph and must not be attempted blind):
+**Reversal of the first draft, and why it is correct.** This section originally
+specified `/health/ready` for the API, reasoning that promotion should be gated on
+dependencies rather than on a bare process. The review's objection (#7141321366
+section 4, items 1 and 5) is sound and this draft accepts it:
+`Health:StorageRequired=true` makes an R2 blip a *required* readiness failure, and
+the platform will not promote on anything but a 2xx. A strict gate can therefore
+block a perfectly good revision and stall the deploy - "a self-inflicted outage
+disguised as a safety measure". The defect observed in #1245 is a container not
+*bound*, which liveness proves exactly and nothing else. So:
+
+- the **platform** gate is `/health/live` - bind proof, no dependency can block it;
+- the **operator** gate stays `/health/ready` - dependency detail, read by a human,
+  which is where a red storage check is information rather than an outage.
+
+That split keeps the property this lane was built for without importing the
+blocking risk. If `/health/ready` is ever preferred for automatic promotion,
+`Health:StorageRequired` must be pinned `false` first, or the probe must tolerate
+advisory red - and either change is a configuration mutation with a blast radius,
+not a documentation edit.
+
+**Never flip both services in one apply.** One service, one redeploy, one
+observation, then the other: promoting Web to a revision whose API contract differs
+while the API is held unhealthy produces a mixed fleet.
+
+Equivalent IaC for when the project is migrated deliberately. This file is **not**
+added by this lane, because `railway config apply` takes ownership of the whole
+project graph and must not be attempted blind - and because one service cannot be
+managed by Config as Code and IaC at the same time:
 
 ```ts
 import { defineRailway, project, service } from "railway/iac";
 
 export default defineRailway(() => project("taslim", {
   resources: [
-    service("Taslim API", { healthcheck: "/health/ready", healthcheckTimeout: 300 }),
-    service("Taslim Web", { healthcheck: "/", healthcheckTimeout: 120 }),
+    service("Taslim Web", { healthcheck: "/", healthcheckTimeout: 30 }),
+    service("Taslim API", { healthcheck: "/health/live", healthcheckTimeout: 60 }),
   ],
 }));
 ```
@@ -205,21 +307,36 @@ No production setting is changed by anything in this repository. Verify before
 promoting, on a **separate Railway environment or a throwaway project**, never on
 the production environment:
 
-1. `railway link` to the staged project, then `railway config pull --force` and
+**Staging comes before any production apply, in every variant of this plan,
+including the config-only one.** A setting that has never been observed to change
+an outcome has not been verified, whatever the documentation says.
+
+1. **Snapshot first.** Record the current Web and API service config - env names,
+   start command, port, health fields - to a dated file *before* changing anything.
+   This is what makes each step below reversible by config rather than by
+   redeploying old code.
+2. `railway link` to the staged project, then `railway config pull --force` and
    inspect it, so the staged graph is known rather than assumed.
-2. Set the API healthcheck path to `/health/ready` and the Web path to `/` on the
-   staged services only.
-3. Deploy the candidate SHA to staging and read the deployment detail page: the
-   healthcheck value must show, with the file or settings icon that names its
-   source.
-4. Confirm the gate **holds** rather than passes trivially: with the staged API
-   pointed at an unreachable database the deployment must not go `SUCCESS` before
-   the timeout, and `deploy-readiness-gate.sh` against staging must exit 1 with
-   `not-ready`. A gate that cannot fail is not a gate.
-5. Confirm promotion timing on a clean staged deploy: the previous deployment must
-   still answer throughout the startup window, i.e. zero 502 on `/health` in the
-   deployment-scoped logs.
-6. Only then apply the same two values to production through the dashboard.
+3. **Web only:** set `healthcheckPath=/`, `healthcheckTimeout=30`. Lowest-risk
+   service, no migration step. Trigger no deploy yet.
+4. **API only, after Web is observed:** set `healthcheckPath=/health/live`,
+   `healthcheckTimeout=60` (never less), and keep the platform probe interval at or
+   above 30s so it cannot consume the #249 anonymous budget or throttle itself.
+5. Deploy the candidate SHA to staging and read the deployment detail page: the
+   healthcheck value must show, with the icon that names its config source.
+6. **Validate with a staged no-op deploy of the API alone** - redeploy the same
+   revision - and confirm promotion now waits for the bound listener: the
+   #1245-class burst of 502s on `/health` must be absent from the deployment-scoped
+   logs. Only after that observation is the same done for Web.
+7. Confirm the gate **can go red**, which is the check that distinguishes a gate
+   from a formality: point the operator gate at a staged API with an unreachable
+   database and it must exit 1 with `not-ready`; the platform deploy must not reach
+   `SUCCESS` before its timeout.
+8. Confirm the operator gate's own PASS text is read, not just its exit code -
+   against staging it should say `IDENTITY UNVERIFIED` while the API exposes no
+   revision field (section 2.1). That message is expected here and is not a defect.
+9. **Only then** apply the same values to production, in the same one-service-per-
+   apply order, each followed by its own observation.
 
 Staged check with the gate, with `GATE_SKIP_WEB=1` for an API-only environment:
 
@@ -237,19 +354,31 @@ manifest for the SHA is retained; a rollback target is named in advance.
    active** `SUCCESS` deployment id for each service. The active deployment is the
    rollback target, and it stops being obvious once a new one appears.
 2. Confirm both healthcheck settings from section 3.2 are present on the production
-   services. If the API path is unset, set it before the release rather than during it.
+   services. If they are unset, set them before the release rather than during it,
+   and **one service per apply** - never both at once.
 3. Merge through the normal reviewed path. Each service then deploys independently:
    Railway applies no startup ordering to GitHub push deploys, so Web may switch
    while the API is still migrating. The gate in step 4 is what closes that gap.
-4. Immediately after the API deployment leaves `DEPLOYING`, run the gate against
-   production with a 300s budget and read the verdicts rather than the deployment
-   status:
+4. Immediately after the API deployment leaves `DEPLOYING`, run the gate and read
+   the **verdicts and their wording**, not just the exit code and not the
+   deployment status. Prefer a deployment-scoped URL over the service domain,
+   because the service domain routes to whichever deployment is currently active
+   and can therefore be satisfied by the *previous* revision (section 2.1):
 
    ```bash
+   # preferred: identity demanded, and the new revision's own host
+   GATE_EXPECT_REVISION="$NEW_SHA" \
+     bash scripts/deploy-readiness-gate.sh "$API_DEPLOYMENT_URL" "$WEB_DEPLOYMENT_URL" 300
+
+   # acceptable as a shape assertion only - the PASS line will say IDENTITY UNVERIFIED
    bash scripts/deploy-readiness-gate.sh \
      https://taslim-api-production.up.railway.app \
      https://taslim-web-production.up.railway.app 300
    ```
+
+   With no revision field exposed, demanding `GATE_EXPECT_REVISION` returns
+   `identity-unavailable` rather than a green. That red is the correct answer to a
+   question the platform cannot currently answer; it is not a failed deploy.
 
 5. Green means: sample the deployment-scoped HTTP logs for the cutover window and
    record that 5xx on `/health` and `/health/ready` is zero. Record the deployment
@@ -267,7 +396,11 @@ Choose by verdict; the three cases need opposite responses.
 | `not-ready`, `database=unavailable` | the schema target is unreachable | check Railway PostgreSQL status; do not roll code back for an infrastructure fault |
 | `not-ready`, `storage=unavailable` | the R2 adapter is not answering | `Health:StorageRequired=true` makes this a promotion blocker on purpose; verify R2 settings and provider status before touching the deployment |
 | `throttled` | probe budget exhausted | widen the gate interval; if PR #249 has landed, re-check its per-client-IP budget before promoting |
-| gate green but the release is wrong | a functional regression, not a cutover failure | roll back |
+| `foreign-service` | something that is not the Taslim API answered the readiness path | wrong URL, wrong vhost, or a proxy fronting another app. Nothing to roll back; fix the target the gate was pointed at |
+| `conflict-5xx` | a 5xx carrying a document that claims `ready` | a non-2xx is never promotable. Treat as not bound and investigate the proxy, not the app |
+| `identity-mismatch` | the responder identifies a revision other than the expected one | **the replacement is not serving.** Do not promote. Check which deployment the domain is routed to; the previous revision is still live |
+| `identity-unavailable` | identity was demanded but the responder exposes no revision field or header | expected until a revision field or `/version` lands. Fall back to a deployment-scoped URL, or read the green as shape-only |
+| gate green but the release is wrong | a functional regression, not a cutover failure | roll back. Note that a green on the *service domain* does not prove the new revision is the one answering (section 2.1), so confirm the serving revision before concluding a regression is attributable to it |
 
 Rollback, per service, from `Service -> Deployments`, the three-dot menu on the
 previous deployment:
@@ -297,7 +430,8 @@ Nothing here duplicates or supersedes an existing owner. Deliberate non-goals:
 | Lane | Ownership | Interaction with this gate |
 | --- | --- | --- |
 | **#1028** (open, `MERGEABLE`, base `0325c2d2`, 6 merges stale) | adds advisory `worker` (`required: false`) to the readiness document | this lane adds **no** check to `ReadinessAsync`, touches no `.cs`, and preserves the non-gating contract the PR depends on; the gate's `advisory-degraded` test pins it |
-| **#249** (open, `MERGEABLE`, base `d3fffca5`) | health rate limit: 2 concurrent and 30/min per client IP on `/health`, `/health/live`, `/health/ready`, `/readiness` | **live interaction.** Platform probes originate from `healthcheck.railway.app`, not the public interface, so the cap does not bind them; this lane's default retry is 5s (12/min) to stay inside the budget, and the gate has a distinct `throttled` verdict |
+| **#249** (open, `MERGEABLE`, base `d3fffca5`) | health rate limit: 2 concurrent and 30/min per client IP on `/health`, `/health/live`, `/health/ready`, `/readiness` | **live interaction, and the budget is per client IP - which matters for who it actually constrains.** The gate is operator-initiated, so it shares the *operator's* allowance: default retry 5s = 12/min per service, 24/min for the pair, with a distinct `throttled` verdict. Platform healthcheck probes come from Railway's own source address, not the operator's, so they do not consume the operator's budget - but they can exhaust **their own** if the interval is tight, which is why section 3.2 sets the API probe interval at 30s or above. CI smoke runs from GitHub runners, a third address. Three independent budgets, not one shared pool |
+| **#7141321366** (independent technical review of this PR's head) | found the identity gap and four unpinned classification edges; recommended the Web-then-API `/health/live` sequence | **accepted, and it changed this document.** Sections 2.1, 3.2 and 3.3 are the reconciliation. One point is refined rather than adopted: the review's item 4 treats platform probes, the operator gate and CI smoke as sharing one anonymous allowance, but the limit is keyed per client IP, so they contend separately - see the #249 row above. The review also classifies all four gaps as test-coverage only; two are live code defects at the shipped head, recorded in section 7 |
 | **#66** (open, **`CONFLICTING`**, base 2026-10-05) | bounds startup migration time via `Database:MigrationTimeoutSeconds` | **not duplicated.** Measurement B shows the window exists without migrations, so bounding migration time is necessary-but-not-sufficient; #66 also edits `Program.cs`, `README.md` and `docs/OPERATIONS_RUNBOOK.md`, so any ordering change here would collide with it |
 | #726, #284 | staging rollback contract tests, release-governance evidence | rollback steps in section 5 are the operational counterpart; no test-lane files touched |
 | #258, #461 | readiness redaction, provider failure status | untouched |
