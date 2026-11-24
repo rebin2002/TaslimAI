@@ -67,6 +67,14 @@ public sealed class AcademicSourceUrlGuardTests
         Assert.NotEmpty(new AcademicSourceDiscoveryOptions { CrossrefBaseUrl = "https://user:pw@api.crossref.org" }.Validate());
         Assert.NotEmpty(new AcademicSourceDiscoveryOptions { OpenLibraryBaseUrl = "ftp://openlibrary.org" }.Validate());
         Assert.NotEmpty(new AcademicSourceDiscoveryOptions { GoogleBooksBaseUrl = "" }.Validate());
+        // Bracketed IPv6 spellings of the same destinations: metadata as ::/96, and the two
+        // special-use families that IsIPv6LinkLocal does not flag. Each used to validate clean, so
+        // the feature could be switched on with egress aimed at link-local multicast space.
+        Assert.NotEmpty(new AcademicSourceDiscoveryOptions { OpenAlexBaseUrl = "https://[::a9fe:a9fe]" }.Validate());
+        Assert.NotEmpty(new AcademicSourceDiscoveryOptions { OpenAlexBaseUrl = "https://[::7f00:1]" }.Validate());
+        Assert.NotEmpty(new AcademicSourceDiscoveryOptions { CrossrefBaseUrl = "https://[ff02::1]" }.Validate());
+        Assert.NotEmpty(new AcademicSourceDiscoveryOptions { OpenLibraryBaseUrl = "https://[fe00::1]" }.Validate());
+        Assert.NotEmpty(new AcademicSourceDiscoveryOptions { GoogleBooksBaseUrl = "https://[::a00:1]" }.Validate());
         Assert.Empty(new AcademicSourceDiscoveryOptions().Validate());
     }
 
@@ -81,6 +89,14 @@ public sealed class AcademicSourceUrlGuardTests
         }.Normalize();
         Assert.Equal(["www.googleapis.com"], options.AllowedEndpointHosts());
         Assert.False(AcademicSourceUrlGuard.IsAllowedEndpoint(new Uri("http://169.254.169.254/latest/meta-data/"), options.AllowedEndpointHosts()));
+        // The same exclusion must hold for the IPv6 spellings that used to be admitted: a configured
+        // base URL in the special-use tail never reaches the endpoint allow list.
+        foreach (var literal in new[] { "[::a9fe:a9fe]", "[ff02::1]", "[fe00::1]", "[::7f00:1]" })
+        {
+            var admitted = new AcademicSourceDiscoveryOptions { OpenAlexBaseUrl = "https://" + literal }
+                .Normalize().AllowedEndpointHosts();
+            Assert.DoesNotContain(literal.TrimStart('[').TrimEnd(']'), admitted);
+        }
     }
 
     [Fact]
@@ -137,12 +153,50 @@ public sealed class AcademicSourceUrlGuardTests
     [InlineData("2002:c000:204::1", false)] // 6to4 embeds a v4 address; refused rather than decoded
     [InlineData("2606:4700:4700::1111", true)]
     [InlineData("2001:448:1234::5", true)] // academic IPv6 space must not be false-blocked
+    // ff00::/8 is multicast plus reserved; IsIPv6LinkLocal does not flag any of it.
+    [InlineData("ff02::1", false)]
+    [InlineData("ff13::1", false)]
+    [InlineData("ffff::1", false)]
+    // fe80::/10 is link-local, but the rest of fe80::/9 is not flagged by IsIPv6LinkLocal.
+    [InlineData("fe00::1", false)]
+    [InlineData("fe3f::1", false)]
+    [InlineData("fe7f::1", false)]
+    // ::/96 (IPv4-compatible) spellings inherit the v4 rules: metadata and private stay closed,
+    // public embedded v4 stays open.
+    [InlineData("::a9fe:a9fe", false)]
+    [InlineData("::7f00:1", false)]
+    [InlineData("::a00:1", false)]
+    [InlineData("::c000:201", false)] // 192.0.2.1, documentation
+    [InlineData("::", false)]
+    [InlineData("::10a0:1", true)]    // 16.160.0.1
+    [InlineData("::d5c6:d6d7", true)] // 213.198.214.215
     public void Publicly_routable_ipv6_classification(string address, bool expected)
         => Assert.Equal(expected, AcademicSourceUrlGuard.IsPubliclyRoutable(IPAddress.Parse(address)));
 
     [Fact]
     public void V4_mapped_ipv6_loopback_is_blocked()
         => Assert.False(AcademicSourceUrlGuard.IsPubliclyRoutable(IPAddress.Parse("::ffff:127.0.0.1")));
+
+    [Theory]
+    // The whole fc00::/6 special-use tail plus the ::/96 and ::ffff: forms of every non-public v4
+    // range must be refused *even when the operator allow-listed that exact literal*, so neither a
+    // misbehaving answer nor a misconfigured base URL can turn it into a read target. The allow
+    // list below deliberately contains the literal, so only the classifier can refuse it.
+    [InlineData("ff02::1")]
+    [InlineData("fe00::1")]
+    [InlineData("fe7f::1")]
+    [InlineData("::a9fe:a9fe")]
+    [InlineData("::7f00:1")]
+    [InlineData("::a00:1")]
+    [InlineData("::ffff:169.254.169.254")]
+    public void Special_use_literals_are_rejected_as_endpoints_even_when_configured(string literal)
+    {
+        var bracketed = "[" + literal + "]";
+        Assert.False(AcademicSourceUrlGuard.IsAllowedEndpoint(literal, new[] { literal }));
+        Assert.False(AcademicSourceUrlGuard.IsAllowedEndpoint(bracketed, new[] { literal }));
+        Assert.False(AcademicSourceUrlGuard.IsAllowedEndpoint(new Uri("https://" + bracketed + "/"), new[] { literal }));
+        Assert.False(AcademicSourceUrlGuard.TryAllowedEndpoint("https://" + bracketed + "/", new[] { literal }, out _));
+    }
 
     [Fact]
     public void TryAllowedEndpoint_rejects_credentials_even_for_allow_listed_hosts()
