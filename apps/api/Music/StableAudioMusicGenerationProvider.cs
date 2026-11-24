@@ -223,6 +223,29 @@ public sealed class StableAudioMusicGenerationProvider(
                 pollAttempts);
             return new MusicProviderResult(output, normalizedContentType, format, request.DurationSeconds, usage);
         }
+        catch (OperationCanceledException exception) when (cancellationToken.IsCancellationRequested && providerSubmissionAccepted)
+        {
+            // F-36: same posture as Mubert. The create call was answered with a generation id, so
+            // Stable Audio holds an accepted (and possibly billed) generation that this integration
+            // never cancels at the provider. A plain cancellation would leave the job on MUSIC_CANCELLED,
+            // which RetryAsync treats as safe to restart - a second paid generation while the first is
+            // still running. Typed cancellation keeps the member's cancellation and records the unknown.
+            if (billableResultReceived)
+            {
+                logger.LogWarning(
+                    exception,
+                    "Stable Audio music provider generation was cancelled while delivering an already-completed generation; it was not re-generated. ProviderKey={ProviderKey}; ProviderOperationId={ProviderOperationId}",
+                    Key,
+                    providerGenerationId);
+                throw new MusicProviderCancellationWithAcceptedSubmissionException(providerGenerationId, outputConfirmedComplete: true);
+            }
+            logger.LogWarning(
+                exception,
+                "Stable Audio music provider generation was cancelled after the provider accepted it; the accepted outcome is unconfirmed and was not re-submitted. ProviderKey={ProviderKey}; ProviderOperationId={ProviderOperationId}",
+                Key,
+                providerGenerationId);
+            throw new MusicProviderCancellationWithAcceptedSubmissionException(providerGenerationId, outputConfirmedComplete: false);
+        }
         catch (OperationCanceledException exception) when (!cancellationToken.IsCancellationRequested)
         {
             if (billableResultReceived)

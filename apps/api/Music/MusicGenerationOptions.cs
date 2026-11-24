@@ -105,3 +105,34 @@ public sealed class MusicProviderSubmissionUnconfirmedException : MusicProviderU
     {
     }
 }
+
+/// <summary>
+/// F-36: the member (or the host) cancelled a music job AFTER the provider had already accepted the
+/// billable generation - it answered the create call with a track or generation id - and this
+/// integration establishes no provider-side cancellation, so the accepted operation may still be
+/// running, may still finish and may still bill. Deriving from <see
+/// cref="OperationCanceledException"/> keeps the worker's cancellation handling intact (the job still
+/// ends as Cancelled, because that is what the member asked for), while the distinct type lets the
+/// worker record WHICH cancellation it was: an ordinary pre-submission cancellation, which is safe to
+/// retry, is a plain cancellation and never becomes this class. The accepted operation id is carried
+/// for logs and reconciliation only, and nothing provider-sensitive is in the message.
+/// </summary>
+public sealed class MusicProviderCancellationWithAcceptedSubmissionException : OperationCanceledException
+{
+    public MusicProviderCancellationWithAcceptedSubmissionException(string? providerOperationId, bool outputConfirmedComplete)
+        : base("The music generation was cancelled after the provider accepted it, so its outcome is unconfirmed.")
+    {
+        ProviderOperationId = providerOperationId;
+        OutputConfirmedComplete = outputConfirmedComplete;
+    }
+
+    /// <summary>Accepted provider operation id (Mubert track id / Stable generation id), log-only.</summary>
+    public string? ProviderOperationId { get; }
+
+    /// <summary>
+    /// True when polling had already seen the finished result, so only delivery is unknown (the same
+    /// posture as the retrieval-failure family); false when the accepted generation was still running,
+    /// so completion and charging are both unknown.
+    /// </summary>
+    public bool OutputConfirmedComplete { get; }
+}

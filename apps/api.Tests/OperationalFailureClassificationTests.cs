@@ -24,6 +24,10 @@ public sealed class OperationalFailureClassificationTests
     // Lease expiry with an unknown submission outcome is terminalized, never auto-re-dispatched.
     [InlineData("MUSIC_PROVIDER_SUBMISSION_UNCONFIRMED", "provider", false)]
     [InlineData("MUSIC_SUBMISSION_RETRY_BLOCKED", "provider", false)]
+    // F-36: cancelling an ACCEPTED submission is the same unknown-outcome state as losing contact with
+    // it, and cancelling after a completed output is the same delivery state as a timed-out read.
+    [InlineData("MUSIC_CANCELLED_UNCONFIRMED_SUBMISSION", "provider", false)]
+    [InlineData("MUSIC_CANCELLED_UNDELIVERED_OUTPUT", "delivery", false)]
     [InlineData("MUSIC_PROVIDER_UNAVAILABLE", "provider", true)]
     public void Classifier_returns_bounded_operational_categories(string code, string category, bool retryable)
     {

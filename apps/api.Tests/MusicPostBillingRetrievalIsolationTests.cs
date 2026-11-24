@@ -568,6 +568,52 @@ public sealed class MusicSubmissionUnconfirmedContractTests
     }
 
     [Fact]
+    public void Cancellation_copy_distinguishes_accepted_from_pre_submission_and_known_from_unknown()
+    {
+        // F-36: three different truths must not collapse into one message. Cancelling before acceptance
+        // means nothing is in flight; cancelling an accepted-but-unobserved generation means the first
+        // attempt may still finish and still bill; cancelling after a completed output means the track
+        // exists and only delivery was lost. Each gets its own wording, and only the ordinary one may
+        // suggest trying again.
+        var plain = GenerationJobErrorMessages.For(GenerationJobErrorCodes.MusicCancelled);
+        var unconfirmed = GenerationJobErrorMessages.For(GenerationJobErrorCodes.MusicCancelledUnconfirmedSubmission);
+        var undelivered = GenerationJobErrorMessages.For(GenerationJobErrorCodes.MusicCancelledUndeliveredOutput);
+        Assert.NotNull(plain);
+        Assert.NotNull(unconfirmed);
+        Assert.NotNull(undelivered);
+        Assert.NotEqual(plain, unconfirmed);
+        Assert.NotEqual(plain, undelivered);
+        Assert.NotEqual(unconfirmed, undelivered);
+        Assert.Contains("already accepted", unconfirmed, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("may still finish", unconfirmed, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("try again", unconfirmed, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("Your music was generated", unconfirmed, StringComparison.OrdinalIgnoreCase);
+        // The output WAS observed complete, so this one may say so - and must not offer a retry that
+        // would generate the finished track a second time.
+        Assert.Contains("Your music was generated", undelivered, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("try again", undelivered, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("may still finish", undelivered, StringComparison.OrdinalIgnoreCase);
+        // The unconfirmed arm must not borrow the retrieval arm's existence claim either.
+        Assert.NotEqual(GenerationJobErrorMessages.For(GenerationJobErrorCodes.MusicOutputRetrievalFailed), unconfirmed);
+    }
+
+    [Fact]
+    public void Post_acceptance_cancellations_are_classified_as_non_retryable_for_automation()
+    {
+        // Both cancellation codes describe an accepted submission, so neither may be re-dispatched by an
+        // operator automaton: the unknown-outcome one sits with the provider family and the finished-but-
+        // undelivered one with the delivery family, matching the retry refusals in RetryAsync.
+        var submission = GenerationFailureClassifier.Classify(GenerationJobErrorCodes.MusicCancelledUnconfirmedSubmission);
+        Assert.Equal("provider", submission.Category);
+        Assert.False(submission.Retryable);
+        var delivery = GenerationFailureClassifier.Classify(GenerationJobErrorCodes.MusicCancelledUndeliveredOutput);
+        Assert.Equal("delivery", delivery.Category);
+        Assert.False(delivery.Retryable);
+        // The ordinary cancellation keeps its existing, retryable-free posture.
+        Assert.Equal("cancelled", GenerationFailureClassifier.Classify(GenerationJobErrorCodes.MusicCancelled).Category);
+    }
+
+    [Fact]
     public void Unconfirmed_code_stays_non_retryable_for_automation()
     {
         var result = GenerationFailureClassifier.Classify(GenerationJobErrorCodes.MusicProviderSubmissionUnconfirmed);
@@ -610,10 +656,13 @@ internal sealed class UnconfirmedSubmissionMusicProvider : IMusicGenerationProvi
     }
 }
 /// <summary>
-/// The other two music postures that the fail-closed refusal must NOT capture: a generation the
-/// provider itself declared finished-nothing (a prompt rejection) and one the member cancelled. Both
-/// are evidence that no paid submission is in flight, so their retry path stays open. The delay
-/// outcome waits on the caller's token, which is how a cancellation reaches a running music job.
+/// The music postures that the fail-closed refusal must NOT capture, plus the one it must. A generation
+/// the provider itself declared finished-nothing (a prompt rejection) and a cancellation the member asked
+/// for BEFORE the provider accepted anything are both evidence that no paid submission is in flight, so
+/// their retry path stays open (the delay outcome waits on the caller's token, which is how a
+/// cancellation reaches a running music job). The third posture is F-36: the member cancels AFTER the
+/// provider accepted the paid generation, which the real providers signal with
+/// MusicProviderCancellationWithAcceptedSubmissionException and which the retry endpoint must refuse.
 /// </summary>
 internal sealed class PostureMusicProvider : IMusicGenerationProvider
 {
@@ -622,9 +671,27 @@ internal sealed class PostureMusicProvider : IMusicGenerationProvider
     public int Submissions => Volatile.Read(ref submissions);
     public volatile bool DeclareRejected;
     public volatile bool DelayUntilCancelled;
+    public volatile bool AcceptThenCancel;
     public async Task<MusicProviderResult> GenerateAsync(MusicGenerationInput request, CancellationToken cancellationToken = default)
     {
         Interlocked.Increment(ref submissions);
+        if (AcceptThenCancel)
+        {
+            // Mirrors the real providers exactly: the billable submission above was accepted, the
+            // provider then waits on the caller's token, and the member's cancellation arrives while it
+            // is still waiting - so the provider rethrows the TYPED cancellation instead of letting a
+            // plain one escape. The worker must therefore terminalize the job as a cancellation whose
+            // outcome is unreconciled, and RetryAsync must refuse the second paid submission.
+            try
+            {
+                await Task.Delay(Timeout.Infinite, cancellationToken);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw new MusicProviderCancellationWithAcceptedSubmissionException("posture-accepted-operation", outputConfirmedComplete: false);
+            }
+            throw new MusicProviderUnavailableException();
+        }
         if (DelayUntilCancelled)
         {
             await Task.Delay(Timeout.Infinite, cancellationToken);
@@ -721,6 +788,9 @@ public sealed class MusicRetryPostureIsolationTests : IClassFixture<MusicPosture
             var cancelled = await WaitForTerminal(client, submitted.Id);
             Assert.Equal(GenerationJobStatus.Cancelled.ToString(), cancelled.Status);
             Assert.NotEqual(GenerationJobErrorCodes.MusicProviderSubmissionUnconfirmed, cancelled.ErrorCode);
+        // F-36 makes the code meaningful, so pin it: this cancellation happened before anything was
+        // accepted (the posture provider never reports acceptance), which is exactly why a retry is safe.
+        Assert.Equal(GenerationJobErrorCodes.MusicCancelled, cancelled.ErrorCode);
             var retry = await SendWithCsrf(client, HttpMethod.Post, $"/api/generation/jobs/{submitted.Id}/retry", null, $"music-cancelled-retry-{Guid.NewGuid():N}");
             Assert.Equal(HttpStatusCode.Accepted, retry.StatusCode);
             var child = (await retry.Content.ReadFromJsonAsync<GenerationJobDto>(PostureJson))!;
@@ -734,6 +804,101 @@ public sealed class MusicRetryPostureIsolationTests : IClassFixture<MusicPosture
             provider.DelayUntilCancelled = false;
         }
     }
+    [Fact]
+    public async Task Member_cancelling_an_accepted_music_job_is_refused_on_retry_and_never_posts_a_second_generation()
+    {
+        // The end-to-end regression the billing-fairness policy needs for F-36: the provider accepted the
+        // paid generation, the member cancelled it, and no provider-side cancellation was ever issued -
+        // so the accepted generation may still finish and still bill. The job must be recorded as a
+        // cancellation that is NOT freely retryable, the retry endpoint must refuse it with the same code
+        // as the polling-timeout family, the customer-facing copy must not claim a finished track or
+        // invite another submission, and the provider's submission counter must not move. That counter is
+        // the ground truth for "was a second track paid for"; the fixture provider is shared across the
+        // class, so it is asserted as a delta.
+        var provider = Provider();
+        provider.AcceptThenCancel = true;
+        var submissionsBeforeCreate = provider.Submissions;
+        var client = factory.CreateClient();
+        Guid? jobId = null;
+        try
+        {
+            var auth = await Register(client, $"music-accepted-cancel-{Guid.NewGuid():N}@example.com");
+            var created = await SendWithCsrf(client, HttpMethod.Post, "/api/music-generation/jobs", MusicBody(auth));
+            Assert.Equal(HttpStatusCode.Accepted, created.StatusCode);
+            var submitted = (await created.Content.ReadFromJsonAsync<CreateMusicGenerationResponse>(PostureJson))!.Job;
+            jobId = submitted.Id;
+            GenerationJobDto? running = null;
+            for (var attempt = 0; attempt < 400; attempt++)
+            {
+                running = await client.GetFromJsonAsync<GenerationJobDto>($"/api/generation/jobs/{submitted.Id}");
+                if (running?.Status == GenerationJobStatus.Running.ToString()) break;
+                await Task.Delay(25);
+            }
+            Assert.Equal(GenerationJobStatus.Running.ToString(), running?.Status);
+            // A job turns Running when the worker CLAIMS it, which happens before the provider is
+            // approached, so wait for the accepted submission itself: that is the moment from which a
+            // member cancellation is a post-acceptance cancellation. Exactly one submission for this job.
+            for (var attempt = 0; attempt < 400 && provider.Submissions == submissionsBeforeCreate; attempt++) await Task.Delay(25);
+            Assert.Equal(submissionsBeforeCreate + 1, provider.Submissions);
+
+            var cancel = await SendWithCsrf(client, HttpMethod.Post, $"/api/generation/jobs/{submitted.Id}/cancel", null);
+            Assert.Equal(HttpStatusCode.Accepted, cancel.StatusCode);
+            var cancelled = await WaitForTerminal(client, submitted.Id);
+            Assert.Equal(GenerationJobStatus.Cancelled.ToString(), cancelled.Status);
+            Assert.Equal(GenerationJobErrorCodes.MusicCancelledUnconfirmedSubmission, cancelled.ErrorCode);
+            // Honest copy: the customer was billed once, the outcome is unknown, nothing is asserted as
+            // complete, and the message does not tell them to try again.
+            Assert.NotNull(cancelled.ErrorMessage);
+            Assert.Equal(GenerationJobErrorMessages.For(GenerationJobErrorCodes.MusicCancelledUnconfirmedSubmission), cancelled.ErrorMessage);
+            Assert.DoesNotContain("Your music was generated", cancelled.ErrorMessage, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain("try again", cancelled.ErrorMessage, StringComparison.OrdinalIgnoreCase);
+            Assert.Contains("may still finish", cancelled.ErrorMessage, StringComparison.OrdinalIgnoreCase);
+
+            var before = provider.Submissions;
+            var retry = await SendWithCsrf(client, HttpMethod.Post, $"/api/generation/jobs/{submitted.Id}/retry", null, $"music-accepted-cancel-retry-{Guid.NewGuid():N}");
+            Assert.Equal(HttpStatusCode.BadRequest, retry.StatusCode);
+            using (var refusal = JsonDocument.Parse(await retry.Content.ReadAsStringAsync()))
+            {
+                Assert.Equal(
+                    GenerationJobErrorCodes.MusicSubmissionRetryBlocked,
+                    refusal.RootElement.GetProperty("error").GetProperty("code").GetString());
+            }
+            // A second attempt with a fresh idempotency key must not be a way around the refusal either.
+            var second = await SendWithCsrf(client, HttpMethod.Post, $"/api/generation/jobs/{submitted.Id}/retry", null, $"music-accepted-cancel-retry-{Guid.NewGuid():N}");
+            Assert.Equal(HttpStatusCode.BadRequest, second.StatusCode);
+
+            using (var scope = factory.Services.CreateScope())
+            {
+                var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+                Assert.Equal(0, await db.GenerationJobs.AsNoTracking().CountAsync(item => item.RetryOfJobId == submitted.Id));
+                var usage = await db.UsageTransactions.AsNoTracking()
+                    .SingleAsync(item => item.RequestId == $"generation:{submitted.Id:N}");
+                // The usage row is cancelled, not charged twice, and carries the unreconciled code.
+                Assert.Equal(UsageTransactionStatus.Cancelled, usage.Status);
+            }
+            Assert.Equal(before, provider.Submissions);
+        }
+        finally
+        {
+            provider.AcceptThenCancel = false;
+            // Never strand the shared fixture on an in-flight job: if the test failed before its own
+            // cancellation ran, cancel and drain it so the neighbouring posture tests still get a worker.
+            if (jobId is Guid orphan)
+            {
+                try
+                {
+                    await SendWithCsrf(client, HttpMethod.Post, $"/api/generation/jobs/{orphan}/cancel", null);
+                    await WaitForTerminal(client, orphan);
+                }
+                catch
+                {
+                    // Best effort only; the assertions above carry the verdict.
+                }
+            }
+            client.Dispose();
+        }
+    }
+
     private static object MusicBody(AuthResponse auth) => new
     {
         workspaceId = auth.PersonalWorkspace.Id,

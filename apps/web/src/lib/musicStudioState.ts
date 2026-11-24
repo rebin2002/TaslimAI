@@ -19,10 +19,21 @@ const MUSIC_OUTCOME_UNCONFIRMED_CODES = ["MUSIC_PROVIDER_SUBMISSION_UNCONFIRMED"
 export function isMusicOutcomeUnconfirmed(job: GenerationJob | null): boolean {
   return job?.status === "Failed" && !!job.errorCode && MUSIC_OUTCOME_UNCONFIRMED_CODES.includes(job.errorCode);
 }
+// F-36: a cancellation is only a safe restart when it happened BEFORE the provider accepted the paid
+// generation. MUSIC_CANCELLED is that case and keeps the retry affordance. The two codes below record a
+// cancellation of an ACCEPTED submission, where nothing on the provider side was cancelled: either the
+// first attempt may still be running and billing (MUSIC_CANCELLED_UNCONFIRMED_SUBMISSION) or it finished
+// and only delivery was lost (MUSIC_CANCELLED_UNDELIVERED_OUTPUT). The retry endpoint refuses both (see
+// GenerationJobExecution.RetryAsync), so the panel must not offer an action that can only fail.
+const MUSIC_CANCELLED_UNRESOLVED_CODES = ["MUSIC_CANCELLED_UNCONFIRMED_SUBMISSION", "MUSIC_CANCELLED_UNDELIVERED_OUTPUT"];
+export function isMusicCancellationUnresolved(job: GenerationJob | null): boolean {
+  return job?.status === "Cancelled" && !!job.errorCode && MUSIC_CANCELLED_UNRESOLVED_CODES.includes(job.errorCode);
+}
 
 /**
  * Single source of truth for the music failure panel. `allowRetry` is false only for the
- * unconfirmed outcome, because starting another generation there is a second billable
+ * unresolved outcome - an accepted submission whose result was never observed, whether polling lost it
+ * (F-35) or the member cancelled it after acceptance (F-36) - because starting another generation is a second billable
  * submission, not a recovery. The text must never claim that audio was or was not produced
  * when the provider outcome was never observed.
  */
@@ -30,7 +41,11 @@ export function musicStudioFailureCopy(
   job: GenerationJob | null,
   t: (key: string) => string,
 ): { title: string; text: string; allowRetry: boolean } {
-  if (job?.status === "Cancelled") return { title: t("music.cancelledTitle"), text: t("music.cancelledText"), allowRetry: true };
+  if (job?.status === "Cancelled") {
+    if (job.errorCode === "MUSIC_CANCELLED_UNCONFIRMED_SUBMISSION") return { title: t("music.cancelledUnconfirmedTitle"), text: t("music.cancelledUnconfirmedText"), allowRetry: false };
+    if (job.errorCode === "MUSIC_CANCELLED_UNDELIVERED_OUTPUT") return { title: t("music.cancelledUndeliveredTitle"), text: t("music.cancelledUndeliveredText"), allowRetry: false };
+    return { title: t("music.cancelledTitle"), text: t("music.cancelledText"), allowRetry: true };
+  }
   if (isMusicProviderUnavailable(job)) return { title: t("music.providerUnavailableTitle"), text: t("music.providerUnavailableText"), allowRetry: true };
   if (isMusicOutcomeUnconfirmed(job)) return { title: t("music.unconfirmedTitle"), text: t("music.unconfirmedText"), allowRetry: false };
   return { title: t("music.failureTitle"), text: t("music.failureText"), allowRetry: true };
