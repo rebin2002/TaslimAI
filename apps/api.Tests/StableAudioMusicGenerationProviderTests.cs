@@ -522,6 +522,107 @@ public sealed class StableAudioMusicGenerationProviderTests
         Assert.Single(handler.Requests, request => request.Method == HttpMethod.Post);
     }
 
+    [Fact]
+    public async Task Dispatch_marker_that_cannot_be_written_stops_the_billable_create_request()
+    {
+        // Same seam as the Mubert lane: Stability charges "8 credits per successful generation" the moment
+        // the create is accepted, so a marker that cannot be persisted has to stop the request instead of
+        // logging around it. No request in the list means no credits could have been spent.
+        var handler = new StableAudioHandler((_, _) => Json(HttpStatusCode.InternalServerError, "{}"));
+        var provider = CreateProvider(handler);
+        var failure = await Record.ExceptionAsync(() => provider.GenerateAsync(
+            Input(),
+            CancellationToken.None,
+            null,
+            () => Task.FromException(new MusicProviderUnavailableException())));
+        Assert.IsType<MusicProviderUnavailableException>(failure);
+        Assert.Empty(handler.Requests);
+    }
+
+    [Fact]
+    public async Task Dispatch_marker_is_handed_over_before_any_request_leaves_the_provider()
+    {
+        var seenAtStamp = -1;
+        var handler = new StableAudioHandler((_, _) => Json(HttpStatusCode.InternalServerError, "{}"));
+        var provider = CreateProvider(handler);
+        await Record.ExceptionAsync(() => provider.GenerateAsync(
+            Input(),
+            CancellationToken.None,
+            null,
+            () =>
+            {
+                seenAtStamp = handler.Requests.Count;
+                return Task.CompletedTask;
+            }));
+        Assert.Equal(0, seenAtStamp);
+        Assert.True(handler.Requests.Count >= 1, "the create was never attempted once the marker was durable");
+    }
+
+    [Fact]
+    public async Task Result_lookup_that_returns_the_audio_reports_the_generation_as_completed()
+    {
+        var handler = new StableAudioHandler((_, _) => Json(HttpStatusCode.OK, "{\"id\":\"result-completed\"}"));
+        var provider = CreateProvider(handler);
+        var result = await provider.ReconcileAcceptedSubmissionAsync("result-completed");
+        Assert.Equal(MusicSubmissionOutcome.Completed, result.Outcome);
+        Assert.False(result.ProviderDeclaresNoCharge);
+        Assert.Single(handler.Requests);
+        Assert.Equal(HttpMethod.Get, handler.Requests[0].Method);
+    }
+
+    [Fact]
+    public async Task Result_lookup_while_still_processing_reports_in_progress()
+    {
+        // Documented contract: "Returns 202 while in-progress, 200 with the audio when complete."
+        var handler = new StableAudioHandler((_, _) => Json(HttpStatusCode.Accepted, "{\"status\":\"processing\"}"));
+        var provider = CreateProvider(handler);
+        var result = await provider.ReconcileAcceptedSubmissionAsync("result-pending");
+        Assert.Equal(MusicSubmissionOutcome.InProgress, result.Outcome);
+        Assert.False(result.ProviderDeclaresNoCharge);
+    }
+
+    [Theory]
+    [InlineData("{\"errors\":[\"prompt rejected by moderation\"],\"moderation\":\"blocked\"}")]
+    [InlineData("{\"errors\":[\"invalid prompt parameters\"]}")]
+    public async Task Result_lookup_declaring_a_terminal_failure_carries_the_vendors_no_charge_promise(string body)
+    {
+        // The only branch allowed to release a retry: Stability documents "you will not be charged for
+        // failed generations", and a 400/422 is that vendor declaring this generation failed - so the no-charge
+        // bit is set from the contract, not inferred.
+        var handler = new StableAudioHandler((_, _) => Json(HttpStatusCode.BadRequest, body));
+        var provider = CreateProvider(handler);
+        var result = await provider.ReconcileAcceptedSubmissionAsync("result-declined");
+        Assert.Equal(MusicSubmissionOutcome.ProviderDeclaredFailure, result.Outcome);
+        Assert.True(result.ProviderDeclaresNoCharge);
+    }
+
+    [Theory]
+    [InlineData(HttpStatusCode.NotFound, "{\"error\":\"no such result\"}")]
+    [InlineData(HttpStatusCode.ServiceUnavailable, "upstream unavailable")]
+    [InlineData(HttpStatusCode.Unauthorized, "{\"errors\":[\"invalid key\"]}")]
+    public async Task Result_lookup_that_cannot_answer_reports_unknown_instead_of_a_guess(HttpStatusCode status, string body)
+    {
+        // A 404 is not evidence the generation never existed (results are retained for 24 hours and can be
+        // reaped), and an outage or an auth fault says nothing about the credits: all stay Unknown so recovery
+        // keeps the cancellation closed. Nothing here may look like a completed track.
+        var handler = new StableAudioHandler((_, _) => Json(status, body));
+        var provider = CreateProvider(handler);
+        var result = await provider.ReconcileAcceptedSubmissionAsync("result-unknown");
+        Assert.Equal(MusicSubmissionOutcome.Unknown, result.Outcome);
+        Assert.False(result.ProviderDeclaresNoCharge);
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("taslim:dispatch-pending")]
+    public async Task Sentinel_or_missing_operation_id_is_never_queried_at_the_provider(string operationId)
+    {
+        var handler = new StableAudioHandler((_, _) => Json(HttpStatusCode.OK, "{}"));
+        var provider = CreateProvider(handler);
+        var result = await provider.ReconcileAcceptedSubmissionAsync(operationId);
+        Assert.Equal(MusicSubmissionOutcome.Unknown, result.Outcome);
+        Assert.Empty(handler.Requests);
+    }
     private static StableAudioMusicGenerationProvider CreateProvider(
         HttpMessageHandler handler,
         bool enabled = true,

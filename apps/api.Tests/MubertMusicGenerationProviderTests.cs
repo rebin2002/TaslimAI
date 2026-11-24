@@ -642,6 +642,119 @@ public sealed class MubertMusicGenerationProviderTests
         Assert.Single(handler.Requests, request => request.Method == HttpMethod.Post);
     }
 
+    [Fact]
+    public async Task Dispatch_marker_that_cannot_be_written_stops_the_billable_create_request()
+    {
+        // F-36.1b ordering proof, at the transport seam: the worker's pre-dispatch stamp fails closed with
+        // this exact exception, and the paid create must never be issued behind it. An empty request list is
+        // the assertion that matters - it means the vendor never saw a generation request at all, so there
+        // is nothing to be charged for and nothing to reconcile.
+        var handler = new MubertHandler((_, _) => Json(HttpStatusCode.InternalServerError, "{}"));
+        var provider = CreateProvider(handler);
+        var failure = await Record.ExceptionAsync(() => provider.GenerateAsync(
+            Input(),
+            CancellationToken.None,
+            null,
+            () => Task.FromException(new MusicProviderUnavailableException())));
+        Assert.IsType<MusicProviderUnavailableException>(failure);
+        Assert.Empty(handler.Requests);
+    }
+
+    [Fact]
+    public async Task Dispatch_marker_is_handed_over_before_any_request_leaves_the_provider()
+    {
+        // The other half of the same guarantee: when the stamp succeeds, the marker was already durable by
+        // the time the create went out, so a crash after this point leaves a sentinel rather than silence.
+        var seenAtStamp = -1;
+        var handler = new MubertHandler((_, _) => Json(HttpStatusCode.InternalServerError, "{}"));
+        var provider = CreateProvider(handler);
+        await Record.ExceptionAsync(() => provider.GenerateAsync(
+            Input(),
+            CancellationToken.None,
+            null,
+            () =>
+            {
+                seenAtStamp = handler.Requests.Count;
+                return Task.CompletedTask;
+            }));
+        Assert.Equal(0, seenAtStamp);
+        Assert.True(handler.Requests.Count >= 1, "the create was never attempted once the marker was durable");
+    }
+
+    [Fact]
+    public async Task Quota_free_track_lookup_with_a_url_reports_the_generation_as_completed()
+    {
+        // Mubert documents this endpoint as the way to "check if a track is created" and it spends no quota,
+        // which is what makes a durable operation id worth reconciling during cancellation recovery. The
+        // no-charge bit stays false because a completed track says nothing about refunds.
+        var handler = new MubertHandler((_, _) => Json(
+            HttpStatusCode.OK,
+            "{\"data\":{\"generations\":[{\"status\":\"completed\",\"url\":\"https://download.example/track.mp3\"}]}}"));
+        var provider = CreateProvider(handler);
+        var result = await provider.ReconcileAcceptedSubmissionAsync("track-lookup-1");
+        Assert.Equal(MusicSubmissionOutcome.Completed, result.Outcome);
+        Assert.False(result.ProviderDeclaresNoCharge);
+        Assert.Single(handler.Requests);
+        Assert.Equal(HttpMethod.Get, handler.Requests[0].Method);
+    }
+
+    [Fact]
+    public async Task Track_lookup_reporting_failure_does_not_claim_the_generation_was_free()
+    {
+        // The honest asymmetry the recovery ladder depends on: Mubert documents a failed track but offers no
+        // "not charged on failed generations" statement, so a declared failure here must not be read as a
+        // released refund.
+        var handler = new MubertHandler((_, _) => Json(
+            HttpStatusCode.OK,
+            "{\"data\":{\"generations\":[{\"status\":\"failed\"}]}}"));
+        var provider = CreateProvider(handler);
+        var result = await provider.ReconcileAcceptedSubmissionAsync("track-lookup-2");
+        Assert.Equal(MusicSubmissionOutcome.ProviderDeclaredFailure, result.Outcome);
+        Assert.False(result.ProviderDeclaresNoCharge);
+    }
+
+    [Fact]
+    public async Task Track_lookup_for_a_still_generating_track_reports_in_progress()
+    {
+        var handler = new MubertHandler((_, _) => Json(
+            HttpStatusCode.OK,
+            "{\"data\":{\"generations\":[{\"status\":\"waiting\"}]}}"));
+        var provider = CreateProvider(handler);
+        var result = await provider.ReconcileAcceptedSubmissionAsync("track-lookup-3");
+        Assert.Equal(MusicSubmissionOutcome.InProgress, result.Outcome);
+        Assert.False(result.ProviderDeclaresNoCharge);
+    }
+
+    [Theory]
+    [InlineData(HttpStatusCode.NotFound, "{\"error\":\"unknown track\"}")]
+    [InlineData(HttpStatusCode.ServiceUnavailable, "upstream unavailable")]
+    [InlineData(HttpStatusCode.OK, "{\"data\":{}}")]
+    public async Task Track_lookup_that_cannot_answer_reports_unknown_instead_of_a_guess(HttpStatusCode status, string body)
+    {
+        // 404 (the track is not there for us to see), 503 (a transport/outage answer) and an empty track list
+        // all mean the same thing to recovery: no evidence either way. Unknown keeps the fail-closed posture.
+        var handler = new MubertHandler((_, _) => Json(status, body));
+        var provider = CreateProvider(handler);
+        var result = await provider.ReconcileAcceptedSubmissionAsync("track-lookup-404");
+        Assert.Equal(MusicSubmissionOutcome.Unknown, result.Outcome);
+        Assert.False(result.ProviderDeclaresNoCharge);
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("   ")]
+    [InlineData("taslim:dispatch-pending")]
+    public async Task Sentinel_or_missing_operation_id_is_never_queried_at_the_provider(string operationId)
+    {
+        // The marker sentinel is our own label, not a vendor identifier: asking Mubert about it would be a
+        // meaningless request (and on a paid lane any needless call is a cost risk). Recovery must read the
+        // marker-only row as unconfirmed without approaching the transport.
+        var handler = new MubertHandler((_, _) => Json(HttpStatusCode.OK, "{}"));
+        var provider = CreateProvider(handler);
+        var result = await provider.ReconcileAcceptedSubmissionAsync(operationId);
+        Assert.Equal(MusicSubmissionOutcome.Unknown, result.Outcome);
+        Assert.Empty(handler.Requests);
+    }
     private static MubertMusicGenerationProvider CreateProvider(
         HttpMessageHandler handler,
         string customerId = "customer",
