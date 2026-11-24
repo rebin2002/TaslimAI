@@ -7,12 +7,14 @@ namespace Taslim.Api.AcademicExport;
 
 /// <summary>
 /// QuestPDF counterpart of <see cref="AcademicReportDocxRenderer"/>: the saved research payload under
-/// the selected design spec. Same honesty rules — real bibliography with "catalogue record only" notes,
-/// an always-visible disclosure section when the design has the slot, and an integrity footer under
-/// every design. Unlike the DOCX surface (whose contents list is a field Word fills on open), the PDF
-/// carries real page numbers: every contents-listed heading registers a captured content position and
-/// each contents row resolves that anchor at layout time, so no heading can ever be attributed to a
-/// page it does not appear on.
+/// the selected design spec. Same honesty rules — real bibliography with per-row access-status notes,
+/// an ALWAYS-visible disclosure section (regardless of whether the design carries a dedicated slot,
+/// review finding #2 on a707938), preserved citation ids beside tables (review finding #1), rendering
+/// of every saved section even when its heading is blank (review finding #4), and an integrity footer
+/// under every design. Unlike the DOCX surface (whose contents list is a field Word fills on open),
+/// the PDF carries real page numbers: every contents-listed heading registers a captured content
+/// position and each contents row resolves that anchor at layout time, so no heading can ever be
+/// attributed to a page it does not appear on.
 /// </summary>
 public static class AcademicReportPdfRenderer
 {
@@ -67,19 +69,17 @@ public static class AcademicReportPdfRenderer
         var labels = report.Labels;
 
         // The contents plan is computed before layout so the contents rows and the body headings
-        // agree on anchor identity by construction.
+        // agree on anchor identity by construction. Only non-blank headings are listed; a saved
+        // section with a blank heading is still rendered in the body (finding #4), just not tracked.
         var headings = new List<PlannedHeading>();
         var hasExec = !string.IsNullOrWhiteSpace(report.ExecutiveSummary);
         var hasKeyFindings = report.KeyFindings.Count > 0;
         var hasConclusion = !string.IsNullOrWhiteSpace(report.Conclusion);
-        var plannedSections = report.Sections
-            .Select((section, index) => (section, index))
-            .Where(pair => !string.IsNullOrWhiteSpace(pair.section.Heading))
-            .ToList();
         if (hasExec) headings.Add(new PlannedHeading(labels.ExecutiveSummaryHeading, "academic-toc-0"));
         if (hasKeyFindings) headings.Add(new PlannedHeading(labels.KeyFindingsHeading, $"academic-toc-{headings.Count}"));
-        foreach (var pair in plannedSections)
-            headings.Add(new PlannedHeading(pair.section.Heading, $"academic-toc-{headings.Count}"));
+        foreach (var section in report.Sections)
+            if (!string.IsNullOrWhiteSpace(section.Heading))
+                headings.Add(new PlannedHeading(section.Heading, $"academic-toc-{headings.Count}"));
         if (hasConclusion) headings.Add(new PlannedHeading(labels.ConclusionHeading, $"academic-toc-{headings.Count}"));
         headings.Add(new PlannedHeading(labels.ReferencesHeading, $"academic-toc-{headings.Count}"));
         var cursor = 0;
@@ -154,17 +154,19 @@ public static class AcademicReportPdfRenderer
                         column.Item().PageBreak();
                     }
 
+                    // ── disclosure: honesty invariant, rendered under EVERY design (finding #2) ──
+                    // Designs with a dedicated slot keep their traditional page-break treatment; designs
+                    // without one (e.g. literature-review-apa) still receive the disclosure inline, so a
+                    // supplied student disclosure can never be silently dropped.
+                    column.Item().PaddingTop((float)spec.HeadingTopGapPt).Text(labels.DisclosureHeading)
+                        .FontFamily(headingFont).FontSize((float)spec.HeadingSizePt(2)).Bold();
+                    var disclosureCompleted = !string.IsNullOrWhiteSpace(studentDisclosure);
+                    column.Item().Text(disclosureCompleted ? studentDisclosure!.Trim() : labels.DisclosureMissing);
+                    if (!disclosureCompleted)
+                        column.Item().Text("This export leaves the disclosure visible and incomplete rather than removing it.")
+                            .Italic().FontSize((float)(spec.BodySizePt * 0.9));
                     if (spec.IncludesAiUseDisclosureSlot)
-                    {
-                        var completed = !string.IsNullOrWhiteSpace(studentDisclosure);
-                        column.Item().PaddingTop((float)spec.HeadingTopGapPt).Text(labels.DisclosureHeading)
-                            .FontFamily(headingFont).FontSize((float)spec.HeadingSizePt(2)).Bold();
-                        column.Item().Text(completed ? studentDisclosure!.Trim() : labels.DisclosureMissing);
-                        if (!completed)
-                            column.Item().Text("This export leaves the disclosure visible and incomplete rather than removing it.")
-                                .Italic().FontSize((float)(spec.BodySizePt * 0.9));
                         column.Item().PageBreak();
-                    }
 
                     if (spec.IncludeToc)
                     {
@@ -180,7 +182,14 @@ public static class AcademicReportPdfRenderer
                         column.Item().PageBreak();
                     }
 
-                    // ── body ──
+                    // ── body: EVERY saved section renders; blank headings are skipped as headings
+                    // only, never as containers (finding #4) ──
+                    // Cover-less designs (e.g. literature-review-apa) still carry the report title at
+                    // the head of the body: an export that fails its own integrity gate must not ship
+                    // nameless.
+                    if (string.Equals(spec.CoverStyle, "none", StringComparison.Ordinal))
+                        column.Item().AlignCenter().Text(report.Title)
+                            .FontFamily(headingFont).FontSize((float)spec.HeadingSizePt(1)).Bold();
                     if (hasExec)
                     {
                         Heading(column, labels.ExecutiveSummaryHeading, spec, headingFont, NextAnchor());
@@ -190,13 +199,14 @@ public static class AcademicReportPdfRenderer
                     {
                         Heading(column, labels.KeyFindingsHeading, spec, headingFont, NextAnchor());
                         foreach (var block in report.KeyFindings)
-                            ComposeBlock(column.Item(), block, spec, accentColor);
+                            ComposeBlock(column, block, spec, accentColor);
                     }
-                    foreach (var pair in plannedSections)
+                    foreach (var section in report.Sections)
                     {
-                        Heading(column, pair.section.Heading, spec, headingFont, NextAnchor());
-                        foreach (var block in pair.section.Blocks)
-                            ComposeBlock(column.Item(), block, spec, accentColor);
+                        if (!string.IsNullOrWhiteSpace(section.Heading))
+                            Heading(column, section.Heading, spec, headingFont, NextAnchor());
+                        foreach (var block in section.Blocks)
+                            ComposeBlock(column, block, spec, accentColor);
                     }
                     if (hasConclusion)
                     {
@@ -241,21 +251,34 @@ public static class AcademicReportPdfRenderer
         if (spec.HeadingsBold) text.Bold();
     }
 
-    private static void ComposeBlock(IContainer container, AcademicReportBlockModel block, AcademicDesignSpec spec, string accentColor)
+    /// <summary>Renders one saved report block as its own set of column items. Takes the
+    /// <see cref="ColumnDescriptor"/> rather than a single container so every paragraph, list item,
+    /// caption and table is a distinct element: QuestPDF's fluent surface mutates one container per
+    /// call chain, and re-calling Text(...) on the same item container for multi-item blocks risked
+    /// dropping all but one element (review finding #5 source-level note on a707938).</summary>
+    private static void ComposeBlock(ColumnDescriptor column, AcademicReportBlockModel block, AcademicDesignSpec spec, string accentColor)
     {
         switch (block.Type.ToLowerInvariant())
         {
             case "bullets":
                 foreach (var item in block.Items ?? Array.Empty<string>())
-                    container.Text(AcademicReportDocxRenderer.WithCitations(item, block.CitationIds));
+                    column.Item().PaddingLeft((float)(spec.IsRtl ? 0 : 14)).PaddingRight((float)(spec.IsRtl ? 14 : 0))
+                        .Text("•  " + AcademicReportDocxRenderer.WithCitations(item, block.CitationIds));
                 break;
             case "numbered_list":
                 var number = 1;
                 foreach (var item in block.Items ?? Array.Empty<string>())
-                    container.Text($"{number++}. {AcademicReportDocxRenderer.WithCitations(item, block.CitationIds)}");
+                    column.Item().PaddingLeft((float)(spec.IsRtl ? 0 : 14)).PaddingRight((float)(spec.IsRtl ? 14 : 0))
+                        .Text($"{number++}. {AcademicReportDocxRenderer.WithCitations(item, block.CitationIds)}");
                 break;
             case "table" when block.Rows is { Count: > 0 }:
-                container.Table(table =>
+                // Finding #1 fix: the table block's caption text and citation ids used to be dropped.
+                // A caption renders above the table with the same "[S1]" append shape paragraphs use;
+                // with no caption text, a citation line follows the table so the ids survive in
+                // correct table context.
+                if (!string.IsNullOrWhiteSpace(block.Text))
+                    column.Item().Text(AcademicReportDocxRenderer.WithCitations(block.Text, block.CitationIds)).Italic();
+                column.Item().Table(table =>
                 {
                     table.ColumnsDefinition(columns =>
                     {
@@ -271,10 +294,13 @@ public static class AcademicReportPdfRenderer
                         foreach (var cell in row)
                             table.Cell().BorderTop(0.5f).BorderColor("#999999").Padding(4).Text(cell);
                 });
+                if (string.IsNullOrWhiteSpace(block.Text) && block.CitationIds is { Count: > 0 })
+                    column.Item().PaddingLeft((float)(spec.IsRtl ? 0 : 14)).PaddingRight((float)(spec.IsRtl ? 14 : 0))
+                        .Text(AcademicReportDocxRenderer.CitationOnlyLine(block.CitationIds)).Italic();
                 break;
             default:
                 var text = AcademicReportDocxRenderer.WithCitations(block.Text, block.CitationIds);
-                if (!string.IsNullOrWhiteSpace(text)) container.Text(text);
+                if (!string.IsNullOrWhiteSpace(text)) column.Item().Text(text);
                 break;
         }
     }

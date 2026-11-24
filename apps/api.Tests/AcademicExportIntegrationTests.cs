@@ -7,12 +7,14 @@ using System.Text;
 using System.Text.Json;
 using DocumentFormat.OpenXml.Packaging;
 using DocumentFormat.OpenXml.Wordprocessing;
+using DocumentFormat.OpenXml.Validation;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.Extensions.DependencyInjection;
 using Taslim.Api.AcademicExport;
 using Taslim.Api.AcademicTemplates;
+using Taslim.Api.Contracts;
 using Taslim.Api.Controllers;
 using Taslim.Api.Domain;
 using Taslim.Api.Infrastructure;
@@ -111,7 +113,7 @@ public sealed class AcademicExportIntegrationTests : IClassFixture<TaslimApiFact
         sources = Array.Empty<object>(),
     });
 
-    private Guid SeedCompletedResearchJob(Guid workspaceId, Guid createdByUserId, string language = "en")
+    private Guid SeedCompletedResearchJob(Guid workspaceId, Guid createdByUserId, string language = "en", string? overrideResultJson = null)
     {
         using var scope = _factory.Services.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
@@ -126,12 +128,13 @@ public sealed class AcademicExportIntegrationTests : IClassFixture<TaslimApiFact
             Status = GenerationJobStatus.Succeeded,
             Title = "Sleep Consolidation in Undergraduate Cohorts",
             InputJson = "{}",
-            ResultJson = ResultJson(language),
+            ResultJson = overrideResultJson ?? ResultJson(language),
             CreatedAt = now,
             CompletedAt = now,
         });
         db.ResearchSources.AddRange(
-            // S1: a web source whose content was actually fetched.
+            // S1: a web row whose Snippet is the search surface's synthesized answer text, not a
+            // fetched article — honest labelling (finding #3) treats it as summary-only.
             new ResearchSource
             {
                 Id = Guid.NewGuid(), WorkspaceId = workspaceId, GenerationJobId = jobId,
@@ -249,11 +252,20 @@ public sealed class AcademicExportIntegrationTests : IClassFixture<TaslimApiFact
         var summary = JsonDocument.Parse(raw).RootElement;
         Assert.Equal("Sleep Consolidation in Undergraduate Cohorts", summary.GetProperty("title").GetString());
         Assert.Equal(3, summary.GetProperty("sourceCount").GetInt32());
-        Assert.Equal(2, summary.GetProperty("accessedSourceCount").GetInt32());
-        Assert.Equal(1, summary.GetProperty("metadataOnlySourceCount").GetInt32());
-        var metadataOnly = summary.GetProperty("sources").EnumerateArray().Single(source => !source.GetProperty("contentAccessed").GetBoolean());
-        Assert.Equal("S2", metadataOnly.GetProperty("citationId").GetString());
-        Assert.Contains("not accessed", metadataOnly.GetProperty("accessNote").GetString(), StringComparison.OrdinalIgnoreCase);
+        // Honest access model (finding #3): the web row S1 only carries the search surface's own
+        // synthesized snippet — persisted by ResearchProviders from the generated answer, never a
+        // fetched article — so it must NOT count as accessed. Only the uploaded workspace file does.
+        Assert.Equal(1, summary.GetProperty("accessedSourceCount").GetInt32());
+        Assert.Equal(2, summary.GetProperty("metadataOnlySourceCount").GetInt32());
+        var notAccessed = summary.GetProperty("sources").EnumerateArray()
+            .Where(source => !source.GetProperty("contentAccessed").GetBoolean()).ToList();
+        var catalogue = notAccessed.Single(source => source.GetProperty("citationId").GetString() == "S2");
+        Assert.Contains("Catalogue record only", catalogue.GetProperty("accessNote").GetString(), StringComparison.OrdinalIgnoreCase);
+        var summaryOnly = notAccessed.Single(source => source.GetProperty("citationId").GetString() == "S1");
+        Assert.Contains("Search-result summary only", summaryOnly.GetProperty("accessNote").GetString(), StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("not accessed", summaryOnly.GetProperty("accessNote").GetString(), StringComparison.OrdinalIgnoreCase);
+        Assert.Equal("S3", summary.GetProperty("sources").EnumerateArray()
+            .Single(source => source.GetProperty("contentAccessed").GetBoolean()).GetProperty("citationId").GetString());
 
         // Privacy guard over the whole body: no backend identity tokens on the academic surface.
         Assert.Empty(AcademicCatalogPrivacyGuard.FindLeaks(raw));
@@ -605,6 +617,68 @@ public sealed class AcademicExportIntegrationTests : IClassFixture<TaslimApiFact
         Assert.Equal(0, db.GenerationProviderAttempts.Count(attempt => attempt.GenerationJobId == jobId));
     }
 
+    private static string Collapse(string value) => new(value.Where(character => !char.IsWhiteSpace(character)).ToArray());
+
+    private static string PdfText(byte[] bytes)
+    {
+        using var document = UglyToad.PdfPig.PdfDocument.Open(bytes);
+        return Collapse(string.Concat(Enumerable.Range(1, document.NumberOfPages).Select(number => document.GetPage(number).Text)));
+    }
+
+    private static async Task<string> DocxBodyText(HttpResponseMessage response)
+        => DocxText(WordprocessingDocument.Open(new MemoryStream(await response.Content.ReadAsByteArrayAsync()), false));
+
+    private static string DocxText(WordprocessingDocument package)
+        => string.Join('\n', package.MainDocumentPart!.Document!.Body!.Descendants<Text>().Select(text => text.Text));
+
+    private static string TableCitationJson() => JsonSerializer.Serialize(new
+    {
+        researchType = "research",
+        title = "Table Citation Fidelity",
+        language = "en",
+        executiveSummary = "Tables must cite as honestly as paragraphs.",
+        keyFindings = new object[] { },
+        sections = new object[]
+        {
+            new
+            {
+                heading = "Evidence",
+                blocks = new object[]
+                {
+                    new { type = "paragraph", text = "Interviews were transcribed verbatim.", citationIds = new[] { "S2" } },
+                    new { type = "table", text = "Evidence table A.", rows = new object[] { new { cells = new[] { "Group", "Score" } }, new { cells = new[] { "B", "74%" } } }, citationIds = new[] { "S1" } },
+                    new { type = "table", text = (string?)null, rows = new object[] { new { cells = new[] { "Cohort", "Recall" } }, new { cells = new[] { "C", "68%" } } }, citationIds = new[] { "S3" } },
+                },
+            },
+        },
+        conclusion = "Paragraph and table citations are one contract.",
+        sourceCount = 3,
+        sources = Array.Empty<object>(),
+    });
+
+    private static string TableOnlyJson() => JsonSerializer.Serialize(new
+    {
+        researchType = "research",
+        title = "Table Only Fidelity",
+        language = "en",
+        executiveSummary = "",
+        keyFindings = new object[] { },
+        sections = new object[]
+        {
+            new
+            {
+                heading = "Only Table",
+                blocks = new object[]
+                {
+                    new { type = "table", text = (string?)null, rows = new object[] { new { cells = new[] { "Cohort", "Recall" } }, new { cells = new[] { "D", "68%" } } }, citationIds = new[] { "S2", "S3" } },
+                },
+            },
+        },
+        conclusion = "",
+        sourceCount = 3,
+        sources = Array.Empty<object>(),
+    });
+
     private static HttpContext RenderContext(EnableRateLimitingAttribute attribute, Guid userId)
     {
         var context = new DefaultHttpContext
@@ -618,6 +692,199 @@ public sealed class AcademicExportIntegrationTests : IClassFixture<TaslimApiFact
             new EndpointMetadataCollection(attribute),
             displayName: "academic-export"));
         return context;
+    }
+
+    // ── review findings on a707938: citations, disclosure, provenance, shapes ───────────
+
+    [Fact]
+    public async Task Table_block_citations_survive_in_docx_and_pdf_in_table_context()
+    {
+        // Finding #1: at a707938 both renderers emitted table rows while dropping the table block's
+        // own text and citation ids, and the validators' weak checks (any citation / title only)
+        // let the loss pass. Mixed paragraph + captioned table + bare table, all with distinct ids.
+        var owner = await RegisterAsync("Table Citation Owner");
+        var jobId = SeedCompletedResearchJob(owner.WorkspaceId, Guid.Parse(owner.UserId), overrideResultJson: TableCitationJson());
+        var configurationId = "classic-thesis.times.150.classic.center";
+
+        var docx = await ExportFileAsync(owner, jobId, configurationId, "docx");
+        Assert.True(docx.StatusCode == HttpStatusCode.OK, await docx.Content.ReadAsStringAsync());
+        using (var package = WordprocessingDocument.Open(new MemoryStream(await docx.Content.ReadAsByteArrayAsync()), false))
+        {
+            var body = package.MainDocumentPart!.Document!.Body!;
+            var tables = body.Elements<Table>().ToList();
+            Assert.Equal(2, tables.Count);
+            // Captioned table: the caption paragraph directly above carries the block text + ids.
+            var captionAbove = string.Concat((tables[0].PreviousSibling() as Paragraph)?.Descendants<Text>().Select(t => t.Text) ?? Enumerable.Empty<string>());
+            Assert.Contains("Evidence table A. [S1]", captionAbove, StringComparison.Ordinal);
+            // Bare table: a citation line directly below carries the ids in table context.
+            var trailingBelow = string.Concat((tables[1].NextSibling() as Paragraph)?.Descendants<Text>().Select(t => t.Text) ?? Enumerable.Empty<string>()).Trim();
+            Assert.Equal("[S3]", trailingBelow);
+            // Row content survives, and the paragraph citation from the same section is still there.
+            var tableText = string.Concat(tables.SelectMany(t => t.Descendants<Text>().Select(x => x.Text)));
+            Assert.Contains("74%", tableText, StringComparison.Ordinal);
+            Assert.Contains("Interviews were transcribed verbatim. [S2]", DocxText(package), StringComparison.Ordinal);
+        }
+
+        var pdf = await ExportFileAsync(owner, jobId, configurationId, "pdf");
+        Assert.True(pdf.StatusCode == HttpStatusCode.OK, await pdf.Content.ReadAsStringAsync());
+        var pdfText = PdfText(await pdf.Content.ReadAsByteArrayAsync());
+        Assert.Contains(Collapse("Evidence table A. [S1]"), pdfText, StringComparison.Ordinal);
+        Assert.Contains(Collapse("[S3]"), pdfText, StringComparison.Ordinal);
+        Assert.Contains(Collapse("[S2]"), pdfText, StringComparison.Ordinal);
+        Assert.Contains(Collapse("74%"), pdfText, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Table_only_report_still_ships_every_citation_in_both_formats()
+    {
+        // Same finding, extreme shape: the only cited block in the whole report is a bare table.
+        var owner = await RegisterAsync("Bare Table Owner");
+        var jobId = SeedCompletedResearchJob(owner.WorkspaceId, Guid.Parse(owner.UserId), overrideResultJson: TableOnlyJson());
+
+        var docx = await ExportFileAsync(owner, jobId, "classic-thesis.times.150.classic.center", "docx");
+        Assert.True(docx.StatusCode == HttpStatusCode.OK, await docx.Content.ReadAsStringAsync());
+        var docxBody = await DocxBodyText(docx);
+        Assert.Contains("[S2] [S3]", docxBody, StringComparison.Ordinal);
+        Assert.Contains("68%", docxBody, StringComparison.Ordinal);
+
+        var pdf = await ExportFileAsync(owner, jobId, "classic-thesis.times.150.classic.center", "pdf");
+        Assert.True(pdf.StatusCode == HttpStatusCode.OK, await pdf.Content.ReadAsStringAsync());
+        var pdfText = PdfText(await pdf.Content.ReadAsByteArrayAsync());
+        Assert.Contains(Collapse("[S2] [S3]"), pdfText, StringComparison.Ordinal);
+        Assert.Contains(Collapse("68%"), pdfText, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Disclosure_survives_the_real_slotless_literature_review_apa_template_in_both_formats()
+    {
+        // Finding #2: renderers and the DOCX validator gated the disclosure on
+        // spec.IncludesAiUseDisclosureSlot; the shipped literature-review-apa design has slot=false,
+        // so a supplied AiDisclosureText vanished silently — contradicting the controller's promise
+        // that "this path can never hide the disclosure". Now it renders under EVERY design.
+        var owner = await RegisterAsync("Slotless Disclosure Owner");
+        var jobId = SeedCompletedResearchJob(owner.WorkspaceId, Guid.Parse(owner.UserId));
+        var configurationId = FirstConfigurationWith(spec =>
+            !spec.IncludesAiUseDisclosureSlot
+            && !spec.IsRtl
+            && spec.ConfigurationId.StartsWith("literature-review-apa", StringComparison.Ordinal));
+        Assert.False(AcademicTemplateRegistry.GetConfiguration(configurationId)!.Spec.IncludesAiUseDisclosureSlot);
+
+        const string statement = "Disclosure sentence under a slot-less design.";
+        var docx = await ExportFileAsync(owner, jobId, configurationId, "docx", aiDisclosure: statement);
+        Assert.True(docx.StatusCode == HttpStatusCode.OK, await docx.Content.ReadAsStringAsync());
+        var docxBody = await DocxBodyText(docx);
+        Assert.Contains("Statement of Generative-AI Use", docxBody, StringComparison.Ordinal);
+        Assert.Contains(statement, docxBody, StringComparison.Ordinal);
+
+        var pdf = await ExportFileAsync(owner, jobId, configurationId, "pdf", aiDisclosure: statement);
+        Assert.True(pdf.StatusCode == HttpStatusCode.OK, await pdf.Content.ReadAsStringAsync());
+        var pdfText = PdfText(await pdf.Content.ReadAsByteArrayAsync());
+        Assert.Contains(Collapse("Statement of Generative-AI Use"), pdfText, StringComparison.Ordinal);
+        Assert.Contains(Collapse(statement), pdfText, StringComparison.Ordinal);
+
+        // Unfilled it fails CLOSED: the missing-statement wording stays visible rather than the
+        // section disappearing.
+        var blank = await ExportFileAsync(owner, jobId, configurationId, "docx");
+        Assert.True(blank.StatusCode == HttpStatusCode.OK, await blank.Content.ReadAsStringAsync());
+        var blankBody = await DocxBodyText(blank);
+        Assert.Contains("Statement of Generative-AI Use", blankBody, StringComparison.Ordinal);
+        Assert.Contains("has not completed this disclosure", blankBody, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Synthesized_search_summary_row_is_labelled_not_read_in_both_export_formats()
+    {
+        // Finding #3 export side: the persisted snippet on web source S1 is provider-answer text,
+        // so both formats must carry the summary-only note beside its bibliography entry.
+        var owner = await RegisterAsync("Provenance Export Owner");
+        var jobId = SeedCompletedResearchJob(owner.WorkspaceId, Guid.Parse(owner.UserId));
+
+        var docx = await ExportFileAsync(owner, jobId, "classic-thesis.times.150.classic.center", "docx");
+        Assert.True(docx.StatusCode == HttpStatusCode.OK, await docx.Content.ReadAsStringAsync());
+        var docxBody = await DocxBodyText(docx);
+        Assert.Contains("Search-result summary only — the full text of the article itself was not accessed in this workspace.", docxBody, StringComparison.Ordinal);
+        Assert.Contains("Catalogue record only — the full text was not accessed in this workspace.", docxBody, StringComparison.Ordinal);
+
+        var pdf = await ExportFileAsync(owner, jobId, "classic-thesis.times.150.classic.center", "pdf");
+        Assert.True(pdf.StatusCode == HttpStatusCode.OK, await pdf.Content.ReadAsStringAsync());
+        var pdfText = PdfText(await pdf.Content.ReadAsByteArrayAsync());
+        Assert.Contains(Collapse("Search-result summary only — the full text of the article itself was not accessed in this workspace."), pdfText, StringComparison.Ordinal);
+        Assert.Contains(Collapse("Catalogue record only — the full text was not accessed in this workspace."), pdfText, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Real_persisted_payload_shape_renders_every_section_and_list_item_in_both_formats()
+    {
+        // Findings #4–#6 combined, through the REAL persisted shape: the handler serializes an
+        // anonymous camelCase wrapper whose nested values are ResearchSection/ResearchReportBlock/
+        // ResearchTableRow objects, i.e. PascalCase property names inside. The old reader matched
+        // camelCase only and silently lost the body; the PDF additionally dropped sections with a
+        // blank heading and reused one container for multi-item lists.
+        var payload = JsonSerializer.Serialize(new
+        {
+            researchType = "research",
+            title = "Kurdish Language Policy Round",
+            language = "en",
+            executiveSummary = "Round two converged on bilingual staffing pressure.",
+            keyFindings = new List<ResearchReportBlock>
+            {
+                new() { Type = "bullets", Items = new List<string> { "First ranked point.", "Second ranked point." }, CitationIds = new List<string> { "S1" } },
+                new() { Type = "numbered_list", Items = new List<string> { "Numbered alpha.", "Numbered beta." }, CitationIds = new List<string> { "S3" } },
+            },
+            sections = new List<ResearchSection>
+            {
+                new() { Heading = "Framing", Blocks = new List<ResearchReportBlock> { new() { Type = "paragraph", Text = "Policy language tracked enrolment shares.", CitationIds = new List<string> { "S2" } } } },
+                new() { Heading = "", Blocks = new List<ResearchReportBlock> { new() { Type = "paragraph", Text = "Heading-less section body.", CitationIds = new List<string> { "S1" } } } },
+            },
+            conclusion = "Staffing is the binding constraint.",
+            sourceCount = 3,
+            sources = Array.Empty<object>(),
+        });
+        var owner = await RegisterAsync("Real Shape Owner");
+        var jobId = SeedCompletedResearchJob(owner.WorkspaceId, Guid.Parse(owner.UserId), overrideResultJson: payload);
+
+        var docx = await ExportFileAsync(owner, jobId, "classic-thesis.times.150.classic.center", "docx");
+        Assert.True(docx.StatusCode == HttpStatusCode.OK, await docx.Content.ReadAsStringAsync());
+        var docxBody = await DocxBodyText(docx);
+        Assert.Contains("First ranked point. [S1]", docxBody, StringComparison.Ordinal);
+        Assert.Contains("Second ranked point. [S1]", docxBody, StringComparison.Ordinal);
+        Assert.Contains("Numbered alpha. [S3]", docxBody, StringComparison.Ordinal);
+        Assert.Contains("Numbered beta. [S3]", docxBody, StringComparison.Ordinal);
+        Assert.Contains("Policy language tracked enrolment shares. [S2]", docxBody, StringComparison.Ordinal);
+        Assert.Contains("Heading-less section body. [S1]", docxBody, StringComparison.Ordinal);
+
+        var pdf = await ExportFileAsync(owner, jobId, "classic-thesis.times.150.classic.center", "pdf");
+        Assert.True(pdf.StatusCode == HttpStatusCode.OK, await pdf.Content.ReadAsStringAsync());
+        var pdfText = PdfText(await pdf.Content.ReadAsByteArrayAsync());
+        Assert.Contains(Collapse("First ranked point. [S1]"), pdfText, StringComparison.Ordinal);
+        Assert.Contains(Collapse("Second ranked point. [S1]"), pdfText, StringComparison.Ordinal);
+        Assert.Contains(Collapse("Numbered alpha. [S3]"), pdfText, StringComparison.Ordinal);
+        Assert.Contains(Collapse("Numbered beta. [S3]"), pdfText, StringComparison.Ordinal);
+        // The heading-less section renders in the PDF too — its text and citation are not dropped.
+        Assert.Contains(Collapse("Heading-less section body. [S1]"), pdfText, StringComparison.Ordinal);
+        Assert.Contains(Collapse("Policy language tracked enrolment shares. [S2]"), pdfText, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Docx_section_break_shape_is_schema_legal_under_the_real_openxml_validator()
+    {
+        // Finding #5: the old renderer appended a non-final SectionProperties directly to the body
+        // — illegal WordprocessingML (non-final breaks belong inside a paragraph's properties, and
+        // only the FINAL sectPr may be a direct body child) — and the validator even required that
+        // wrong shape. Now: exactly one body-level sectPr as last child, one embedded pPr sectPr,
+        // and DocumentFormat.OpenXml.Validation reports zero errors.
+        var owner = await RegisterAsync("SectPr Shape Owner");
+        var jobId = SeedCompletedResearchJob(owner.WorkspaceId, Guid.Parse(owner.UserId));
+        var docx = await ExportFileAsync(owner, jobId, "classic-thesis.times.150.classic.center", "docx");
+        Assert.True(docx.StatusCode == HttpStatusCode.OK, await docx.Content.ReadAsStringAsync());
+        using var package = WordprocessingDocument.Open(new MemoryStream(await docx.Content.ReadAsByteArrayAsync()), false);
+        var body = package.MainDocumentPart!.Document!.Body!;
+        var topLevel = body.Elements<SectionProperties>().ToList();
+        Assert.Single(topLevel);
+        Assert.Same(topLevel[0], body.LastChild);
+        Assert.Contains(body.Elements<Paragraph>(), paragraph => paragraph.ChildElements
+            .OfType<ParagraphProperties>().Any(properties => properties.ChildElements.OfType<SectionProperties>().Any()));
+        Assert.Empty(new OpenXmlValidator().Validate(package));
     }
 
     // ── helpers ─────────────────────────────────────────────────────────────────────────

@@ -15,12 +15,25 @@ public sealed record AcademicReportSourceRow(
     string? Url,
     string? PublishedYear,
     string SourceType,
-    /// <summary>True only when the workspace actually holds content from this source: an uploaded file
-    /// whose text was extracted, or fetched web content (snippet/excerpt/evidence). A catalogue record
-    /// with metadata alone is never marked as accessed.</summary>
+    /// <summary>True only when the workspace verifiably holds this source's content: a stored upload whose
+    /// text was really extracted, or a web source explicitly marked by a verified fetcher
+    /// (<see cref="AcademicSavedReportReader.ContentAccessVerifiedMarker"/>). Provider-synthesized answer
+    /// text persisted into Snippet/ExtractedText/Evidence is NOT proof the article itself was read, and a
+    /// catalogue record with metadata alone never is.</summary>
     bool ContentAccessed,
-    /// <summary>Rendered beside every metadata-only entry so a reader can never infer the work was read.</summary>
-    string AccessNote);
+    /// <summary>Rendered beside every not-accessed entry so a reader can never infer the work was read.</summary>
+    string AccessNote,
+    /// <summary>One of <see cref="AccessKindWorkspaceFile"/>, <see cref="AccessKindSearchSummary"/>,
+    /// <see cref="AccessKindCatalogueOnly"/>: why the flag above holds, so exports label the distinction
+    /// honestly instead of collapsing it into one boolean.</summary>
+    string AccessKind)
+{
+    public const string AccessKindWorkspaceFile = "workspace-file";
+    /// <summary>Content present is only the search surface's own generated summary/snippet — the
+    /// constant deliberately avoids backend-identity vocabulary (AcademicCatalogPrivacyGuard token family).</summary>
+    public const string AccessKindSearchSummary = "search-summary";
+    public const string AccessKindCatalogueOnly = "catalogue-only";
+}
 
 public sealed record AcademicReportBlockModel(
     string Type,
@@ -39,6 +52,9 @@ public sealed record AcademicExportLabels(
     string DisclosureMissing,
     string IntegrityNote,
     string MetadataOnlyNote,
+    /// <summary>Honest wording for a web row whose only "content" is the search provider's synthesized
+    /// summary/snippet: the workspace holds provider output, not the article's fetched full text.</summary>
+    string SummaryOnlyNote,
     string ExecutiveSummaryHeading,
     string ConclusionHeading,
     string KeyFindingsHeading);
@@ -69,6 +85,10 @@ public sealed class AcademicSavedReport
     public AcademicExportLabels Labels { get; init; } = DefaultLabels;
     public int AccessedSourceCount => Sources.Count(source => source.ContentAccessed);
     public int MetadataOnlySourceCount => Sources.Count(source => !source.ContentAccessed);
+    /// <summary>Every rendered content block in document order (key findings then section blocks),
+    /// used by the file validator to re-check block-level contracts such as table citation context.</summary>
+    public IEnumerable<AcademicReportBlockModel> AllBlocks => KeyFindings
+        .Concat(Sections.SelectMany(section => section.Blocks));
 
     private static readonly AcademicExportLabels DefaultLabels = LabelsFor("en");
 
@@ -83,6 +103,7 @@ public sealed class AcademicSavedReport
             "لم يُكمل الطالب هذا البيان. تقتضي السياسة الأكاديمية عادةً وصف مواضع استخدام أدوات الذكاء الاصطناعي وكيفية استخدامها قبل التقديم.",
             "ملاحظة النزاهة الأكاديمية: المراجع المعلَّمة بـ«سجل فهرسة فقط» حُددت من بيانات الفهرسة ولم يُطَّلع على نصها الكامل داخل مساحة العمل هذه. تُعيد هذه الوثيقة عرض تقرير بحثي محفوظ، وهي لا تحتوي على أي مخرجات توليدية جديدة.",
             "سجل فهرسة فقط — لم يتم الوصول إلى النص الكامل عبر مساحة العمل هذه.",
+            "ملخص نتائج البحث فقط — لم يتم الوصول إلى النص الكامل للمقال عبر مساحة العمل هذه.",
             "الملخص التنفيذي",
             "الخاتمة",
             "أبرز النتائج"),
@@ -93,6 +114,7 @@ public sealed class AcademicSavedReport
             "قوتابی ئەم ڕاگەیاندنەی تەواو نەکردووە. سیاسەتی ئەکادیمی بە شێوەیەکی ئاسایی داوا دەکات پێش پێشکەشکردن باس لە شوێن و شێوازی بەکارهێنانی ئامرازەکانی زیرەکی دەستکرد بکرێت.",
             "تێبینی ڕێزپارێزی ئەکادیمی: سەرچاوە پێناسکراوەکان بە «تۆماری کەتەلۆگ تەنها» لە زانیاری کەتەلۆگەوە دیاری کراون و دەقی تەواویان لەم شوێنە کارکردنەدا نەخوێندراوەتەوە. ئەم بەڵگەیە دووبارە ڕووکارکردنەوەی توێژینەوەی پاشەکەوتکراوە و هیچ ناوەڕۆکی نوێی لێ دروست نەکراوە.",
             "تۆماری کەتەلۆگ تەنها — دەقی تەواوی لەم شوێنە کارکردنەدا بەردەست نەبوو.",
+            "پوختەی ئەنجامەکانی گەڕان تەنها — دەقی تەواوی بابەتەکە لەم شوێنە کارکردنەدا بەردەست نەبوو.",
             "پوختەی جێبەجێکردن",
             "ئەنجام",
             "دەرەنجامە سەرەکییەکان"),
@@ -103,6 +125,7 @@ public sealed class AcademicSavedReport
             "The student has not completed this disclosure. Academic policy normally requires describing where and how generative AI tools were used before submission.",
             "Research integrity note: entries marked \"catalogue record only\" were identified from catalogue metadata and their full text was not read in this workspace. This document re-renders a saved research report and contains no newly generated content.",
             "Catalogue record only — the full text was not accessed in this workspace.",
+            "Search-result summary only — the full text of the article itself was not accessed in this workspace.",
             "Executive summary",
             "Conclusion",
             "Key findings"),
@@ -120,6 +143,15 @@ public static class AcademicSavedReportReader
     /// <summary>Stored payloads are bounded by the generation options upstream; this is the export-side
     /// ceiling so a pathological row cannot stall a synchronous render.</summary>
     public const int MaximumResultJsonCharacters = 8 * 1024 * 1024;
+
+    /// <summary>
+    /// The only marker by which a web (non-uploaded) source may be reported as full-text accessed:
+    /// an explicit flag in the row's persisted MetadataJson, written by a verified content fetcher.
+    /// The production fetcher today is a pass-through (providers persist their own synthesized
+    /// answer text into Snippet/ExtractedText), so no web row qualifies until a real fetcher marks
+    /// one — which is exactly the conservative default the honesty rule demands.
+    /// </summary>
+    public const string ContentAccessVerifiedMarker = "contentAccessVerified";
 
     public static AcademicSavedReport Read(GenerationJob job, IReadOnlyList<ResearchSource> sources)
     {
@@ -139,17 +171,20 @@ public static class AcademicSavedReportReader
             throw new AcademicSavedReportException("ACADEMIC_REPORT_UNAVAILABLE", "The saved report payload could not be read.");
         }
 
+        // The handler persists an anonymous object: outer keys are written camelCase, but the nested
+        // ResearchSection/ResearchReportBlock classes serialize with their PascalCase property names.
+        // Both spellings are live payloads; every property lookup must therefore be case-tolerant.
         if (root.ValueKind != JsonValueKind.Object
-            || !root.TryGetProperty("title", out var titleElement) || titleElement.ValueKind != JsonValueKind.String
-            || !root.TryGetProperty("sections", out var sectionsElement) || sectionsElement.ValueKind != JsonValueKind.Array)
+            || !TryGetProperty(root, "title", out var titleElement) || titleElement.ValueKind != JsonValueKind.String
+            || !TryGetProperty(root, "sections", out var sectionsElement) || sectionsElement.ValueKind != JsonValueKind.Array)
             throw new AcademicSavedReportException("ACADEMIC_REPORT_UNAVAILABLE", "The saved report payload is not in the expected shape.");
 
         var language = AcademicRtlPolicy.NormalizeLanguage(
-            root.TryGetProperty("language", out var languageElement) && languageElement.ValueKind == JsonValueKind.String
+            TryGetProperty(root, "language", out var languageElement) && languageElement.ValueKind == JsonValueKind.String
                 ? languageElement.GetString()
                 : null);
 
-        var keyFindings = ReadBlocks(root.TryGetProperty("keyFindings", out var findingsElement) ? findingsElement : default);
+        var keyFindings = ReadBlocks(TryGetProperty(root, "keyFindings", out var findingsElement) ? findingsElement : default);
         var sections = ReadSections(sectionsElement);
         var orderedSources = ReadSources(sources, language);
 
@@ -178,8 +213,29 @@ public static class AcademicSavedReportReader
         return report;
     }
 
+    /// <summary>Case-tolerant property lookup: exact name first, then an ordinal-ignore-case scan.
+    /// Handles both the synthetic camelCase shape and the real PascalCase-nested persisted shape
+    /// without changing behaviour for payloads where either spelling is absent.</summary>
+    private static bool TryGetProperty(JsonElement element, string name, out JsonElement value)
+    {
+        if (element.ValueKind == JsonValueKind.Object)
+        {
+            if (element.TryGetProperty(name, out value)) return true;
+            foreach (var property in element.EnumerateObject())
+            {
+                if (string.Equals(property.Name, name, StringComparison.OrdinalIgnoreCase))
+                {
+                    value = property.Value;
+                    return true;
+                }
+            }
+        }
+        value = default;
+        return false;
+    }
+
     private static string? ReadOptionalString(JsonElement element, string name) =>
-        element.ValueKind == JsonValueKind.Object && element.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.String
+        TryGetProperty(element, name, out var value) && value.ValueKind == JsonValueKind.String
             ? value.GetString()
             : null;
 
@@ -190,7 +246,7 @@ public static class AcademicSavedReportReader
         {
             if (section.ValueKind != JsonValueKind.Object) continue;
             var heading = ReadOptionalString(section, "heading") ?? string.Empty;
-            var blocks = section.TryGetProperty("blocks", out var blocksElement)
+            var blocks = TryGetProperty(section, "blocks", out var blocksElement)
                 ? ReadBlocks(blocksElement)
                 : Array.Empty<AcademicReportBlockModel>();
             sections.Add(new AcademicReportSectionModel(heading, blocks));
@@ -206,17 +262,21 @@ public static class AcademicSavedReportReader
         {
             if (block.ValueKind != JsonValueKind.Object) continue;
             var type = ReadOptionalString(block, "type") ?? "paragraph";
-            var items = block.TryGetProperty("items", out var itemsElement) && itemsElement.ValueKind == JsonValueKind.Array
+            var items = TryGetProperty(block, "items", out var itemsElement) && itemsElement.ValueKind == JsonValueKind.Array
                 ? itemsElement.EnumerateArray().Where(item => item.ValueKind == JsonValueKind.String).Select(item => item.GetString()!).ToArray()
                 : null;
-            var rows = block.TryGetProperty("rows", out var rowsElement) && rowsElement.ValueKind == JsonValueKind.Array
+            var rows = TryGetProperty(block, "rows", out var rowsElement) && rowsElement.ValueKind == JsonValueKind.Array
                 ? rowsElement.EnumerateArray()
-                    .Where(row => row.ValueKind == JsonValueKind.Object && row.TryGetProperty("cells", out var cells) && cells.ValueKind == JsonValueKind.Array)
-                    .Select(row => (IReadOnlyList<string>)row.GetProperty("cells").EnumerateArray()
-                        .Where(cell => cell.ValueKind == JsonValueKind.String).Select(cell => cell.GetString()!).ToArray())
+                    .Where(row => row.ValueKind == JsonValueKind.Object && TryGetProperty(row, "cells", out var cells) && cells.ValueKind == JsonValueKind.Array)
+                    .Select(row =>
+                    {
+                        TryGetProperty(row, "cells", out var cellsElement);
+                        return (IReadOnlyList<string>)cellsElement.EnumerateArray()
+                            .Where(cell => cell.ValueKind == JsonValueKind.String).Select(cell => cell.GetString()!).ToArray();
+                    })
                     .ToArray()
                 : null;
-            var citations = block.TryGetProperty("citationIds", out var citationsElement) && citationsElement.ValueKind == JsonValueKind.Array
+            var citations = TryGetProperty(block, "citationIds", out var citationsElement) && citationsElement.ValueKind == JsonValueKind.Array
                 ? citationsElement.EnumerateArray().Where(id => id.ValueKind == JsonValueKind.String).Select(id => id.GetString()!).ToArray()
                 : Array.Empty<string>();
             blocks.Add(new AcademicReportBlockModel(type, ReadOptionalString(block, "text"), items, rows, citations));
@@ -230,14 +290,31 @@ public static class AcademicSavedReportReader
             .OrderBy(source => source.Rank)
             .ThenBy(source => source.CitationId, StringComparer.Ordinal)
             .ToList();
-        var note = AcademicSavedReport.LabelsFor(language).MetadataOnlyNote;
+        var labels = AcademicSavedReport.LabelsFor(language);
         return ordered.Select(source =>
         {
-            var uploaded = string.Equals(source.SourceType, "uploaded", StringComparison.OrdinalIgnoreCase);
-            var hasContent = uploaded
-                || !string.IsNullOrWhiteSpace(source.Snippet)
+            // Honest provenance (review finding #3 on a707938): for web sources the persisted
+            // Snippet/ExtractedText come from the provider's synthesized answer (see
+            // ResearchProviders parsing: both fields are filled from `answer`), and Evidence rows are
+            // derived from that same text by the evidence processor. None of it proves the workspace
+            // ever fetched the article. Only a stored upload with extracted text, or a row explicitly
+            // marked verified by a real fetcher, counts as accessed.
+            var uploaded = string.Equals(source.SourceType, "uploaded", StringComparison.OrdinalIgnoreCase)
+                || source.StoredFileId is not null;
+            var verified = uploaded || HasVerifiedFetchProvenance(source.MetadataJson);
+            var hasProviderContent = !string.IsNullOrWhiteSpace(source.Snippet)
                 || !string.IsNullOrWhiteSpace(source.ExtractedText)
                 || source.Evidence.Count > 0;
+            var accessKind = verified
+                ? AcademicReportSourceRow.AccessKindWorkspaceFile
+                : hasProviderContent
+                    ? AcademicReportSourceRow.AccessKindSearchSummary
+                    : AcademicReportSourceRow.AccessKindCatalogueOnly;
+            var note = verified
+                ? string.Empty
+                : hasProviderContent
+                    ? labels.SummaryOnlyNote
+                    : labels.MetadataOnlyNote;
             return new AcademicReportSourceRow(
                 source.CitationId,
                 source.Title,
@@ -245,9 +322,28 @@ public static class AcademicSavedReportReader
                 source.Url ?? source.CanonicalUrl,
                 source.PublishedAt?.ToString("yyyy", CultureInfo.InvariantCulture),
                 source.SourceType,
-                hasContent,
-                hasContent ? string.Empty : note);
+                verified,
+                note,
+                accessKind);
         }).ToArray();
+    }
+
+    /// <summary>True only when the row's own persisted MetadataJson carries the explicit verified-fetch
+    /// flag. Malformed metadata is treated conservatively as "not verified".</summary>
+    private static bool HasVerifiedFetchProvenance(string? metadataJson)
+    {
+        if (string.IsNullOrWhiteSpace(metadataJson)) return false;
+        try
+        {
+            using var document = JsonDocument.Parse(metadataJson);
+            return document.RootElement.ValueKind == JsonValueKind.Object
+                && document.RootElement.TryGetProperty(ContentAccessVerifiedMarker, out var marker)
+                && marker.ValueKind == JsonValueKind.True;
+        }
+        catch (JsonException)
+        {
+            return false;
+        }
     }
 
     /// <summary>
@@ -268,7 +364,8 @@ public static class AcademicSavedReportReader
                 .Append(source.SourceType).Append('|')
                 .Append(source.Url ?? string.Empty).Append('|')
                 .Append(source.PublishedYear ?? string.Empty).Append('|')
-                .Append(source.ContentAccessed ? "1" : "0")
+                .Append(source.ContentAccessed ? "1" : "0").Append('|')
+                .Append(source.AccessKind)
                 .Append('\u001f');
         }
         return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(canonical.ToString()))).ToLowerInvariant();

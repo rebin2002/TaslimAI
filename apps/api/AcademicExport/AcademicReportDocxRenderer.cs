@@ -14,13 +14,16 @@ namespace Taslim.Api.AcademicExport;
 /// content is the student's own stored payload, citations included.
 ///
 /// Honest by construction:
-/// - the bibliography comes from the job's persisted sources, with an explicit "catalogue record
-///   only" note on every row whose full text was never accessed;
-/// - the generative-AI disclosure slot is always rendered when the design has one, completed by the
-///   student's own text or failing closed to a "not completed" statement — the export can never
-///   silently drop the disclosure;
-/// - a research-integrity footer is rendered even under designs without a slot;
-/// - no synthetic sample text is reachable from this renderer.
+/// - the bibliography comes from the job's persisted sources, with an explicit access-status note on
+///   every row whose full text was never verifiably read in this workspace;
+/// - the generative-AI disclosure is ALWAYS rendered, whether or not the design carries a dedicated
+///   slot, completed by the student's own text or failing closed to a "not completed" statement —
+///   the export can never silently drop the disclosure (review finding #2 on a707938);
+/// - every block's citation ids survive, including table blocks, whose ids render beside the table in
+///   correct context (review finding #1 on a707938);
+/// - a research-integrity footer is rendered under every design;
+/// - the section split is legal WordprocessingML: the non-final front-matter sectPr lives inside a
+///   paragraph's properties, only the final sectPr is a direct body child (review finding #5).
 /// </summary>
 public static class AcademicReportDocxRenderer
 {
@@ -80,14 +83,14 @@ public static class AcademicReportDocxRenderer
             body.Append(PageBreak());
         }
 
-        if (spec.IncludesAiUseDisclosureSlot)
-        {
-            body.Append(Paragraph(labels.DisclosureHeading, "Heading2", spec));
-            var completed = !string.IsNullOrWhiteSpace(studentDisclosure);
-            body.Append(Paragraph(completed ? studentDisclosure!.Trim() : labels.DisclosureMissing, null, spec));
-            if (!completed)
-                body.Append(Paragraph("This export leaves the disclosure visible and incomplete rather than removing it.", null, spec, italic: true));
-        }
+        // The disclosure is a honesty invariant, not a design decoration: designs without a slot
+        // still render it (finding #2: literature-review-apa has no slot, yet the controller
+        // documents "this path can never hide the disclosure").
+        body.Append(Paragraph(labels.DisclosureHeading, "Heading2", spec));
+        var disclosureCompleted = !string.IsNullOrWhiteSpace(studentDisclosure);
+        body.Append(Paragraph(disclosureCompleted ? studentDisclosure!.Trim() : labels.DisclosureMissing, null, spec));
+        if (!disclosureCompleted)
+            body.Append(Paragraph("This export leaves the disclosure visible and incomplete rather than removing it.", null, spec, italic: true));
 
         if (spec.IncludeToc)
         {
@@ -95,9 +98,16 @@ public static class AcademicReportDocxRenderer
             body.Append(TocField(spec));
             body.Append(PageBreak());
         }
-        body.Append(SectionPropertiesFor(spec, frontMatter: true));
+        // WordprocessingML rule: a non-final section break belongs inside the last paragraph of the
+        // section it closes; only the document-final sectPr may be a direct child of <w:body>.
+        body.Append(SectionBreakParagraph(SectionPropertiesFor(spec, frontMatter: true)));
 
         // ── body: the saved report, verbatim content, citations preserved ──────────────
+        // Designs without a cover page (e.g. literature-review-apa) must still carry the report title:
+        // the validator contract says every export contains its title, and an untitled document would
+        // fail its own integrity gate rather than ship nameless.
+        if (string.Equals(spec.CoverStyle, "none", StringComparison.Ordinal))
+            body.Append(Paragraph(report.Title, null, spec, centered: true, sizePt: spec.HeadingSizePt(1), bold: spec.HeadingsBold));
         if (!string.IsNullOrWhiteSpace(report.ExecutiveSummary))
         {
             body.Append(Paragraph(labels.ExecutiveSummaryHeading, "Heading1", spec));
@@ -168,9 +178,21 @@ public static class AcademicReportDocxRenderer
                 break;
             case "table":
                 if (block.Rows is { Count: > 0 })
+                {
+                    // Finding #1 fix: a table block's own Text (a caption/lead-in) and its CitationIds
+                    // used to be dropped entirely. The caption renders above the table with the same
+                    // "[S1]" append shape paragraphs use; with no caption text, the citation line
+                    // renders directly after the table so the ids always survive in table context.
+                    if (!string.IsNullOrWhiteSpace(block.Text))
+                        yield return Paragraph(WithCitations(block.Text, block.CitationIds), null, spec, italic: true);
                     yield return BuildTable(spec, block.Rows);
+                    if (string.IsNullOrWhiteSpace(block.Text) && block.CitationIds is { Count: > 0 })
+                        yield return Paragraph(CitationOnlyLine(block.CitationIds), null, spec, italic: true, indentLeftPt: spec.IsRtl ? 0 : 18, indentRightPt: spec.IsRtl ? 18 : 0);
+                }
                 else
+                {
                     yield return Paragraph(WithCitations(block.Text, block.CitationIds), null, spec);
+                }
                 break;
             default:
                 var text = WithCitations(block.Text, block.CitationIds);
@@ -187,11 +209,15 @@ public static class AcademicReportDocxRenderer
             : citations is null || citations.Count == 0 ? text
                 : $"{text.Trim()} {string.Join(' ', citations.Select(citation => $"[{citation}]"))}";
 
+    /// <summary>Citation markers alone, for a table whose block carries ids but no caption text.</summary>
+    public static string CitationOnlyLine(IReadOnlyList<string> citations)
+        => string.Join(' ', citations.Select(citation => $"[{citation}]"));
+
     private static Paragraph TocField(AcademicDesignSpec spec)
     {
         var properties = new ParagraphProperties();
-        if (spec.IsRtl) properties.Append(new BiDi());
         properties.Append(new ParagraphStyleId { Val = "TOCEntry" });
+        if (spec.IsRtl) properties.Append(new BiDi());
         var instruction = $"TOC \\o \"1-{Math.Max(1, spec.HeadingLevels)}\" \\h \\z \\u";
         var field = new SimpleField { Instruction = instruction };
         field.Append(new Run(new Text("(Open in Word and accept the field update to populate the contents list.)") { Space = SpaceProcessingModeValues.Preserve }));
@@ -219,10 +245,8 @@ public static class AcademicReportDocxRenderer
 
         styles.Append(new Style(
             new StyleName { Val = "Normal" },
-            new StyleParagraphProperties(
-                new SpacingBetweenLines { After = TwipsI(spec.ParagraphAfterPt), Line = lineTwipsS, LineRule = LineSpacingRuleValues.Auto },
-                spec.JustifyBody ? new Justification { Val = JustificationValues.Both } : null!,
-                spec.FirstLineIndentPt > 0 ? new Indentation { FirstLine = TwipsI(spec.FirstLineIndentPt) } : null!))
+            BuildNormalParagraphProperties(spec, lineTwipsS)
+        )
         { StyleId = "Normal", Type = StyleValues.Paragraph, Default = OnOffValue.FromBoolean(true) });
 
         for (var level = 1; level <= Math.Max(1, spec.HeadingLevels); level++)
@@ -237,13 +261,7 @@ public static class AcademicReportDocxRenderer
                     new SpacingBetweenLines { Before = TwipsI(spec.HeadingTopGapPt), After = TwipsI(spec.ParagraphAfterPt / 2) },
                     new Indentation { FirstLine = "0" },
                     new OutlineLevel { Val = level - 1 }),
-                new StyleRunProperties(
-                    new RunFonts { Ascii = headingFont, HighAnsi = headingFont, EastAsia = headingFont, ComplexScript = headingFont },
-                    new FontSize { Val = HalfPoints(spec.HeadingSizePt(level)) },
-                    new FontSizeComplexScript { Val = HalfPoints(spec.HeadingSizePt(level)) },
-                    spec.HeadingsBold ? new Bold() : null!,
-                    spec.HeadingsBold ? new BoldComplexScript() : null!,
-                    level == 1 && spec.H1Uppercase ? new Caps() : null!))
+                BuildHeadingRunProperties(headingFont, spec, level))
             { StyleId = id, Type = StyleValues.Paragraph });
         }
 
@@ -268,45 +286,96 @@ public static class AcademicReportDocxRenderer
         return styles;
     }
 
+    // ECMA-376 defines a strict child order inside CT_PPr (spacing, then ind, then jc) and CT_RPr
+    // (rFonts, b/bCs, i/iCs, caps, then sz/szCs). Elements must be appended in schema order or
+    // WordprocessingML validators reject them; conditional children are appended, never passed as
+    // null placeholders, because a null attribute assignment survives as an empty attribute and
+    // empty ST_SignedTwipsMeasure values are themselves schema violations.
+    private static StyleParagraphProperties BuildNormalParagraphProperties(AcademicDesignSpec spec, string lineTwipsS)
+    {
+        var properties = new StyleParagraphProperties(
+            new SpacingBetweenLines { After = TwipsI(spec.ParagraphAfterPt), Line = lineTwipsS, LineRule = LineSpacingRuleValues.Auto });
+        if (spec.FirstLineIndentPt > 0) properties.Append(new Indentation { FirstLine = TwipsI(spec.FirstLineIndentPt) });
+        if (spec.JustifyBody) properties.Append(new Justification { Val = JustificationValues.Both });
+        return properties;
+    }
+
+    private static StyleRunProperties BuildHeadingRunProperties(string headingFont, AcademicDesignSpec spec, int level)
+    {
+        var properties = new StyleRunProperties();
+        properties.Append(new RunFonts { Ascii = headingFont, HighAnsi = headingFont, EastAsia = headingFont, ComplexScript = headingFont });
+        if (spec.HeadingsBold)
+        {
+            properties.Append(new Bold());
+            properties.Append(new BoldComplexScript());
+        }
+        if (level == 1 && spec.H1Uppercase) properties.Append(new Caps());
+        properties.Append(new FontSize { Val = HalfPoints(spec.HeadingSizePt(level)) });
+        properties.Append(new FontSizeComplexScript { Val = HalfPoints(spec.HeadingSizePt(level)) });
+        return properties;
+    }
+
     private static Paragraph PageBreak() => new(new Run(new Break { Type = BreakValues.Page }));
+
+    /// <summary>Closes a section: the sectPr rides inside the paragraph's properties, which is the
+    /// only schema-legal home for a non-final section break.</summary>
+    private static Paragraph SectionBreakParagraph(SectionProperties properties)
+        => new(new ParagraphProperties(properties));
 
     private static Paragraph Paragraph(string text, string? style, AcademicDesignSpec spec,
         bool centered = false, double? sizePt = null, bool bold = false, bool italic = false,
         double indentLeftPt = 0, double indentRightPt = 0)
     {
         var properties = new ParagraphProperties();
-        if (spec.IsRtl) properties.Append(new BiDi());
         if (style is not null) properties.Append(new ParagraphStyleId { Val = style });
-        if (centered) properties.Append(new Justification { Val = JustificationValues.Center });
+        if (spec.IsRtl) properties.Append(new BiDi());
         if (indentLeftPt > 0 || indentRightPt > 0)
-            properties.Append(new Indentation
-            {
-                Left = indentLeftPt > 0 ? TwipsI(indentLeftPt) : null!,
-                Right = indentRightPt > 0 ? TwipsI(indentRightPt) : null!,
-            });
+        {
+            var indentation = new Indentation();
+            if (indentLeftPt > 0) indentation.Left = TwipsI(indentLeftPt);
+            if (indentRightPt > 0) indentation.Right = TwipsI(indentRightPt);
+            properties.Append(indentation);
+        }
+        if (centered) properties.Append(new Justification { Val = JustificationValues.Center });
         var run = new Run();
         if (sizePt is not null || bold || italic)
-            run.RunProperties = new RunProperties(
-                sizePt is not null ? new FontSize { Val = HalfPoints(sizePt.Value) } : null!,
-                sizePt is not null ? new FontSizeComplexScript { Val = HalfPoints(sizePt.Value) } : null!,
-                bold ? new Bold() : null!,
-                bold ? new BoldComplexScript() : null!,
-                italic ? new Italic() : null!,
-                italic ? new ItalicComplexScript() : null!);
+        {
+            var runProperties = new RunProperties();
+            if (bold)
+            {
+                runProperties.Append(new Bold());
+                runProperties.Append(new BoldComplexScript());
+            }
+            if (italic)
+            {
+                runProperties.Append(new Italic());
+                runProperties.Append(new ItalicComplexScript());
+            }
+            if (sizePt is not null)
+            {
+                runProperties.Append(new FontSize { Val = HalfPoints(sizePt.Value) });
+                runProperties.Append(new FontSizeComplexScript { Val = HalfPoints(sizePt.Value) });
+            }
+            run.RunProperties = runProperties;
+        }
         run.Append(new Text(text) { Space = SpaceProcessingModeValues.Preserve });
         return new Paragraph(properties, run);
     }
 
     private static Table BuildTable(AcademicDesignSpec spec, IReadOnlyList<IReadOnlyList<string>> rows)
     {
+        // tblPr children follow CT_TblBorders order (top, left/start, bottom, right/end, insideH,
+        // insideV), and a w:tblGrid is mandatory between tblPr and the first w:tr.
         var table = new Table(new TableProperties(
             new TableBorders(
                 new TopBorder { Val = BorderValues.Single, Size = 4 },
-                new BottomBorder { Val = BorderValues.Single, Size = 4 },
                 new LeftBorder { Val = BorderValues.Single, Size = 4 },
+                new BottomBorder { Val = BorderValues.Single, Size = 4 },
                 new RightBorder { Val = BorderValues.Single, Size = 4 },
                 new InsideHorizontalBorder { Val = BorderValues.Single, Size = 4 },
-                new InsideVerticalBorder { Val = BorderValues.Single, Size = 4 })));
+                new InsideVerticalBorder { Val = BorderValues.Single, Size = 4 })),
+            new TableGrid(Enumerable.Range(0, rows.Count > 0 ? rows[0].Count : 0)
+                .Select(_ => new GridColumn { Width = TwipsI(Math.Max(10, (spec.PaperWidthPt - spec.MarginLeftPt - spec.MarginRightPt) / Math.Max(1, rows.Count > 0 ? rows[0].Count : 1))) })));
         foreach (var (rowIndex, row) in rows.Select((row, index) => (index, row)))
         {
             var tableRow = new TableRow();
@@ -322,12 +391,9 @@ public static class AcademicReportDocxRenderer
     {
         var properties = new SectionProperties();
         var scheme = frontMatter ? spec.FrontMatterNumbering : spec.BodyNumbering;
-        if (!string.Equals(scheme, "none", StringComparison.Ordinal))
-            properties.Append(new PageNumberType
-            {
-                Format = PageNumberFormat(scheme),
-                Start = frontMatter || spec.RestartNumbersAfterFrontMatter ? new Int32Value(1) : null,
-            });
+        // CT_SectPr child order: pgSz, pgMar, pgNumType, cols, bidi, rtlGutter. Null-assigned
+        // attributes serialize as empty strings and are rejected by the validator, so optional
+        // attributes are only assigned when they carry a value.
         properties.Append(new PageSize
         {
             Width = new UInt32Value((uint)Math.Round(spec.PaperWidthPt * AcademicDesignSpec.TwipsPerPoint)),
@@ -342,8 +408,12 @@ public static class AcademicReportDocxRenderer
             Right = new UInt32Value((uint)Math.Max(0, TwipsN(spec.MarginRightPt))),
             Gutter = new UInt32Value((uint)Math.Max(0, TwipsN(spec.BindingEdgePt))),
         });
-        if (spec.IsRtl) properties.Append(new BiDi());
-        if (spec.IsRtl && string.Equals(spec.BindingEdge, "right", StringComparison.Ordinal)) properties.Append(new GutterOnRight());
+        if (!string.Equals(scheme, "none", StringComparison.Ordinal))
+        {
+            var pageNumberType = new PageNumberType { Format = PageNumberFormat(scheme) };
+            if (frontMatter || spec.RestartNumbersAfterFrontMatter) pageNumberType.Start = 1;
+            properties.Append(pageNumberType);
+        }
         if (spec.ColumnCount > 1)
         {
             var columnWidth = (uint)Math.Round((spec.PaperWidthPt - spec.MarginLeftPt - spec.MarginRightPt - (spec.ColumnCount - 1) * spec.ColumnGapPt) / spec.ColumnCount * AcademicDesignSpec.TwipsPerPoint);
@@ -358,6 +428,8 @@ public static class AcademicReportDocxRenderer
         {
             properties.Append(new Columns());
         }
+        if (spec.IsRtl) properties.Append(new BiDi());
+        if (spec.IsRtl && string.Equals(spec.BindingEdge, "right", StringComparison.Ordinal)) properties.Append(new GutterOnRight());
         return properties;
     }
 
