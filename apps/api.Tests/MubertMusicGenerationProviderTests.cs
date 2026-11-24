@@ -190,15 +190,64 @@ public sealed class MubertMusicGenerationProviderTests
     }
 
     [Fact]
-    public async Task Hanging_download_is_cancelled_by_the_provider_timeout()
+    public async Task Hanging_download_after_the_track_completed_is_a_retrieval_failure_not_a_retryable_timeout()
     {
+        // The status response carried a track URL, so Mubert has produced - and billed - the track.
+        // The internal provider timeout firing underneath the artifact read used to surface as
+        // MusicProviderTimeoutException, which the job layer treats as retryable: a retry would POST a
+        // second paid track and orphan the finished one. Post-completion it is the terminal retrieval
+        // class instead, which MusicPostBillingRetrievalIsolationTests proves blocks the retry.
         var handler = CompleteTrackHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
         {
             Content = new StreamContent(new BlockingStream()),
         });
         var provider = CreateProvider(handler, providerTimeoutSeconds: 1);
 
+        var failure = await Assert.ThrowsAsync<MusicOutputRetrievalFailedException>(() => provider.GenerateAsync(Input()));
+
+        Assert.IsAssignableFrom<MusicProviderUnavailableException>(failure);
+        // create POST, status GET, one artifact GET; the timeout ends the attempt without a re-POST.
+        Assert.Equal(3, handler.Requests.Count);
+        Assert.Single(handler.Requests, request => request.Method == HttpMethod.Post);
+    }
+
+    [Fact]
+    public async Task Caller_cancellation_while_reading_a_completed_track_still_propagates_as_cancellation()
+    {
+        // The completion-known classification is scoped to the internal timeout only. When the caller
+        // cancels, the job is cancelled and its usage finalises as cancelled; converting that into a
+        // retrieval failure would misreport a deliberate abort as a provider fault.
+        var handler = CompleteTrackHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StreamContent(new BlockingStream()),
+        });
+        var provider = CreateProvider(handler);
+        using var cancellation = new CancellationTokenSource();
+        var generation = provider.GenerateAsync(Input(), cancellation.Token);
+        await handler.WaitForRequestAsync(3);
+        cancellation.Cancel();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => generation);
+        Assert.Single(handler.Requests, request => request.Method == HttpMethod.Post);
+    }
+
+    [Fact]
+    public async Task Timeout_before_the_track_exists_stays_a_retryable_provider_timeout()
+    {
+        // Nothing was billed when the status response itself never arrives, so the retryable timeout
+        // class is the right answer here: only a fault after completion is terminal.
+        var handler = new MubertHandler((_, requestNumber) => requestNumber switch
+        {
+            1 => Json(HttpStatusCode.OK, "{\"data\":{\"id\":\"track-pre-timeout\",\"session_id\":\"session\"}}"),
+            _ => new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StreamContent(new BlockingStream()),
+            },
+        });
+        var provider = CreateProvider(handler, providerTimeoutSeconds: 1);
+
         await Assert.ThrowsAsync<MusicProviderTimeoutException>(() => provider.GenerateAsync(Input()));
+        Assert.Single(handler.Requests, request => request.Method == HttpMethod.Post);
     }
 
     [Fact]

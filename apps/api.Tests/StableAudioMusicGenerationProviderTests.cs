@@ -243,6 +243,32 @@ public sealed class StableAudioMusicGenerationProviderTests
         Assert.DoesNotContain("private upstream response", exception.Message, StringComparison.OrdinalIgnoreCase);
     }
 
+    [Fact]
+    public async Task Provider_timeout_while_reading_a_billed_result_is_a_retrieval_failure_not_a_retryable_timeout()
+    {
+        // The result endpoint answered 2xx, so the generation exists and Stability billed it (the
+        // success metadata says as much). The internal provider timeout firing underneath the body
+        // read used to surface as MusicProviderTimeoutException, which the job layer still retries:
+        // a retry would create a second paid generation and orphan the finished one. Post-billing it
+        // is the terminal retrieval class, which MusicPostBillingRetrievalIsolationTests proves
+        // blocks the retry. The pre-completion timeout keeps its retryable class, as the polling
+        // bound test above shows.
+        var handler = new StableAudioHandler((_, requestNumber) => requestNumber switch
+        {
+            1 => Json(HttpStatusCode.Accepted, "{\"id\":\"generation-billed-timeout\"}"),
+            _ => new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StreamContent(new HangingStream()),
+            },
+        });
+        var provider = CreateProvider(handler, maxPollAttempts: 3, providerTimeoutSeconds: 1);
+
+        var failure = await Assert.ThrowsAsync<MusicOutputRetrievalFailedException>(() => provider.GenerateAsync(Input()));
+
+        Assert.IsAssignableFrom<MusicProviderUnavailableException>(failure);
+        Assert.Single(handler.Requests, request => request.Method == HttpMethod.Post);
+    }
+
     private static StableAudioMusicGenerationProvider CreateProvider(
         HttpMessageHandler handler,
         bool enabled = true,
@@ -250,14 +276,15 @@ public sealed class StableAudioMusicGenerationProviderTests
         int maxPollAttempts = 3,
         int pollIntervalMilliseconds = 1,
         int retryAttempts = 2,
-        int retryDelayMilliseconds = 1) => new(
+        int retryDelayMilliseconds = 1,
+        int providerTimeoutSeconds = 15) => new(
             new HttpClient(handler),
             Options.Create(new MusicGenerationOptions
             {
                 Enabled = enabled,
                 ProviderKey = "stable-audio",
                 Model = "stable-audio-3",
-                ProviderTimeoutSeconds = 15,
+                ProviderTimeoutSeconds = providerTimeoutSeconds,
                 MaxPromptCharacters = 4000,
                 MaxOutputBytes = 1024,
                 StableAudioApiBaseUrl = "https://api.stability.ai/",
@@ -331,6 +358,29 @@ public sealed class StableAudioMusicGenerationProviderTests
         public override void Flush() => throw new NotSupportedException();
         public override int Read(byte[] buffer, int offset, int count) => throw new HttpRequestException("synthetic stream failure");
         public override ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default) => throw new HttpRequestException("synthetic stream failure");
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+    }
+
+    /// <summary>
+    /// A body that never delivers: reads park until the caller's token fires, which is how the
+    /// provider's own timeout is made to expire underneath a billed result read.
+    /// </summary>
+    private sealed class HangingStream : Stream
+    {
+        public override bool CanRead => true;
+        public override bool CanSeek => false;
+        public override bool CanWrite => false;
+        public override long Length => 0;
+        public override long Position { get => 0; set => throw new NotSupportedException(); }
+        public override void Flush() => throw new NotSupportedException();
+        public override int Read(byte[] buffer, int offset, int count) => throw new OperationCanceledException("synthetic body read timeout");
+        public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
+        {
+            await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+            return 0;
+        }
         public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
         public override void SetLength(long value) => throw new NotSupportedException();
         public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
