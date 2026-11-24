@@ -46,6 +46,72 @@ public sealed class S3CompatibleStorageTests
     }
 
     [Fact]
+    public async Task Verified_missing_object_get_returns_null_without_storage_error()
+    {
+        // Only a genuine object-level 404 may be interpreted as an absent file.
+        var client = new AwsS3CompatibleObjectClient((_, _) =>
+            Task.FromException<GetObjectResponse>(new AmazonS3Exception("synthetic missing object")
+            {
+                StatusCode = HttpStatusCode.NotFound,
+                ErrorCode = "NoSuchKey",
+            }));
+        var logger = new RecordingLogger();
+        using var service = CreateService(client, logger);
+
+        Assert.Null(await service.OpenReadAsync("private/missing.pdf"));
+        Assert.Empty(logger.Messages);
+    }
+
+    [Theory]
+    [InlineData(HttpStatusCode.NotFound, "NoSuchBucket", "s3_response")]
+    [InlineData(HttpStatusCode.Forbidden, "NoSuchKey", "s3_auth_or_permission")]
+    [InlineData(HttpStatusCode.ServiceUnavailable, "NoSuchKey", "s3_service_error")]
+    public async Task Non_object_s3_get_failures_cannot_be_reported_as_missing_private_files(
+        HttpStatusCode upstreamStatus, string upstreamErrorCode, string expectedFailureClass)
+    {
+        // A missing bucket, permission denial or provider outage must not be
+        // transformed into "file not found" even when the upstream code is misleading.
+        const string privateMarker = "synthetic-private-file-name-DO-NOT-LOG";
+        var client = new AwsS3CompatibleObjectClient((_, _) =>
+            Task.FromException<GetObjectResponse>(new AmazonS3Exception($"synthetic {privateMarker}")
+            {
+                StatusCode = upstreamStatus,
+                ErrorCode = upstreamErrorCode,
+            }));
+        var logger = new RecordingLogger();
+        using var service = CreateService(client, logger);
+
+        await Assert.ThrowsAsync<FileStorageOperationException>(
+            () => service.OpenReadAsync($"private/{privateMarker}.pdf"));
+
+        Assert.Contains(logger.Messages, message =>
+            message.Contains("Operation=get", StringComparison.Ordinal) &&
+            message.Contains($"FailureClass={expectedFailureClass}", StringComparison.Ordinal));
+        Assert.DoesNotContain(logger.Messages,
+            message => message.Contains(privateMarker, StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task Successful_get_with_null_response_stream_fails_closed_instead_of_hiding_private_file()
+    {
+        // A malformed successful response is not equivalent to the S3 object
+        // returning a verified 404. This test uses an entirely fake GET.
+        var client = new AwsS3CompatibleObjectClient(
+            (_, _) => Task.FromResult(new GetObjectResponse { ResponseStream = null! }));
+        var logger = new RecordingLogger();
+        using var service = CreateService(client, logger);
+
+        await Assert.ThrowsAsync<FileStorageOperationException>(
+            () => service.OpenReadAsync("private/sensitive-filename.pdf"));
+
+        Assert.Contains(logger.Messages, message =>
+            message.Contains("Operation=get", StringComparison.Ordinal) &&
+            message.Contains("ErrorType=InvalidDataException", StringComparison.Ordinal));
+        Assert.DoesNotContain(logger.Messages, message =>
+            message.Contains("sensitive-filename.pdf", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public async Task Pdf_extraction_succeeds_from_a_non_seekable_s3_response_after_buffering()
     {
         var client = new AwsS3CompatibleObjectClient((_, _) => Task.FromResult(new GetObjectResponse
@@ -170,11 +236,62 @@ public sealed class S3CompatibleStorageTests
         Assert.DoesNotContain("taslim-secret", exception.Message, StringComparison.Ordinal);
         Assert.Contains(logger.Messages, message => message.Contains("Operation=put", StringComparison.Ordinal));
         Assert.Contains(logger.Messages, message => message.Contains("StatusCode=403", StringComparison.Ordinal));
-        Assert.Contains(logger.Messages, message => message.Contains("ErrorCode=AccessDenied", StringComparison.Ordinal));
+        Assert.Contains(logger.Messages, message => message.Contains("FailureClass=s3_auth_or_permission", StringComparison.Ordinal));
         Assert.Contains(logger.Messages, message => message.Contains("ErrorType=AmazonS3Exception", StringComparison.Ordinal));
-        Assert.Contains(logger.Messages, message => message.Contains("RequestId=r2-request-123", StringComparison.Ordinal));
+        Assert.Contains(logger.Messages, message => message.Contains("HasRequestId=True", StringComparison.Ordinal));
+        Assert.DoesNotContain(logger.Messages, message => message.Contains("ErrorCode=", StringComparison.Ordinal));
+        Assert.DoesNotContain(logger.Messages, message => message.Contains("RequestId=r2-request-123", StringComparison.Ordinal));
         Assert.DoesNotContain(logger.Messages, message => message.Contains("r2-secret-value", StringComparison.Ordinal));
         Assert.DoesNotContain(logger.Messages, message => message.Contains("taslim-secret", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task Pdf_upload_retries_after_s3_put_failure_without_exposing_a_failed_object()
+    {
+        // Synthetic, in-memory S3 transport only: proves API failure/retry and
+        // private readback behavior, not live R2 connectivity or credentials.
+        const string marker = "S3_PDF_RETRY_EXTRACTION_MARKER";
+        var objectClient = new FakeObjectClient { FailNextPuts = 1 };
+        using var storage = CreateService(objectClient);
+        using var factory = new StorageProviderFactory(new Dictionary<string, string?>
+        {
+            ["Files:StorageProvider"] = "S3Compatible",
+        }, storage);
+        EnsureDatabase(factory);
+        using var http = factory.CreateClient();
+        var auth = await Register(http, "Synthetic PDF PUT recovery");
+        var pdf = CreatePdf(marker);
+
+        using var rejected = await UploadPdf(http, auth.PersonalWorkspace.Id, "private-report.pdf", pdf);
+        var error = await rejected.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, rejected.StatusCode);
+        Assert.Equal("FILE_STORAGE_OPERATION_FAILED", error.GetProperty("error").GetProperty("code").GetString());
+        Assert.DoesNotContain(marker, await rejected.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+
+        using var accepted = await UploadPdf(http, auth.PersonalWorkspace.Id, "private-report.pdf", pdf);
+        Assert.True(accepted.IsSuccessStatusCode, await accepted.Content.ReadAsStringAsync());
+
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        var records = await db.StoredFiles.AsNoTracking().ToListAsync();
+        var failed = Assert.Single(records.Where(f => f.Status == StoredFileStatus.Failed));
+        var ready = Assert.Single(records.Where(f => f.Status == StoredFileStatus.Ready));
+        Assert.Equal(auth.PersonalWorkspace.Id, failed.WorkspaceId);
+        Assert.Equal(auth.PersonalWorkspace.Id, ready.WorkspaceId);
+        Assert.Equal(FileStorageProviders.S3Compatible, ready.StorageProvider);
+        Assert.Equal(pdf.Length, ready.SizeBytes);
+        Assert.Contains(marker, ready.ExtractedText ?? string.Empty, StringComparison.Ordinal);
+        Assert.Equal(failed.StorageKey, objectClient.LastDelete?.Key);
+        Assert.False(await storage.ExistsAsync(failed.StorageKey));
+
+        await using var readback = await storage.OpenReadAsync(ready.StorageKey);
+        Assert.NotNull(readback);
+        using var copied = new MemoryStream();
+        await readback!.CopyToAsync(copied);
+        Assert.Equal(pdf, copied.ToArray());
+        Assert.Equal(("taslim-private", ready.StorageKey), objectClient.LastPut);
+        Assert.Empty(await db.GenerationJobs.AsNoTracking().ToListAsync());
+        Assert.Empty(await db.UsageTransactions.AsNoTracking().ToListAsync());
     }
 
     [Fact]
@@ -379,6 +496,18 @@ public sealed class S3CompatibleStorageTests
         return await client.SendAsync(request);
     }
 
+    private static async Task<HttpResponseMessage> UploadPdf(HttpClient client, Guid workspaceId, string fileName, byte[] pdf)
+    {
+        var csrf = await client.GetFromJsonAsync<JsonElement>("/api/auth/csrf");
+        using var form = new MultipartFormDataContent();
+        var body = new ByteArrayContent(pdf);
+        body.Headers.ContentType = new MediaTypeHeaderValue("application/pdf");
+        form.Add(body, "file", fileName);
+        using var request = new HttpRequestMessage(HttpMethod.Post, $"/api/workspaces/{workspaceId}/files") { Content = form };
+        request.Headers.Add("X-CSRF-TOKEN", csrf.GetProperty("token").GetString()!);
+        return await client.SendAsync(request);
+    }
+
     private static async Task<HttpResponseMessage> SendWithCsrf(HttpClient client, HttpMethod method, string path, object payload)
     {
         var csrf = await client.GetFromJsonAsync<JsonElement>("/api/auth/csrf");
@@ -410,9 +539,18 @@ public sealed class S3CompatibleStorageTests
         public (string Bucket, string Key)? LastPut { get; private set; }
         public (string Bucket, string Key)? LastDelete { get; private set; }
         public Exception? Failure { get; init; }
+        public int FailNextPuts { get; set; }
 
         public async Task PutAsync(string bucket, string key, Stream content, CancellationToken cancellationToken = default)
         {
+            if (FailNextPuts > 0)
+            {
+                FailNextPuts--;
+                throw new AmazonS3Exception("synthetic transient storage failure")
+                {
+                    StatusCode = HttpStatusCode.ServiceUnavailable,
+                };
+            }
             ThrowIfConfigured();
             using var buffer = new MemoryStream();
             await content.CopyToAsync(buffer, cancellationToken);
