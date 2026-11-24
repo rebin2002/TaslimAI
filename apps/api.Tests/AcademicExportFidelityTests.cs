@@ -371,11 +371,12 @@ public sealed class AcademicExportFidelityTests : IClassFixture<TaslimApiFactory
         Assert.Contains("Spacing effects survived the follow-up.", text, StringComparison.Ordinal);
         Assert.Contains("First numbered finding.", text, StringComparison.Ordinal);
         Assert.Contains("Third numbered finding.", text, StringComparison.Ordinal);
-        // The table: caption, cells, and the citations that trail it.
+        // The table: caption with its own citations attached (the same append shape a paragraph
+        // citation uses), plus the cells. The ids may no longer be separable from the caption.
         Assert.Contains("Table 1. Workload against revision depth.", text, StringComparison.Ordinal);
         Assert.Contains("Weighted load", text, StringComparison.Ordinal);
         Assert.Contains("Shallow", text, StringComparison.Ordinal);
-        Assert.Contains("Sources:", text, StringComparison.Ordinal);
+        Assert.Contains("Table 1. Workload against revision depth. [S1] [S3]", text, StringComparison.Ordinal);
         // Paragraph citation distinct from table citation, both present.
         Assert.Contains("[S2]", text, StringComparison.Ordinal);
         Assert.Contains("[S1]", text, StringComparison.Ordinal);
@@ -414,13 +415,13 @@ public sealed class AcademicExportFidelityTests : IClassFixture<TaslimApiFactory
         Assert.Contains("First numbered finding.", flat, StringComparison.Ordinal);
         Assert.Contains("Second numbered finding.", flat, StringComparison.Ordinal);
         Assert.Contains("Third numbered finding.", flat, StringComparison.Ordinal);
-        // Table caption, cells and the trailing citations.
+        // Table caption carrying its citations, and the cells.
         Assert.Contains("Table 1. Workload against revision depth.", flat, StringComparison.Ordinal);
         Assert.Contains("Weighted load", flat, StringComparison.Ordinal);
         Assert.Contains("Shallow", flat, StringComparison.Ordinal);
-        Assert.Contains("Sources: [S1] [S3]", flat, StringComparison.Ordinal);
+        Assert.Contains("Table 1. Workload against revision depth. [S1] [S3]", flat, StringComparison.Ordinal);
         // Access honesty in the bibliography.
-        Assert.Contains("Search result only", flat, StringComparison.Ordinal);
+        Assert.Contains("Search-result summary only", flat, StringComparison.Ordinal);
         Assert.Contains("Catalogue record only", flat, StringComparison.Ordinal);
     }
 
@@ -474,5 +475,44 @@ public sealed class AcademicExportFidelityTests : IClassFixture<TaslimApiFactory
         Assert.False(rows[0].GetProperty("fullTextAccessed").GetBoolean());
         Assert.Equal("full_text", rows[2].GetProperty("accessTier").GetString());
         Assert.True(rows[2].GetProperty("fullTextAccessed").GetBoolean());
+    }
+
+    [Fact]
+    public void Tightening_the_access_claim_does_not_move_the_content_identity()
+    {
+        // The no-charge re-export rule compares a stored snapshot hash against the hash of the report
+        // as it is read now. Making "content accessed" mean what it should mean (a snippet the search
+        // surface printed is not access to the work) flips that boolean for ordinary saved reports — and
+        // if the identity read the boolean, every report exported before the change would look like
+        // changed content afterwards and lose its free re-render. The identity reads its own predicate.
+        var job = new GenerationJob
+        {
+            Id = Guid.Parse("3f6a1c2d-5b4e-4a97-9d31-2f7c8b1a4e60"),
+            WorkspaceId = Guid.Parse("1a2b3c4d-5e6f-4a0b-8c9d-0e1f2a3b4c5d"),
+            CreatedByUserId = Guid.Parse("9f8e7d6c-5b4a-4321-8765-43210fedcba9"),
+            JobType = "research.generate",
+            Status = GenerationJobStatus.Succeeded,
+            InputJson = "{}",
+            ResultJson = "{\"title\":\"Identity\"}",
+            CreatedAt = new DateTime(2026, 11, 24, 0, 0, 0, DateTimeKind.Utc),
+        };
+        AcademicReportSourceRow Row(string tier, bool contentAccessed) => new(
+            "S1", "Sleep and memory", "Journal of Sleep", "https://example.org/a", "2024",
+            "web", contentAccessed, tier, contentAccessed && tier == "full_text", tier == "metadata_only" ? string.Empty : "note");
+
+        var honest = Row("search_result_only", contentAccessed: false);
+        var legacyFlag = Row("search_result_only", contentAccessed: true);
+        Assert.NotEqual(honest.ContentAccessed, legacyFlag.ContentAccessed);
+        Assert.True(AcademicSavedReportReader.HoldsAnyContent(honest));
+        Assert.Equal(
+            AcademicSavedReportReader.ComputeHash(job, new[] { honest }),
+            AcademicSavedReportReader.ComputeHash(job, new[] { legacyFlag }));
+
+        // The predicate is not a constant: holding nothing at all still reads differently, so the
+        // identity stays sensitive to real source changes.
+        Assert.False(AcademicSavedReportReader.HoldsAnyContent(Row("metadata_only", contentAccessed: false)));
+        Assert.NotEqual(
+            AcademicSavedReportReader.ComputeHash(job, new[] { honest }),
+            AcademicSavedReportReader.ComputeHash(job, new[] { Row("metadata_only", contentAccessed: false) }));
     }
 }

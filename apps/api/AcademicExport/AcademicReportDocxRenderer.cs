@@ -200,13 +200,16 @@ public static class AcademicReportDocxRenderer
                 {
                     // A table's own caption and its citations used to disappear whenever the row data
                     // was present, which is the normal case: the paragraph path rendered them, the
-                    // table path rendered neither. The caption leads the table and the citations trail
-                    // it, so the evidence a claim rests on stays visible with the claim.
-                    if (!string.IsNullOrWhiteSpace(block.Text))
-                        yield return Paragraph(WithCitations(block.Text, Array.Empty<string>()), null, spec);
+                    // table path rendered neither. A caption carries its ids in the same append shape a
+                    // paragraph uses, so the citation marker sits with the claim it supports instead of
+                    // floating below the grid; a caption-less table has nothing to append to, so its ids
+                    // become their own line directly after the grid.
+                    var hasCaption = !string.IsNullOrWhiteSpace(block.Text);
+                    if (hasCaption)
+                        yield return Paragraph(WithCitations(block.Text, block.CitationIds), null, spec);
                     yield return BuildTable(spec, tableRows);
-                    if (block.CitationIds.Count > 0)
-                        yield return Paragraph(WithCitations("Sources:", block.CitationIds), null, spec, italic: true);
+                    if (!hasCaption && block.CitationIds.Count > 0)
+                        yield return Paragraph(CitationMarkers(block.CitationIds), null, spec, italic: true);
                 }
                 else
                     yield return Paragraph(WithCitations(block.Text, block.CitationIds), null, spec);
@@ -225,6 +228,13 @@ public static class AcademicReportDocxRenderer
         => string.IsNullOrWhiteSpace(text) ? string.Empty
             : citations is null || citations.Count == 0 ? text
                 : $"{text.Trim()} {string.Join(' ', citations.Select(citation => $"[{citation}]"))}";
+
+    /// <summary>The bare "[S1] [S3]" markers, for content with no prose to append them to. Reused by
+    /// the PDF renderer so a table's citations read identically in both formats.</summary>
+    public static string CitationMarkers(IReadOnlyList<string>? citations)
+        => citations is null || citations.Count == 0
+            ? string.Empty
+            : string.Join(' ', citations.Select(citation => $"[{citation}]"));
 
     private static Paragraph TocField(AcademicDesignSpec spec)
     {

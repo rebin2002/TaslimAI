@@ -279,14 +279,18 @@ public static class AcademicReportPdfRenderer
                 RenderList(container, block, number => $"{number}. ", spec);
                 break;
             case "table" when block.Rows is { Count: > 0 } rows:
-                // Caption, grid and citation line are three children, so they need a column of their
-                // own: handing them to the single item this block was given made QuestPDF overwrite
-                // the earlier children, and a table with a caption threw outright.
+                // Caption, grid and citation line are separate children, so they need a column of
+                // their own: handing them to the single item this block was given made QuestPDF
+                // overwrite the earlier children, and a table with a caption threw outright.
+                // Same citation shape as the DOCX renderer: ids ride the caption when there is one,
+                // and become a line of their own below the grid when there is nothing to append to.
                 container.Column(tableBlock =>
                 {
                     tableBlock.Spacing((float)(spec.ParagraphAfterPt / 2));
-                    if (!string.IsNullOrWhiteSpace(block.Text))
-                        tableBlock.Item().Text(block.Text!);
+                    var hasCaption = !string.IsNullOrWhiteSpace(block.Text);
+                    var captioned = AcademicReportDocxRenderer.WithCitations(block.Text, block.CitationIds);
+                    if (hasCaption)
+                        tableBlock.Item().Text(captioned);
                     tableBlock.Item().Table(table =>
                     {
                         table.ColumnsDefinition(columns =>
@@ -303,8 +307,9 @@ public static class AcademicReportPdfRenderer
                             foreach (var cell in row)
                                 table.Cell().BorderTop(0.5f).BorderColor("#999999").Padding(4).Text(cell);
                     });
-                    if (block.CitationIds.Count > 0)
-                        tableBlock.Item().Text(AcademicReportDocxRenderer.WithCitations("Sources:", block.CitationIds)).Italic();
+                    var trailing = AcademicReportDocxRenderer.CitationMarkers(block.CitationIds);
+                    if (!hasCaption && trailing.Length > 0)
+                        tableBlock.Item().Text(trailing).Italic();
                 });
                 break;
             default:

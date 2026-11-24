@@ -15,11 +15,12 @@ public sealed record AcademicReportSourceRow(
     string? Url,
     string? PublishedYear,
     string SourceType,
-    /// <summary>True when the workspace holds anything at all from this source: an uploaded file,
-    /// extracted text, or the saved snippet/excerpt/evidence the search step recorded. A catalogue
-    /// record with metadata alone is never marked as accessed. This field deliberately says nothing
-    /// about HOW MUCH was held — <see cref="AccessTier"/> and <see cref="FullTextAccessed"/> carry
-    /// that claim, because a search-result snippet is not proof that anyone read the work.</summary>
+    /// <summary>True only when this workspace holds content drawn from the work itself: an uploaded
+    /// file, or passages extracted out of it. A snippet the search surface printed about the work, or
+    /// an evidence line saved beside it, is NOT this claim — those rows are "search_result_only" and
+    /// are counted with the metadata rows as not accessed. <see cref="AccessTier"/> states how much is
+    /// held, <see cref="FullTextAccessed"/> whether the document itself is, and neither is derivable
+    /// from the other two.</summary>
     bool ContentAccessed,
     /// <summary>"full_text" | "extracted_text" | "search_result_only" | "metadata_only": how much of
     /// this source this workspace actually holds, stated separately from <see cref="ContentAccessed"/>
@@ -104,7 +105,7 @@ public sealed class AcademicSavedReport
             "لم يُكمل الطالب هذا البيان. تقتضي السياسة الأكاديمية عادةً وصف مواضع استخدام أدوات الذكاء الاصطناعي وكيفية استخدامها قبل التقديم.",
             "ملاحظة النزاهة الأكاديمية: المراجع المعلَّمة بـ«سجل فهرسة فقط» حُددت من بيانات الفهرسة، والمعلَّمة بـ«نتيجة بحث فقط» لا تتجاوز سطراً من نتائج البحث، والمعلَّمة بـ«نص مستخرَج» تحتفظ بمقاطع دون المستند كاملًا؛ وفي جميع هذه الحالات لم يُطَّلع على النص الكامل داخل مساحة العمل هذه. تُعيد هذه الوثيقة عرض تقرير بحثي محفوظ، وهي لا تحتوي على أي مخرجات توليدية جديدة.",
             "سجل فهرسة فقط — لم يتم الوصول إلى النص الكامل عبر مساحة العمل هذه.",
-            "نتيجة بحث فقط — لم يتم الوصول إلى النص الكامل عبر مساحة العمل هذه.",
+            "ملخص نتيجة البحث فقط — لم يُطَّلع على النص الكامل للمقال داخل مساحة العمل هذه.",
             "نص مستخرَج — مقاطع محفوظة هنا، وليس المستند كاملًا.",
             "الملخص التنفيذي",
             "الخاتمة",
@@ -116,7 +117,7 @@ public sealed class AcademicSavedReport
             "قوتابی ئەم ڕاگەیاندنەی تەواو نەکردووە. سیاسەتی ئەکادیمی بە شێوەیەکی ئاسایی داوا دەکات پێش پێشکەشکردن باس لە شوێن و شێوازی بەکارهێنانی ئامرازەکانی زیرەکی دەستکرد بکرێت.",
             "تێبینی ڕێزپارێزی ئەکادیمی: سەرچاوە پێناسکراوەکان بە «تۆماری کەتەلۆگ تەنها» لە زانیاری کەتەلۆگەوە دیاری کراون، ئەوانەی بە «دەرەنجامی گەڕان تەنها» تەنها دێڕێک لە ئەنجامەکانی گەڕانن، و ئەوانەی بە «دەقی وەرگیراو» بەشێک لەم شوێنە کارکردنەدا هەڵگیراوە نەک بەڵگەکە بەتەواوی؛ لە هیچ یەکێک لەم کاتانەدا دەقی تەواو لەم شوێنە کارکردنەدا نەخوێندراوەتەوە. ئەم بەڵگەیە دووبارە ڕووکارکردنەوەی توێژینەوەی پاشەکەوتکراوە و هیچ ناوەڕۆکی نوێی لێ دروست نەکراوە.",
             "تۆماری کەتەلۆگ تەنها — دەقی تەواوی لەم شوێنە کارکردنەدا بەردەست نەبوو.",
-            "دەرەنجامی گەڕان تەنها — دەقی تەواوی لەم شوێنە کارکردنەدا نەخوێندراوەتەوە.",
+            "پوختەی دەرەنجامی گەڕان تەنها — دەقی تەواوی وتارەکە لەم شوێنە کارکردنەدا نەخوێندراوەتەوە.",
             "دەقی وەرگیراو — بەشێک لەم شوێنە کارکردنەدا هەڵگیراوە، نەک بەڵگەکە بەتەواوی.",
             "پوختەی جێبەجێکردن",
             "ئەنجام",
@@ -126,9 +127,9 @@ public sealed class AcademicSavedReport
             "References",
             "Statement of Generative-AI Use",
             "The student has not completed this disclosure. Academic policy normally requires describing where and how generative AI tools were used before submission.",
-            "Research integrity note: entries marked \"catalogue record only\" were identified from catalogue metadata, entries marked \"search result only\" are backed by no more than a line from the search results, and entries marked \"extracted text\" hold saved passages rather than the document itself; in none of those cases was the full text read in this workspace. This document re-renders a saved research report and contains no newly generated content.",
+            "Research integrity note: entries marked \"catalogue record only\" were identified from catalogue metadata, entries marked \"search-result summary only\" are backed by no more than a line the search surface printed, and entries marked \"extracted text\" hold saved passages rather than the document itself; in none of those cases was the full text read in this workspace. This document re-renders a saved research report and contains no newly generated content.",
             "Catalogue record only — the full text was not accessed in this workspace.",
-            "Search result only — this workspace holds a snippet from the search results, not the document.",
+            "Search-result summary only — the full text of the article itself was not accessed in this workspace.",
             "Extracted text — saved passages held here; the full document was not.",
             "Executive summary",
             "Conclusion",
@@ -329,10 +330,13 @@ public static class AcademicSavedReportReader
                 source.Url ?? source.CanonicalUrl,
                 source.PublishedAt?.ToString("yyyy", CultureInfo.InvariantCulture),
                 source.SourceType,
-                // The stored boolean keeps its old meaning (some content of any kind is held here), so
-                // the canonical content hash — and with it the free re-export rule — does not move out
-                // from under reports already exported. The honesty is carried by the tier and the note.
-                uploaded || extracted || excerptOnly,
+                // Honest claim, per the review: a line of text the search surface printed about a work
+                // is not evidence that anyone in this workspace accessed the work. Only content drawn
+                // from the document itself — the uploaded file, or passages extracted from it — counts.
+                // The content identity behind the no-charge re-export rule deliberately does not read
+                // this field (see HoldsAnyContent), so tightening the claim here cannot retroactively
+                // move the identity of already-exported reports and take away a free re-render.
+                uploaded || extracted,
                 tier,
                 uploaded,
                 note);
@@ -344,7 +348,7 @@ public static class AcademicSavedReportReader
     /// (it is immutable once a job succeeds) plus the persisted per-source facts the bibliography and
     /// the honesty notes depend on. Same job + same sources ⇒ same hash, in any process.
     /// </summary>
-    private static string ComputeHash(GenerationJob job, IReadOnlyList<AcademicReportSourceRow> sources)
+    internal static string ComputeHash(GenerationJob job, IReadOnlyList<AcademicReportSourceRow> sources)
     {
         var canonical = new StringBuilder();
         canonical.Append(job.Id.ToString("N")).Append('\u001f');
@@ -357,9 +361,22 @@ public static class AcademicSavedReportReader
                 .Append(source.SourceType).Append('|')
                 .Append(source.Url ?? string.Empty).Append('|')
                 .Append(source.PublishedYear ?? string.Empty).Append('|')
-                .Append(source.ContentAccessed ? "1" : "0")
+                .Append(HoldsAnyContent(source) ? "1" : "0")
                 .Append('\u001f');
         }
         return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(canonical.ToString()))).ToLowerInvariant();
     }
+
+    /// <summary>
+    /// Hash input only: the wide, wording-independent predicate — does this workspace hold anything at
+    /// all from this source. "metadata_only" is the one tier that means nothing is held, which is
+    /// exactly what the stored boolean asserted before the access claim was tightened. Reading the
+    /// tightened field here instead would move the content identity of every report exported before it
+    /// that has a snippet row, re-classifying a re-render as changed content and taking back an export
+    /// the no-charge policy had already promised.
+    /// </summary>
+    internal static bool HoldsAnyContent(AcademicReportSourceRow source)
+        => string.IsNullOrEmpty(source.AccessTier)
+            ? source.ContentAccessed || source.FullTextAccessed
+            : !string.Equals(source.AccessTier, "metadata_only", StringComparison.Ordinal);
 }
