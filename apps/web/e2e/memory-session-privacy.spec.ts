@@ -1,4 +1,4 @@
-import { test, expect } from "@playwright/test";
+import { test, expect, registerInUi } from "./fixtures";
 
 const workspaceA = "11111111-1111-4111-8111-111111111111";
 const workspaceB = "22222222-2222-4222-8222-222222222222";
@@ -47,9 +47,20 @@ function syntheticMemory(workspaceId: string, id: string, content: string) {
   }];
 }
 
-test("revalidates private memories after a cross-tab account switch", async ({ browser }) => {
+test("revalidates private memories after a cross-tab account switch", async ({ browser, testUser }) => {
   const context = await browser.newContext();
   let currentSession = sessionA;
+
+  // /account/memory now carries a server-side session gate, which validates the
+  // auth cookie against the real API before any markup is rendered. A
+  // browser-level route handler cannot satisfy that hop, so seed a genuine
+  // session into this context first and close the seeding tab; the stubs below
+  // keep owning the client-side identity and the memory rows exactly as before,
+  // and every assertion in this test is unchanged. Same idiom as
+  // presentation-revoked-session.spec.ts: real session, synthetic payloads.
+  const seeder = await context.newPage();
+  await registerInUi(seeder, testUser);
+  await seeder.close();
 
   await context.route("**/api/**", async (route) => {
     const url = new URL(route.request().url());
