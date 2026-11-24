@@ -63,15 +63,27 @@ internal static class StorageReadbackFaults
     /// category. The whole chain is inspected rather than only the outer
     /// exception because the SDK can wrap a transport failure inside a client
     /// or service exception.
+    ///
+    /// Cancellation takes precedence over every fault category across the
+    /// whole chain, not just as the outermost type. The AWS SDK client layer
+    /// reports an aborted request as an AmazonClientException and the HTTP
+    /// transport layer as an IOException, each carrying the original
+    /// OperationCanceledException as the inner exception. Recognizing those
+    /// wrappers by their outer type first would re-map a caller cancellation
+    /// to a content-unavailable fault and record the wrong terminal state and
+    /// a spurious cost anomaly for a request the user cancelled. A genuine
+    /// provider fault never carries an OperationCanceledException in its
+    /// chain, so this precedence only re-routes cancellations.
     /// </summary>
     internal static FailureCategory Classify(Exception exception)
     {
+        if (IsCancellation(exception))
+            return FailureCategory.Cancelled;
+
         for (Exception? current = exception; current is not null; current = current.InnerException)
         {
             switch (current)
             {
-                case OperationCanceledException:
-                    return FailureCategory.Cancelled;
                 case FileStorageUnavailableException or FileStorageOperationException:
                     return FailureCategory.StorageOperation;
                 case AmazonS3Exception:
@@ -93,6 +105,55 @@ internal static class StorageReadbackFaults
 
         return FailureCategory.Unexpected;
     }
+
+    /// <summary>
+    /// True when an OperationCanceledException appears anywhere in the
+    /// exception chain, including the SDK-style case where a client or
+    /// transport exception wraps the cancellation as an inner exception.
+    /// </summary>
+    internal static bool IsCancellation(Exception exception) => FindCancellation(exception) is not null;
+
+    /// <summary>
+    /// Returns the first OperationCanceledException in the chain, or null.
+    /// Callers re-throw this inner instance instead of the wrapper so the
+    /// cancellation propagates without the provider wrapper text that
+    /// incident #459 requires to stay out of logs and responses.
+    /// </summary>
+    internal static OperationCanceledException? FindCancellation(Exception exception)
+    {
+        for (Exception? current = exception; current is not null; current = current.InnerException)
+        {
+            if (current is OperationCanceledException cancellation)
+                return cancellation;
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// Hard ceiling for a single attachment readback. Recorded object sizes are
+    /// data, not authority: a row migrated or corrupted above the legacy
+    /// upload-era validation still cannot drive an unbounded in-memory read.
+    /// Sized above every configured limit ever shipped for chat attachments so
+    /// legitimate legacy objects stay readable.
+    /// </summary>
+    internal const long AbsoluteReadbackCeilingBytes = 256L * 1024 * 1024;
+
+    /// <summary>
+    /// Resolves the readback size bound for a stored object.
+    ///
+    /// Legacy-object policy: the recorded SizeBytes was validated against the
+    /// limit in force at upload time (FileValidationService). Lowering the
+    /// configured maximum afterwards must not silently orphan objects that
+    /// were lawful when stored, so the bound honors the larger of the current
+    /// configuration and the recorded size. The recorded size is metadata,
+    /// however, not a trusted authority, so the pair is additionally clamped
+    /// to <see cref="AbsoluteReadbackCeilingBytes"/>; an object reported above
+    /// that ceiling fails closed through the bounded reader's
+    /// InvalidDataException into the content-unavailable contract.
+    /// </summary>
+    internal static long ResolveReadbackBound(long configuredMaxBytes, long recordedSizeBytes) =>
+        Math.Min(AbsoluteReadbackCeilingBytes, Math.Max(configuredMaxBytes, Math.Max(0L, recordedSizeBytes)));
 
     /// <summary>
     /// Reads a stored object into memory under an explicit ceiling and fails

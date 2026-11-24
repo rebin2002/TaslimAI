@@ -638,7 +638,11 @@ public sealed class ChatController(
                 using var readbackTimeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
                 readbackTimeout.CancelAfter(fileOptions.Value.StorageOperationTimeout);
                 var readbackToken = readbackTimeout.Token;
-                var readbackBound = Math.Max(fileOptions.Value.MaxFileSizeBytes, file.SizeBytes);
+                // Legacy objects stored under an earlier, larger limit stay
+                // readable at their recorded size, but the recorded size is
+                // data rather than authority, so the bound is additionally
+                // clamped to a concrete absolute ceiling.
+                var readbackBound = StorageReadbackFaults.ResolveReadbackBound(fileOptions.Value.MaxFileSizeBytes, file.SizeBytes);
                 try
                 {
                     await using var stream = await fileStorage.OpenReadAsync(file.StorageKey, readbackToken) ?? throw new FileContentUnavailableException();
@@ -647,11 +651,40 @@ public sealed class ChatController(
                         throw new InvalidDataException("Stored attachment content did not match its recorded size.");
                     dataUrl = $"data:{file.ContentType};base64,{Convert.ToBase64String(bytes)}";
                 }
-                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested || !readbackTimeout.IsCancellationRequested)
+                catch (Exception exception) when (StorageReadbackFaults.Classify(exception) == StorageReadbackFaults.FailureCategory.Cancelled)
                 {
-                    throw;
+                    // Cancellation must survive the readback as cancellation, even
+                    // when the SDK reports an aborted request through a client or
+                    // transport wrapper around the original cancellation.
+                    if (exception is OperationCanceledException)
+                    {
+                        // Raw cancellation: caller aborts and storage-side timeouts
+                        // are distinguished exactly as before.
+                        if (cancellationToken.IsCancellationRequested || !readbackTimeout.IsCancellationRequested)
+                            throw;
+                    }
+                    else if (cancellationToken.IsCancellationRequested)
+                    {
+                        // Wrapped caller cancellation: propagate the unwrapped
+                        // cancellation so request finalization records the user
+                        // cancel path, and the provider wrapper text required to
+                        // stay private by incident #459 never reaches logs.
+                        throw StorageReadbackFaults.FindCancellation(exception)!;
+                    }
+                    // Otherwise the linked timeout token alone was the source of the
+                    // cancellation (for example the SDK surfacing its own abort), which
+                    // is a readback fault and falls on the content contract below.
+                    logger.LogWarning(
+                        "Chat attachment readback failed. ConversationId={ConversationId}; MessageId={MessageId}; FileId={FileId}; StorageProvider={StorageProvider}; FailureClass={FailureClass}; TimeoutSeconds={TimeoutSeconds}",
+                        conversation.Id,
+                        currentMessageId,
+                        file.StoredFileId,
+                        fileStorage.ProviderKey,
+                        "timeout",
+                        fileOptions.Value.StorageOperationTimeout.TotalSeconds);
+                    throw new FileContentUnavailableException();
                 }
-                catch (Exception exception) when (exception is OperationCanceledException || StorageReadbackFaults.IsReadbackFault(exception))
+                catch (Exception exception) when (StorageReadbackFaults.IsReadbackFault(exception))
                 {
                     logger.LogWarning(
                         "Chat attachment readback failed. ConversationId={ConversationId}; MessageId={MessageId}; FileId={FileId}; StorageProvider={StorageProvider}; FailureClass={FailureClass}; TimeoutSeconds={TimeoutSeconds}",
@@ -659,7 +692,7 @@ public sealed class ChatController(
                         currentMessageId,
                         file.StoredFileId,
                         fileStorage.ProviderKey,
-                        exception is OperationCanceledException ? "timeout" : StorageReadbackFaults.Classify(exception).ToString("G").ToLowerInvariant(),
+                        StorageReadbackFaults.Classify(exception).ToString("G").ToLowerInvariant(),
                         fileOptions.Value.StorageOperationTimeout.TotalSeconds);
                     throw new FileContentUnavailableException();
                 }
