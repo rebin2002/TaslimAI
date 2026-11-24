@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { ArrowUpRight, Check, Compass, DoorOpen, Image as ImageIcon, LockKeyhole, MapPin, Package, Pencil, Plus, Route, Save, ShieldCheck, Sparkles, Sun, Theater } from "lucide-react";
 import { useLocale } from "@/components/LocaleProvider";
 import { api, type MovieLocation, type MovieLocationGeographyEntry, type MovieLocationGeographyOpening, type MovieLocationGeographyPath, type MovieLocationGeographySheet, type MovieProp, type MovieSet, type MovieWorldAsset, type MovieWorldReference, type MovieWorldWorkspace as WorldData } from "@/lib/api";
@@ -54,6 +54,13 @@ function assetLabel(assetId: string | null | undefined, assets: MovieWorldAsset[
 
 export function MovieWorldWorkspace({ projectId }: { projectId: string }) {
   const { t } = useLocale();
+  // Round-20 review fence: one token object is minted per project (re)load by the effect below.
+  // Continuations of requests that started under an older token (a save() or saveReference() that
+  // is still in flight when the user switches to another movie project) compare against it and
+  // drop their success/error/finally writes instead of stamping the previous project's records,
+  // selection, edit flags, or errors into the newly loaded project. The API call itself keeps the
+  // originating projectId argument - only the state application is fenced.
+  const worldLoadRef = useRef({ projectId, generation: 0 });
   const [data, setData] = useState<WorldData | null>(null);
   const [room, setRoom] = useState<Room>("locations");
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -68,6 +75,7 @@ export function MovieWorldWorkspace({ projectId }: { projectId: string }) {
   const [error, setError] = useState("");
 
   useEffect(() => {
+    worldLoadRef.current = { projectId, generation: worldLoadRef.current.generation + 1 };
     let mounted = true;
     void api.getMovieWorld(projectId).then((result) => {
       if (!mounted) return;
@@ -114,6 +122,8 @@ export function MovieWorldWorkspace({ projectId }: { projectId: string }) {
 
   async function save() {
     if (!data || !form.name.trim() || !form.description.trim()) return;
+    const origin = worldLoadRef.current;
+    const stale = () => worldLoadRef.current !== origin;
     setSaving(true); setError("");
     try {
       const referenceAssetId = form.referenceAssetId.trim() || null;
@@ -123,6 +133,11 @@ export function MovieWorldWorkspace({ projectId }: { projectId: string }) {
           : room === "sets"
             ? await api.addMovieSet(projectId, { name: form.name, description: form.description, environmentType: form.environmentType, movieLocationId: form.movieLocationId || null, visualDescription: form.visualDescription || null, timeOfDay: form.timeOfDay || null, weather: form.weather || null, continuityNotes: form.continuityNotes || null, referenceAssetId })
             : await api.addMovieProp(projectId, { name: form.name, description: form.description, category: form.category || null, continuityNotes: form.continuityNotes || null, referenceAssetId });
+        // The create was answered after the user moved to another project: the durable write
+        // already happened server-side under the originating project, but appending its record
+        // (or stealing the selection/edit state) into whatever data is loaded now is the wrong
+        // project's view. Drop the frame; the next project's own load renders the truth.
+        if (stale()) return;
         setData((current) => current ? { ...current, world: { ...current.world, [room]: [...(current.world[room] as Entity[]), created] } } : current);
         setSelectedId(created.id); setCreating(false); setEditing(false);
       } else if (selected) {
@@ -131,22 +146,34 @@ export function MovieWorldWorkspace({ projectId }: { projectId: string }) {
           : room === "sets"
             ? await api.updateMovieSet(selected.id, { name: form.name, description: form.description, environmentType: form.environmentType, movieLocationId: form.movieLocationId || null, visualDescription: form.visualDescription || null, timeOfDay: form.timeOfDay || null, weather: form.weather || null, continuityNotes: form.continuityNotes || null, referenceAssetId })
             : await api.updateMovieProp(selected.id, { name: form.name, description: form.description, category: form.category || null, continuityNotes: form.continuityNotes || null, referenceAssetId });
+        if (stale()) return; // see the create arm above: never rewrites the newly loaded project
         setData((current) => current ? { ...current, world: { ...current.world, [room]: (current.world[room] as Entity[]).map((item) => item.id === updated.id ? updated : item) } } : current);
         setEditing(false);
       }
-    } catch (cause) { setError(cause instanceof Error ? cause.message : "The World record could not be saved."); }
-    finally { setSaving(false); }
+    } catch (cause) {
+      // A failure of the old project's request must not paint an error onto the new project.
+      if (!stale()) setError(cause instanceof Error ? cause.message : "The World record could not be saved.");
+    } finally {
+      // The new project may itself be mid-save; only the request that owned the spinner clears it.
+      if (!stale()) setSaving(false);
+    }
   }
 
   async function saveReference() {
     if (!data || !referenceName.trim()) return;
+    const origin = worldLoadRef.current;
+    const stale = () => worldLoadRef.current !== origin;
     setSaving(true); setError("");
     try {
       const reference = await api.addMovieWorldReference(projectId, { name: referenceName.trim(), kind: referenceKind, assetId: referenceAssetId || null });
+      if (stale()) return; // the reference belongs to the project we left, not the one now shown
       setData((current) => current ? { ...current, world: { ...current.world, references: [...current.world.references, reference] } } : current);
       setReferenceName(""); setReferenceAssetId(""); setAddingReference(false);
-    } catch (cause) { setError(cause instanceof Error ? cause.message : "The visual reference could not be registered."); }
-    finally { setSaving(false); }
+    } catch (cause) {
+      if (!stale()) setError(cause instanceof Error ? cause.message : "The visual reference could not be registered.");
+    } finally {
+      if (!stale()) setSaving(false);
+    }
   }
 
   if (!data || !isMovieWorldForProject(data, projectId)) return <div className="movie-world-loading"><span className="loading-spinner" /><p>{error || t("movieBody.loading")}</p></div>;
