@@ -48,6 +48,8 @@ public sealed class MovieStoryService(TaslimDbContext db, MovieCollaborationAcce
         await ValidateSceneLinksAsync(movieProjectId, request.Scenes, cancellationToken);
 
         var story = await db.MovieStories.Include(item => item.Revisions).SingleOrDefaultAsync(item => item.MovieProjectId == movieProjectId, cancellationToken);
+        if (request.ParentRevisionId.HasValue && (story is null || story.Revisions.All(item => item.Id != request.ParentRevisionId.Value)))
+            throw new MovieStoryValidationException("The parent revision must belong to this Movie Story.");
         var now = DateTime.UtcNow;
         if (story is null)
         {
