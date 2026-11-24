@@ -457,7 +457,7 @@ Nothing here duplicates or supersedes an existing owner. Deliberate non-goals:
 | --- | --- | --- |
 | **#1028** (open, `MERGEABLE`, base `0325c2d2`, 6 merges stale) | adds advisory `worker` (`required: false`) to the readiness document | this lane adds **no** check to `ReadinessAsync`, touches no `.cs`, and preserves the non-gating contract the PR depends on; the gate's `advisory-degraded` test pins it |
 | **#249** (open, `MERGEABLE`, base `d3fffca5`) | health rate limit: 2 concurrent and 30/min per client IP on `/health`, `/health/live`, `/health/ready`, `/readiness` | **live interaction, and the budget is per client IP - which matters for who it actually constrains.** The gate is operator-initiated, so it shares the *operator's* allowance: default retry 5s = 12/min per service, 24/min for the pair, with a distinct `throttled` verdict. Platform healthcheck probes come from Railway's own source address, not the operator's, so they do not consume the operator's budget - but they can exhaust **their own** if the interval is tight, which is why section 3.2 sets the API probe interval at 30s or above. CI smoke runs from GitHub runners, a third address. Three independent budgets, not one shared pool |
-| **#7141321366** (independent technical review of this PR's head) | found the identity gap and four unpinned classification edges; recommended the Web-then-API `/health/live` sequence | **accepted, and it changed this document.** Sections 2.1, 3.2 and 3.3 are the reconciliation. One point is refined rather than adopted: the review's item 4 treats platform probes, the operator gate and CI smoke as sharing one anonymous allowance, but the limit is keyed per client IP, so they contend separately - see the #249 row above. The review also classifies all four gaps as test-coverage only; two are live code defects at the shipped head, recorded in section 7 |
+| **#7141321366** (independent technical review of this PR's head) | found the identity gap and four unpinned classification edges; recommended the Web-then-API `/health/live` sequence | **accepted, and it changed this document.** Sections 2.1, 3.2 and 3.3 are the reconciliation. One point is refined rather than adopted: the review's item 4 treats platform probes, the operator gate and CI smoke as sharing one anonymous allowance, but the limit is keyed per client IP, so they contend separately - see the #249 row above. The review classifies all four gaps as test-coverage only; **three were also live false greens at the shipped head**, verified by running that head's script against the same responders, and one (MUT-D) is coverage-only exactly as reported - section 7.1 |
 | **#66** (open, **`CONFLICTING`**, base 2026-10-05) | bounds startup migration time via `Database:MigrationTimeoutSeconds` | **not duplicated.** Measurement B shows the window exists without migrations, so bounding migration time is necessary-but-not-sufficient; #66 also edits `Program.cs`, `README.md` and `docs/OPERATIONS_RUNBOOK.md`, so any ordering change here would collide with it |
 | #726, #284 | staging rollback contract tests, release-governance evidence | rollback steps in section 5 are the operational counterpart; no test-lane files touched |
 | #258, #461 | readiness redaction, provider failure status | untouched |
@@ -486,24 +486,34 @@ was touched.
   Web failing independently of a green API, a closed port reporting `no-upstream`,
   API-only operation, the 5s probe-interval default, and the usage guards.
 
-### 7.1 Two of the review's coverage gaps were live defects, not test gaps
+### 7.1 Three of the four review gaps were live false greens, not test gaps
 
-`7141321366` classifies all four gaps as surviving mutants. Two were also producing
-wrong verdicts at head `c0156e2e`, proven by running the *old* script and the *new*
-one side by side against the same adversarial responders:
+`7141321366` classifies all four gaps as surviving mutants - a statement about the
+*tests*. Three of them were also producing a wrong verdict at the shipped head
+`c0156e2e`, and one was not. Rather than reason about it from the source, the old
+script (`git show c0156e2e:...`) and the new one were run **side by side against the
+same loopback responders**:
 
-| Responder | Old script at `c0156e2e` | New script |
-| --- | --- | --- |
-| `gateway-502-json` - 502 from the proxy, body `{"service":"Taslim API","status":"ready"}` | `ready`, exit **0** | `conflict-5xx`, exit 1 |
-| `redirect-then-200` - 302 to a login page that answers 200 | followed it, `ready`, exit **0** | `redirect`, exit 1 |
-| `foreign-shape` - 200, correct shape, `"service":"Other API"` | `ready`, exit **0** | `foreign-service`, exit 1 |
-| `array-body` - 200, body is a JSON array | `probe-error`, exit 1, no diagnosis | `bad-body`, exit 1 |
-| `string-check` - 200, `checks: ["database"]` | `probe-error`, exit 1, no diagnosis | `bad-body`, exit 1 |
+| Responder | Old script at `c0156e2e` | New script | |
+| --- | --- | --- | --- |
+| 200, valid shape, `"service":"Not The Taslim API"` (MUT-E) | API `GREEN`, overall exit **0** | `foreign-service`, exit 1 | **live false green** |
+| 503 (or 502) whose own body says `service:"Taslim API", status:"ready"` (MUT-G) | API `GREEN`, overall exit **0** | `conflict-5xx`, exit 1 | **live false green** |
+| Web 302 `/` -> 200 sign-in page, API honest (MUT-F) | overall exit **0**, printed `PASS - readiness-gated cutover is clear for both services` | `redirect`, exit 1 | **live false green** |
+| `checks: []`, and an advisory-only `checks` list (MUT-D) | exit 1 (red) | exit 1 (red) | **coverage-only**, as the review said |
+| 502 with an HTML body | `no-upstream`, exit 1 | `no-upstream`, exit 1 | unchanged, correct |
+| 200 with a JSON *array* body, and `checks: ["database"]` | `probe-error`, exit 1, no diagnosis | `bad-body`, exit 1 | red-but-undiagnosed, fixed |
+
+So MUT-D is fairly reported as a coverage gap: an earlier draft merged the
+malformed-document and empty-check-set decisions into one guard
+(`if not checks or not required`), which made the shipped behaviour correct **by
+luck of the neighbouring clause** while leaving the `or not required` half unpinnable
+by any test. Removing that clause does not go green today; it would if the sibling
+clause ever moved, which is the actual fragility. The guards are now one decision each.
 
 The 3xx case was unreachable code: `probe()` passed `curl --location`, so a 302 was
 followed to its 200 destination before the classifier ever saw the redirect status.
 `--max-redirs 0` now makes the branch live. A Web service behind a sign-in redirect
-would have reported GREEN. That is why `redirect` is a verdict and not a note.
+would have printed the PASS line. That is why `redirect` is a verdict and not a note.
 
 Also corrected from this lane's own earlier work: `GATE_RETRY_SECONDS` shipped a
 default of `2` while its comment and the phase-1 release record both said `5`. Two
