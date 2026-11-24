@@ -45,6 +45,20 @@ public sealed class AcademicSourceConnectionPolicyTests
     [InlineData("2002:c000:204::1")]
     [InlineData("::ffff:127.0.0.1")]
     [InlineData("::ffff:169.254.169.254")]
+    // The rest of the special-use tail that IsIPv6LinkLocal does not flag: multicast/reserved
+    // ff00::/8 and unicast link-local fe00::/9 outside fe80::/10. A resolver that answers with
+    // any of these used to be pinned and dialled.
+    [InlineData("ff02::1")]
+    [InlineData("ff13::1")]
+    [InlineData("ffff::1")]
+    [InlineData("fe00::1")]
+    [InlineData("fe7f::1")]
+    // IPv4-compatible ::/96 spellings of non-public v4 space, including the metadata address.
+    [InlineData("::a9fe:a9fe")]
+    [InlineData("::7f00:1")]
+    [InlineData("::a00:1")]
+    [InlineData("::c000:201")]
+    [InlineData("::")]
     public async Task Allow_listed_hostname_that_rebinds_to_non_public_space_is_refused_before_connect(string answer)
     {
         var resolver = new AcademicFixture.StubResolver(answer);
@@ -72,6 +86,8 @@ public sealed class AcademicSourceConnectionPolicyTests
     [InlineData("104.16.1.2")]
     [InlineData("2606:4700:4700::1111")]
     [InlineData("2001:448:1234::5")]                          // academic IPv6 must not be false-blocked
+    [InlineData("::10a0:1")]                                   // ::/96 spelling of public 16.160.0.1
+    [InlineData("::d5c6:d6d7")]                                // ::/96 spelling of public 213.198.214.215
     public async Task Public_answers_are_pinned_to_the_address_that_was_validated(string answer)
     {
         var resolver = new AcademicFixture.StubResolver(answer);
@@ -125,6 +141,9 @@ public sealed class AcademicSourceConnectionPolicyTests
     [InlineData("127.0.0.1")]
     [InlineData("169.254.169.254")]
     [InlineData("[::ffff:127.0.0.1]")]
+    [InlineData("[ff02::1]")]
+    [InlineData("[fe00::1]")]
+    [InlineData("[::a9fe:a9fe]")]
     public async Task Ip_literals_are_classified_without_consulting_dns(string literal)
     {
         var resolver = new AcademicFixture.StubResolver("8.8.8.8");
