@@ -215,6 +215,49 @@ public sealed class GeneratedMediaSecurityTests
         await policy.EnsureSafeAsync(new Uri(value));
     }
 
+    // Alignment with the deployed academic guard (PR #1273) on the current main: the local-use
+    // IPv4-translatable prefix 64:ff9b:1::/48 (RFC 8215) is refused outright — on a network with
+    // a local translator it can name a non-public IPv4 destination that socket pinning alone
+    // cannot see through — and so are the embedded-private spellings of the well-known NAT64
+    // prefix, the SRv6 SID space 5f00::/16 (RFC 9602), the current documentation prefix
+    // 3fff::/20 (RFC 9637), and the rest of the IETF Protocol Assignments block 2001::/23 that
+    // the older 2001::/32-only rule missed (2001:1::/32 hosts PCP/TURN/DNS-SD allocations).
+    [Theory]
+    [InlineData("https://[64:ff9b:1::1]/media.mp3")]
+    [InlineData("https://[64:ff9b:1::8.8.8.8]/media.mp3")]
+    [InlineData("https://[64:ff9b::a9fe:a9fe]/media.mp3")]
+    [InlineData("https://[64:ff9b::7f00:1]/media.mp3")]
+    [InlineData("https://[64:ff9b::a00:1]/media.mp3")]
+    [InlineData("https://[5f00::1]/media.mp3")]
+    [InlineData("https://[3fff::1]/media.mp3")]
+    [InlineData("https://[2001:1::3]/media.mp3")]
+    public async Task Provider_url_policy_blocks_nat64_local_use_and_new_special_use_targets(string value)
+    {
+        var policy = new ProviderUrlPolicy();
+
+        await Assert.ThrowsAsync<InvalidDataException>(() => policy.EnsureSafeAsync(new Uri(value)));
+    }
+
+    // The aligned rules must keep legitimate DNS64 provider answers fetchable: on IPv6-only
+    // networks a public provider hostname synthesises 64:ff9b::<public v4> (RFC 6052 well-known
+    // prefix), so admission inherits the IPv4 rules on the embedded address instead of blanket-
+    // refusing the /96. Boundary rows mirror the academic classifier exactly (2001:448::/32 real
+    // provider space above the /23 — 2001:2::/48 benchmarking sits INSIDE the /23 and stays
+    // refused, as the academic comment itself lists), 3fff:1000:: above the /20, and 5f01::
+    // above the SRv6 /16.
+    [Theory]
+    [InlineData("https://[64:ff9b::808:808]/media.mp3")]
+    [InlineData("https://[64:ff9b::d0a0:1]/media.mp3")]
+    [InlineData("https://[2001:448::1]/media.mp3")]
+    [InlineData("https://[3fff:1000::1]/media.mp3")]
+    [InlineData("https://[5f01::1]/media.mp3")]
+    public async Task Provider_url_policy_allows_dns64_public_answers_and_boundaries(string value)
+    {
+        var policy = new ProviderUrlPolicy();
+
+        await policy.EnsureSafeAsync(new Uri(value));
+    }
+
     [Fact]
     public async Task Provider_url_policy_requires_https()
     {
@@ -678,6 +721,56 @@ public sealed class ProviderPinnedConnectionTests
         await policy.EnsureSafeAsync(new Uri("https://1.1.1.1/track.mp3"));
 
         Assert.Equal(0, resolver.CallCount);
+    }
+
+    // #1273 alignment, dial side: a DNS64 answer for a public provider hostname is admitted and
+    // the socket is pinned to the ORIGINAL synthesized v6 address (the embedded-IPv4 reduction
+    // decides admission only; it never swaps the dialed destination mid-connection).
+    [Fact]
+    public async Task Dns64_public_answer_admits_and_dials_the_original_v6_address()
+    {
+        var dns64 = IPAddress.Parse("64:ff9b::808:808");
+        var resolver = new QueueResolver(_ => new[] { dns64 });
+        var dialed = new List<(IPAddress Address, int Port)>();
+
+        await using var stream = await ProviderPinnedConnections.OpenConnectionAsync(
+            "provider.example.test", 443, resolver,
+            (address, port, token) =>
+            {
+                dialed.Add((address, port));
+                return ValueTask.FromResult<Stream>(new MemoryStream());
+            },
+            CancellationToken.None);
+
+        Assert.Equal(new[] { (dns64, 443) }, dialed);
+        Assert.Equal(System.Net.Sockets.AddressFamily.InterNetworkV6, dialed[0].Address.AddressFamily);
+        Assert.Equal(1, resolver.CallCount);
+    }
+
+    [Theory]
+    [InlineData("64:ff9b::a9fe:a9fe")]
+    [InlineData("64:ff9b::7f00:1")]
+    [InlineData("64:ff9b:1::1")]
+    [InlineData("5f00::dead:beef")]
+    [InlineData("3fff::dead:beef")]
+    [InlineData("2001:1::3")]
+    public async Task Special_use_or_embedded_private_resolver_answers_refuse_before_dialing(string candidate)
+    {
+        var resolver = new QueueResolver(_ => new[] { IPAddress.Parse(candidate) });
+        var dialed = false;
+
+        var error = await Assert.ThrowsAsync<InvalidDataException>(() =>
+            ProviderPinnedConnections.OpenConnectionAsync(
+                "provider.example.test", 443, resolver,
+                (address, port, token) =>
+                {
+                    dialed = true;
+                    return ValueTask.FromResult<Stream>(new MemoryStream());
+                },
+                CancellationToken.None));
+
+        Assert.Equal("Provider download target is not public.", error.Message);
+        Assert.False(dialed);
     }
 
     [Fact]

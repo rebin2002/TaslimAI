@@ -316,6 +316,37 @@ public sealed class ManusOutputRedirectCompatibilityTests
         Assert.Equal(new[] { "https://out.example.test/v.mp4" }, handler.Urls);
     }
 
+    // Full provider flow over the #1273-aligned classifier: a DNS64-spelled public output
+    // literal (the answer an IPv6-only deployment synthesises for a public provider CDN) must
+    // fetch, while the same prefix spelling embedded private/metadata space must be refused
+    // before anything is dialed.
+    [Fact]
+    public async Task RetrieveAsync_fetches_dns64_public_output_literal_end_to_end()
+    {
+        var handler = new RecordingHandler(_ => VideoBody());
+        var (provider, _) = Provider(handler);
+
+        var output = await provider.RetrieveAsync("task-1",
+            SucceededStatus("https://[64:ff9b::808:808]/v.mp4"), CancellationToken.None);
+        await using var stream = await output.OpenReadAsync(CancellationToken.None);
+        using var buffer = new MemoryStream();
+        await stream.CopyToAsync(buffer);
+
+        Assert.Equal("clip", Encoding.UTF8.GetString(buffer.ToArray()));
+        Assert.Equal(new[] { new Uri("https://[64:ff9b::808:808]/v.mp4").ToString() }, handler.Urls);
+    }
+
+    [Fact]
+    public async Task RetrieveAsync_refuses_nat64_metadata_spelled_output_literal()
+    {
+        var handler = new RecordingHandler(_ => VideoBody());
+        var (provider, _) = Provider(handler);
+
+        await Assert.ThrowsAsync<MovieVideoProviderOutputException>(() => provider.RetrieveAsync(
+            "task-1", SucceededStatus("https://[64:ff9b::a9fe:a9fe]/v.mp4"), CancellationToken.None));
+        Assert.Empty(handler.Urls);
+    }
+
     private static (ManusMovieVideoProvider Provider, List<string> Unused) Provider(RecordingHandler handler)
     {
         var policy = new ProviderUrlPolicy(new PublicAddressResolver());

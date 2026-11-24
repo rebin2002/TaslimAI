@@ -63,10 +63,17 @@ public sealed class ProviderUrlPolicy : IProviderUrlPolicy
             .ConfigureAwait(false);
     }
 
-    // True when the address must never be a fetch target. Kept byte-identical to the proven
-    // e9903fa8 predicate (special-use IPv4, the ::/96 and ::ffff:/96 embedded-IPv4 reductions,
-    // IPv6 unique-local/link-local/site-local/multicast/documentation/discard/6to4/Teredo/6bone,
-    // and a fail-closed family branch).
+    // True when the address must never be a fetch target. Semantically aligned with the
+    // independently reviewed, deployed academic guard (AcademicSourceUrlGuard.IsPubliclyRoutable
+    // as landed by PR #1273): special-use IPv4, the ::/96 and ::ffff:0:0/96 embedded-IPv4
+    // reductions, the well-known NAT64 prefix 64:ff9b::/96 (RFC 6052) reduced the same way so
+    // DNS64 answers for public IPv4 stay fetchable while embedded private/metadata space stays
+    // refused, the local-use IPv4-translatable prefix 64:ff9b:1::/48 (RFC 8215) refused outright,
+    // the IETF Protocol Assignments block 2001::/23, the current documentation prefix 3fff::/20
+    // (RFC 9637), the SRv6 SID space 5f00::/16 (RFC 9602), unique-local/link-local/site-local/
+    // multicast/documentation/discard/6to4/Teredo/6bone IPv6, and a fail-closed family branch.
+    // The reduction never swaps the dialed destination: callers pin the ORIGINAL validated
+    // address (the v6 literal or resolver answer), the embedded IPv4 only decides admission.
     internal static bool IsBlocked(IPAddress address)
     {
         // Fail closed: only a plain v4 or v6 endpoint can ever be a fetch target.
@@ -114,14 +121,26 @@ public sealed class ProviderUrlPolicy : IProviderUrlPolicy
         // (100::/64), 6to4 (2002::/16), Teredo (2001::/32) and legacy 6bone (3ffe::/16) are
         // not fetch targets. 6to4 carries an attacker-chosen v4 destination in bytes 2-5 and
         // is refused outright rather than reduced to whatever that embedded v4 looks like.
+        // NAT64 (aligned with #1273): the local-use prefix names only whatever the LOCAL
+        // domain's own translator resolves, so it is refused outright like 6to4. The
+        // well-known /96 is the DNS64 spelling of an IPv4 destination on IPv6-only networks:
+        // refusing it wholesale would break legitimate provider lookups, so admission
+        // inherits the IPv4 rules on the embedded last 32 bits (64:ff9b::a9fe:a9fe is the
+        // metadata address and stays refused; 64:ff9b::808:808 is public 8.8.8.8 and stays
+        // allowed). Socket pinning is unaffected — the original v6 address is what is dialed.
+        if (IsNat64LocalUse(bytes)) return true;
+        if (IsNat64WellKnown(bytes))
+            return IsBlocked(new IPAddress(new[] { bytes[12], bytes[13], bytes[14], bytes[15] }));
         return (bytes[0] & 0xFE) == 0xFC
             || (bytes[0] == 0xFE && (bytes[1] & 0xC0) == 0x80)
             || (bytes[0] == 0xFE && (bytes[1] & 0xC0) == 0xC0)
             || (bytes[0] == 0x01 && bytes[1] == 0x00 && bytes[2] == 0x00 && bytes[3] == 0x00)
             || (bytes[0] == 0x20 && bytes[1] == 0x02)
-            || (bytes[0] == 0x20 && bytes[1] == 0x01 && bytes[2] == 0x00 && bytes[3] == 0x00)
+            || (bytes[0] == 0x20 && bytes[1] == 0x01 && bytes[2] <= 0x01)
             || (bytes[0] == 0x20 && bytes[1] == 0x01 && bytes[2] == 0x0D && bytes[3] == 0xB8)
             || (bytes[0] == 0x3F && bytes[1] == 0xFE)
+            || (bytes[0] == 0x3F && bytes[1] == 0xFF && (bytes[2] & 0xF0) == 0)
+            || (bytes[0] == 0x5F && bytes[1] == 0x00)
             || bytes[0] >= 0xFC;
     }
 
@@ -137,6 +156,26 @@ public sealed class ProviderUrlPolicy : IProviderUrlPolicy
 
         return true;
     }
+
+    // True for the well-known NAT64 prefix 64:ff9b::/96 (RFC 6052): first 96 bits fixed,
+    // remaining 32 bits carry the DNS64-synthesised IPv4 destination. Only called with a
+    // 16-byte v6 address.
+    private static bool IsNat64WellKnown(byte[] bytes)
+    {
+        if (bytes[0] != 0x00 || bytes[1] != 0x64 || bytes[2] != 0xff || bytes[3] != 0x9b) return false;
+        for (var i = 4; i < 12; i++)
+        {
+            if (bytes[i] != 0) return false;
+        }
+
+        return true;
+    }
+
+    // True for 64:ff9b:1::/48, the local-use IPv4-translatable prefix (RFC 8215). Disjoint
+    // from the well-known /96 above (its third group is 0001, where bytes 4..11 are zero).
+    private static bool IsNat64LocalUse(byte[] bytes)
+        => bytes[0] == 0x00 && bytes[1] == 0x64 && bytes[2] == 0xff && bytes[3] == 0x9b
+            && bytes[4] == 0x00 && bytes[5] == 0x01;
 }
 
 /// <summary>
