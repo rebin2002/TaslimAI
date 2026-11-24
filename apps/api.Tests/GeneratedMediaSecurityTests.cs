@@ -256,18 +256,22 @@ public sealed class ProviderDownloadRedirectHardeningTests : IClassFixture<Tasli
 
     public ProviderDownloadRedirectHardeningTests(TaslimApiFactory factory) => this.factory = factory;
 
-    public static TheoryData<Type, bool> GuardedClientTypes { get; } = new()
+    public static TheoryData<Type, bool, bool> GuardedClientTypes { get; } = new()
     {
-        { typeof(ManusMovieVideoProvider), true },
-        { typeof(RunwayMovieVideoProvider), true },
-        { typeof(DirectVideoHttpProviderAdapter), true },
-        { typeof(Taslim.Api.Music.MubertMusicGenerationProvider), true },
-        { typeof(Taslim.Api.Music.StableAudioMusicGenerationProvider), false },
+        // (addressPinned, followsClassifiedHops): the video adapters' fetch code has no redirect
+        // loop, so the bounded revalidating resolver must be wired for them. Mubert keeps its own
+        // manual loop and must NOT gain a second one; StableAudio's audio arrives inline in its
+        // 200 API responses (no provider-URL download hop exists), so nothing must be wired.
+        { typeof(ManusMovieVideoProvider), true, true },
+        { typeof(RunwayMovieVideoProvider), true, true },
+        { typeof(DirectVideoHttpProviderAdapter), true, true },
+        { typeof(Taslim.Api.Music.MubertMusicGenerationProvider), true, false },
+        { typeof(Taslim.Api.Music.StableAudioMusicGenerationProvider), false, false },
     };
 
     [Theory]
     [MemberData(nameof(GuardedClientTypes))]
-    public void Guarded_provider_client_never_autofollows_unclassified_redirect_hops(Type clientType, bool addressPinned)
+    public void Guarded_provider_client_never_autofollows_unclassified_redirect_hops(Type clientType, bool addressPinned, bool followsClassifiedHops)
     {
         // AddHttpClient<TClient>() keys its named options by the type's simple name on net8.
         var options = factory.Services
@@ -309,6 +313,13 @@ public sealed class ProviderDownloadRedirectHardeningTests : IClassFixture<Tasli
         {
             primary!.Dispose();
         }
+
+        // Framework auto-redirect must stay off, while adapters that rely on legitimate public
+        // 3xx output hops get the policy-revalidated resolver in the SAME effective pipeline.
+        var resolvers = probe.AdditionalHandlers.OfType<ProviderRedirectResolver>().ToList();
+        if (followsClassifiedHops) Assert.Single(resolvers);
+        else Assert.Empty(resolvers);
+        foreach (var resolver in resolvers) resolver.Dispose();
     }
 
     // The e9903fa8 assertions above read registration, not resolution. Review B proved that
@@ -341,6 +352,22 @@ public sealed class ProviderDownloadRedirectHardeningTests : IClassFixture<Tasli
                 $"{provider.GetType().Name}: the client the registry actually holds must not follow redirects");
             Assert.False(handler.UseProxy);
             Assert.NotNull(handler.ConnectCallback);
+
+            // Review C's compatibility half: the effective client resolved THROUGH THE REAL
+            // REGISTRY must also contain the bounded revalidating redirect resolver, or a
+            // legitimate public 3xx CDN hop would now fail the fetch.
+            var pipelineField = typeof(HttpMessageInvoker)
+                .GetField("_handler", BindingFlags.Instance | BindingFlags.NonPublic)!;
+            var pipeline = pipelineField.GetValue(client) as HttpMessageHandler;
+            var hasResolver = false;
+            while (pipeline is DelegatingHandler delegating)
+            {
+                if (delegating is ProviderRedirectResolver) hasResolver = true;
+                pipeline = delegating.InnerHandler;
+            }
+
+            Assert.True(hasResolver,
+                $"{provider.GetType().Name}: the registry client must follow policy-revalidated redirects");
         }
     }
 

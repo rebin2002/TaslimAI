@@ -170,13 +170,29 @@ public static class ProviderPinnedConnections
         IProviderHostResolver resolver,
         CancellationToken cancellationToken)
     {
+        var candidates = await SelectPinnedAddressesAsync(host, resolver, cancellationToken).ConfigureAwait(false);
+        return candidates[0];
+    }
+
+    /// <summary>
+    /// The full ordered candidate list one connection may try: every address must be public or
+    /// the whole target is refused, IPv4 sorts first (dual-stack stability, mirroring #1271),
+    /// and the remainder of the SAME single resolution answer follows so a provider CDN with
+    /// several healthy A records keeps the platform's connect-time fallback without ever
+    /// re-resolving or dialing an unvalidated address.
+    /// </summary>
+    public static async Task<IReadOnlyList<IPAddress>> SelectPinnedAddressesAsync(
+        string? host,
+        IProviderHostResolver resolver,
+        CancellationToken cancellationToken)
+    {
         var normalized = NormalizeHost(host);
         if (normalized.Length == 0) throw new InvalidDataException("Provider download URL is not safe.");
 
         if (IPAddress.TryParse(normalized, out var literal))
         {
             if (ProviderUrlPolicy.IsBlocked(literal)) throw new InvalidDataException("Provider download target is not public.");
-            return literal;
+            return new[] { literal };
         }
 
         IReadOnlyList<IPAddress> addresses;
@@ -192,25 +208,34 @@ public static class ProviderPinnedConnections
         if (addresses is null || addresses.Count == 0)
             throw new InvalidDataException("Provider download target is not public.");
 
-        IPAddress? selected = null;
+        IPAddress? firstV4 = null;
+        var validated = new List<IPAddress>(addresses.Count);
         foreach (var address in addresses)
         {
             // All-or-nothing: a mixed answer (public + rebinding candidate) refuses the target
             // entirely. This is the property an alternating resolver test asserts.
             if (address is null || ProviderUrlPolicy.IsBlocked(address))
                 throw new InvalidDataException("Provider download target is not public.");
-            if (selected is null
-                || (selected.AddressFamily == AddressFamily.InterNetworkV6 && address.AddressFamily == AddressFamily.InterNetwork))
-                selected = address;
+            if (firstV4 is null && address.AddressFamily == AddressFamily.InterNetwork) firstV4 = address;
+            validated.Add(address);
         }
 
-        return selected!;
+        if (firstV4 is null) return validated;
+        var ordered = new List<IPAddress>(validated.Count) { firstV4 };
+        foreach (var address in validated)
+        {
+            if (!address.Equals(firstV4)) ordered.Add(address);
+        }
+
+        return ordered;
     }
 
     /// <summary>
-    /// Dials one connection: decide, then hand the decided address to the transport. Exposed
-    /// separately from the handler so tests can assert the dialed endpoint equals the validated
-    /// endpoint without a real network, using a stub transport.
+    /// Dials one connection: decide once, then hand the validated addresses to the transport in
+    /// order until one connects. Fallback stays inside the single admitted answer (never a fresh
+    /// resolution), so the DNS-rebinding closure is preserved while a dead sibling address no
+    /// longer fails the whole fetch. Exposed with an injectable transport so tests can assert the
+    /// dialed endpoints equal the validated endpoints without a real network.
     /// </summary>
     public static async Task<Stream> OpenConnectionAsync(
         string host,
@@ -219,8 +244,23 @@ public static class ProviderPinnedConnections
         Func<IPAddress, int, CancellationToken, ValueTask<Stream>> transport,
         CancellationToken cancellationToken)
     {
-        var pinned = await SelectPinnedAddressAsync(host, resolver, cancellationToken).ConfigureAwait(false);
-        return await transport(pinned, port, cancellationToken).ConfigureAwait(false);
+        var candidates = await SelectPinnedAddressesAsync(host, resolver, cancellationToken).ConfigureAwait(false);
+        Exception? lastFailure = null;
+        foreach (var address in candidates)
+        {
+            try
+            {
+                return await transport(address, port, cancellationToken).ConfigureAwait(false);
+            }
+            catch (Exception exception) when (exception is SocketException or IOException)
+            {
+                // One validated address being down must not strand the connection while other
+                // validated addresses from the same answer remain; cancellation still propagates.
+                lastFailure = exception;
+            }
+        }
+
+        throw lastFailure!;
     }
 
     /// <summary>
@@ -303,4 +343,169 @@ public sealed class ProviderDownloadSecurity(IProviderUrlPolicy urlPolicy)
 
     public Task EnsureSafeAsync(Uri uri, CancellationToken cancellationToken = default) =>
         urlPolicy.EnsureSafeAsync(uri, cancellationToken);
+}
+
+/// <summary>
+/// Bounded, revalidated redirect follower for provider download clients whose fetch code has no
+/// manual redirect loop (Manus Movie, Runway Movie, DirectVideo). The pinned primary handler runs
+/// with <c>AllowAutoRedirect=false</c> — the only safe setting while every hop must pass endpoint
+/// admission — which would otherwise turn legitimate CDN 301/302/303/307/308 output hops into hard
+/// failures. This handler restores that compatibility while re-running the full URL policy (HTTPS,
+/// port 443, no userinfo, public destination) against every <c>Location</c> before it is dialed,
+/// so a redirect can never land on a private destination.
+///
+/// Semantics deliberately mirror the platform auto-redirect handler: relative targets resolve
+/// against the hop URI; 301/302/303 rewrite methods other than GET/HEAD to GET (a body cannot be
+/// replayed under a rewritten method); 307/308 preserve method and replay a buffered copy of the
+/// body (up to a small cap). Credential-like headers (Authorization, Proxy-Authorization, Cookie,
+/// and any header whose name contains key/token/secret/signature) are dropped when a hop changes
+/// origin, so a cross-origin CDN never receives provider API credentials. A refused hop surfaces
+/// as an <see cref="HttpRequestException"/> wrapping the policy's stable
+/// <see cref="InvalidDataException"/> so existing provider failure mapping keeps classifying
+/// failures unchanged; no URL material is echoed into messages. When the hop budget is exhausted
+/// the final 3xx is returned to the caller rather than chased further, and a malformed
+/// <c>Location</c> is likewise surfaced, never followed.
+/// </summary>
+public sealed class ProviderRedirectResolver : DelegatingHandler
+{
+    private const int ReplayableBodyLimit = 5 * 1024 * 1024;
+
+    private static readonly HashSet<string> ExplicitCredentialHeaders = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "Authorization",
+        "Proxy-Authorization",
+        "Cookie",
+    };
+
+    private readonly IProviderUrlPolicy urlPolicy;
+    private readonly int maxRedirects;
+
+    public ProviderRedirectResolver(IProviderUrlPolicy urlPolicy, int maxRedirects = ProviderDownloadSecurity.MaxRedirects)
+    {
+        this.urlPolicy = urlPolicy ?? throw new ArgumentNullException(nameof(urlPolicy));
+        this.maxRedirects = maxRedirects < 0 ? 0 : maxRedirects;
+    }
+
+    protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+    {
+        var current = request;
+        var currentOwned = false;
+        var redirects = 0;
+        while (true)
+        {
+            HttpResponseMessage response;
+            try
+            {
+                response = await base.SendAsync(current, cancellationToken).ConfigureAwait(false);
+            }
+            catch
+            {
+                if (currentOwned) current.Dispose();
+                throw;
+            }
+
+            if (!IsRedirectStatus(response.StatusCode) || response.Headers.Location is null)
+                return response;
+
+            var target = ResolveTarget(current.RequestUri!, response.Headers.Location);
+            if (target is null)
+                return response; // Malformed Location: surface the 3xx like the platform handler.
+
+            if (redirects >= maxRedirects)
+                return response; // Budget exhausted; the caller maps the remaining 3xx to its failure.
+
+            try
+            {
+                await urlPolicy.EnsureSafeAsync(target, cancellationToken).ConfigureAwait(false);
+            }
+            catch (InvalidDataException exception)
+            {
+                response.Dispose();
+                if (currentOwned) current.Dispose();
+                // The policy's stable message stays reachable as the inner exception for logs,
+                // while HttpRequestException keeps every provider's existing failure mapping.
+                throw new HttpRequestException("Provider download redirect was refused.", exception);
+            }
+
+            var next = await BuildNextRequest(current, response.StatusCode, target, cancellationToken).ConfigureAwait(false);
+            redirects++;
+            response.Dispose();
+            if (currentOwned) current.Dispose();
+            current = next;
+            currentOwned = true;
+        }
+    }
+
+    private static bool IsRedirectStatus(HttpStatusCode statusCode) =>
+        statusCode is HttpStatusCode.Moved
+            or HttpStatusCode.Found
+            or HttpStatusCode.SeeOther
+            or HttpStatusCode.TemporaryRedirect
+            or HttpStatusCode.PermanentRedirect;
+
+    private static Uri? ResolveTarget(Uri from, Uri location)
+    {
+        if (location.IsAbsoluteUri) return location;
+        return Uri.TryCreate(from, location, out var combined) && combined.IsAbsoluteUri ? combined : null;
+    }
+
+    private static async ValueTask<HttpRequestMessage> BuildNextRequest(
+        HttpRequestMessage previous,
+        HttpStatusCode statusCode,
+        Uri target,
+        CancellationToken cancellationToken)
+    {
+        var method = statusCode switch
+        {
+            HttpStatusCode.Moved or HttpStatusCode.Found or HttpStatusCode.SeeOther
+                => previous.Method == HttpMethod.Get || previous.Method == HttpMethod.Head
+                    ? previous.Method
+                    : HttpMethod.Get,
+            _ => previous.Method, // 307/308 preserve the method.
+        };
+
+        var next = new HttpRequestMessage(method, target)
+        {
+            Version = previous.Version,
+            VersionPolicy = previous.VersionPolicy,
+        };
+
+        // 307/308 replay the body from a buffered copy (the previous request owns its content, and
+        // disposing it must not strand the replay); Get/Head hops and rewritten 301/302/303 POSTs
+        // carry none, matching the platform handler.
+        if (method != HttpMethod.Get && method != HttpMethod.Head && previous.Content is not null)
+        {
+            var body = await previous.Content.ReadAsByteArrayAsync(cancellationToken).ConfigureAwait(false);
+            if (body.Length > ReplayableBodyLimit)
+                throw new HttpRequestException("Provider download redirect body was too large to replay.");
+            var replay = new ByteArrayContent(body);
+            foreach (var header in previous.Content.Headers)
+                replay.Headers.TryAddWithoutValidation(header.Key, header.Value);
+            next.Content = replay;
+        }
+
+        CopyHeaders(previous, next, crossOrigin: !IsSameOrigin(previous.RequestUri!, target));
+        return next;
+    }
+
+    private static void CopyHeaders(HttpRequestMessage previous, HttpRequestMessage next, bool crossOrigin)
+    {
+        foreach (var header in previous.Headers)
+        {
+            if (crossOrigin && IsCredentialHeader(header.Key)) continue;
+            next.Headers.TryAddWithoutValidation(header.Key, header.Value);
+        }
+    }
+
+    private static bool IsCredentialHeader(string name) =>
+        ExplicitCredentialHeaders.Contains(name)
+        || name.Contains("key", StringComparison.OrdinalIgnoreCase)
+        || name.Contains("token", StringComparison.OrdinalIgnoreCase)
+        || name.Contains("secret", StringComparison.OrdinalIgnoreCase)
+        || name.Contains("signature", StringComparison.OrdinalIgnoreCase);
+
+    private static bool IsSameOrigin(Uri left, Uri right) =>
+        string.Equals(left.Scheme, right.Scheme, StringComparison.OrdinalIgnoreCase)
+        && string.Equals(left.Host, right.Host, StringComparison.OrdinalIgnoreCase)
+        && left.Port == right.Port;
 }

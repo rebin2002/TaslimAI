@@ -346,15 +346,22 @@ builder.Services.Configure<MovieVideoOptions>(builder.Configuration.GetSection("
 builder.Services.Configure<MovieDialogueVoiceOptions>(builder.Configuration.GetSection("MovieDialogueVoice"));
 builder.Services.Configure<DirectVideoProviderOptions>(builder.Configuration.GetSection("DirectVideoProviders"));
 builder.Services.AddHttpClient<DirectVideoHttpProviderAdapter>()
-    .ConfigurePrimaryHttpMessageHandler(services => ProviderPinnedConnections.CreatePinnedHandler(services.GetRequiredService<IProviderHostResolver>()));
+    .ConfigurePrimaryHttpMessageHandler(services => ProviderPinnedConnections.CreatePinnedHandler(services.GetRequiredService<IProviderHostResolver>()))
+    // The pinned handler disables auto-redirect (every hop must pass endpoint admission), so this
+    // bounded resolver revalidates and follows legitimate public 3xx output hops for adapters whose
+    // fetch code has no manual loop of its own (Mubert keeps its own loop; StableAudio's audio
+    // arrives inline in its 200 responses, so no API redirect hop is load-bearing there).
+    .AddHttpMessageHandler(services => new ProviderRedirectResolver(services.GetRequiredService<IProviderUrlPolicy>()));
 builder.Services.Configure<VideoGenerationAdapterOptions>(builder.Configuration.GetSection("VideoGenerationAdapters"));
 builder.Services.AddSingleton<IVideoGenerationAdapter, UnavailableVideoGenerationAdapter>();
 builder.Services.AddSingleton<VideoGenerationAdapterExecutionService>();
 builder.Services.AddScoped<MovieVideoExecutionStore>();
 builder.Services.AddHttpClient<RunwayMovieVideoProvider>()
-    .ConfigurePrimaryHttpMessageHandler(services => ProviderPinnedConnections.CreatePinnedHandler(services.GetRequiredService<IProviderHostResolver>()));
+    .ConfigurePrimaryHttpMessageHandler(services => ProviderPinnedConnections.CreatePinnedHandler(services.GetRequiredService<IProviderHostResolver>()))
+    .AddHttpMessageHandler(services => new ProviderRedirectResolver(services.GetRequiredService<IProviderUrlPolicy>()));
 builder.Services.AddHttpClient<ManusMovieVideoProvider>()
-    .ConfigurePrimaryHttpMessageHandler(services => ProviderPinnedConnections.CreatePinnedHandler(services.GetRequiredService<IProviderHostResolver>()));
+    .ConfigurePrimaryHttpMessageHandler(services => ProviderPinnedConnections.CreatePinnedHandler(services.GetRequiredService<IProviderHostResolver>()))
+    .AddHttpMessageHandler(services => new ProviderRedirectResolver(services.GetRequiredService<IProviderUrlPolicy>()));
 // No bare AddSingleton<RunwayMovieVideoProvider>()/AddSingleton<ManusMovieVideoProvider>() here.
 // A later last-wins singleton registration shadows the typed client above (Microsoft DI resolves
 // the final descriptor) and rebuilds the provider on the container's default HttpClient, so the
