@@ -1,6 +1,10 @@
 using Amazon.S3;
 using Amazon.S3.Model;
+using Amazon.Runtime;
 using Microsoft.Extensions.Options;
+using System.Net.Http;
+using System.Net.Sockets;
+using System.Security.Authentication;
 using Taslim.Api.Domain;
 
 namespace Taslim.Api.Files;
@@ -47,9 +51,18 @@ public sealed class S3CompatibleFileStorageService : IFileStorageService, IDispo
         {
             await client.PutAsync(settings.S3Bucket, storageKey, content, cancellationToken);
         }
-        catch (OperationCanceledException)
+        // Preserve a real caller abort; an SDK-initiated timeout with an active
+        // caller token is a storage failure, not a client cancellation. The SDK
+        // can also report the abort behind a client or transport wrapper with
+        // the cancellation as an inner exception, so the whole chain is checked
+        // and the unwrapped cancellation is what propagates.
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
             throw;
+        }
+        catch (Exception exception) when (cancellationToken.IsCancellationRequested && StorageReadbackFaults.IsCancellation(exception))
+        {
+            throw StorageReadbackFaults.FindCancellation(exception)!;
         }
         catch (Exception exception)
         {
@@ -64,9 +77,18 @@ public sealed class S3CompatibleFileStorageService : IFileStorageService, IDispo
         {
             return await client.GetAsync(settings.S3Bucket, storageKey, cancellationToken);
         }
-        catch (OperationCanceledException)
+        // Preserve a real caller abort; an SDK-initiated timeout with an active
+        // caller token is a storage failure, not a client cancellation. The SDK
+        // can also report the abort behind a client or transport wrapper with
+        // the cancellation as an inner exception, so the whole chain is checked
+        // and the unwrapped cancellation is what propagates.
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
             throw;
+        }
+        catch (Exception exception) when (cancellationToken.IsCancellationRequested && StorageReadbackFaults.IsCancellation(exception))
+        {
+            throw StorageReadbackFaults.FindCancellation(exception)!;
         }
         catch (Exception exception)
         {
@@ -81,9 +103,18 @@ public sealed class S3CompatibleFileStorageService : IFileStorageService, IDispo
         {
             await client.DeleteAsync(settings.S3Bucket, storageKey, cancellationToken);
         }
-        catch (OperationCanceledException)
+        // Preserve a real caller abort; an SDK-initiated timeout with an active
+        // caller token is a storage failure, not a client cancellation. The SDK
+        // can also report the abort behind a client or transport wrapper with
+        // the cancellation as an inner exception, so the whole chain is checked
+        // and the unwrapped cancellation is what propagates.
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
             throw;
+        }
+        catch (Exception exception) when (cancellationToken.IsCancellationRequested && StorageReadbackFaults.IsCancellation(exception))
+        {
+            throw StorageReadbackFaults.FindCancellation(exception)!;
         }
         catch (Exception exception)
         {
@@ -98,9 +129,18 @@ public sealed class S3CompatibleFileStorageService : IFileStorageService, IDispo
         {
             return await client.ExistsAsync(settings.S3Bucket, storageKey, cancellationToken);
         }
-        catch (OperationCanceledException)
+        // Preserve a real caller abort; an SDK-initiated timeout with an active
+        // caller token is a storage failure, not a client cancellation. The SDK
+        // can also report the abort behind a client or transport wrapper with
+        // the cancellation as an inner exception, so the whole chain is checked
+        // and the unwrapped cancellation is what propagates.
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
             throw;
+        }
+        catch (Exception exception) when (cancellationToken.IsCancellationRequested && StorageReadbackFaults.IsCancellation(exception))
+        {
+            throw StorageReadbackFaults.FindCancellation(exception)!;
         }
         catch (Exception exception)
         {
@@ -113,22 +153,57 @@ public sealed class S3CompatibleFileStorageService : IFileStorageService, IDispo
 
     private void LogFailure(string operation, Exception exception)
     {
+        var failureClass = ClassifyFailure(exception);
         if (exception is AmazonS3Exception s3Exception)
         {
+            // Provider error codes and request IDs are external strings, not
+            // trusted diagnostic categories. Do not log their raw contents:
+            // they may disclose tenant, endpoint or request-specific data.
             logger.LogError(
-                "S3-compatible storage operation failed. Operation={Operation}; StatusCode={StatusCode}; ErrorCode={ErrorCode}; ErrorType={ErrorType}; RequestId={RequestId}",
+                "S3-compatible storage operation failed. Operation={Operation}; StatusCode={StatusCode}; ErrorType={ErrorType}; HasRequestId={HasRequestId}; FailureClass={FailureClass}",
                 operation,
                 (int)s3Exception.StatusCode,
-                s3Exception.ErrorCode,
                 exception.GetType().Name,
-                s3Exception.RequestId);
+                !string.IsNullOrWhiteSpace(s3Exception.RequestId),
+                failureClass);
             return;
         }
 
         logger.LogError(
-            "S3-compatible storage operation failed. Operation={Operation}; ErrorType={ErrorType}",
+            "S3-compatible storage operation failed. Operation={Operation}; ErrorType={ErrorType}; FailureClass={FailureClass}",
             operation,
-            exception.GetType().Name);
+            exception.GetType().Name,
+            failureClass);
+    }
+
+    internal static string ClassifyFailure(Exception exception)
+    {
+        // Prefer a recognized transport root cause, but do not lose the outer
+        // S3 response classification when the inner exception is unrecognized.
+        // Never log exception messages, endpoints, object keys or credentials.
+        if (exception.InnerException is not null)
+        {
+            var innerClass = ClassifyFailure(exception.InnerException);
+            if (innerClass != "unknown")
+                return innerClass;
+        }
+
+        return exception switch
+        {
+            SocketException => "network",
+            AuthenticationException => "tls",
+            TaskCanceledException => "timeout",
+            OperationCanceledException => "timeout",
+            HttpRequestException => "transport",
+            // Status 0 means that the SDK did not expose an HTTP response.
+            // It is NOT proof of a particular network or signing root cause.
+            AmazonS3Exception s3 when (int)s3.StatusCode == 0 => "s3_no_http_response",
+            AmazonS3Exception s3 when (int)s3.StatusCode is 401 or 403 => "s3_auth_or_permission",
+            AmazonS3Exception s3 when (int)s3.StatusCode == 429 => "s3_rate_limited",
+            AmazonS3Exception s3 when (int)s3.StatusCode >= 500 => "s3_service_error",
+            AmazonS3Exception => "s3_response",
+            _ => "unknown",
+        };
     }
 
     private static IS3CompatibleObjectClient CreateClient(FileOptions settings)
@@ -136,16 +211,22 @@ public sealed class S3CompatibleFileStorageService : IFileStorageService, IDispo
         if (!settings.IsS3Configured)
             throw new InvalidOperationException("S3-compatible storage configuration is incomplete.");
 
-        var config = new AmazonS3Config
-        {
-            ServiceURL = settings.S3Endpoint,
-            AuthenticationRegion = settings.S3Region,
-            ForcePathStyle = true,
-            UseHttp = false,
-        };
+        var config = CreateConfig(settings);
         var s3 = new AmazonS3Client(settings.S3AccessKey, settings.S3SecretKey, config);
         return new AwsS3CompatibleObjectClient(s3);
     }
+
+    internal static AmazonS3Config CreateConfig(FileOptions settings) => new()
+    {
+        ServiceURL = settings.S3Endpoint,
+        AuthenticationRegion = settings.S3Region,
+        ForcePathStyle = true,
+        UseHttp = false,
+        // AWSSDK v4 defaults to WHEN_SUPPORTED, enabling optional CRC checksums
+        // and potential trailers on S3 PUTs. R2 needs the non-streaming S3 form.
+        // Keep HTTPS transport and only request checksums required by the API.
+        RequestChecksumCalculation = RequestChecksumCalculation.WHEN_REQUIRED,
+    };
 }
 
 internal sealed class AwsS3CompatibleObjectClient : IS3CompatibleObjectClient
@@ -169,16 +250,34 @@ internal sealed class AwsS3CompatibleObjectClient : IS3CompatibleObjectClient
         await client!.PutObjectAsync(CreatePutObjectRequest(bucket, key, content), cancellationToken);
     }
 
-    internal static PutObjectRequest CreatePutObjectRequest(string bucket, string key, Stream content) => new()
+    internal static PutObjectRequest CreatePutObjectRequest(string bucket, string key, Stream content)
     {
-        BucketName = bucket,
-        Key = key,
-        InputStream = content,
-        AutoCloseStream = false,
-        AutoResetStreamPosition = false,
-        DisablePayloadSigning = true,
-        DisableDefaultChecksumValidation = true,
-    };
+        var request = new PutObjectRequest
+        {
+            BucketName = bucket,
+            Key = key,
+            InputStream = content,
+            AutoCloseStream = false,
+            AutoResetStreamPosition = false,
+            DisablePayloadSigning = true,
+            DisableDefaultChecksumValidation = true,
+            // Cloudflare R2 requires a plain, non-streaming SigV4 PUT.
+            UseChunkEncoding = false,
+        };
+
+        // FileProcessingService wraps uploads in a non-seekable CountingReadStream.
+        // The AWS SDK cannot infer Content-Length from that stream, even though the
+        // upload has already passed size validation. A normal S3 PUT needs this
+        // explicit header or the SDK may fail before sending an HTTP request.
+        long? contentLength = content is CountingReadStream { ExpectedContentLength: > 0 } counted
+            ? counted.ExpectedContentLength
+            : content.CanSeek ? content.Length - content.Position : null;
+
+        if (contentLength is > 0)
+            request.Headers["Content-Length"] = contentLength.Value.ToString(System.Globalization.CultureInfo.InvariantCulture);
+
+        return request;
+    }
 
     public async Task<Stream?> GetAsync(string bucket, string key, CancellationToken cancellationToken = default)
     {
@@ -191,7 +290,12 @@ internal sealed class AwsS3CompatibleObjectClient : IS3CompatibleObjectClient
                 Key = key,
             }, cancellationToken);
 
-            if (response.ResponseStream is null) return null;
+            // A successful GET without a response body is a malformed upstream
+            // response, not proof that a private object is missing. Only a
+            // verified object-level 404 should be reported as absent.
+            if (response.ResponseStream is null)
+                throw new InvalidDataException("S3-compatible GET returned no response stream.");
+
             var stream = new ResponseOwnedStream(response.ResponseStream, response);
             response = null;
             return stream;
@@ -234,10 +338,15 @@ internal sealed class AwsS3CompatibleObjectClient : IS3CompatibleObjectClient
 
     public void Dispose() => client?.Dispose();
 
-    private static bool IsNotFound(AmazonS3Exception exception) =>
+    // Never turn an auth, transport, or bucket-configuration failure into an
+    // apparent missing private file just because the upstream error code says
+    // "NoSuchKey". Only a 404 for an object (or a generic 404 without an S3
+    // error code) proves absence. Other failures must reach safe diagnostics.
+    internal static bool IsNotFound(AmazonS3Exception exception) =>
         exception.StatusCode == System.Net.HttpStatusCode.NotFound
-        || string.Equals(exception.ErrorCode, "NoSuchKey", StringComparison.OrdinalIgnoreCase)
-        || string.Equals(exception.ErrorCode, "NotFound", StringComparison.OrdinalIgnoreCase);
+        && (string.IsNullOrWhiteSpace(exception.ErrorCode)
+            || string.Equals(exception.ErrorCode, "NoSuchKey", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(exception.ErrorCode, "NotFound", StringComparison.OrdinalIgnoreCase));
 
     private sealed class ResponseOwnedStream(Stream inner, IDisposable response) : Stream
     {

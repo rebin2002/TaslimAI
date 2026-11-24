@@ -12,9 +12,21 @@ public sealed class DocumentGenerationOptions
     public int MaxHeadingCharacters { get; set; } = 240;
     public int MaxBlockCharacters { get; set; } = 8_000;
     public int MaxSummaryCharacters { get; set; } = 2_000;
-    public decimal? EstimatedOutputUsdPer1KTokens { get; set; }
+    private decimal? estimatedOutputUsdPer1KTokens;
+    public decimal? EstimatedOutputUsdPer1KTokens
+    {
+        get => estimatedOutputUsdPer1KTokens;
+        set => estimatedOutputUsdPer1KTokens = EnsureNonNegative(value, nameof(EstimatedOutputUsdPer1KTokens));
+    }
     public string RequestedTier { get; set; } = "Smart";
     public int ProviderTimeoutSeconds { get; set; } = 180;
     public string DefaultFontFamily { get; set; } = "Lato";
     public string RtlFontFamily { get; set; } = "Noto Sans Arabic";
+
+    private static decimal? EnsureNonNegative(decimal? value, string parameterName)
+    {
+        if (value < 0m)
+            throw new ArgumentOutOfRangeException(parameterName, value, "Document estimated output pricing cannot be negative.");
+        return value;
+    }
 }

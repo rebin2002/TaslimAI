@@ -1,13 +1,14 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
-import { DocumentPreviewTable, DocumentProgressMeter, DocumentStudioView } from "./DocumentStudioView";
+import { DocumentPreviewTable } from "./DocumentPreviewTable";
+import { DocumentProgressMeter, DocumentStudioView } from "./DocumentStudioView";
 
 vi.mock("next/navigation", () => ({
   useSearchParams: () => new URLSearchParams(),
 }));
 
 vi.mock("@/components/AuthProvider", () => ({
-  useAuth: () => ({ workspace: { id: "workspace-1" } }),
+  useAuth: () => ({ user: { id: "synthetic-test-user" }, workspace: { id: "workspace-1" } }),
 }));
 
 vi.mock("@/components/LocaleProvider", () => ({
