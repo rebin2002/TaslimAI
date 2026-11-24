@@ -2,6 +2,10 @@ const configuredApiUrl = process.env.NEXT_PUBLIC_API_URL;
 if (process.env.NODE_ENV === "production" && (!configuredApiUrl || !configuredApiUrl.startsWith("https://")))
   throw new Error("NEXT_PUBLIC_API_URL must be an HTTPS URL in production.");
 const apiOrigin = (configuredApiUrl ?? "http://localhost:5000").replace(/\/$/, "");
+// The forwarding namespace the proxy is allowed to reach. Derived from the
+// configured origin so a deployment whose API base URL carries a path prefix
+// keeps forwarding exactly as before.
+const apiNamespacePathname = new URL(`${apiOrigin}/api/`).pathname;
 const MAX_PROXY_BODY_BYTES = 25 * 1024 * 1024;
 const UPSTREAM_TIMEOUT_MS = 30_000;
 // Remove the entire client-controlled forwarding namespace, not just today's
@@ -19,6 +23,31 @@ function stripUntrustedForwardingHeaders(headers: Headers): void {
 type RouteContext = { params: Promise<{ path: string[] }> };
 
 const bodyMethods = new Set(["POST", "PUT", "PATCH", "DELETE"]);
+
+// Containment helper for the same-origin /api/[...path] proxy (draft PR #1105
+// red-by-design handler contract). encodeURIComponent does not encode "." or
+// "..", and the router decodes spellings such as %2e%2e before invoking the
+// handler, so a relative segment reaching here composes a target whose request
+// line the WHATWG URL parser collapses out of the /api/ namespace
+// (e.g. /api/v1/../../admin -> /admin) while the caller's session cookie keeps
+// traveling with it. Relative segments are dropped before composition; a
+// percent-decode failure is treated as an ordinary (non-relative) segment
+// because the encoded form cannot collapse.
+function isRelativePathSegment(segment: string): boolean {
+  let candidate = segment;
+  for (let depth = 0; depth < 2; depth++) {
+    if (candidate === "." || candidate === "..") return true;
+    let decoded: string;
+    try {
+      decoded = decodeURIComponent(candidate);
+    } catch {
+      return false;
+    }
+    if (decoded === candidate) return false;
+    candidate = decoded;
+  }
+  return candidate === "." || candidate === "..";
+}
 
 function splitCombinedSetCookieHeader(value: string): string[] {
   return value.split(/,(?=\s*[^;,=\s]+=[^;,]*)/).map(cookie => cookie.trim()).filter(Boolean);
@@ -65,7 +94,20 @@ async function readBoundedBody(request: Request): Promise<ArrayBuffer | Response
 
 async function forward(request: Request, context: RouteContext): Promise<Response> {
   const { path } = await context.params;
-  const target = `${apiOrigin}/api/${path.map((segment) => encodeURIComponent(segment)).join("/")}${new URL(request.url).search}`;
+  const target = `${apiOrigin}/api/${path.filter((segment) => !isRelativePathSegment(segment)).map((segment) => encodeURIComponent(segment)).join("/")}${new URL(request.url).search}`;
+  // Second, independent fail-closed assertion: if the composed target would
+  // ever normalize outside the forwarding namespace for any reason, refuse it
+  // before fetch() so neither the request line nor any credential header
+  // (session cookie included) can leave /api/. Valid paths, auth forwarding,
+  // and the 503/504/413 error envelopes are unchanged.
+  let targetPathname: string;
+  try {
+    targetPathname = new URL(target).pathname;
+  } catch {
+    return Response.json({ error: { code: "INVALID_PATH", message: "The requested path is not valid." } }, { status: 400 });
+  }
+  if (!targetPathname.startsWith(apiNamespacePathname))
+    return Response.json({ error: { code: "INVALID_PATH", message: "The requested path is not valid." } }, { status: 400 });
   const headers = new Headers(request.headers);
   headers.delete("host");
   headers.delete("content-length");
