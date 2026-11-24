@@ -43,6 +43,7 @@ const copyKeys = [
   "errorIntegrity",
   "errorDirection",
   "errorNotFound",
+  "errorRateLimited",
 ] as AcademicExportCopyKey[];
 
 describe("academicExportCopy", () => {
@@ -98,6 +99,9 @@ describe("academicExportCopy", () => {
     expect(academicExportCopy("en", "metadataWarning")).toContain("were not read in full");
     expect(academicExportCopy("en", "disclosureBody")).toContain("cannot be removed");
     expect(academicExportCopy("en", "disclosureMissing")).toContain("incomplete");
+    // The bounded-render refusal must tell the truth too: nothing was produced, nothing was started.
+    expect(academicExportCopy("en", "errorRateLimited")).toContain("was not produced");
+    expect(academicExportCopy("en", "errorRateLimited")).toContain("no new research was started");
     // The same rules must be present in the non-English packs, not silently dropped.
     expect(academicExportCopy("ar", "disclosureBody")).toContain("لا يمكن حذفه");
     expect(academicExportCopy("ckb", "disclosureBody")).toContain("ناڕەشێت بدرێت");

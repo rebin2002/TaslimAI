@@ -1,15 +1,21 @@
 using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
+using System.Reflection;
+using System.Security.Claims;
 using System.Text;
 using System.Text.Json;
 using DocumentFormat.OpenXml.Packaging;
 using DocumentFormat.OpenXml.Wordprocessing;
+using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.Extensions.DependencyInjection;
 using Taslim.Api.AcademicExport;
 using Taslim.Api.AcademicTemplates;
 using Taslim.Api.Controllers;
 using Taslim.Api.Domain;
+using Taslim.Api.Infrastructure;
 using Taslim.Api.Persistence;
 using Xunit;
 
@@ -502,6 +508,116 @@ public sealed class AcademicExportIntegrationTests : IClassFixture<TaslimApiFact
         // Refusal wording must not leak the promise of paid work: no new job was created.
         using var scope2 = _factory.Services.CreateScope();
         Assert.Equal(1, scope2.ServiceProvider.GetRequiredService<TaslimDbContext>().GenerationJobs.Count(job => job.WorkspaceId == owner.WorkspaceId));
+    }
+
+    // ── bounded render concurrency (combined-tree gap) ──────────────────────────────────
+    // The export POST is the only synchronous render route in the academic lane. With no endpoint
+    // policy it fell through the global concurrency limiter's switch to "no limiter", so one student
+    // could queue an unbounded number of full DOCX/PDF builds plus their re-open validation. The fix
+    // binds the established expensive-render policy that already covers the other render and mutation
+    // surfaces; these three tests pin the wiring, the bound itself, and that a capped burst is both
+    // honest and still bill-free.
+
+    [Fact]
+    public void Export_post_action_carries_the_established_expensive_render_policy()
+    {
+        var action = typeof(AcademicExportController).GetMethod(
+            nameof(AcademicExportController.Export),
+            BindingFlags.Instance | BindingFlags.Public | BindingFlags.DeclaredOnly);
+
+        Assert.NotNull(action);
+        Assert.NotEmpty(action!.GetCustomAttributes<HttpPostAttribute>(inherit: true));
+        // The bound belongs on the mutating, CSRF-protected render route.
+        Assert.NotNull(action.GetCustomAttribute<ValidateAntiForgeryTokenAttribute>(inherit: true));
+        var policy = Assert.Single(action.GetCustomAttributes<EnableRateLimitingAttribute>(inherit: true));
+        Assert.Equal(RateLimiting.ExpensiveAi, policy.PolicyName);
+    }
+
+    [Fact]
+    public async Task Export_policy_bounds_simultaneous_renders_per_student()
+    {
+        // The controller's own attribute, replayed through the production limiter table: a policy
+        // missing from that switch resolves to "no limiter", so this would never reject.
+        var attribute = typeof(AcademicExportController)
+            .GetMethod(nameof(AcademicExportController.Export),
+                BindingFlags.Instance | BindingFlags.Public | BindingFlags.DeclaredOnly)!
+            .GetCustomAttribute<EnableRateLimitingAttribute>()!;
+
+        var options = new RateLimiterOptions();
+        RateLimiting.Configure(options);
+        var student = Guid.NewGuid();
+        var anotherStudent = Guid.NewGuid();
+
+        using var first = await options.GlobalLimiter!.AcquireAsync(RenderContext(attribute, student));
+        using var second = await options.GlobalLimiter!.AcquireAsync(RenderContext(attribute, student));
+        using var third = await options.GlobalLimiter!.AcquireAsync(RenderContext(attribute, student));
+        using var neighbour = await options.GlobalLimiter!.AcquireAsync(RenderContext(attribute, anotherStudent));
+
+        Assert.True(first.IsAcquired);
+        Assert.True(second.IsAcquired);
+        Assert.False(third.IsAcquired, "a third simultaneous render from one student must be refused, not queued");
+        Assert.True(neighbour.IsAcquired, "the render cap is per student, never a global stall");
+    }
+
+    [Fact]
+    public async Task Export_route_is_governed_by_the_policy_and_refuses_without_rendering_or_billing()
+    {
+        var owner = await RegisterAsync("Export Window Owner");
+        var jobId = SeedCompletedResearchJob(owner.WorkspaceId, Guid.Parse(owner.UserId));
+
+        // Twelve exports from one student in a row crosses the established window (10/minute),
+        // which only happens if the route really is governed: an ungoverned route returns 200 twelve
+        // times. Requests stay sequential because the shared in-memory SQLite connection of the test
+        // harness is not safe under concurrent use; the in-flight half of the same policy is pinned by
+        // Export_policy_bounds_simultaneous_renders_per_student.
+        var outcomes = new List<(HttpStatusCode Status, string Body, string? RetryAfter, string? Mode)>();
+        for (var index = 0; index < 12; index++)
+        {
+            var response = await ExportFileAsync(owner, jobId, "classic-thesis.times.150.classic.center", "docx");
+            outcomes.Add((
+                response.StatusCode,
+                await response.Content.ReadAsStringAsync(),
+                response.Headers.TryGetValues("Retry-After", out var retry) ? string.Join(",", retry) : null,
+                response.Headers.TryGetValues(AcademicExportController.ModeHeader, out var mode) ? string.Join(",", mode) : null));
+        }
+
+        Assert.All(outcomes, outcome => Assert.True(
+            outcome.Status is HttpStatusCode.OK or HttpStatusCode.TooManyRequests,
+            $"unexpected {(int)outcome.Status} {outcome.Status}: {outcome.Body[..Math.Min(outcome.Body.Length, 240)]}"));
+        Assert.Equal(10, outcomes.Count(outcome => outcome.Status == HttpStatusCode.OK));
+        Assert.Equal(2, outcomes.Count(outcome => outcome.Status == HttpStatusCode.TooManyRequests));
+
+        foreach (var rejected in outcomes.Where(outcome => outcome.Status == HttpStatusCode.TooManyRequests))
+        {
+            // Refused before any rendering: the documented safe envelope, no export-mode header, and
+            // no file bytes in the body.
+            Assert.Contains("RATE_LIMITED", rejected.Body, StringComparison.Ordinal);
+            Assert.Equal("60", rejected.RetryAfter);
+            Assert.Null(rejected.Mode);
+            Assert.StartsWith("{", rejected.Body, StringComparison.Ordinal);
+        }
+
+        // And the bounded surface still created nothing billable across the whole sweep.
+        using var scope = _factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        Assert.Equal(1, db.GenerationJobs.Count(job => job.WorkspaceId == owner.WorkspaceId));
+        Assert.Equal(0, db.UsageTransactions.Count(transaction => transaction.GenerationJobId == jobId));
+        Assert.Equal(0, db.GenerationProviderAttempts.Count(attempt => attempt.GenerationJobId == jobId));
+    }
+
+    private static HttpContext RenderContext(EnableRateLimitingAttribute attribute, Guid userId)
+    {
+        var context = new DefaultHttpContext
+        {
+            User = new ClaimsPrincipal(new ClaimsIdentity(
+                [new Claim(ClaimTypes.NameIdentifier, userId.ToString("N"))],
+                "test")),
+        };
+        context.SetEndpoint(new Endpoint(
+            requestDelegate: null,
+            new EndpointMetadataCollection(attribute),
+            displayName: "academic-export"));
+        return context;
     }
 
     // ── helpers ─────────────────────────────────────────────────────────────────────────

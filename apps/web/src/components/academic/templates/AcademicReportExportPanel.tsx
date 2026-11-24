@@ -104,6 +104,10 @@ export function exportErrorCopyKey(code: string): AcademicExportCopyKey {
       return "errorDirection";
     case "ACADEMIC_EXPORT_NOT_FOUND":
       return "errorNotFound";
+    case "RATE_LIMITED":
+      // The render surface is bounded by the established expensive-operation policy, so a burst of
+      // downloads is refused before anything is produced. Say so plainly instead of implying failure.
+      return "errorRateLimited";
     default:
       return "errorGeneric";
   }

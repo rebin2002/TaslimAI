@@ -48,7 +48,8 @@ export type AcademicExportCopyKey =
   | "errorGeneric"
   | "errorIntegrity"
   | "errorDirection"
-  | "errorNotFound";
+  | "errorNotFound"
+  | "errorRateLimited";
 
 const COPY: Record<AcademicExportCopyLocale, Record<AcademicExportCopyKey, string>> = {
   en: {
@@ -95,6 +96,8 @@ const COPY: Record<AcademicExportCopyLocale, Record<AcademicExportCopyKey, strin
       "Some sources cannot be cited verifiably in a submitted document yet. Review the sources in your report, then try again.",
     errorDirection: "The selected design reads in a different direction than this report. Choose a matching design.",
     errorNotFound: "This report is no longer available to your account, or its saved payload cannot be exported.",
+    errorRateLimited:
+      "Too many exports were asked for in a short time, so this one was not produced. Your saved report is untouched and no new research was started — wait a minute, then try again.",
   },
   ckb: {
     panelTitle: "هەناردەکردنی ڕاپۆرتی پاشەکەوتکراو بە دیزاینی داڕشتەوە",
@@ -140,6 +143,8 @@ const COPY: Record<AcademicExportCopyLocale, Record<AcademicExportCopyKey, strin
       "هەندێک سەرچاوە هێشتا بە شێوەیەکی دڵنیاکراو ناتوانرێت لە بەڵگەنامەی پێشکەشکراودا بهێنرێت. سەرچاوەکان پشکنە و دووبارە هەوڵ بدە.",
     errorDirection: "دیزاینی هەڵبژێردراو لەگەڵ ئاراستەی خوێندنەوەی ئەم ڕاپۆرتەدا ناکۆکە. دیزاینێکی گونجاو هەڵبژێرە.",
     errorNotFound: "ئەم ڕاپۆرتە بۆ هەژمارەکەت بەردەست نییە، یان دەقی پاشەکەوتکراوەکەی ناگەنجرێتە هەناردەکردن.",
+    errorRateLimited:
+      "لە ماوەیەکی کورتدا هەناردەکردنی زۆرت داوا کردووە، بۆیە ئەمە دروست نەکرا. ڕاپۆرتی پاشەکەوتکراوەکەت دەست‌نەکراوەیە و هیچ لێکۆڵینەوەیەکی نوێ دەست پێنەکات — چەند خولەکێک چاوەڕێ بکە و دووبارە هەوڵ بدە.",
   },
   ar: {
     panelTitle: "تصدير تقرير محفوظ بتصميم قالب",
@@ -185,6 +190,8 @@ const COPY: Record<AcademicExportCopyLocale, Record<AcademicExportCopyKey, strin
       "بعض المصادر لا يمكن الاستشهاد بها بشكل قابل للتحقق بعد. راجع مصادر التقرير ثم أعد المحاولة.",
     errorDirection: "التصميم المختار يختلف في اتجاه القراءة عن هذا التقرير. اختر تصميمًا مطابقًا.",
     errorNotFound: "هذا التقرير لم يعد متاحًا لحسابك، أو إن نسخة المحفوظات منه لا يمكن تصديرها.",
+    errorRateLimited:
+      "طلبت تصديرات كثيرة في وقت قصير، فلم يُنشأ هذا الملف. تقريرك المحفوظ لم يُمسّ ولا يبدأ أي بحث جديد — انتظر دقيقة ثم أعد المحاولة.",
   },
 };
 

@@ -165,6 +165,8 @@ describe("export panel helpers", () => {
     expect(exportErrorCopyKey("ACADEMIC_BIBLIOGRAPHY_INTEGRITY")).toBe("errorIntegrity");
     expect(exportErrorCopyKey("ACADEMIC_EXPORT_DIRECTION_MISMATCH")).toBe("errorDirection");
     expect(exportErrorCopyKey("ACADEMIC_EXPORT_NOT_FOUND")).toBe("errorNotFound");
+    // The export POST is rate bounded, so the 429 code must not be reported as a generic failure.
+    expect(exportErrorCopyKey("RATE_LIMITED")).toBe("errorRateLimited");
     expect(exportErrorCopyKey("ANYTHING_ELSE")).toBe("errorGeneric");
   });
 

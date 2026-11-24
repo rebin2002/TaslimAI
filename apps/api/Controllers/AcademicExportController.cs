@@ -1,6 +1,7 @@
 using System.Security.Claims;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
 using Taslim.Api.AcademicExport;
 using Taslim.Api.AcademicTemplates;
@@ -67,6 +68,12 @@ public sealed record AcademicExportRequest(
 ///   so job existence is not leaked across tenants;
 /// - no generation charge: no GenerationJob, UsageTransaction or provider attempt is ever created
 ///   by these endpoints (they hold no cost-control or job-creation dependency at all);
+/// - bounded render concurrency: the export POST is synchronous document production (DOCX package
+///   build, PDF layout, then a full re-open and validation of the bytes). It carries the established
+///   expensive-render policy `expensive-ai`, the same one that bounds the other render and mutation
+///   surfaces in this API, so one student cannot pile unbounded renders onto the process. Without an
+///   endpoint policy the global concurrency limiter's switch resolves this route to "no limiter",
+///   which is exactly the combined-tree gap this closes;
 /// - citations preserved verbatim, bibliography re-checked through the merged integrity gate;
 /// - metadata-only rows are always labelled as not accessed, and the AI-use disclosure is rendered
 ///   even when the student has not completed it — this path can never hide the disclosure.
@@ -102,6 +109,7 @@ public sealed class AcademicExportController(
 
     [HttpPost("jobs/{jobId:guid}/export")]
     [ValidateAntiForgeryToken]
+    [EnableRateLimiting(RateLimiting.ExpensiveAi)]
     public async Task<IActionResult> Export(Guid jobId, [FromBody] AcademicExportRequest request, CancellationToken cancellationToken)
     {
         if (string.IsNullOrWhiteSpace(request.ConfigurationId) || request.ConfigurationId.Length > 200)
