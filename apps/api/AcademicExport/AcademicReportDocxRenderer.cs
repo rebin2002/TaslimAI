@@ -69,6 +69,15 @@ public static class AcademicReportDocxRenderer
             body.Append(Paragraph($"Saved {report.GeneratedAtUtc.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture)}", null, spec, centered: true));
             body.Append(PageBreak());
         }
+        else
+        {
+            // A coverless design (APA-style reports put the title on the first page rather than on a
+            // title page of their own) still has to identify itself: without this the export is a
+            // stack of unlabelled prose, and the integrity check could not even locate the title.
+            body.Append(Paragraph(report.Title, null, spec, centered: true, sizePt: spec.HeadingSizePt(1), bold: spec.HeadingsBold));
+            if (!string.IsNullOrWhiteSpace(report.Subtitle))
+                body.Append(Paragraph(report.Subtitle!, null, spec, centered: true));
+        }
 
         if (spec.IncludesApprovalPage)
         {
@@ -80,9 +89,13 @@ public static class AcademicReportDocxRenderer
             body.Append(PageBreak());
         }
 
-        if (spec.IncludesAiUseDisclosureSlot)
+        // The disclosure is a statement the student made, not a template decoration. Templates differ
+        // in whether they reserve a styled slot for it, and a slot-less template used to drop the text
+        // silently — the export said nothing about an AI-use statement the reader believed was filed,
+        // while the panel copy promised it was "included in every export". It is now included in every
+        // export: the slot decides styling, never existence.
+        body.Append(Paragraph(labels.DisclosureHeading, spec.IncludesAiUseDisclosureSlot ? "Heading2" : null, spec, bold: !spec.IncludesAiUseDisclosureSlot));
         {
-            body.Append(Paragraph(labels.DisclosureHeading, "Heading2", spec));
             var completed = !string.IsNullOrWhiteSpace(studentDisclosure);
             body.Append(Paragraph(completed ? studentDisclosure!.Trim() : labels.DisclosureMissing, null, spec));
             if (!completed)
@@ -95,7 +108,12 @@ public static class AcademicReportDocxRenderer
             body.Append(TocField(spec));
             body.Append(PageBreak());
         }
-        body.Append(SectionPropertiesFor(spec, frontMatter: true));
+        // WordprocessingML allows exactly one SectionProperties as a direct child of the body: the final
+        // one, which describes the last section. Every EARLIER section break belongs to the paragraph
+        // that ends its section. A body-level sectPr in the middle is invalid markup — Word reports the
+        // file as corrupt, and OpenXmlValidator flags it — so the front-matter break rides on a
+        // paragraph of its own, and only the closing break stays at body level.
+        body.Append(new Paragraph(new ParagraphProperties(SectionPropertiesFor(spec, frontMatter: true))));
 
         // ── body: the saved report, verbatim content, citations preserved ──────────────
         if (!string.IsNullOrWhiteSpace(report.ExecutiveSummary))
@@ -129,7 +147,9 @@ public static class AcademicReportDocxRenderer
         foreach (var source in report.Sources)
         {
             body.Append(Paragraph(BibliographyLine(source), "Bibliography", spec));
-            if (!source.ContentAccessed)
+            // Note-driven, not flag-driven: a row can hold a snippet (so "some content") and still have
+            // to say plainly that the document itself was not read here.
+            if (!string.IsNullOrWhiteSpace(source.AccessNote))
                 body.Append(Paragraph(source.AccessNote, null, spec, italic: true, indentLeftPt: spec.IsRtl ? 0 : spec.BibliographyIndentPt));
         }
 
@@ -155,20 +175,39 @@ public static class AcademicReportDocxRenderer
     {
         switch (block.Type.ToLowerInvariant())
         {
-            case "bullets":
-                foreach (var item in block.Items ?? Array.Empty<string>())
-                    yield return Paragraph("•  " + WithCitations(item, block.CitationIds), null, spec, indentLeftPt: spec.IsRtl ? 0 : 18, indentRightPt: spec.IsRtl ? 18 : 0);
-                break;
-            case "numbered_list":
-                var number = 1;
-                foreach (var item in block.Items ?? Array.Empty<string>())
+            case "bullets" or "numbered_list":
+                // Both renderers treat a list the same way: one paragraph per item with the marker the
+                // template's family implies, and — if a producer ever sends a list block with no items
+                // but with prose — that prose rather than nothing.
+                if (block.Items is { Count: > 0 } list)
                 {
-                    yield return Paragraph($"{number++}.  {WithCitations(item, block.CitationIds)}", null, spec, indentLeftPt: spec.IsRtl ? 0 : 18, indentRightPt: spec.IsRtl ? 18 : 0);
+                    var number = 1;
+                    foreach (var item in list)
+                    {
+                        var marker = block.Type.Equals("numbered_list", StringComparison.OrdinalIgnoreCase) ? $"{number++}.  " : "•  ";
+                        yield return Paragraph(marker + WithCitations(item, block.CitationIds), null, spec,
+                            indentLeftPt: spec.IsRtl ? 0 : 18, indentRightPt: spec.IsRtl ? 18 : 0);
+                    }
+                }
+                else
+                {
+                    var prose = WithCitations(block.Text, block.CitationIds);
+                    if (!string.IsNullOrWhiteSpace(prose)) yield return Paragraph(prose, null, spec);
                 }
                 break;
             case "table":
-                if (block.Rows is { Count: > 0 })
-                    yield return BuildTable(spec, block.Rows);
+                if (block.Rows is { Count: > 0 } tableRows)
+                {
+                    // A table's own caption and its citations used to disappear whenever the row data
+                    // was present, which is the normal case: the paragraph path rendered them, the
+                    // table path rendered neither. The caption leads the table and the citations trail
+                    // it, so the evidence a claim rests on stays visible with the claim.
+                    if (!string.IsNullOrWhiteSpace(block.Text))
+                        yield return Paragraph(WithCitations(block.Text, Array.Empty<string>()), null, spec);
+                    yield return BuildTable(spec, tableRows);
+                    if (block.CitationIds.Count > 0)
+                        yield return Paragraph(WithCitations("Sources:", block.CitationIds), null, spec, italic: true);
+                }
                 else
                     yield return Paragraph(WithCitations(block.Text, block.CitationIds), null, spec);
                 break;
@@ -190,8 +229,10 @@ public static class AcademicReportDocxRenderer
     private static Paragraph TocField(AcademicDesignSpec spec)
     {
         var properties = new ParagraphProperties();
-        if (spec.IsRtl) properties.Append(new BiDi());
         properties.Append(new ParagraphStyleId { Val = "TOCEntry" });
+        // w:pStyle is the first element of CT_PPr; appending the RTL flag ahead of it is a schema
+        // violation that only an RTL template hits, which is why the Kurdish export failed validation.
+        if (spec.IsRtl) properties.Append(new BiDi());
         var instruction = $"TOC \\o \"1-{Math.Max(1, spec.HeadingLevels)}\" \\h \\z \\u";
         var field = new SimpleField { Instruction = instruction };
         field.Append(new Run(new Text("(Open in Word and accept the field update to populate the contents list.)") { Space = SpaceProcessingModeValues.Preserve }));
@@ -237,13 +278,9 @@ public static class AcademicReportDocxRenderer
                     new SpacingBetweenLines { Before = TwipsI(spec.HeadingTopGapPt), After = TwipsI(spec.ParagraphAfterPt / 2) },
                     new Indentation { FirstLine = "0" },
                     new OutlineLevel { Val = level - 1 }),
-                new StyleRunProperties(
-                    new RunFonts { Ascii = headingFont, HighAnsi = headingFont, EastAsia = headingFont, ComplexScript = headingFont },
-                    new FontSize { Val = HalfPoints(spec.HeadingSizePt(level)) },
-                    new FontSizeComplexScript { Val = HalfPoints(spec.HeadingSizePt(level)) },
-                    spec.HeadingsBold ? new Bold() : null!,
-                    spec.HeadingsBold ? new BoldComplexScript() : null!,
-                    level == 1 && spec.H1Uppercase ? new Caps() : null!))
+                // CT_RPr order: rFonts, b, bCs, i, iCs, caps, ..., sz, szCs. Bold and caps used to be
+                // appended after the size, which the schema reads as an unexpected w:b.
+                BuildHeadingRunProperties(headingFont, spec, level))
             { StyleId = id, Type = StyleValues.Paragraph });
         }
 
@@ -251,6 +288,7 @@ public static class AcademicReportDocxRenderer
             new StyleName { Val = "toc 1" },
             new BasedOn { Val = "Normal" },
             new StyleParagraphProperties(
+                // CT_PPrBase order: tabs, ..., spacing.
                 new Tabs(new TabStop { Val = TabStopValues.Right, Position = TwipsN(spec.PaperWidthPt - spec.MarginLeftPt - spec.MarginRightPt) }),
                 new SpacingBetweenLines { After = "40" }))
         { StyleId = "TOCEntry", Type = StyleValues.Paragraph });
@@ -270,29 +308,47 @@ public static class AcademicReportDocxRenderer
 
     private static Paragraph PageBreak() => new(new Run(new Break { Type = BreakValues.Page }));
 
+    /// <summary>Heading character properties in schema order (rFonts, b, bCs, caps, sz, szCs).</summary>
+    private static StyleRunProperties BuildHeadingRunProperties(string headingFont, AcademicDesignSpec spec, int level)
+    {
+        var properties = new StyleRunProperties();
+        properties.Append(new RunFonts { Ascii = headingFont, HighAnsi = headingFont, EastAsia = headingFont, ComplexScript = headingFont });
+        if (spec.HeadingsBold) properties.Append(new Bold(), new BoldComplexScript());
+        if (level == 1 && spec.H1Uppercase) properties.Append(new Caps());
+        properties.Append(new FontSize { Val = HalfPoints(spec.HeadingSizePt(level)) },
+            new FontSizeComplexScript { Val = HalfPoints(spec.HeadingSizePt(level)) });
+        return properties;
+    }
+
     private static Paragraph Paragraph(string text, string? style, AcademicDesignSpec spec,
         bool centered = false, double? sizePt = null, bool bold = false, bool italic = false,
         double indentLeftPt = 0, double indentRightPt = 0)
     {
+        // WordprocessingML declares an exact child order inside w:pPr and w:rPr, and the OpenXml
+        // validator rejects a document that appends them in whatever order was convenient: w:pStyle
+        // must precede w:bidi, and w:b/w:i must precede w:sz. Word's own repair dialog used to swallow
+        // this; a schema check cannot. Build in schema order instead of relying on the reader's
+        // tolerance, and never emit an attribute with an empty value (w:left="" is not "unset").
         var properties = new ParagraphProperties();
-        if (spec.IsRtl) properties.Append(new BiDi());
         if (style is not null) properties.Append(new ParagraphStyleId { Val = style });
-        if (centered) properties.Append(new Justification { Val = JustificationValues.Center });
+        if (spec.IsRtl) properties.Append(new BiDi());
         if (indentLeftPt > 0 || indentRightPt > 0)
-            properties.Append(new Indentation
-            {
-                Left = indentLeftPt > 0 ? TwipsI(indentLeftPt) : null!,
-                Right = indentRightPt > 0 ? TwipsI(indentRightPt) : null!,
-            });
+        {
+            var indentation = new Indentation();
+            if (indentLeftPt > 0) indentation.Left = TwipsI(indentLeftPt);
+            if (indentRightPt > 0) indentation.Right = TwipsI(indentRightPt);
+            properties.Append(indentation);
+        }
+        if (centered) properties.Append(new Justification { Val = JustificationValues.Center });
         var run = new Run();
         if (sizePt is not null || bold || italic)
-            run.RunProperties = new RunProperties(
-                sizePt is not null ? new FontSize { Val = HalfPoints(sizePt.Value) } : null!,
-                sizePt is not null ? new FontSizeComplexScript { Val = HalfPoints(sizePt.Value) } : null!,
-                bold ? new Bold() : null!,
-                bold ? new BoldComplexScript() : null!,
-                italic ? new Italic() : null!,
-                italic ? new ItalicComplexScript() : null!);
+        {
+            var runProperties = new RunProperties();
+            if (bold) runProperties.Append(new Bold(), new BoldComplexScript());
+            if (italic) runProperties.Append(new Italic(), new ItalicComplexScript());
+            if (sizePt is not null) runProperties.Append(new FontSize { Val = HalfPoints(sizePt.Value) }, new FontSizeComplexScript { Val = HalfPoints(sizePt.Value) });
+            run.RunProperties = runProperties;
+        }
         run.Append(new Text(text) { Space = SpaceProcessingModeValues.Preserve });
         return new Paragraph(properties, run);
     }
@@ -301,12 +357,21 @@ public static class AcademicReportDocxRenderer
     {
         var table = new Table(new TableProperties(
             new TableBorders(
+                // w:tblBorders is an ordered group: top, left, bottom, right, then the inside edges.
                 new TopBorder { Val = BorderValues.Single, Size = 4 },
-                new BottomBorder { Val = BorderValues.Single, Size = 4 },
                 new LeftBorder { Val = BorderValues.Single, Size = 4 },
+                new BottomBorder { Val = BorderValues.Single, Size = 4 },
                 new RightBorder { Val = BorderValues.Single, Size = 4 },
                 new InsideHorizontalBorder { Val = BorderValues.Single, Size = 4 },
                 new InsideVerticalBorder { Val = BorderValues.Single, Size = 4 })));
+        // w:tblGrid is required between w:tblPr and the first w:tr; without it the table is only
+        // renderable by forgiving readers, and the validator reports the rows as unexpected children.
+        var columnCount = rows.Count == 0 ? 0 : rows[0].Count;
+        var grid = new TableGrid();
+        var usableWidthPt = Math.Max(1, spec.PaperWidthPt - spec.MarginLeftPt - spec.MarginRightPt);
+        for (var index = 0; index < columnCount; index++)
+            grid.Append(new GridColumn { Width = TwipsI(usableWidthPt / Math.Max(1, columnCount)) });
+        table.Append(grid);
         foreach (var (rowIndex, row) in rows.Select((row, index) => (index, row)))
         {
             var tableRow = new TableRow();
@@ -322,12 +387,6 @@ public static class AcademicReportDocxRenderer
     {
         var properties = new SectionProperties();
         var scheme = frontMatter ? spec.FrontMatterNumbering : spec.BodyNumbering;
-        if (!string.Equals(scheme, "none", StringComparison.Ordinal))
-            properties.Append(new PageNumberType
-            {
-                Format = PageNumberFormat(scheme),
-                Start = frontMatter || spec.RestartNumbersAfterFrontMatter ? new Int32Value(1) : null,
-            });
         properties.Append(new PageSize
         {
             Width = new UInt32Value((uint)Math.Round(spec.PaperWidthPt * AcademicDesignSpec.TwipsPerPoint)),
@@ -342,8 +401,15 @@ public static class AcademicReportDocxRenderer
             Right = new UInt32Value((uint)Math.Max(0, TwipsN(spec.MarginRightPt))),
             Gutter = new UInt32Value((uint)Math.Max(0, TwipsN(spec.BindingEdgePt))),
         });
-        if (spec.IsRtl) properties.Append(new BiDi());
-        if (spec.IsRtl && string.Equals(spec.BindingEdge, "right", StringComparison.Ordinal)) properties.Append(new GutterOnRight());
+        // EG_SectPrContents is an ordered group: w:pgSz, w:pgMar, then w:pgNumType, w:cols, w:bidi and
+        // w:rtlGutter. Emitting the numbering first made the validator call w:pgSz an unexpected child,
+        // which is the difference between a file Word opens and a file Word offers to repair.
+        if (!string.Equals(scheme, "none", StringComparison.Ordinal))
+            properties.Append(new PageNumberType
+            {
+                Format = PageNumberFormat(scheme),
+                Start = frontMatter || spec.RestartNumbersAfterFrontMatter ? new Int32Value(1) : null,
+            });
         if (spec.ColumnCount > 1)
         {
             var columnWidth = (uint)Math.Round((spec.PaperWidthPt - spec.MarginLeftPt - spec.MarginRightPt - (spec.ColumnCount - 1) * spec.ColumnGapPt) / spec.ColumnCount * AcademicDesignSpec.TwipsPerPoint);
@@ -358,6 +424,8 @@ public static class AcademicReportDocxRenderer
         {
             properties.Append(new Columns());
         }
+        if (spec.IsRtl) properties.Append(new BiDi());
+        if (spec.IsRtl && string.Equals(spec.BindingEdge, "right", StringComparison.Ordinal)) properties.Append(new GutterOnRight());
         return properties;
     }
 

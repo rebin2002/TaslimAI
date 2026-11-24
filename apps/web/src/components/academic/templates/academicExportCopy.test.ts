@@ -20,8 +20,13 @@ const copyKeys = [
   "savedAt",
   "sectionsCount",
   "sourcesCount",
-  "accessedCount",
   "metadataOnlyCount",
+  // The access breakdown: "content accessed" was one undifferentiated claim, and it overstated what
+  // a search snippet proves. Four separate strings now, all locale-complete.
+  "fullTextCount",
+  "extractedTextCount",
+  "searchResultCount",
+  "accessBreakdownNote",
   "metadataWarning",
   "disclosureHeading",
   "disclosureBody",

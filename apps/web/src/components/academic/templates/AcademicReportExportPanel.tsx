@@ -199,8 +199,14 @@ export function AcademicReportExportView({
             <li>{copy("savedAt", { date: formatSavedDate(summary.savedAtUtc, locale) ?? summary.savedAtUtc })}</li>
             <li>{copy("sectionsCount", { count: summary.sectionCount })}</li>
             <li>{copy("sourcesCount", { count: summary.sourceCount })}</li>
-            <li>{copy("accessedCount", { count: summary.accessedSourceCount })}</li>
+            {/* Split by what the workspace actually holds. A single "full text reviewed here" line
+                counted rows backed by nothing but a search-result snippet, which is a claim about the
+                student's reading that no stored row proves. */}
+            <li>{copy("fullTextCount", { count: summary.fullTextSourceCount })}</li>
+            <li>{copy("extractedTextCount", { count: summary.extractedTextSourceCount })}</li>
+            <li>{copy("searchResultCount", { count: summary.searchResultOnlySourceCount })}</li>
             <li>{copy("metadataOnlyCount", { count: summary.metadataOnlySourceCount })}</li>
+            <li>{copy("accessBreakdownNote")}</li>
           </ul>
           {summary.metadataOnlySourceCount > 0 ? <p className="academic-export-warning">{copy("metadataWarning")}</p> : null}
 

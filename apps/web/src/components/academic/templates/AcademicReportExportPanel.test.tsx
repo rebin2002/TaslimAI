@@ -22,6 +22,11 @@ const summary: AcademicReportSummary = {
   sourceCount: 9,
   accessedSourceCount: 6,
   metadataOnlySourceCount: 3,
+  // Four different things the panel must keep apart: a filed document, saved passages, a search line,
+  // and catalogue metadata. "6 sources accessed" used to be rendered as "full text reviewed here".
+  fullTextSourceCount: 1,
+  extractedTextSourceCount: 2,
+  searchResultOnlySourceCount: 3,
   sourceContentHash: "hash-not-shown-to-students",
   sources: [],
 };
@@ -82,7 +87,12 @@ describe("AcademicReportExportView", () => {
     const html = renderToStaticMarkup(<AcademicReportExportView {...viewProps()} />);
     expect(html).toContain(summary.title);
     expect(html).toContain("9 sources");
-    expect(html).toContain("6 sources with full text reviewed here");
+    expect(html).toContain("1 sources whose document itself is filed in this workspace");
+    expect(html).toContain("2 sources with saved passages, not the whole document");
+    expect(html).toContain("3 sources backed by a search-result line only");
+    expect(html).toContain("only the first stands for a filed document");
+    // The overstated claim must not come back through any other field.
+    expect(html).not.toContain("full text reviewed");
     expect(html).toContain("3 catalogue records only");
     expect(html).toContain("were not read in full");
     // The internal content hash is a server-side integrity value, never student copy.

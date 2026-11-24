@@ -2,7 +2,7 @@ import type { Metadata } from "next";
 import { ProtectedPage } from "@/components/ProtectedPage";
 import { AcademicReportExportPanel } from "@/components/academic/templates/AcademicReportExportPanel";
 import { academicExportRoute, academicRoute } from "@/components/academic/academicRoutes";
-import { requireAuthenticatedPage } from "@/lib/serverAuth";
+import { internalReturnPath, requireAuthenticatedPage } from "@/lib/serverAuth";
 
 /**
  * Issue #1267 (export slice) — route that connects the template gallery (#1265)
@@ -27,10 +27,18 @@ export const metadata: Metadata = {
 export default async function AcademicReportExportPage({
   searchParams,
 }: {
-  searchParams: Promise<{ job?: string }>;
+  searchParams: Promise<{ job?: string | string[] }>;
 }) {
-  await requireAuthenticatedPage(academicExportRoute);
-  const { job } = await searchParams;
+  // Read the requested location first. `?job=` selects which saved report the panel opens, and the
+  // gate below hands the reader back exactly what they asked for; a pathname-only return path would
+  // land an expired session on an empty export screen and lose the deep link mid-action. Same
+  // server-gate pattern as `/assets` and `/account/generation-jobs`, so the promised destination
+  // matches the browser-side boundary's instead of narrowing it.
+  const query = await searchParams;
+  await requireAuthenticatedPage(internalReturnPath(academicExportRoute, query));
+  // Validation stays where the value is consumed: the identifier is checked before it reaches the
+  // panel, so a malformed parameter survives sign-in as text and is then refused as data.
+  const job = Array.isArray(query.job) ? query.job[0] : query.job;
   const initialJobId = job && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(job) ? job : null;
   return (
     <ProtectedPage>

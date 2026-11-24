@@ -24,6 +24,13 @@ export type AcademicExportSource = {
   publishedYear: string | null;
   sourceType: string;
   contentAccessed: boolean;
+  /**
+   * "full_text" | "extracted_text" | "search_result_only" | "metadata_only". Kept apart from
+   * `contentAccessed`, which only says something was retained: a search-result line is retained and
+   * is not the document, and the surface must not let one flag stand for the other.
+   */
+  accessTier: string;
+  fullTextAccessed: boolean;
   accessNote: string;
 };
 
@@ -38,6 +45,9 @@ export type AcademicReportSummary = {
   sourceCount: number;
   accessedSourceCount: number;
   metadataOnlySourceCount: number;
+  fullTextSourceCount: number;
+  extractedTextSourceCount: number;
+  searchResultOnlySourceCount: number;
   sourceContentHash: string;
   sources: AcademicExportSource[];
 };

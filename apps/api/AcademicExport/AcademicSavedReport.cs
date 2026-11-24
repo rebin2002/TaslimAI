@@ -15,11 +15,21 @@ public sealed record AcademicReportSourceRow(
     string? Url,
     string? PublishedYear,
     string SourceType,
-    /// <summary>True only when the workspace actually holds content from this source: an uploaded file
-    /// whose text was extracted, or fetched web content (snippet/excerpt/evidence). A catalogue record
-    /// with metadata alone is never marked as accessed.</summary>
+    /// <summary>True when the workspace holds anything at all from this source: an uploaded file,
+    /// extracted text, or the saved snippet/excerpt/evidence the search step recorded. A catalogue
+    /// record with metadata alone is never marked as accessed. This field deliberately says nothing
+    /// about HOW MUCH was held — <see cref="AccessTier"/> and <see cref="FullTextAccessed"/> carry
+    /// that claim, because a search-result snippet is not proof that anyone read the work.</summary>
     bool ContentAccessed,
-    /// <summary>Rendered beside every metadata-only entry so a reader can never infer the work was read.</summary>
+    /// <summary>"full_text" | "extracted_text" | "search_result_only" | "metadata_only": how much of
+    /// this source this workspace actually holds, stated separately from <see cref="ContentAccessed"/>
+    /// so no consumer can read "some content present" as "the work was read".</summary>
+    string AccessTier,
+    /// <summary>True only when the source document itself is held here (an uploaded file). Extracted
+    /// passages and search snippets are content ABOUT a work, not the work.</summary>
+    bool FullTextAccessed,
+    /// <summary>Rendered beside every entry whose holdings fall short of the document itself, so a
+    /// reader can never infer the work was read from the bibliography alone.</summary>
     string AccessNote);
 
 public sealed record AcademicReportBlockModel(
@@ -39,6 +49,11 @@ public sealed record AcademicExportLabels(
     string DisclosureMissing,
     string IntegrityNote,
     string MetadataOnlyNote,
+    /// <summary>Beside a row where only a search-result line or saved excerpt is held: not a claim
+    /// that the document was accessed.</summary>
+    string SearchResultOnlyNote,
+    /// <summary>Beside a row where extracted passages are held but the document itself is not.</summary>
+    string ExtractedTextNote,
     string ExecutiveSummaryHeading,
     string ConclusionHeading,
     string KeyFindingsHeading);
@@ -69,6 +84,12 @@ public sealed class AcademicSavedReport
     public AcademicExportLabels Labels { get; init; } = DefaultLabels;
     public int AccessedSourceCount => Sources.Count(source => source.ContentAccessed);
     public int MetadataOnlySourceCount => Sources.Count(source => !source.ContentAccessed);
+    /// <summary>Rows where the document itself is in the workspace — the only rows a "full text
+    /// reviewed" claim may count.</summary>
+    public int FullTextSourceCount => Sources.Count(source => source.FullTextAccessed);
+    /// <summary>Rows backed by nothing stronger than a search result or saved excerpt.</summary>
+    public int SearchResultOnlySourceCount => Sources.Count(source => source.AccessTier == "search_result_only");
+    public int ExtractedTextSourceCount => Sources.Count(source => source.AccessTier == "extracted_text");
 
     private static readonly AcademicExportLabels DefaultLabels = LabelsFor("en");
 
@@ -81,8 +102,10 @@ public sealed class AcademicSavedReport
             "المراجع",
             "بيان استخدام الذكاء الاصطناعي التوليدي",
             "لم يُكمل الطالب هذا البيان. تقتضي السياسة الأكاديمية عادةً وصف مواضع استخدام أدوات الذكاء الاصطناعي وكيفية استخدامها قبل التقديم.",
-            "ملاحظة النزاهة الأكاديمية: المراجع المعلَّمة بـ«سجل فهرسة فقط» حُددت من بيانات الفهرسة ولم يُطَّلع على نصها الكامل داخل مساحة العمل هذه. تُعيد هذه الوثيقة عرض تقرير بحثي محفوظ، وهي لا تحتوي على أي مخرجات توليدية جديدة.",
+            "ملاحظة النزاهة الأكاديمية: المراجع المعلَّمة بـ«سجل فهرسة فقط» حُددت من بيانات الفهرسة، والمعلَّمة بـ«نتيجة بحث فقط» لا تتجاوز سطراً من نتائج البحث، والمعلَّمة بـ«نص مستخرَج» تحتفظ بمقاطع دون المستند كاملًا؛ وفي جميع هذه الحالات لم يُطَّلع على النص الكامل داخل مساحة العمل هذه. تُعيد هذه الوثيقة عرض تقرير بحثي محفوظ، وهي لا تحتوي على أي مخرجات توليدية جديدة.",
             "سجل فهرسة فقط — لم يتم الوصول إلى النص الكامل عبر مساحة العمل هذه.",
+            "نتيجة بحث فقط — لم يتم الوصول إلى النص الكامل عبر مساحة العمل هذه.",
+            "نص مستخرَج — مقاطع محفوظة هنا، وليس المستند كاملًا.",
             "الملخص التنفيذي",
             "الخاتمة",
             "أبرز النتائج"),
@@ -91,8 +114,10 @@ public sealed class AcademicSavedReport
             "سەرچاوەکان",
             "ڕاگەیاندنی بەکارهێنانی زیرەکی دەستکردی دروستکەر",
             "قوتابی ئەم ڕاگەیاندنەی تەواو نەکردووە. سیاسەتی ئەکادیمی بە شێوەیەکی ئاسایی داوا دەکات پێش پێشکەشکردن باس لە شوێن و شێوازی بەکارهێنانی ئامرازەکانی زیرەکی دەستکرد بکرێت.",
-            "تێبینی ڕێزپارێزی ئەکادیمی: سەرچاوە پێناسکراوەکان بە «تۆماری کەتەلۆگ تەنها» لە زانیاری کەتەلۆگەوە دیاری کراون و دەقی تەواویان لەم شوێنە کارکردنەدا نەخوێندراوەتەوە. ئەم بەڵگەیە دووبارە ڕووکارکردنەوەی توێژینەوەی پاشەکەوتکراوە و هیچ ناوەڕۆکی نوێی لێ دروست نەکراوە.",
+            "تێبینی ڕێزپارێزی ئەکادیمی: سەرچاوە پێناسکراوەکان بە «تۆماری کەتەلۆگ تەنها» لە زانیاری کەتەلۆگەوە دیاری کراون، ئەوانەی بە «دەرەنجامی گەڕان تەنها» تەنها دێڕێک لە ئەنجامەکانی گەڕانن، و ئەوانەی بە «دەقی وەرگیراو» بەشێک لەم شوێنە کارکردنەدا هەڵگیراوە نەک بەڵگەکە بەتەواوی؛ لە هیچ یەکێک لەم کاتانەدا دەقی تەواو لەم شوێنە کارکردنەدا نەخوێندراوەتەوە. ئەم بەڵگەیە دووبارە ڕووکارکردنەوەی توێژینەوەی پاشەکەوتکراوە و هیچ ناوەڕۆکی نوێی لێ دروست نەکراوە.",
             "تۆماری کەتەلۆگ تەنها — دەقی تەواوی لەم شوێنە کارکردنەدا بەردەست نەبوو.",
+            "دەرەنجامی گەڕان تەنها — دەقی تەواوی لەم شوێنە کارکردنەدا نەخوێندراوەتەوە.",
+            "دەقی وەرگیراو — بەشێک لەم شوێنە کارکردنەدا هەڵگیراوە، نەک بەڵگەکە بەتەواوی.",
             "پوختەی جێبەجێکردن",
             "ئەنجام",
             "دەرەنجامە سەرەکییەکان"),
@@ -101,8 +126,10 @@ public sealed class AcademicSavedReport
             "References",
             "Statement of Generative-AI Use",
             "The student has not completed this disclosure. Academic policy normally requires describing where and how generative AI tools were used before submission.",
-            "Research integrity note: entries marked \"catalogue record only\" were identified from catalogue metadata and their full text was not read in this workspace. This document re-renders a saved research report and contains no newly generated content.",
+            "Research integrity note: entries marked \"catalogue record only\" were identified from catalogue metadata, entries marked \"search result only\" are backed by no more than a line from the search results, and entries marked \"extracted text\" hold saved passages rather than the document itself; in none of those cases was the full text read in this workspace. This document re-renders a saved research report and contains no newly generated content.",
             "Catalogue record only — the full text was not accessed in this workspace.",
+            "Search result only — this workspace holds a snippet from the search results, not the document.",
+            "Extracted text — saved passages held here; the full document was not.",
             "Executive summary",
             "Conclusion",
             "Key findings"),
@@ -140,16 +167,16 @@ public static class AcademicSavedReportReader
         }
 
         if (root.ValueKind != JsonValueKind.Object
-            || !root.TryGetProperty("title", out var titleElement) || titleElement.ValueKind != JsonValueKind.String
-            || !root.TryGetProperty("sections", out var sectionsElement) || sectionsElement.ValueKind != JsonValueKind.Array)
+            || !TryProperty(root, "title", out var titleElement) || titleElement.ValueKind != JsonValueKind.String
+            || !TryProperty(root, "sections", out var sectionsElement) || sectionsElement.ValueKind != JsonValueKind.Array)
             throw new AcademicSavedReportException("ACADEMIC_REPORT_UNAVAILABLE", "The saved report payload is not in the expected shape.");
 
         var language = AcademicRtlPolicy.NormalizeLanguage(
-            root.TryGetProperty("language", out var languageElement) && languageElement.ValueKind == JsonValueKind.String
+            TryProperty(root, "language", out var languageElement) && languageElement.ValueKind == JsonValueKind.String
                 ? languageElement.GetString()
                 : null);
 
-        var keyFindings = ReadBlocks(root.TryGetProperty("keyFindings", out var findingsElement) ? findingsElement : default);
+        var keyFindings = ReadBlocks(TryProperty(root, "keyFindings", out var findingsElement) ? findingsElement : default);
         var sections = ReadSections(sectionsElement);
         var orderedSources = ReadSources(sources, language);
 
@@ -179,9 +206,48 @@ public static class AcademicSavedReportReader
     }
 
     private static string? ReadOptionalString(JsonElement element, string name) =>
-        element.ValueKind == JsonValueKind.Object && element.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.String
+        element.ValueKind == JsonValueKind.Object && TryProperty(element, name, out var value) && value.ValueKind == JsonValueKind.String
             ? value.GetString()
             : null;
+
+    /// <summary>
+    /// Property lookup that accepts both spellings of a name, exact match first.
+    ///
+    /// This is not cosmetic. The writer of `ResultJson` serializes an anonymous object with no
+    /// <see cref="JsonSerializerOptions"/>, so the naming policy is the default one: the OUTER keys are
+    /// camelCase because they are hand-written that way (`sections`, `keyFindings`), while every NESTED
+    /// object keeps its C# property names — `Heading`, `Blocks`, `Type`, `Text`, `Items`, `Rows`,
+    /// `Cells`, `CitationIds`. A case-sensitive camelCase-only reader therefore found the sections array
+    /// and decoded each of them into an empty heading with no blocks, which rendered as a document with
+    /// a title page, a summary, and no body — while still passing validation, because the citation check
+    /// keys off cited identifiers the reader had just lost. Real saved reports exist in that shape now.
+    ///
+    /// camelCase is kept as an accepted spelling, not dropped: it is what earlier fixtures and any
+    /// future camel-naming producer emit, and an export must render whichever shape is stored.
+    /// </summary>
+    private static bool TryProperty(JsonElement element, string name, out JsonElement value)
+    {
+        if (element.ValueKind == JsonValueKind.Object)
+        {
+            if (element.TryGetProperty(name, out value)) return true;
+            if (name.Length > 0)
+            {
+                var pascal = char.ToUpperInvariant(name[0]) + name[1..];
+                if (!string.Equals(pascal, name, StringComparison.Ordinal)
+                    && element.TryGetProperty(pascal, out value)) return true;
+            }
+            foreach (var property in element.EnumerateObject())
+            {
+                if (string.Equals(property.Name, name, StringComparison.OrdinalIgnoreCase))
+                {
+                    value = property.Value;
+                    return true;
+                }
+            }
+        }
+        value = default;
+        return false;
+    }
 
     private static IReadOnlyList<AcademicReportSectionModel> ReadSections(JsonElement sectionsElement)
     {
@@ -190,7 +256,7 @@ public static class AcademicSavedReportReader
         {
             if (section.ValueKind != JsonValueKind.Object) continue;
             var heading = ReadOptionalString(section, "heading") ?? string.Empty;
-            var blocks = section.TryGetProperty("blocks", out var blocksElement)
+            var blocks = TryProperty(section, "blocks", out var blocksElement)
                 ? ReadBlocks(blocksElement)
                 : Array.Empty<AcademicReportBlockModel>();
             sections.Add(new AcademicReportSectionModel(heading, blocks));
@@ -206,23 +272,29 @@ public static class AcademicSavedReportReader
         {
             if (block.ValueKind != JsonValueKind.Object) continue;
             var type = ReadOptionalString(block, "type") ?? "paragraph";
-            var items = block.TryGetProperty("items", out var itemsElement) && itemsElement.ValueKind == JsonValueKind.Array
-                ? itemsElement.EnumerateArray().Where(item => item.ValueKind == JsonValueKind.String).Select(item => item.GetString()!).ToArray()
-                : null;
-            var rows = block.TryGetProperty("rows", out var rowsElement) && rowsElement.ValueKind == JsonValueKind.Array
+            // Both spellings of every nested name (see TryProperty): the real payload says "Items",
+            // "Rows" and "CitationIds"; a camelCase payload says the lower-cased version.
+            var items = ReadStrings(block, "items");
+            var rows = ReadArray(block, "rows") is { } rowsElement
                 ? rowsElement.EnumerateArray()
-                    .Where(row => row.ValueKind == JsonValueKind.Object && row.TryGetProperty("cells", out var cells) && cells.ValueKind == JsonValueKind.Array)
-                    .Select(row => (IReadOnlyList<string>)row.GetProperty("cells").EnumerateArray()
-                        .Where(cell => cell.ValueKind == JsonValueKind.String).Select(cell => cell.GetString()!).ToArray())
+                    .Select(row => ReadStrings(row, "cells") ?? Array.Empty<string>())
                     .ToArray()
                 : null;
-            var citations = block.TryGetProperty("citationIds", out var citationsElement) && citationsElement.ValueKind == JsonValueKind.Array
-                ? citationsElement.EnumerateArray().Where(id => id.ValueKind == JsonValueKind.String).Select(id => id.GetString()!).ToArray()
-                : Array.Empty<string>();
+            var citations = ReadStrings(block, "citationIds") ?? Array.Empty<string>();
             blocks.Add(new AcademicReportBlockModel(type, ReadOptionalString(block, "text"), items, rows, citations));
         }
         return blocks;
     }
+
+    private static JsonElement? ReadArray(JsonElement element, string name) =>
+        TryProperty(element, name, out var value) && value.ValueKind == JsonValueKind.Array ? value : null;
+
+    /// <summary>The array of strings under <paramref name="name"/>, or null when the name is absent or
+    /// not an array. Non-string entries inside it are skipped rather than guessed at.</summary>
+    private static string[]? ReadStrings(JsonElement element, string name) =>
+        ReadArray(element, name) is { } array
+            ? array.EnumerateArray().Where(entry => entry.ValueKind == JsonValueKind.String).Select(entry => entry.GetString()!).ToArray()
+            : null;
 
     private static IReadOnlyList<AcademicReportSourceRow> ReadSources(IReadOnlyList<ResearchSource> sources, string language)
     {
@@ -230,14 +302,26 @@ public static class AcademicSavedReportReader
             .OrderBy(source => source.Rank)
             .ThenBy(source => source.CitationId, StringComparer.Ordinal)
             .ToList();
-        var note = AcademicSavedReport.LabelsFor(language).MetadataOnlyNote;
+        var labels = AcademicSavedReport.LabelsFor(language);
         return ordered.Select(source =>
         {
-            var uploaded = string.Equals(source.SourceType, "uploaded", StringComparison.OrdinalIgnoreCase);
-            var hasContent = uploaded
-                || !string.IsNullOrWhiteSpace(source.Snippet)
-                || !string.IsNullOrWhiteSpace(source.ExtractedText)
-                || source.Evidence.Count > 0;
+            var uploaded = string.Equals(source.SourceType, "uploaded", StringComparison.OrdinalIgnoreCase)
+                || source.StoredFileId is not null;
+            // Three different claims, kept apart on purpose. A search-result snippet, or an excerpt the
+            // pipeline saved beside it, says that SOMETHING was retrieved about the work; it does not
+            // say anybody in this workspace opened the work. Marking either as "content accessed" made
+            // the bibliography imply a reading that the persisted state never proved — and the panel's
+            // own count said "full text reviewed here" about exactly those rows.
+            var extracted = !string.IsNullOrWhiteSpace(source.ExtractedText);
+            var excerptOnly = !extracted
+                && (!string.IsNullOrWhiteSpace(source.Snippet) || source.Evidence.Count > 0);
+            var (tier, note) = uploaded
+                ? ("full_text", string.Empty)
+                : extracted
+                    ? ("extracted_text", labels.ExtractedTextNote)
+                    : excerptOnly
+                        ? ("search_result_only", labels.SearchResultOnlyNote)
+                        : ("metadata_only", labels.MetadataOnlyNote);
             return new AcademicReportSourceRow(
                 source.CitationId,
                 source.Title,
@@ -245,8 +329,13 @@ public static class AcademicSavedReportReader
                 source.Url ?? source.CanonicalUrl,
                 source.PublishedAt?.ToString("yyyy", CultureInfo.InvariantCulture),
                 source.SourceType,
-                hasContent,
-                hasContent ? string.Empty : note);
+                // The stored boolean keeps its old meaning (some content of any kind is held here), so
+                // the canonical content hash — and with it the free re-export rule — does not move out
+                // from under reports already exported. The honesty is carried by the tier and the note.
+                uploaded || extracted || excerptOnly,
+                tier,
+                uploaded,
+                note);
         }).ToArray();
     }
 

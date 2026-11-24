@@ -28,6 +28,11 @@ public sealed record AcademicExportSourceDto(
     string? PublishedYear,
     string SourceType,
     bool ContentAccessed,
+    /// <summary>"full_text" | "extracted_text" | "search_result_only" | "metadata_only". Kept apart
+    /// from <see cref="ContentAccessed"/> on purpose: some content being held here is not evidence
+    /// that anybody read the work, and the surface must be able to say which of the two it means.</summary>
+    string AccessTier,
+    bool FullTextAccessed,
     string AccessNote);
 
 public sealed record AcademicExportReportSummaryDto(
@@ -40,6 +45,11 @@ public sealed record AcademicExportReportSummaryDto(
     int SourceCount,
     int AccessedSourceCount,
     int MetadataOnlySourceCount,
+    /// <summary>Rows whose document itself is in the workspace — the only rows a "full text" claim
+    /// may count, and the reason this is separate from <see cref="AccessedSourceCount"/>.</summary>
+    int FullTextSourceCount,
+    int ExtractedTextSourceCount,
+    int SearchResultOnlySourceCount,
     string SourceContentHash,
     IReadOnlyList<AcademicExportSourceDto> Sources);
 
@@ -276,9 +286,13 @@ public sealed class AcademicExportController(
         report.Sources.Count,
         report.AccessedSourceCount,
         report.MetadataOnlySourceCount,
+        report.FullTextSourceCount,
+        report.ExtractedTextSourceCount,
+        report.SearchResultOnlySourceCount,
         report.SourceContentHash,
         report.Sources.Select(source => new AcademicExportSourceDto(
-            source.CitationId, source.Title, source.Url, source.PublishedYear, source.SourceType, source.ContentAccessed, source.AccessNote)).ToList());
+            source.CitationId, source.Title, source.Url, source.PublishedYear, source.SourceType,
+            source.ContentAccessed, source.AccessTier, source.FullTextAccessed, source.AccessNote)).ToList());
 
     private static string Sanitize(string value)
     {

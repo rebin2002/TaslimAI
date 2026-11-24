@@ -26,7 +26,10 @@ export type AcademicExportCopyKey =
   | "savedAt"
   | "sectionsCount"
   | "sourcesCount"
-  | "accessedCount"
+  | "fullTextCount"
+  | "extractedTextCount"
+  | "searchResultCount"
+  | "accessBreakdownNote"
   | "metadataOnlyCount"
   | "metadataWarning"
   | "disclosureHeading"
@@ -68,7 +71,14 @@ const COPY: Record<AcademicExportCopyLocale, Record<AcademicExportCopyKey, strin
     savedAt: "Saved {date}",
     sectionsCount: "{count} sections",
     sourcesCount: "{count} sources",
-    accessedCount: "{count} sources with full text reviewed here",
+    // One line per thing the workspace actually holds. The single line this replaces counted a
+    // search-result snippet as "full text reviewed here", because the stored flag only meant "some
+    // content present". The counts now come from the tier the server derives from persisted rows, so
+    // the strongest claim is reserved for the rows that can carry it.
+    fullTextCount: "{count} sources whose document itself is filed in this workspace",
+    extractedTextCount: "{count} sources with saved passages, not the whole document",
+    searchResultCount: "{count} sources backed by a search-result line only",
+    accessBreakdownNote: "None of these lines says a work was read in full: only the first stands for a filed document.",
     metadataOnlyCount: "{count} catalogue records only",
     metadataWarning:
       "Sources listed as catalogue records were not read in full in this workspace. The export labels every one of them honestly, and a submitted paper must not claim they were read.",
@@ -115,7 +125,10 @@ const COPY: Record<AcademicExportCopyLocale, Record<AcademicExportCopyKey, strin
     savedAt: "پاشەکەوتکراو لە {date}",
     sectionsCount: "{count} بەش",
     sourcesCount: "{count} سەرچاوە",
-    accessedCount: "{count} سەرچاوە کە تەواوی دەقەکەی لێرەوە خوێندراوەتەوە",
+    fullTextCount: "{count} سەرچاوە کە بەڵگەکە بەتەواوی لەم شوێنە کارکردنەدا پاشەکەوتکراوە",
+    extractedTextCount: "{count} سەرچاوە تەنها بەشێک لە دەقیان پاشەکەوتکراوە، نەک بەڵگەکە",
+    searchResultCount: "{count} سەرچاوە تەنها دێڕێک لە ئەنجامەکانی گەڕانیان هەیە",
+    accessBreakdownNote: "هیچێک لەم ڕیزانە مانای خوێندنەوەی تەواوی بەڵگ نییە: تەنها یەکەم ڕیز باس لە بەڵگەیەکی پاشەکەوتکراو دەکات.",
     metadataOnlyCount: "{count} تۆماری کەتەلۆگ تەنها",
     metadataWarning:
       "سەرچاوەکانی وەکوو تۆماری کەتەلۆگ نیشاندران تەواوی دەقەکەیان لەم شوێنەدا خوێندراونەتەوە نییە. هەناردەکە هەموویان بە ڕاستگۆیی نیشان دەکات، و پێویستە لە توێژینەوەی پێشکەشکراودا وەکوو خوێندراو نەنرێن.",
@@ -162,7 +175,10 @@ const COPY: Record<AcademicExportCopyLocale, Record<AcademicExportCopyKey, strin
     savedAt: "حُفظ في {date}",
     sectionsCount: "{count} أقسام",
     sourcesCount: "{count} مصادر",
-    accessedCount: "{count} مصادر تمت مراجعة نصها الكامل هنا",
+    fullTextCount: "{count} مصادر تم الاحتفاظ بمستندها الكامل في مساحة العمل هذه",
+    extractedTextCount: "{count} مصادر تحتفظ بمقاطع محفوظة لا بالمستند نفسه",
+    searchResultCount: "{count} مصادر لا تتجاوز سطرًا من نتائج البحث",
+    accessBreakdownNote: "لا يعني أيٌّ من هذا أن العمل قُرئ بالكامل: السطر الأول وحده يمثّل مستندًا محفوظًا.",
     metadataOnlyCount: "{count} سجلّ فهرس فقط",
     metadataWarning:
       "المصادر المعروضة كسجلّات فهرس لم يُقرأ نصها الكامل في مساحة العمل هذه. يوسم التصدير كل مصدر بصدق، ولا يجوز أن يدّعي بحثٌ مقدَّم أنها قُرئت.",

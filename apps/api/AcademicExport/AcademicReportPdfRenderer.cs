@@ -143,6 +143,18 @@ public static class AcademicReportPdfRenderer
                         column.Item().AlignCenter().Text($"Saved {report.GeneratedAtUtc:yyyy-MM-dd}");
                         column.Item().PageBreak();
                     }
+                    else
+                    {
+                        // Same rule as the DOCX path: a design without a title page still puts the
+                        // title at the head of the first page, so the artefact identifies itself.
+                        column.Item().AlignCenter().Text(text =>
+                        {
+                            text.DefaultTextStyle(style => style.FontFamily(headingFont).FontSize((float)spec.HeadingSizePt(1)).FontColor(textColor));
+                            text.Span(spec.H1Uppercase ? report.Title.ToUpperInvariant() : report.Title);
+                        });
+                        if (!string.IsNullOrWhiteSpace(report.Subtitle))
+                            column.Item().AlignCenter().Text(report.Subtitle!);
+                    }
 
                     if (spec.IncludesApprovalPage)
                     {
@@ -154,11 +166,16 @@ public static class AcademicReportPdfRenderer
                         column.Item().PageBreak();
                     }
 
-                    if (spec.IncludesAiUseDisclosureSlot)
+                    // The student's statement of AI use is included whatever the template reserves for
+                    // it: a slot decides styling, never existence. Silently dropping it made the export
+                    // contradict the panel's own promise that the disclosure cannot be removed.
                     {
                         var completed = !string.IsNullOrWhiteSpace(studentDisclosure);
-                        column.Item().PaddingTop((float)spec.HeadingTopGapPt).Text(labels.DisclosureHeading)
+                        if (spec.IncludesAiUseDisclosureSlot)
+                            column.Item().PaddingTop((float)spec.HeadingTopGapPt).Text(labels.DisclosureHeading)
                             .FontFamily(headingFont).FontSize((float)spec.HeadingSizePt(2)).Bold();
+                        else
+                            column.Item().PaddingTop((float)spec.HeadingTopGapPt).Text(labels.DisclosureHeading).Bold();
                         column.Item().Text(completed ? studentDisclosure!.Trim() : labels.DisclosureMissing);
                         if (!completed)
                             column.Item().Text("This export leaves the disclosure visible and incomplete rather than removing it.")
@@ -192,10 +209,18 @@ public static class AcademicReportPdfRenderer
                         foreach (var block in report.KeyFindings)
                             ComposeBlock(column.Item(), block, spec, accentColor);
                     }
-                    foreach (var pair in plannedSections)
+                    // Every section's blocks are rendered, including one whose author left the heading
+                    // blank: filtering on the heading used to hide the prose and citations underneath it,
+                    // which is the opposite of what a contents list is for. The heading list above stays
+                    // filtered, because an untitled entry in a table of contents is not a navigable
+                    // heading — but the content it names is still the report's content.
+                    foreach (var section in report.Sections)
                     {
-                        Heading(column, pair.section.Heading, spec, headingFont, NextAnchor());
-                        foreach (var block in pair.section.Blocks)
+                        if (!string.IsNullOrWhiteSpace(section.Heading))
+                        {
+                            Heading(column, section.Heading, spec, headingFont, NextAnchor());
+                        }
+                        foreach (var block in section.Blocks)
                             ComposeBlock(column.Item(), block, spec, accentColor);
                     }
                     if (hasConclusion)
@@ -213,7 +238,9 @@ public static class AcademicReportPdfRenderer
                             .PaddingRight((float)(spec.IsRtl && spec.BibliographyHangingIndent ? spec.BibliographyIndentPt : 0))
                             .Text(AcademicReportDocxRenderer.BibliographyLine(source))
                             .LineHeight((float)Math.Min(spec.LineSpacing, 1.3));
-                        if (!source.ContentAccessed)
+                        // Note-driven: a row backed only by a search result holds "content" in the
+                        // stored flag yet still has to say that the document was not read here.
+                        if (!string.IsNullOrWhiteSpace(source.AccessNote))
                             column.Item()
                                 .PaddingLeft((float)(!spec.IsRtl && spec.BibliographyHangingIndent ? spec.BibliographyIndentPt : 0))
                                 .PaddingRight((float)(spec.IsRtl && spec.BibliographyHangingIndent ? spec.BibliographyIndentPt : 0))
@@ -246,30 +273,38 @@ public static class AcademicReportPdfRenderer
         switch (block.Type.ToLowerInvariant())
         {
             case "bullets":
-                foreach (var item in block.Items ?? Array.Empty<string>())
-                    container.Text(AcademicReportDocxRenderer.WithCitations(item, block.CitationIds));
+                RenderList(container, block, null, spec);
                 break;
             case "numbered_list":
-                var number = 1;
-                foreach (var item in block.Items ?? Array.Empty<string>())
-                    container.Text($"{number++}. {AcademicReportDocxRenderer.WithCitations(item, block.CitationIds)}");
+                RenderList(container, block, number => $"{number}. ", spec);
                 break;
-            case "table" when block.Rows is { Count: > 0 }:
-                container.Table(table =>
+            case "table" when block.Rows is { Count: > 0 } rows:
+                // Caption, grid and citation line are three children, so they need a column of their
+                // own: handing them to the single item this block was given made QuestPDF overwrite
+                // the earlier children, and a table with a caption threw outright.
+                container.Column(tableBlock =>
                 {
-                    table.ColumnsDefinition(columns =>
+                    tableBlock.Spacing((float)(spec.ParagraphAfterPt / 2));
+                    if (!string.IsNullOrWhiteSpace(block.Text))
+                        tableBlock.Item().Text(block.Text!);
+                    tableBlock.Item().Table(table =>
                     {
-                        for (var index = 0; index < block.Rows[0].Count; index++)
-                            columns.RelativeColumn();
+                        table.ColumnsDefinition(columns =>
+                        {
+                            for (var index = 0; index < rows[0].Count; index++)
+                                columns.RelativeColumn();
+                        });
+                        table.Header(header =>
+                        {
+                            foreach (var cell in rows[0])
+                                header.Cell().Background(accentColor).Padding(4).Text(cell).FontSize((float)(spec.BodySizePt * 0.9));
+                        });
+                        foreach (var row in rows.Skip(1))
+                            foreach (var cell in row)
+                                table.Cell().BorderTop(0.5f).BorderColor("#999999").Padding(4).Text(cell);
                     });
-                    table.Header(header =>
-                    {
-                        foreach (var cell in block.Rows[0])
-                            header.Cell().Background(accentColor).Padding(4).Text(cell).FontSize((float)(spec.BodySizePt * 0.9));
-                    });
-                    foreach (var row in block.Rows.Skip(1))
-                        foreach (var cell in row)
-                            table.Cell().BorderTop(0.5f).BorderColor("#999999").Padding(4).Text(cell);
+                    if (block.CitationIds.Count > 0)
+                        tableBlock.Item().Text(AcademicReportDocxRenderer.WithCitations("Sources:", block.CitationIds)).Italic();
                 });
                 break;
             default:
@@ -277,6 +312,43 @@ public static class AcademicReportPdfRenderer
                 if (!string.IsNullOrWhiteSpace(text)) container.Text(text);
                 break;
         }
+    }
+
+    /// <summary>
+    /// A list is one container with one text per item, not one container asked to hold several texts.
+    /// QuestPDF rejects a second child on a single-child container outright
+    /// ("You should not assign multiple child elements to a single-child container"), so the old loop
+    /// over <c>container.Text(...)</c> threw as soon as a real report had a two-item list — which it
+    /// never did while the reader could not decode <c>Items</c>, and which it does the moment the
+    /// payload is read correctly. The nesting is also what keeps the citation markers beside their own
+    /// items, matching what the DOCX path renders for the same block.
+    /// </summary>
+    private static void RenderList(IContainer container, AcademicReportBlockModel block,
+        Func<int, string>? prefix, AcademicDesignSpec spec)
+    {
+        var items = block.Items;
+        var citations = block.CitationIds;
+        if (items is not { Count: > 0 } list)
+        {
+            // A list block with no items is not a claim about a list. If the producer left prose in it,
+            // that prose renders — a block must never vanish from the document over a shape mismatch.
+            var fallback = AcademicReportDocxRenderer.WithCitations(block.Text, block.CitationIds);
+            if (!string.IsNullOrWhiteSpace(fallback)) container.Text(fallback);
+            return;
+        }
+        container.Column(column =>
+        {
+            column.Spacing((float)(spec.ParagraphAfterPt / 2));
+            var number = 1;
+            foreach (var item in list)
+            {
+                column.Item()
+                    .PaddingLeft(spec.IsRtl ? 0 : 18)
+                    .PaddingRight(spec.IsRtl ? 18 : 0)
+                    .Text((prefix?.Invoke(number) ?? "•  ") + AcademicReportDocxRenderer.WithCitations(item, citations));
+                number++;
+            }
+        });
     }
 
     private static PageSize PageSizeFor(AcademicDesignSpec spec) => spec.PaperFormat.ToLowerInvariant() switch
