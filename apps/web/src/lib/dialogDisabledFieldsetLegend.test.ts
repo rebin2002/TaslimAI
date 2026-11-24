@@ -115,10 +115,12 @@ describe("disabled fieldset legend exemption scope", () => {
     expect(evaluate(stray)).toBe(false);
   });
 
-  it("applies the exemption to the nearest disabled fieldset's own legend", () => {
-    // <fieldset disabled><fieldset disabled><legend><button> - the control sits
-    // in the inner disabled fieldset's own legend, which is the exemption that
-    // governs it; the outer fieldset does not widen or narrow it.
+  it("excludes a control that escapes only the inner of two nested disabled fieldsets", () => {
+    // <fieldset disabled><fieldset disabled><legend><button> - the control is
+    // inside the inner fieldset's own legend, so it escapes the inner one, but
+    // it is still a descendant of the outer disabled fieldset and outside that
+    // fieldset's legend. The constraint applies per disabled ancestor, so the
+    // outer one bars it; Chromium refuses focus.
     const outer = new FakeElement("FIELDSET").set("disabled");
     const inner = new FakeElement("FIELDSET").set("disabled");
     const innerLegend = new FakeElement("LEGEND");
@@ -126,6 +128,58 @@ describe("disabled fieldset legend exemption scope", () => {
     innerLegend.append(caption);
     inner.append(innerLegend);
     outer.append(inner);
+    expect(evaluate(caption)).toBe(false);
+  });
+
+  it("admits a control in the outer legend that no nested disabled fieldset contains", () => {
+    // <fieldset disabled><legend><button></legend><fieldset disabled> - the
+    // second fieldset is a sibling subtree, so the only disabled ancestor of the
+    // control is the first one, whose own legend it sits in.
+    const outer = new FakeElement("FIELDSET").set("disabled");
+    const outerLegend = new FakeElement("LEGEND");
+    const caption = control("outer-own-legend");
+    outerLegend.append(caption);
+    const sibling = new FakeElement("FIELDSET").set("disabled");
+    outer.append(outerLegend);
+    outer.append(sibling);
     expect(evaluate(caption)).toBe(true);
+  });
+
+  it("admits a control nested deeper inside the disabled fieldset's own legend", () => {
+    // The exemption is the legend subtree, not the legend's direct child list:
+    // a wrapper element inside the fieldset's first legend still escapes it.
+    const fieldset = new FakeElement("FIELDSET").set("disabled");
+    const legend = new FakeElement("LEGEND");
+    const wrapper = new FakeElement("DIV");
+    const caption = control("deep-in-own-legend");
+    wrapper.append(caption);
+    legend.append(wrapper);
+    fieldset.append(legend);
+    expect(evaluate(caption)).toBe(true);
+  });
+
+  it("excludes a control three legends deep across three disabled fieldsets", () => {
+    // The #1226 lane's s6 shape, measured against headless Chromium: each disabled
+    // fieldset carries its own legend in the body chain, so the control escapes the
+    // innermost one only. Every outer disabled ancestor applies its own bar, and the
+    // outer legends - captions sitting beside the nested fieldsets - do not contain
+    // it, so the browser skips it.
+    const outer = new FakeElement("FIELDSET").set("disabled");
+    const middle = new FakeElement("FIELDSET").set("disabled");
+    const inner = new FakeElement("FIELDSET").set("disabled");
+    const innerLegend = new FakeElement("LEGEND");
+    const caption = control("three-deep");
+    innerLegend.append(caption);
+    inner.append(innerLegend);
+    inner.append(control("inner-caption-holder"));
+    const middleLegend = new FakeElement("LEGEND");
+    middleLegend.append(new FakeElement("SPAN"));
+    middle.append(middleLegend);
+    middle.append(inner);
+    const outerLegend = new FakeElement("LEGEND");
+    outerLegend.append(new FakeElement("SPAN"));
+    outer.append(outerLegend);
+    outer.append(middle);
+    expect(evaluate(caption)).toBe(false);
   });
 });
