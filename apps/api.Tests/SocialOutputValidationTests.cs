@@ -46,4 +46,87 @@ public sealed class SocialOutputValidationTests
 
         Assert.Throws<SocialOutputValidationException>(() => SocialDraftValidator.Validate(draft, new SocialGenerationOptions()));
     }
+
+    [Fact]
+    public void Draft_validator_rejects_blank_references_and_markup_titles()
+    {
+        var options = new SocialGenerationOptions();
+
+        var nullHashtag = new SocialDraft
+        {
+            Title = "Launch",
+            Platform = "linkedin",
+            SocialType = "announcement",
+            Language = "en",
+            Posts = [new SocialPost { Order = 1, Hook = "Hook", Body = "Body", Hashtags = [null!] }],
+        };
+        Assert.Throws<SocialOutputValidationException>(() => SocialDraftValidator.Validate(nullHashtag, options));
+
+        var blankHashtag = new SocialDraft
+        {
+            Title = "Launch",
+            Platform = "linkedin",
+            SocialType = "announcement",
+            Language = "en",
+            Posts = [new SocialPost { Order = 1, Hook = "Hook", Body = "Body", Hashtags = ["   "] }],
+        };
+        Assert.Throws<SocialOutputValidationException>(() => SocialDraftValidator.Validate(blankHashtag, options));
+
+        var nullAssetReference = new SocialDraft
+        {
+            Title = "Launch",
+            Platform = "linkedin",
+            SocialType = "announcement",
+            Language = "en",
+            Posts = [new SocialPost { Order = 1, Hook = "Hook", Body = "Body", AssetRefs = [null!] }],
+        };
+        Assert.Throws<SocialOutputValidationException>(() => SocialDraftValidator.Validate(nullAssetReference, options));
+
+        var blankAssetReference = new SocialDraft
+        {
+            Title = "Launch",
+            Platform = "linkedin",
+            SocialType = "announcement",
+            Language = "en",
+            Posts = [new SocialPost { Order = 1, Hook = "Hook", Body = "Body", AssetRefs = ["   "] }],
+        };
+        Assert.Throws<SocialOutputValidationException>(() => SocialDraftValidator.Validate(blankAssetReference, options));
+
+        var markupTitle = new SocialDraft
+        {
+            Title = "<b>Launch</b>",
+            Platform = "linkedin",
+            SocialType = "announcement",
+            Language = "en",
+            Posts = [new SocialPost { Order = 1, Hook = "Hook", Body = "Body" }],
+        };
+        Assert.Throws<SocialOutputValidationException>(() => SocialDraftValidator.Validate(markupTitle, options));
+    }
+
+    [Fact]
+    public void Draft_validator_rejects_degenerate_hashtags_and_embedded_non_space_whitespace()
+    {
+        var options = new SocialGenerationOptions();
+
+        static SocialDraft Draft(params string[] hashtags) => new()
+        {
+            Title = "Launch",
+            Platform = "linkedin",
+            SocialType = "announcement",
+            Language = "en",
+            Posts = [new SocialPost { Order = 1, Hook = "Hook", Body = "Body", Hashtags = hashtags.ToList() }],
+        };
+
+        // Bare sigils carry no tag body and previously passed validation.
+        Assert.Throws<SocialOutputValidationException>(() => SocialDraftValidator.Validate(Draft("#"), options));
+        Assert.Throws<SocialOutputValidationException>(() => SocialDraftValidator.Validate(Draft("##"), options));
+        Assert.Throws<SocialOutputValidationException>(() => SocialDraftValidator.Validate(Draft("###"), options));
+        // Only ASCII spaces were rejected; tabs, newlines and non-breaking spaces survived.
+        Assert.Throws<SocialOutputValidationException>(() => SocialDraftValidator.Validate(Draft("#launch\tevent"), options));
+        Assert.Throws<SocialOutputValidationException>(() => SocialDraftValidator.Validate(Draft("#launch\nevent"), options));
+        Assert.Throws<SocialOutputValidationException>(() => SocialDraftValidator.Validate(Draft("#launch\u00A0event"), options));
+
+        // Canonical tags keep validating unchanged.
+        SocialDraftValidator.Validate(Draft("#taslim", "#Launch2026", "#a"), options);
+    }
 }

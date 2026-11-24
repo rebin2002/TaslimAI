@@ -76,7 +76,7 @@ public sealed class FileProcessingService(
         {
             logger.LogInformation("Generated file storage started. FileId={FileId}; WorkspaceId={WorkspaceId}; StorageProvider={StorageProvider}; SizeBytes={SizeBytes}", file.Id, workspaceId, storage.ProviderKey, content.Length);
             await using var input = new MemoryStream(content.ToArray(), writable: false);
-            await storage.StoreAsync(storageKey, input, cancellationToken);
+            await RunStorageOperationAsync("store", token => storage.StoreAsync(storageKey, input, token), cancellationToken);
             file.ContentHashSha256 = hash;
             file.ContainerFormat = inspection.ContainerFormat;
             file.Width = inspection.Width;
@@ -98,7 +98,7 @@ public sealed class FileProcessingService(
         }
         catch (Exception exception)
         {
-            logger.LogError(exception, "Generated file storage failed. FileId={FileId}; WorkspaceId={WorkspaceId}; StorageProvider={StorageProvider}; FailureCategory={FailureCategory}", file.Id, workspaceId, storage.ProviderKey, exception is FileStorageUnavailableException ? "unavailable" : "operation_failed");
+            logger.LogError("Generated file storage failed. FileId={FileId}; WorkspaceId={WorkspaceId}; StorageProvider={StorageProvider}; FailureCategory={FailureCategory}", file.Id, workspaceId, storage.ProviderKey, exception is FileStorageUnavailableException ? "unavailable" : "operation_failed");
             file.Status = StoredFileStatus.Failed;
             file.ProcessedAt = DateTime.UtcNow;
             await db.SaveChangesAsync(CancellationToken.None);
@@ -109,8 +109,8 @@ public sealed class FileProcessingService(
 
     private async Task TryDeleteGeneratedObjectAsync(string storageKey, Guid fileId, Guid workspaceId)
     {
-        try { await storage.DeleteAsync(storageKey, CancellationToken.None); }
-        catch (Exception exception) { logger.LogWarning(exception, "Generated file cleanup failed. FileId={FileId}; WorkspaceId={WorkspaceId}", fileId, workspaceId); }
+        try { await RunStorageOperationAsync("delete", token => storage.DeleteAsync(storageKey, token), CancellationToken.None); }
+        catch (Exception exception) { logger.LogWarning("Generated file cleanup failed. FileId={FileId}; WorkspaceId={WorkspaceId}; FailureCategory={FailureCategory}", fileId, workspaceId, exception is FileStorageUnavailableException ? "unavailable" : "operation_failed"); }
     }
 
     private async Task<GeneratedFileStorageResult> FinalizeGeneratedFileAsync(StoredFile file, string storageKey, CancellationToken cancellationToken)
@@ -195,10 +195,12 @@ public sealed class FileProcessingService(
         {
             logger.LogInformation("Generated stream storage started. FileId={FileId}; WorkspaceId={WorkspaceId}; StorageProvider={StorageProvider}; SizeBytes={SizeBytes}", file.Id, workspaceId, storage.ProviderKey, sizeBytes);
             await using var input = await openReadAsync(cancellationToken);
-            await using var bounded = new CountingReadStream(input, Math.Max(1, settings.MaxGeneratedVideoBytes));
-            await storage.StoreAsync(storageKey, bounded, cancellationToken);
-            if (bounded.BytesRead != sizeBytes)
-                throw new FileUploadValidationException("Generated video output size did not match its declared size.");
+            // Propagate the known generated-stream length to non-seekable S3 PUTs.
+            // Post-upload verification must also probe EOF: the SDK may stop
+            // reading at Content-Length and otherwise hide trailing bytes.
+            await using var bounded = new CountingReadStream(input, Math.Max(1, settings.MaxGeneratedVideoBytes), sizeBytes);
+            await RunStorageOperationAsync("store", token => storage.StoreAsync(storageKey, bounded, token), cancellationToken);
+            await bounded.VerifyExactLengthAsync(sizeBytes, cancellationToken);
             var inspection = GeneratedMediaInspector.Inspect(descriptor, bounded.Prefix.Span, streamMetadata, bounded.Sha256Hex);
             file.ContentHashSha256 = bounded.Sha256Hex;
             file.ContainerFormat = inspection.ContainerFormat;
@@ -221,7 +223,9 @@ public sealed class FileProcessingService(
         }
         catch (Exception exception)
         {
-            logger.LogError(exception, "Generated stream storage failed. FileId={FileId}; WorkspaceId={WorkspaceId}; StorageProvider={StorageProvider}; FailureCategory={FailureCategory}", file.Id, workspaceId, storage.ProviderKey, exception is FileStorageUnavailableException ? "unavailable" : "operation_failed");
+            // Do not pass an arbitrary source/provider exception to structured logging:
+            // exception messages may contain signed URLs, object paths, or provider secrets.
+            logger.LogError("Generated stream storage failed. FileId={FileId}; WorkspaceId={WorkspaceId}; StorageProvider={StorageProvider}; FailureCategory={FailureCategory}", file.Id, workspaceId, storage.ProviderKey, exception is FileStorageUnavailableException ? "unavailable" : "operation_failed");
             file.Status = StoredFileStatus.Failed;
             file.ProcessedAt = DateTime.UtcNow;
             await db.SaveChangesAsync(CancellationToken.None);
@@ -264,11 +268,15 @@ public sealed class FileProcessingService(
         try
         {
             logger.LogInformation("File upload started. FileId={FileId}; WorkspaceId={WorkspaceId}; StorageProvider={StorageProvider}; Extension={Extension}; SizeBytes={SizeBytes}", file.Id, workspaceId, storage.ProviderKey, file.Extension, file.SizeBytes);
-            await using (var input = new CountingReadStream(upload.OpenReadStream(), settings.MaxFileSizeBytes))
+            await using (var input = new CountingReadStream(upload.OpenReadStream(), settings.MaxFileSizeBytes, validated.SizeBytes))
             {
-                await storage.StoreAsync(storageKey, input, cancellationToken);
-                if (input.BytesRead != validated.SizeBytes)
-                    throw new FileUploadValidationException("The uploaded file changed while it was being stored.");
+                await RunStorageOperationAsync("store", token => storage.StoreAsync(storageKey, input, token), cancellationToken);
+                // S3 clients can stop reading at Content-Length. Counting the
+                // accepted bytes alone cannot detect a source that grew since
+                // validation, so probe EOF before publishing the file.
+                await input.VerifyExactLengthAsync(
+                    validated.SizeBytes, cancellationToken,
+                    "The uploaded file changed while it was being stored.");
             }
 
             file.Status = StoredFileStatus.Processing;
@@ -279,7 +287,7 @@ public sealed class FileProcessingService(
 
             if (extractor.CanHandle(file.Extension))
             {
-                await using var input = await storage.OpenReadAsync(storageKey, cancellationToken) ?? throw new FileStorageUnavailableException();
+                await using var input = await RunStorageOperationAsync("read", token => storage.OpenReadAsync(storageKey, token), cancellationToken) ?? throw new FileStorageUnavailableException();
                 extractionStarted = true;
                 var result = await extractor.ExtractAsync(file.Extension, input, cancellationToken);
                 file.TextExtractionStatus = result.Status;
@@ -318,9 +326,9 @@ public sealed class FileProcessingService(
             await TryDeleteGeneratedObjectAsync(storageKey, file.Id, workspaceId);
             throw;
         }
-        catch (FileStorageOperationException exception)
+        catch (FileStorageOperationException)
         {
-            logger.LogWarning(exception, "File storage operation failed. FileId={FileId}; WorkspaceId={WorkspaceId}; StorageProvider={StorageProvider}", file.Id, workspaceId, storage.ProviderKey);
+            logger.LogWarning("File storage operation failed. FileId={FileId}; WorkspaceId={WorkspaceId}; StorageProvider={StorageProvider}", file.Id, workspaceId, storage.ProviderKey);
             file.Status = StoredFileStatus.Failed;
             file.TextExtractionStatus = FileExtractionStatus.Failed;
             file.ProcessedAt = DateTime.UtcNow;
@@ -328,24 +336,24 @@ public sealed class FileProcessingService(
             await TryDeleteGeneratedObjectAsync(storageKey, file.Id, workspaceId);
             throw;
         }
-        catch (FileUploadValidationException exception)
+        catch (FileUploadValidationException)
         {
             file.Status = StoredFileStatus.Failed;
             file.TextExtractionStatus = FileExtractionStatus.Failed;
             file.ProcessedAt = DateTime.UtcNow;
             await db.SaveChangesAsync(CancellationToken.None);
             await TryDeleteGeneratedObjectAsync(storageKey, file.Id, workspaceId);
-            logger.LogWarning(exception, "File upload validation failed after storage began. FileId={FileId}; WorkspaceId={WorkspaceId}", file.Id, workspaceId);
+            logger.LogWarning("File upload validation failed after storage began. FileId={FileId}; WorkspaceId={WorkspaceId}", file.Id, workspaceId);
             throw;
         }
-        catch (Exception exception)
+        catch (Exception)
         {
             file.Status = StoredFileStatus.Failed;
             file.TextExtractionStatus = FileExtractionStatus.Failed;
             file.ProcessedAt = DateTime.UtcNow;
             await db.SaveChangesAsync(CancellationToken.None);
             await TryDeleteGeneratedObjectAsync(storageKey, file.Id, workspaceId);
-            logger.LogWarning(exception, "File processing failed without logging file contents. FileId={FileId}; WorkspaceId={WorkspaceId}", file.Id, workspaceId);
+            logger.LogWarning("File processing failed without logging file contents. FileId={FileId}; WorkspaceId={WorkspaceId}", file.Id, workspaceId);
             if (extractionStarted) return file;
             throw new FileStorageOperationException();
         }
@@ -353,7 +361,7 @@ public sealed class FileProcessingService(
 
     public async Task<bool> DeleteAsync(StoredFile file, CancellationToken cancellationToken)
     {
-        await storage.DeleteAsync(file.StorageKey, cancellationToken);
+        await RunStorageOperationAsync("delete", token => storage.DeleteAsync(file.StorageKey, token), cancellationToken);
         file.Status = StoredFileStatus.Deleted;
         file.DeletedAt = DateTime.UtcNow;
         file.ExtractedText = null;
@@ -367,10 +375,51 @@ public sealed class FileProcessingService(
         await db.SaveChangesAsync(cancellationToken);
         return true;
     }
+
+    private async Task RunStorageOperationAsync(string operation, Func<CancellationToken, Task> action, CancellationToken cancellationToken)
+    {
+        await RunStorageOperationAsync<object?>(operation, async token =>
+        {
+            await action(token);
+            return null;
+        }, cancellationToken);
+    }
+
+    private async Task<T> RunStorageOperationAsync<T>(string operation, Func<CancellationToken, Task<T>> action, CancellationToken cancellationToken)
+    {
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeout.CancelAfter(settings.StorageOperationTimeout);
+        try
+        {
+            return await action(timeout.Token);
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested && timeout.IsCancellationRequested)
+        {
+            logger.LogWarning("File storage operation timed out. Operation={Operation}; StorageProvider={StorageProvider}; TimeoutSeconds={TimeoutSeconds}", operation, storage.ProviderKey, settings.StorageOperationTimeout.TotalSeconds);
+            throw new FileStorageOperationException();
+        }
+    }
 }
 
-internal sealed class CountingReadStream(Stream inner, long maxBytes) : Stream
+internal sealed class CountingReadStream(Stream inner, long maxBytes, long? expectedContentLength = null) : Stream
 {
+    // Uploaded file sizes are validated before storage; expose the declared length
+    // to S3 without making this hash/counting stream seekable.
+    internal long? ExpectedContentLength => expectedContentLength;
+    internal async Task VerifyExactLengthAsync(
+        long expectedBytes, CancellationToken cancellationToken = default, string? errorMessage = null)
+    {
+        var error = errorMessage ?? "Generated video output size did not match its declared size.";
+        if (BytesRead != expectedBytes)
+            throw new FileUploadValidationException(error);
+
+        // Content-Length may make a destination stop before reading EOF.
+        // Probe the source once to reject extra bytes and finalize its hash,
+        // while keeping the payload streamed rather than buffered.
+        var trailing = new byte[1];
+        if (await ReadAsync(trailing.AsMemory(), cancellationToken) != 0)
+            throw new FileUploadValidationException(error);
+    }
     private readonly byte[] prefix = new byte[64];
     private readonly IncrementalHash hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
     private bool hashFinalized;
@@ -385,6 +434,13 @@ internal sealed class CountingReadStream(Stream inner, long maxBytes) : Stream
 
     public override int Read(byte[] buffer, int offset, int count)
     {
+        // A zero-length read is not EOF. In particular, it must not finalize
+        // the streaming hash before the SDK has read the payload.
+        if (count == 0)
+        {
+            _ = buffer.AsSpan(offset, count); // Retain range validation.
+            return 0;
+        }
         var read = inner.Read(buffer, offset, Math.Min(count, RemainingBufferSize(count)));
         Record(read, buffer.AsSpan(offset, read));
         return read;
@@ -392,6 +448,7 @@ internal sealed class CountingReadStream(Stream inner, long maxBytes) : Stream
 
     public override int Read(Span<byte> buffer)
     {
+        if (buffer.IsEmpty) return 0;
         var read = inner.Read(buffer[..Math.Min(buffer.Length, RemainingBufferSize(buffer.Length))]);
         Record(read, buffer);
         return read;
@@ -399,6 +456,13 @@ internal sealed class CountingReadStream(Stream inner, long maxBytes) : Stream
 
     public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
     {
+        // AWS SDK callers may issue an empty read even at Content-Length.
+        // Never consume a trailing source byte (or finalize SHA-256) for it.
+        if (buffer.IsEmpty)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return 0;
+        }
         if (BytesRead >= maxBytes)
         {
             var probe = new byte[1];

@@ -5,6 +5,7 @@ import {
   documentActiveJobStorageKey,
   displayDocumentProgress,
   documentPresentationState,
+  isDocumentJobUnavailableError,
   isDocumentJob,
   isDocumentSourceReady,
   isSafeDocumentIdentifier,
@@ -46,6 +47,14 @@ describe("Document Studio state", () => {
     expect(nextDocumentPollDelay(job("Running"), 1)).toBe(1400);
     expect(nextDocumentPollDelay(job("Running"), 10)).toBe(2800);
     expect(nextDocumentPollDelay(job("Succeeded"), 0)).toBeNull();
+  });
+
+  it("treats missing or inaccessible jobs as unrecoverable polling state", () => {
+    expect(isDocumentJobUnavailableError({ status: 403 })).toBe(true);
+    expect(isDocumentJobUnavailableError({ status: 404 })).toBe(true);
+    expect(isDocumentJobUnavailableError({ status: 408 })).toBe(false);
+    expect(isDocumentJobUnavailableError(new Error("network failure"))).toBe(false);
+    expect(isDocumentJobUnavailableError(null)).toBe(false);
   });
 
   it("validates the restored job type and keeps active job storage workspace-scoped", () => {
@@ -120,6 +129,24 @@ describe("Document Studio state", () => {
 
     completed.resultJson = "not-json";
     expect(parseDocumentJobResult(completed)).toBeNull();
+  });
+
+  it("reads legacy PascalCase persisted sections while the API writes camelCase", () => {
+    const completed = job("Succeeded", false, {
+      resultJson: JSON.stringify({
+        AssetId: "00000000-0000-4000-8000-000000000010",
+        DocumentType: "document",
+        Title: "Legacy report",
+        Summary: "Legacy summary",
+        Sections: [{ Heading: "Overview", Blocks: [{ Type: "paragraph", Text: "Legacy text" }, { Type: "table", Rows: [{ Cells: ["A", "B"] }] }] }],
+        Representations: [{ Id: "00000000-0000-4000-8000-000000000011", Type: "docx", FileName: "report.docx", ContentType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document" }],
+      }),
+    });
+
+    const parsed = parseDocumentJobResult(completed);
+    expect(parsed).toMatchObject({ assetId: "00000000-0000-4000-8000-000000000010", title: "Legacy report" });
+    expect(parsed?.sections?.[0].blocks[1].rows?.[0].cells).toEqual(["A", "B"]);
+    expect(parsed?.representations).toHaveLength(1);
   });
 
   it("represents a succeeded job without an optional result as recoverable", () => {

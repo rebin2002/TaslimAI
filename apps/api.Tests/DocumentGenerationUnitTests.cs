@@ -1,3 +1,5 @@
+using System.IO.Compression;
+using System.Text;
 using Taslim.Api.Contracts;
 using Taslim.Api.Domain;
 using Taslim.Api.Documents;
@@ -70,6 +72,39 @@ public sealed class DocumentGenerationUnitTests
     }
 
     [Fact]
+    public void Renderer_infers_rtl_for_auto_language_from_draft_script()
+    {
+        var renderer = new DocumentRenderer();
+        var options = new DocumentGenerationOptions();
+        var arabicDraft = new DocumentDraft
+        {
+            Title = "ڕاپۆرتی تاقیکردنەوە",
+            Summary = "پوختەی بەڵگەنامە",
+            Sections = [new DocumentSection { Heading = "سەرەکی", Blocks = [new DocumentBlock { Type = DocumentBlockTypes.Paragraph, Text = "ناوەڕۆکی تاقیکردنەوە" }] }],
+        };
+        var arabicInput = new DocumentGenerationInput(Guid.NewGuid(), null, arabicDraft.Title, "Create a report.", "report", "short", null, null, [], "auto", "docx", "professional", true);
+        var arabicXml = ReadMainDocumentXml(renderer.RenderDocx(arabicDraft, arabicInput, options));
+        Assert.Contains("bidi", arabicXml, StringComparison.Ordinal);
+        Assert.Contains(arabicDraft.Title, arabicXml, StringComparison.Ordinal);
+        // DOCX structure alone does not prove the PDF path accepts auto Sorani.
+        // Exercise the rendered binary; visual glyph/layout review remains separate.
+        var soraniPdf = renderer.RenderPdf(arabicDraft, arabicInput, options);
+        Assert.Equal(AssetRepresentationTypes.Pdf, soraniPdf.RepresentationType);
+        Assert.StartsWith("%PDF-", Encoding.ASCII.GetString(soraniPdf.Content, 0, 5));
+        Assert.True(soraniPdf.Content.Length > 500);
+
+        var englishDraft = new DocumentDraft
+        {
+            Title = "Launch report",
+            Summary = "A concise summary.",
+            Sections = [new DocumentSection { Heading = "Overview", Blocks = [new DocumentBlock { Type = DocumentBlockTypes.Paragraph, Text = "The launch is ready." }] }],
+        };
+        var englishInput = new DocumentGenerationInput(Guid.NewGuid(), null, englishDraft.Title, "Create a report.", "report", "short", null, null, [], "auto", "docx", "professional", true);
+        var englishXml = ReadMainDocumentXml(renderer.RenderDocx(englishDraft, englishInput, options));
+        Assert.DoesNotContain("bidi", englishXml, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Structured_document_schema_is_strict_and_matches_canonical_blocks()
     {
         var schema = DocumentDraftStructuredOutput.Spec.Schema;
@@ -78,6 +113,33 @@ public sealed class DocumentGenerationUnitTests
         Assert.Equal(new[] { "title", "summary", "sections" }, schema.GetProperty("required").EnumerateArray().Select(item => item.GetString()).ToArray());
         var block = schema.GetProperty("properties").GetProperty("sections").GetProperty("items").GetProperty("properties").GetProperty("blocks").GetProperty("items");
         Assert.Equal(new[] { "type", "text", "items", "rows" }, block.GetProperty("required").EnumerateArray().Select(item => item.GetString()).ToArray());
+    }
+
+    [Fact]
+    public void Persisted_result_uses_camel_case_for_generated_sections()
+    {
+        var draft = new DocumentDraft
+        {
+            Title = "Report",
+            Summary = "Summary",
+            Sections = [new DocumentSection
+            {
+                Heading = "Overview",
+                Blocks = [new DocumentBlock { Type = DocumentBlockTypes.Paragraph, Text = "Text" }],
+            }],
+        };
+
+        using var result = System.Text.Json.JsonDocument.Parse(DocumentGenerationContractMapper.SerializeResult("document", draft.Title, "en", draft.Summary, draft.Sections));
+        var root = result.RootElement;
+        var section = root.GetProperty("sections")[0];
+        var block = section.GetProperty("blocks")[0];
+
+        Assert.Equal("Overview", section.GetProperty("heading").GetString());
+        Assert.Equal("paragraph", block.GetProperty("type").GetString());
+        Assert.Equal("Text", block.GetProperty("text").GetString());
+        Assert.False(root.TryGetProperty("Sections", out _));
+        Assert.False(section.TryGetProperty("Heading", out _));
+        Assert.False(block.TryGetProperty("Type", out _));
     }
 
     [Fact]
@@ -107,6 +169,14 @@ public sealed class DocumentGenerationUnitTests
 
         Assert.Throws<DocumentOutputValidationException>(() => DocumentDraftValidator.Validate(nullSection, options));
         Assert.Throws<DocumentOutputValidationException>(() => DocumentDraftValidator.Validate(oversizedCell, options));
+    }
+
+    private static string ReadMainDocumentXml(RenderedDocument rendered)
+    {
+        using var stream = new MemoryStream(rendered.Content, writable: false);
+        using var archive = new ZipArchive(stream, ZipArchiveMode.Read);
+        using var reader = new StreamReader(archive.GetEntry("word/document.xml")!.Open(), Encoding.UTF8);
+        return reader.ReadToEnd();
     }
 
     [Fact]

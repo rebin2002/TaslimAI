@@ -278,6 +278,29 @@ public sealed class BillingTests
     }
 
     [Fact]
+    public async Task Compensating_entries_cannot_be_adjusted_again()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        var options = new DbContextOptionsBuilder<TaslimDbContext>().UseSqlite(connection).Options;
+        await using var db = new TaslimDbContext(options);
+        await db.Database.EnsureCreatedAsync();
+        var workspace = NewWorkspace("adjustment-chain");
+        db.Workspaces.Add(workspace);
+        await db.SaveChangesAsync();
+        var service = new CreditLedgerService(db, Options.Create(new BillingOptions { CustomerChargingEnabled = false }));
+
+        var grant = await service.GrantAsync(workspace.Id, CreditEntitlementType.AdministrativeCorrection, 25, "correction:chain", "Goodwill correction");
+        var reversal = await service.ReverseAsync(workspace.Id, grant.Entry.Id, "reversal:chain", "Correction withdrawn");
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => service.ReverseAsync(workspace.Id, reversal.Entry.Id, "reversal:chain-again", "Undo the reversal"));
+        await Assert.ThrowsAsync<InvalidOperationException>(() => service.RefundAsync(workspace.Id, reversal.Entry.Id, "refund:chain-again", "Refund the reversal"));
+
+        Assert.Equal(2, await db.CreditLedgerEntries.CountAsync());
+        Assert.Equal(0L, await db.CreditLedgerEntries.SumAsync(item => item.Amount));
+    }
+
+    [Fact]
     public async Task Reversal_replay_cannot_change_audit_attribution()
     {
         await using var connection = new SqliteConnection("Data Source=:memory:");

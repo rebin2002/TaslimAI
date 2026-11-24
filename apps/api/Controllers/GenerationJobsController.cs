@@ -34,8 +34,16 @@ public sealed class GenerationJobsController(IGenerationJobService jobs, IOption
     [HttpGet("api/generation/jobs/{id:guid}")]
     public async Task<IActionResult> Get(Guid id, CancellationToken cancellationToken)
     {
-        var job = await jobs.GetAsync(GetUserId(), id, cancellationToken);
-        return job is null ? ApiResults.Error(this, 404, GenerationJobErrorCodes.NotFound, "Job not found.") : Ok(GenerationJobContractMapper.ToDto(job));
+        // The published ResultJson snapshot stays exactly as stored; the live per-representation
+        // download promise rides beside it, so a rendition whose file a retention prune has taken
+        // stops being advertised as downloadable instead of dead-ending in
+        // 409 ASSET_FILE_UNAVAILABLE (issue #1049). Authorization is unchanged: availability is
+        // resolved only after this caller has been allowed to read the job, and a job whose
+        // snapshot advertises no rendition is served byte-for-byte as before.
+        var read = await jobs.GetPublishedAsync(GetUserId(), id, cancellationToken);
+        return read is null
+            ? ApiResults.Error(this, 404, GenerationJobErrorCodes.NotFound, "Job not found.")
+            : Ok(GenerationJobContractMapper.ToDtoWithRepresentationAvailability(read.Job, read.RepresentationAvailability));
     }
 
     [HttpPost("api/generation/jobs/{id:guid}/retry")]
@@ -69,9 +77,22 @@ public sealed class GenerationJobsController(IGenerationJobService jobs, IOption
         [FromQuery] string? jobType = null,
         CancellationToken cancellationToken = default)
     {
-        if (!Enum.TryParse<GenerationJobStatus>(status, true, out var parsedStatus) && !string.IsNullOrWhiteSpace(status))
-            return ApiResults.Validation(this, "Choose a valid job status.");
-        var result = await jobs.ListAsync(GetUserId(), new GenerationJobFilter(workspaceId, page, pageSize, string.IsNullOrWhiteSpace(status) ? null : parsedStatus, projectId, jobType), cancellationToken);
+        // Enum.TryParse also accepts the underlying numeric form, so "4" silently parsed as
+        // Failed and "99" parsed as an undefined member that matches no stored row. Both were
+        // served as a successful page instead of the intended validation error, which made an
+        // invalid queue status filter indistinguishable from an empty queue. Accept defined
+        // status names only, so filtering the generation-job queue by status stays truthful.
+        GenerationJobStatus? statusFilter = null;
+        if (!string.IsNullOrWhiteSpace(status))
+        {
+            var requestedStatus = status.Trim();
+            if (!Enum.TryParse<GenerationJobStatus>(requestedStatus, true, out var parsedStatus)
+                || !Enum.IsDefined(parsedStatus)
+                || !string.Equals(parsedStatus.ToString(), requestedStatus, StringComparison.OrdinalIgnoreCase))
+                return ApiResults.Validation(this, "Choose a valid job status.");
+            statusFilter = parsedStatus;
+        }
+        var result = await jobs.ListAsync(GetUserId(), new GenerationJobFilter(workspaceId, page, pageSize, statusFilter, projectId, jobType), cancellationToken);
         return result is null ? Forbid() : Ok(result);
     }
 

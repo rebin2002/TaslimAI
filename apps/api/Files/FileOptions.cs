@@ -8,6 +8,7 @@ public sealed class FileOptions
     public long MaxFileSizeBytes { get; set; } = 25 * 1024 * 1024;
     public long MaxGeneratedVideoBytes { get; set; } = 250 * 1024 * 1024;
     public int MaxAttachmentsPerMessage { get; set; } = 5;
+    public int StorageOperationTimeoutSeconds { get; set; } = 120;
     public int FileContextBudgetTokens { get; set; } = 4_000;
     public int MaxExtractedTextCharacters { get; set; } = 80_000;
     public int MaxArchiveEntries { get; set; } = 256;
@@ -22,6 +23,8 @@ public sealed class FileOptions
     public string S3Bucket { get; set; } = string.Empty;
     public string S3AccessKey { get; set; } = string.Empty;
     public string S3SecretKey { get; set; } = string.Empty;
+
+    public TimeSpan StorageOperationTimeout => TimeSpan.FromSeconds(Math.Clamp(StorageOperationTimeoutSeconds, 1, 600));
 
     public bool IsS3Configured =>
         Uri.TryCreate(S3Endpoint, UriKind.Absolute, out var endpoint)

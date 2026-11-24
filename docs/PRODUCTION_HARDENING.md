@@ -82,6 +82,7 @@ Production deployments must provide the following without placing secrets in sou
 | `Files:StorageProvider` | `S3Compatible` in production. |
 | `Files:S3Endpoint` | HTTPS endpoint. |
 | `Files:S3Region`, `Files:S3Bucket`, `Files:S3AccessKey`, `Files:S3SecretKey` | Required only because production selects S3-compatible storage. |
+| `Files:StorageOperationTimeoutSeconds` | Bounded object-store operation timeout; defaults to 120 seconds and is clamped to 1–600 seconds. A timeout fails the upload or deletion closed with the existing safe storage error contract. |
 | `Ai:OpenAI:Enabled` | Remains `false` unless a separate provider-readiness decision explicitly enables it. If set to `true`, `Ai:OpenAI:ApiKey` and an HTTPS `Ai:OpenAI:BaseUrl` become required. |
 | `Billing:CustomerChargingEnabled` | Must remain `false`. |
 | `NEXT_PUBLIC_API_URL` | Required for the production web image and must be an explicit HTTPS URL. The Docker build no longer defaults this value to localhost. |

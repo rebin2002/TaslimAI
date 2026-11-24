@@ -45,9 +45,10 @@ public sealed class ImageGenerationDisabledJobHandlerTests
         Assert.Equal(0, provider.CallCount);
     }
 
-    private sealed class CountingImageProvider : IImageGenerationProvider
+    private sealed class CountingImageProvider : IImageGenerationProvider, IImageGenerationProviderReadiness
     {
         public string Key => "test-image";
+        public bool IsAvailable => true;
         public int CallCount { get; private set; }
 
         public Task<ImageProviderResult> GenerateAsync(
