@@ -100,13 +100,24 @@ public static class MovieReferenceReadinessPolicy
             // An explicit Director prop list is a set of named requirements: every
             // enumerated prop must have a canonical World reference that covers it,
             // otherwise the item fails closed for the unmatched names.
+            // Covering is directional and exclusive: a canonical reference satisfies
+            // a requirement only when its name is the requirement itself or more
+            // specific (its name tokens contain the requirement sequence), and each
+            // canonical prop can be spent on at most one requirement. A generic
+            // "compass" therefore cannot satisfy "brass compass", and one "compass"
+            // cannot satisfy "compass, compass".
+            var pool = new List<MovieProductionPropReferenceDto>(props);
             var unsatisfied = new List<string>();
             MovieProductionPropReferenceDto? representative = null;
             foreach (var requirement in enumerated)
             {
-                var prop = props.FirstOrDefault(candidate => ContainsWord(requirement, candidate.Name) || ContainsWord(candidate.Name, requirement));
+                var prop = pool.FirstOrDefault(candidate => ContainsWord(candidate.Name, requirement));
                 if (prop is null) unsatisfied.Add(requirement);
-                else representative ??= prop;
+                else
+                {
+                    pool.Remove(prop);
+                    representative ??= prop;
+                }
             }
             if (unsatisfied.Count > 0)
                 return new("props", "Prop references", MovieReferenceReadinessItemStates.Missing, important, important, !important, $"The shot explicitly requires {string.Join(", ", unsatisfied)}, but no named canonical World prop reference matches every required prop.", "world_prop");

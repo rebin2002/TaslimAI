@@ -178,6 +178,41 @@ public sealed class MovieReferenceReadinessTests
     }
 
     [Fact]
+    public void A_generic_canonical_prop_does_not_satisfy_a_more_specific_enumerated_requirement()
+    {
+        var result = MovieReferenceReadinessPolicy.EvaluatePropReference(
+            "Important props: brass compass. VFX: none. Production notes: none",
+            [Prop("Compass")],
+            important: true);
+
+        Assert.Equal(MovieReferenceReadinessItemStates.Missing, result.State);
+        Assert.True(result.BlocksGeneration);
+        Assert.Null(result.SourceId);
+    }
+
+    [Fact]
+    public void One_canonical_prop_cannot_satisfy_two_enumerated_requirements()
+    {
+        var single = MovieReferenceReadinessPolicy.EvaluatePropReference(
+            "Important props: compass, compass. VFX: none. Production notes: none",
+            [Prop("Compass")],
+            important: true);
+
+        Assert.Equal(MovieReferenceReadinessItemStates.Missing, single.State);
+        Assert.True(single.BlocksGeneration);
+
+        var brass = Guid.NewGuid();
+        var silver = Guid.NewGuid();
+        var distinct = MovieReferenceReadinessPolicy.EvaluatePropReference(
+            "Important props: brass compass, silver compass. VFX: none. Production notes: none",
+            [Prop("Brass Compass", brass), Prop("Silver Compass", silver)],
+            important: true);
+
+        Assert.Equal(MovieReferenceReadinessItemStates.Complete, distinct.State);
+        Assert.Equal(brass, distinct.SourceId);
+    }
+
+    [Fact]
     public void Combining_marks_fold_inside_tokens_for_unicode_prop_matching()
     {
         var propId = Guid.NewGuid();
