@@ -33,9 +33,13 @@ export function isTabbableElement(element: HTMLElement, readStyle?: VisibilitySt
     if (control.disabled) return false;
     if (element.getAttribute("disabled") !== null) return false;
     // A disabled fieldset un-focuses every contained form control except the
-    // ones inside its legend (HTML living-standard sequential navigation).
+    // ones inside *its own* legend (HTML living-standard sequential
+    // navigation). "Its own" is load-bearing: a legend belonging to a nested
+    // fieldset, or a stray second legend child, is not the element the
+    // exemption is written about, so admitting it would let the focus trap
+    // enumerate a control the browser itself refuses to tab into.
     const fieldset = element.closest("fieldset[disabled]");
-    if (fieldset && !element.closest("legend")) return false;
+    if (fieldset && !isOwnFieldsetLegend(fieldset, element.closest("legend"))) return false;
     if (element.tagName === "INPUT" && (element as HTMLInputElement).type === "hidden") return false;
   }
   const tabindex = element.getAttribute("tabindex");
@@ -64,6 +68,19 @@ export function isTabbableElement(element: HTMLElement, readStyle?: VisibilitySt
     if (computed.visibility === "hidden" || computed.visibility === "collapse") return false;
   }
   return true;
+}
+
+/**
+ * True when `legend` is the disabled fieldset's own legend, i.e. the first
+ * `legend` child of that fieldset. The nearest disabled fieldset governs the
+ * control, so a legend nested inside a different fieldset never rescues it.
+ */
+function isOwnFieldsetLegend(fieldset: Element, legend: Element | null): boolean {
+  if (legend === null || legend.tagName !== "LEGEND" || legend.parentElement !== fieldset) return false;
+  for (const child of Array.from(fieldset.children)) {
+    if (child.tagName === "LEGEND") return child === legend;
+  }
+  return false;
 }
 
 export type DialogHandle = { readonly token: symbol };
