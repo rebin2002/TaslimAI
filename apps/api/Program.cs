@@ -346,17 +346,22 @@ builder.Services.Configure<MovieVideoOptions>(builder.Configuration.GetSection("
 builder.Services.Configure<MovieDialogueVoiceOptions>(builder.Configuration.GetSection("MovieDialogueVoice"));
 builder.Services.Configure<DirectVideoProviderOptions>(builder.Configuration.GetSection("DirectVideoProviders"));
 builder.Services.AddHttpClient<DirectVideoHttpProviderAdapter>()
-    .ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler { AllowAutoRedirect = false });
+    .ConfigurePrimaryHttpMessageHandler(services => ProviderPinnedConnections.CreatePinnedHandler(services.GetRequiredService<IProviderHostResolver>()));
 builder.Services.Configure<VideoGenerationAdapterOptions>(builder.Configuration.GetSection("VideoGenerationAdapters"));
 builder.Services.AddSingleton<IVideoGenerationAdapter, UnavailableVideoGenerationAdapter>();
 builder.Services.AddSingleton<VideoGenerationAdapterExecutionService>();
 builder.Services.AddScoped<MovieVideoExecutionStore>();
 builder.Services.AddHttpClient<RunwayMovieVideoProvider>()
-    .ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler { AllowAutoRedirect = false });
+    .ConfigurePrimaryHttpMessageHandler(services => ProviderPinnedConnections.CreatePinnedHandler(services.GetRequiredService<IProviderHostResolver>()));
 builder.Services.AddHttpClient<ManusMovieVideoProvider>()
-    .ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler { AllowAutoRedirect = false });
-builder.Services.AddSingleton<RunwayMovieVideoProvider>();
-builder.Services.AddSingleton<ManusMovieVideoProvider>();
+    .ConfigurePrimaryHttpMessageHandler(services => ProviderPinnedConnections.CreatePinnedHandler(services.GetRequiredService<IProviderHostResolver>()));
+// No bare AddSingleton<RunwayMovieVideoProvider>()/AddSingleton<ManusMovieVideoProvider>() here.
+// A later last-wins singleton registration shadows the typed client above (Microsoft DI resolves
+// the final descriptor) and rebuilds the provider on the container's default HttpClient, so the
+// pinned primary handler never reaches the provider the registry uses — the exact composition bug
+// the #358 review proved on e9903fa8. The registry factory below resolves each typed client once;
+// because the registry itself is a singleton, each provider still exists exactly once for the
+// lifetime of the app (the same pattern the music lane uses with IMusicGenerationProvider).
 builder.Services.AddSingleton<IMovieVideoProviderRegistry>(services => new MovieVideoProviderRegistry(
 [
     services.GetRequiredService<RunwayMovieVideoProvider>(),
@@ -443,9 +448,13 @@ builder.Services.AddScoped<IGenerationJobHandler, ResearchGenerationJobHandler>(
 builder.Services.AddSingleton<ISocialPromptBuilder, SocialPromptBuilder>();
 builder.Services.AddScoped<ISocialGenerationProvider, AiSocialGenerationProvider>();
 builder.Services.AddScoped<IGenerationJobHandler, SocialGenerationJobHandler>();
-builder.Services.AddSingleton<IProviderUrlPolicy, ProviderUrlPolicy>();
+// The resolver seam keeps endpoint admission testable (fixed address tables instead of live
+// DNS) and gives the URL policy and the pinned connect callback one shared answer source.
+builder.Services.AddSingleton<IProviderHostResolver, SystemProviderHostResolver>();
+builder.Services.AddSingleton<IProviderUrlPolicy>(services =>
+    new ProviderUrlPolicy(services.GetRequiredService<IProviderHostResolver>()));
 builder.Services.AddHttpClient<MubertMusicGenerationProvider>()
-    .ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler { AllowAutoRedirect = false });
+    .ConfigurePrimaryHttpMessageHandler(services => ProviderPinnedConnections.CreatePinnedHandler(services.GetRequiredService<IProviderHostResolver>()));
 builder.Services.AddSingleton<IMusicGenerationProvider>(services => services.GetRequiredService<MubertMusicGenerationProvider>());
 builder.Services.AddHttpClient<StableAudioMusicGenerationProvider>()
     .ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler { AllowAutoRedirect = false });
