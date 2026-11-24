@@ -488,14 +488,31 @@ public sealed class GenerationJobService(
         // already created (and was billed by the provider for) its generation; only delivery of the
         // finished result failed. RetryAsync re-runs CreateAsync with the source input, which for
         // music means a fresh POST to the provider, so this refusal is enforced here rather than
-        // left to the retry copy. Scoped to music and to this one code: every other terminal failure,
-        // including the provider-outage classes, keeps its existing retry behaviour.
+        // left to the retry copy. Two music codes are refused and they cover the two unknown states:
+        // the result is known to exist but could not be delivered, and the submission was accepted but
+        // its outcome was never observed. Every other terminal failure - including the provider-outage
+        // classes, a provider-declared rejection, and a cancellation the member asked for - keeps its
+        // existing retry behaviour, because those states are evidence that nothing is in flight.
         if (string.Equals(source.JobType, GenerationJobTypes.MusicGenerate, StringComparison.OrdinalIgnoreCase)
             && string.Equals(source.ErrorCode, GenerationJobErrorCodes.MusicOutputRetrievalFailed, StringComparison.Ordinal))
         {
             throw new GenerationJobValidationException(
                 GenerationJobErrorCodes.MusicRetrievalRetryBlocked,
                 "This retry was blocked because the music was already generated and only delivery failed. Generating again would create a duplicate.");
+        }
+        // Accepted-but-unconfirmed: the provider took the submission and we never saw the outcome.
+        // A retry here would be a SECOND paid submission, so the endpoint refuses it until the first
+        // attempt is reconciled (explicit user policy 15:59Z: avoid duplicate charges over immediate
+        // retry). This supersedes the earlier informed-customer-retry posture: "you may retry once"
+        // was truthful about the risk but still let the duplicate happen, and there is no verified
+        // safe-recovery path for the accepted generation today - RecoverExpiredClaimsAsync already
+        // refuses to re-dispatch music, so nothing on this branch can reattach to the first attempt.
+        if (string.Equals(source.JobType, GenerationJobTypes.MusicGenerate, StringComparison.OrdinalIgnoreCase)
+            && string.Equals(source.ErrorCode, GenerationJobErrorCodes.MusicProviderSubmissionUnconfirmed, StringComparison.Ordinal))
+        {
+            throw new GenerationJobValidationException(
+                GenerationJobErrorCodes.MusicSubmissionRetryBlocked,
+                "This retry was blocked because the first attempt may already have reached the provider and its outcome has not been reconciled yet. Starting another would risk a duplicate paid generation.");
         }
         if (string.Equals(source.JobType, GenerationJobTypes.ImageGenerate, StringComparison.OrdinalIgnoreCase) && !imageOptions.Value.Enabled)
             throw new GenerationJobValidationException(GenerationJobErrorCodes.ImageStudioUnavailable, "Image generation is not available right now.");

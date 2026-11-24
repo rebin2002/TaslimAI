@@ -159,6 +159,29 @@ public sealed class StableAudioMusicGenerationProviderTests
     }
 
     [Fact]
+    public async Task Rate_limited_result_answer_after_an_accepted_generation_is_unconfirmed_not_a_retryable_rate_limit()
+    {
+        // Stability accepted the generation and the result endpoint keeps answering 429. After the
+        // bounded retries this is a returned response, not a thrown transport fault, so the disposition
+        // comes from the status branch: MapFailureAsync classifies it as the dedicated rate-limit class,
+        // whose own public code invites a retry, and the class does NOT declare the generation terminal
+        // (only a moderation rejection or an invalid request does). The unknown outcome is therefore
+        // reported as an unconfirmed submission instead of a replayable rate limit.
+        var handler = new StableAudioHandler((_, requestNumber) => requestNumber == 1
+            ? Json(HttpStatusCode.Accepted, "{\"id\":\"generation-429\"}")
+            : new HttpResponseMessage(HttpStatusCode.TooManyRequests)
+            {
+                Content = new StringContent("{\"errors\":[\"private upstream payload\"]}"),
+            });
+        var provider = CreateProvider(handler, maxPollAttempts: 2, pollIntervalMilliseconds: 1, retryAttempts: 1, retryDelayMilliseconds: 1);
+        var failure = await Assert.ThrowsAsync<MusicProviderSubmissionUnconfirmedException>(() => provider.GenerateAsync(Input()));
+        Assert.IsAssignableFrom<MusicProviderUnavailableException>(failure);
+        Assert.IsNotType<MusicProviderRateLimitException>(failure);
+        Assert.DoesNotContain("private upstream payload", failure.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("generated", failure.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Single(handler.Requests, request => request.Method == HttpMethod.Post);
+    }
+    [Fact]
     public async Task Result_transport_exhaustion_after_an_accepted_generation_is_unconfirmed_not_a_retryable_outage()
     {
         // The other exhaustion shape: the result GET keeps failing at the transport level, so

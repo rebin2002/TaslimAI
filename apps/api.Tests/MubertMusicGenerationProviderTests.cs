@@ -314,6 +314,33 @@ public sealed class MubertMusicGenerationProviderTests
     }
 
     [Fact]
+    public async Task Rate_limited_status_answer_after_an_accepted_track_is_unconfirmed_not_a_retryable_rate_limit()
+    {
+        // The throttle shape of the same window: Mubert accepted the track and the status endpoint then
+        // answers 429 until the bounded GET retries run out. A rate limit is a property of the REQUEST,
+        // not of the generation, so its public code is retryable by design - and a replay would post a
+        // second paid track next to the accepted one. Mubert's helper reports a throttled status answer
+        // as the unavailable class, which the accepted-stage guard catches, so the outcome is reported
+        // as unconfirmed. This pins that disposition by name: a later change that starts reporting 429
+        // with the dedicated rate-limit class must keep this answer, not reopen the replay path.
+        var handler = new MubertHandler(
+            (_, requestNumber) => requestNumber switch
+            {
+                1 => Json(HttpStatusCode.OK, "{\"data\":{\"id\":\"track-429\",\"session_id\":\"session-429\"}}"),
+                _ => new HttpResponseMessage(HttpStatusCode.TooManyRequests)
+                {
+                    Content = new StringContent("{\"error\":\"private provider payload\"}"),
+                },
+            });
+        var provider = CreateProvider(handler, maxPollAttempts: 2, pollIntervalMilliseconds: 100, retryAttempts: 1);
+        var failure = await Assert.ThrowsAsync<MusicProviderSubmissionUnconfirmedException>(() => provider.GenerateAsync(Input()));
+        Assert.IsAssignableFrom<MusicProviderUnavailableException>(failure);
+        Assert.DoesNotContain("private provider payload", failure.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("generated", failure.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("completed", failure.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Single(handler.Requests, request => request.Method == HttpMethod.Post);
+    }
+    [Fact]
     public async Task Non_transient_status_failure_after_an_accepted_track_is_unconfirmed_not_a_generic_fault()
     {
         // A status answer the helper classifies as a plain provider failure falls through to the generic

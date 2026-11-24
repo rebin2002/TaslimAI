@@ -79,9 +79,14 @@ public static class GenerationJobErrorMessages
             GenerationJobErrorCodes.MusicOutputRetrievalFailed => "Your music was generated, but the finished track could not be delivered. It was not generated a second time, because that would create a duplicate.",
             GenerationJobErrorCodes.MusicRetrievalRetryBlocked => "This retry was blocked because the track was already generated and only delivery failed. Please contact support to recover it.",
             // Deliberate contrast with the two arms above: here the finished track is NOT known to
-            // exist, so nothing is deliverable and a single deliberate customer retry is the right
-            // recovery. What was suppressed is the automatic re-dispatch, not the customer's option.
-            GenerationJobErrorCodes.MusicProviderSubmissionUnconfirmed => "Music generation was interrupted before it finished, and it was not restarted automatically because the first attempt may already have reached the provider. Please try again.",
+            // exist, so nothing is deliverable, and the first attempt may still be running and
+            // billing. The customer's retry endpoint is therefore refused as well (see
+            // GenerationJobExecution.RetryAsync and the arm below): an informed retry would still be
+            // a second paid submission whose sibling may already exist, and fair billing outweighs
+            // the convenience of an immediate retry. The wording states the unknown outcome without
+            // claiming a finished track and without inviting the customer to submit another job.
+            GenerationJobErrorCodes.MusicProviderSubmissionUnconfirmed => "Music generation stopped before its outcome could be confirmed: the first attempt may already have reached the provider. It was not restarted automatically, and this job cannot be retried while that outcome is unconfirmed, so you are not billed a second time for it.",
+            GenerationJobErrorCodes.MusicSubmissionRetryBlocked => "This retry was blocked because the first attempt may already have reached the provider and its outcome has not been reconciled yet. Starting another would risk a duplicate paid generation.",
             GenerationJobErrorCodes.MusicCancelled => "The music generation was cancelled.",
             GenerationJobErrorCodes.VoiceProviderUnavailable or GenerationJobErrorCodes.VoiceProviderAuthentication => "Voice generation is temporarily unavailable. Please try again later.",
             GenerationJobErrorCodes.VoiceProviderRateLimited => "Voice generation is busy right now. Please try again later.",
