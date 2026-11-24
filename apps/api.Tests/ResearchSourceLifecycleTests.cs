@@ -518,6 +518,416 @@ public sealed class ResearchSourceLifecycleTests
         }
     }
 
+    [Fact]
+    public async Task Staging_exception_rolls_back_cleanup_under_claim_sqlite()
+    {
+        var databasePath = Path.Combine(Path.GetTempPath(), $"taslim-research-rollback-{Guid.NewGuid():N}.db");
+        var connectionString = new SqliteConnectionStringBuilder
+        {
+            DataSource = databasePath,
+            Mode = SqliteOpenMode.ReadWriteCreate,
+            Cache = SqliteCacheMode.Shared,
+        }.ToString();
+        var workspaceId = Guid.NewGuid();
+        var userId = Guid.NewGuid();
+        var jobId = Guid.NewGuid();
+        var claim = Guid.NewGuid();
+        var now = DateTime.UtcNow;
+        try
+        {
+            await using (var seedConnection = new SqliteConnection(connectionString))
+            {
+                await seedConnection.OpenAsync();
+                await using var seedDb = CreateDb(seedConnection);
+                await seedDb.Database.EnsureCreatedAsync();
+                seedDb.Users.Add(new ApplicationUser
+                {
+                    Id = userId,
+                    UserName = $"research-rollback-{userId:N}@example.com",
+                    NormalizedUserName = $"RESEARCH-ROLLBACK-{userId:N}@EXAMPLE.COM",
+                    DisplayName = "Research Rollback Tester",
+                    CreatedAt = now,
+                    UpdatedAt = now,
+                });
+                seedDb.Workspaces.Add(new Workspace { Id = workspaceId, Name = "Research Rollback Workspace", Slug = $"research-rollback-{userId:N}", Type = WorkspaceType.Personal, CreatedAt = now, UpdatedAt = now });
+                seedDb.GenerationJobs.Add(new GenerationJob
+                {
+                    Id = jobId,
+                    WorkspaceId = workspaceId,
+                    CreatedByUserId = userId,
+                    JobType = GenerationJobTypes.ResearchGenerate,
+                    Status = GenerationJobStatus.Running,
+                    InputJson = "{}",
+                    ConcurrencyToken = claim,
+                    CreatedAt = now,
+                    StartedAt = now,
+                    ClaimExpiresAt = now.AddMinutes(5),
+                });
+                var source = new ResearchSource
+                {
+                    Id = Guid.NewGuid(),
+                    WorkspaceId = workspaceId,
+                    GenerationJobId = jobId,
+                    CitationId = "S1",
+                    Url = "https://example.gov/old",
+                    CanonicalUrl = "https://example.gov/old",
+                    Title = "Existing source",
+                    Domain = "example.gov",
+                    RetrievedAt = now,
+                    SourceType = "web",
+                    Rank = 1,
+                    IsSelected = true,
+                };
+                seedDb.ResearchSources.Add(source);
+                seedDb.ResearchEvidence.Add(new ResearchEvidence
+                {
+                    Id = Guid.NewGuid(),
+                    WorkspaceId = workspaceId,
+                    GenerationJobId = jobId,
+                    ResearchSourceId = source.Id,
+                    Topic = "old",
+                    Excerpt = "old evidence",
+                    CreatedAt = now,
+                });
+                await seedDb.SaveChangesAsync();
+            }
+
+            await using var workerConnection = new SqliteConnection(connectionString);
+            await workerConnection.OpenAsync();
+            await using var workerDb = CreateDb(workerConnection);
+            var ownedJob = await workerDb.GenerationJobs.AsNoTracking().SingleAsync(item => item.Id == jobId);
+
+            // Cleanup already deleted S1 inside the fenced transaction; staging then fails midway.
+            // The exception must roll the whole transaction back: no partial insert, and the
+            // cleanup's deletes must not survive either.
+            await Assert.ThrowsAsync<InvalidOperationException>(() => ResearchSourceLifecycle.TryPersistUnderClaimAsync(workerDb, ownedJob, ct =>
+            {
+                workerDb.ResearchSources.Add(new ResearchSource
+                {
+                    Id = Guid.NewGuid(),
+                    WorkspaceId = workspaceId,
+                    GenerationJobId = jobId,
+                    CitationId = "PARTIAL",
+                    CanonicalUrl = "https://example.gov/partial",
+                    Title = "Partial staging source",
+                    Domain = "example.gov",
+                    RetrievedAt = now,
+                    SourceType = "web",
+                    Rank = 1,
+                    IsSelected = true,
+                });
+                throw new InvalidOperationException("staging failed midway");
+            }, CancellationToken.None));
+
+            await using var verifyConnection = new SqliteConnection(connectionString);
+            await verifyConnection.OpenAsync();
+            await using var verifyDb = CreateDb(verifyConnection);
+            Assert.True(await verifyDb.ResearchSources.AsNoTracking().AnyAsync(item => item.CitationId == "S1"));
+            Assert.True(await verifyDb.ResearchEvidence.AsNoTracking().AnyAsync(item => item.GenerationJobId == jobId));
+            Assert.False(await verifyDb.ResearchSources.AsNoTracking().AnyAsync(item => item.CitationId == "PARTIAL"));
+            var token = await verifyDb.GenerationJobs.AsNoTracking()
+                .Where(item => item.Id == jobId)
+                .Select(item => item.ConcurrencyToken)
+                .SingleAsync();
+            Assert.Equal(claim, token);
+        }
+        finally
+        {
+            SqliteConnection.ClearAllPools();
+            if (File.Exists(databasePath)) File.Delete(databasePath);
+            if (File.Exists(databasePath + "-wal")) File.Delete(databasePath + "-wal");
+            if (File.Exists(databasePath + "-shm")) File.Delete(databasePath + "-shm");
+        }
+    }
+
+    [DisposablePostgresFact]
+    public async Task Claim_takeover_serializes_behind_open_fence_and_stale_worker_cannot_stage_postgres()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("ConnectionStrings__Postgres")!;
+        var schema = $"research_fence_overlap_{Guid.NewGuid():N}";
+        var workspaceId = Guid.NewGuid();
+        var userId = Guid.NewGuid();
+        var jobId = Guid.NewGuid();
+        var oldClaim = Guid.NewGuid();
+        var recoveredClaim = Guid.NewGuid();
+        var now = DateTime.UtcNow;
+        var scoped = new NpgsqlConnectionStringBuilder(connectionString) { SearchPath = schema };
+        var options = new DbContextOptionsBuilder<TaslimDbContext>().UseNpgsql(scoped.ConnectionString).Options;
+        try
+        {
+            await using (var connection = new NpgsqlConnection(connectionString))
+            {
+                await connection.OpenAsync();
+                await using var create = connection.CreateCommand();
+                create.CommandText = $"CREATE SCHEMA \"{schema}\"";
+                await create.ExecuteNonQueryAsync();
+            }
+            await using (var setup = new TaslimDbContext(options))
+            {
+                await setup.Database.EnsureCreatedAsync();
+                setup.Users.Add(new ApplicationUser
+                {
+                    Id = userId,
+                    UserName = $"research-overlap-{userId:N}@example.com",
+                    NormalizedUserName = $"RESEARCH-OVERLAP-{userId:N}@EXAMPLE.COM",
+                    DisplayName = "Research Overlap Tester",
+                    CreatedAt = now,
+                    UpdatedAt = now,
+                });
+                setup.Workspaces.Add(new Workspace { Id = workspaceId, Name = "Research Overlap Workspace", Slug = $"research-overlap-{userId:N}", Type = WorkspaceType.Personal, CreatedAt = now, UpdatedAt = now });
+                setup.GenerationJobs.Add(new GenerationJob
+                {
+                    Id = jobId,
+                    WorkspaceId = workspaceId,
+                    CreatedByUserId = userId,
+                    JobType = GenerationJobTypes.ResearchGenerate,
+                    Status = GenerationJobStatus.Running,
+                    InputJson = "{}",
+                    ConcurrencyToken = oldClaim,
+                    CreatedAt = now,
+                    StartedAt = now,
+                    ClaimExpiresAt = now.AddMinutes(5),
+                });
+                await setup.SaveChangesAsync();
+            }
+
+            var inFence = new SemaphoreSlim(0, 1);
+            var proceed = new SemaphoreSlim(0, 1);
+            bool stagedOwner;
+            int takeoverAffected;
+            await using (var workerDb = new TaslimDbContext(options))
+            {
+                var ownedJob = await workerDb.GenerationJobs.AsNoTracking().SingleAsync(item => item.Id == jobId);
+                var workerTask = Task.Run(async () => await ResearchSourceLifecycle.TryPersistUnderClaimAsync(workerDb, ownedJob, async ct =>
+                {
+                    workerDb.ResearchSources.Add(new ResearchSource
+                    {
+                        Id = Guid.NewGuid(),
+                        WorkspaceId = workspaceId,
+                        GenerationJobId = jobId,
+                        CitationId = "OVERLAP",
+                        CanonicalUrl = "https://example.org/overlap",
+                        Title = "Owner staged source",
+                        Domain = "example.org",
+                        RetrievedAt = now,
+                        SourceType = "web",
+                        Rank = 1,
+                        IsSelected = true,
+                    });
+                    inFence.Release();
+                    if (!await proceed.WaitAsync(TimeSpan.FromSeconds(60), ct))
+                    {
+                        throw new TimeoutException("takeover probe never completed while the fence was open");
+                    }
+                }, CancellationToken.None));
+
+                if (!await inFence.WaitAsync(TimeSpan.FromSeconds(60)))
+                {
+                    Assert.False(true, "the owner worker never reached the open claim fence");
+                }
+
+                // Second connection attempts a claim takeover while the owner's fenced transaction
+                // still holds the job row lock mid-staging.
+                var takeoverTask = Task.Run(async () =>
+                {
+                    await using var takeoverDb = new TaslimDbContext(options);
+                    return await takeoverDb.GenerationJobs
+                        .Where(item => item.Id == jobId && item.Status == GenerationJobStatus.Running)
+                        .ExecuteUpdateAsync(setters => setters.SetProperty(item => item.ConcurrencyToken, recoveredClaim));
+                });
+
+                // The takeover UPDATE queues behind the fence's row lock: ownership cannot
+                // transfer while cleanup and staging are in flight.
+                await Task.Delay(TimeSpan.FromSeconds(2));
+                Assert.False(takeoverTask.IsCompleted);
+                proceed.Release();
+                stagedOwner = await workerTask;
+                takeoverAffected = await takeoverTask;
+            }
+
+            Assert.True(stagedOwner);
+            Assert.Equal(1, takeoverAffected);
+
+            // A third worker still holding the superseded token can neither stage nor delete.
+            var staleJob = new GenerationJob
+            {
+                Id = jobId,
+                WorkspaceId = workspaceId,
+                CreatedByUserId = userId,
+                JobType = GenerationJobTypes.ResearchGenerate,
+                Status = GenerationJobStatus.Running,
+                InputJson = "{}",
+                ConcurrencyToken = oldClaim,
+                CreatedAt = now,
+                StartedAt = now,
+                ClaimExpiresAt = now.AddMinutes(5),
+            };
+            await using (var staleDb = new TaslimDbContext(options))
+            {
+                var stagedStale = await ResearchSourceLifecycle.TryPersistUnderClaimAsync(staleDb, staleJob, ct =>
+                {
+                    staleDb.ResearchSources.Add(new ResearchSource
+                    {
+                        Id = Guid.NewGuid(),
+                        WorkspaceId = workspaceId,
+                        GenerationJobId = jobId,
+                        CitationId = "STALE2",
+                        CanonicalUrl = "https://example.gov/stale2",
+                        Title = "Stale worker source",
+                        Domain = "example.gov",
+                        RetrievedAt = now,
+                        SourceType = "web",
+                        Rank = 2,
+                        IsSelected = true,
+                    });
+                    return Task.CompletedTask;
+                }, CancellationToken.None);
+                Assert.False(stagedStale);
+            }
+
+            await using var verify = new TaslimDbContext(options);
+            Assert.True(await verify.ResearchSources.AsNoTracking().AnyAsync(item => item.CitationId == "OVERLAP"));
+            Assert.False(await verify.ResearchSources.AsNoTracking().AnyAsync(item => item.CitationId == "STALE2"));
+            var claim = await verify.GenerationJobs.AsNoTracking()
+                .Where(item => item.Id == jobId)
+                .Select(item => item.ConcurrencyToken)
+                .SingleAsync();
+            Assert.Equal(recoveredClaim, claim);
+        }
+        finally
+        {
+            await using var connection = new NpgsqlConnection(connectionString);
+            await connection.OpenAsync();
+            await using var drop = connection.CreateCommand();
+            drop.CommandText = $"DROP SCHEMA IF EXISTS \"{schema}\" CASCADE";
+            await drop.ExecuteNonQueryAsync();
+        }
+    }
+
+    [DisposablePostgresFact]
+    public async Task Staging_cancellation_rolls_back_cleanup_on_postgres()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("ConnectionStrings__Postgres")!;
+        var schema = $"research_staging_cancel_{Guid.NewGuid():N}";
+        var workspaceId = Guid.NewGuid();
+        var userId = Guid.NewGuid();
+        var jobId = Guid.NewGuid();
+        var claim = Guid.NewGuid();
+        var now = DateTime.UtcNow;
+        var scoped = new NpgsqlConnectionStringBuilder(connectionString) { SearchPath = schema };
+        var options = new DbContextOptionsBuilder<TaslimDbContext>().UseNpgsql(scoped.ConnectionString).Options;
+        try
+        {
+            await using (var connection = new NpgsqlConnection(connectionString))
+            {
+                await connection.OpenAsync();
+                await using var create = connection.CreateCommand();
+                create.CommandText = $"CREATE SCHEMA \"{schema}\"";
+                await create.ExecuteNonQueryAsync();
+            }
+            Guid sourceId;
+            await using (var setup = new TaslimDbContext(options))
+            {
+                await setup.Database.EnsureCreatedAsync();
+                setup.Users.Add(new ApplicationUser
+                {
+                    Id = userId,
+                    UserName = $"research-cancel-{userId:N}@example.com",
+                    NormalizedUserName = $"RESEARCH-CANCEL-{userId:N}@EXAMPLE.COM",
+                    DisplayName = "Research Cancel Tester",
+                    CreatedAt = now,
+                    UpdatedAt = now,
+                });
+                setup.Workspaces.Add(new Workspace { Id = workspaceId, Name = "Research Cancel Workspace", Slug = $"research-cancel-{userId:N}", Type = WorkspaceType.Personal, CreatedAt = now, UpdatedAt = now });
+                setup.GenerationJobs.Add(new GenerationJob
+                {
+                    Id = jobId,
+                    WorkspaceId = workspaceId,
+                    CreatedByUserId = userId,
+                    JobType = GenerationJobTypes.ResearchGenerate,
+                    Status = GenerationJobStatus.Running,
+                    InputJson = "{}",
+                    ConcurrencyToken = claim,
+                    CreatedAt = now,
+                    StartedAt = now,
+                    ClaimExpiresAt = now.AddMinutes(5),
+                });
+                var source = new ResearchSource
+                {
+                    Id = Guid.NewGuid(),
+                    WorkspaceId = workspaceId,
+                    GenerationJobId = jobId,
+                    CitationId = "S1",
+                    CanonicalUrl = "https://example.gov/old",
+                    Title = "Existing source",
+                    Domain = "example.gov",
+                    RetrievedAt = now,
+                    SourceType = "web",
+                    Rank = 1,
+                    IsSelected = true,
+                };
+                sourceId = source.Id;
+                setup.ResearchSources.Add(source);
+                setup.ResearchEvidence.Add(new ResearchEvidence
+                {
+                    Id = Guid.NewGuid(),
+                    WorkspaceId = workspaceId,
+                    GenerationJobId = jobId,
+                    ResearchSourceId = source.Id,
+                    Topic = "old",
+                    Excerpt = "old evidence",
+                    CreatedAt = now,
+                });
+                await setup.SaveChangesAsync();
+            }
+
+            await using var workerDb = new TaslimDbContext(options);
+            var ownedJob = await workerDb.GenerationJobs.AsNoTracking().SingleAsync(item => item.Id == jobId);
+            using var cancel = new CancellationTokenSource();
+
+            // Cancellation during staging must roll the fenced transaction back completely:
+            // the cleanup deletes are undone and the half-staged row never persists.
+            await Assert.ThrowsAsync<OperationCanceledException>(() => ResearchSourceLifecycle.TryPersistUnderClaimAsync(workerDb, ownedJob, ct =>
+            {
+                workerDb.ResearchSources.Add(new ResearchSource
+                {
+                    Id = Guid.NewGuid(),
+                    WorkspaceId = workspaceId,
+                    GenerationJobId = jobId,
+                    CitationId = "PARTIAL",
+                    CanonicalUrl = "https://example.gov/partial",
+                    Title = "Partial staging source",
+                    Domain = "example.gov",
+                    RetrievedAt = now,
+                    SourceType = "web",
+                    Rank = 1,
+                    IsSelected = true,
+                });
+                cancel.Cancel();
+                throw new OperationCanceledException(cancel.Token);
+            }, CancellationToken.None));
+
+            await using var verify = new TaslimDbContext(options);
+            Assert.True(await verify.ResearchSources.AsNoTracking().AnyAsync(item => item.CitationId == "S1"));
+            Assert.True(await verify.ResearchEvidence.AsNoTracking().AnyAsync(item => item.GenerationJobId == jobId));
+            Assert.False(await verify.ResearchSources.AsNoTracking().AnyAsync(item => item.CitationId == "PARTIAL"));
+            var token = await verify.GenerationJobs.AsNoTracking()
+                .Where(item => item.Id == jobId)
+                .Select(item => item.ConcurrencyToken)
+                .SingleAsync();
+            Assert.Equal(claim, token);
+            _ = sourceId;
+        }
+        finally
+        {
+            await using var connection = new NpgsqlConnection(connectionString);
+            await connection.OpenAsync();
+            await using var drop = connection.CreateCommand();
+            drop.CommandText = $"DROP SCHEMA IF EXISTS \"{schema}\" CASCADE";
+            await drop.ExecuteNonQueryAsync();
+        }
+    }
+
     private sealed class ClaimRolloverBeforeCleanupInterceptor(
         string connectionString,
         Guid jobId,
