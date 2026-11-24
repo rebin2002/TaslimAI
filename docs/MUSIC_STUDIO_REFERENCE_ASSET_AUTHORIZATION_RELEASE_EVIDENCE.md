@@ -255,6 +255,80 @@ Both failures are explained by the stale producer, not by #1152's assertions: in
 
 Nothing here merges, deploys, closes a PR, enables a provider, or touches Railway.
 
+---
+
+## 8. Independent review round (2026-11-24) — file-readability parity
+
+> The §3 decision table and the §1/§2 byte counts are a snapshot of the `e98ce379` candidate.
+> This section records the reviewer-driven hardening added on top of it; §3 now has a fourteenth
+> gate, and the file counts below are the ones that supersede §1 for the current head.
+
+**Finding (independent review of head `6aaf29c1`).** `IAssetService.GetAsync` resolves a *personal*
+asset for its creator through the `asset.CreatedByUserId == userId` short-circuit in
+`AssetVisibility.ForWorkspaceMember`, regardless of the backing `StoredFile`'s user/project linkage.
+`AssetService.GetDownloadAsync` is stricter: it additionally applies `AssetService.CanReadStoredFile`
+(the requester owns the file, **or** the file is project-shared inside the workspace and not
+conversation-bound) and otherwise throws `ASSET_FILE_UNAVAILABLE`. The §3 pipeline checked only
+`file.WorkspaceId == asset.WorkspaceId` (gate 12), so a same-workspace row where an A-created asset
+points at a B-owned personal or conversation file would be reported `AllAuthorized` here while the
+server's own download rule refuses exactly that file to exactly that requester. That is a
+contradiction between two server rules — precisely what a fail-closed access layer exists to prevent.
+
+**Reachability verdict: not reachable through any currently deployed creation path, hardened as
+fail-closed integrity.** `GeneratedAssetPublisher` is the only production site that creates `Asset`
+rows. Its fresh-artifact branch stores the file as `job.CreatedByUserId` (owner equals creator, so
+`CanReadStoredFile` holds). Its reuse branch — which accepts a handler-supplied `output.StoredFileId`
+after checking workspace, `Ready`, `ConversationId == null` and project match, but *not* file
+ownership — is fed only by handlers whose file selection is already visibility-filtered against the
+job creator (`ResearchGenerationJobHandler.LoadFilesAsync` and `SocialGenerationJobHandler.LoadFilesAsync`
+both apply `StoredFileVisibility.ForWorkspaceMember(job.CreatedByUserId)`, which admits a member's
+file only in the project-shared shape `CanReadStoredFile` also admits). The reviewer's
+conversation-file sub-case is additionally excluded by the publisher's `ConversationId == null` gate.
+The contradicting state is constructible only at the database level (a future writer, a rebinding
+job, or a project/conversation lifecycle mutation), so this is recorded as **fail-closed integrity
+hardening, not a deployed-exposure claim** — consistent with §7's and this slice's unwired posture.
+
+**Fix — reuse, don't restate.** After gate 12 (lineage) and before gate 13 (media kind) the authorizer
+now requires `AssetService.CanReadStoredFile(file, userId, asset.WorkspaceId)`; otherwise the
+selection denies with a new additive code:
+
+| # | Check | Denial code | Evidence used |
+| --- | --- | --- | --- |
+| 12.5 | requester may actually read the stored file (download-rule parity) | `MUSIC_REFERENCE_AUTH_FILE_NOT_READABLE` | `AssetService.CanReadStoredFile`, the same predicate `GetDownloadAsync` enforces |
+
+The predicate is reused, not copied, so the access layer and the download path cannot drift. Its
+position after the ownership (6), workspace (7) and lineage (12) fences means it discloses nothing
+more about foreign rows than those gates already do, and every pre-existing denial code — including
+#1116's post-purge `MUSIC_REFERENCE_AUTH_FILE_UNAVAILABLE` contract — is unchanged.
+
+**Tests — real DbContext.** `MusicReferenceAssetAuthorizationPersistenceTests` was added to
+`apps/api.Tests/MusicReferenceAssetAuthorizationTests.cs`; the stub-based suite above it is byte-for-byte
+unchanged. Five contracts run against a real `TaslimDbContext` (in-memory SQLite) through the real
+`AssetService` + `WorkspaceAccessService` + `MusicReferenceAssetAuthorizer`:
+
+1. creator asset backed by another member's **personal** file — the visibility premise is re-asserted
+   with a live `GetAsync` (it resolves, so denying `GetAsync` would have been the wrong fix), the
+   authorizer denies `MUSIC_REFERENCE_AUTH_FILE_NOT_READABLE`, `GetDownloadAsync` throws
+   `ASSET_FILE_UNAVAILABLE` on the same row, and no storage detail reaches the serialized outcome;
+2. creator asset backed by another member's **conversation** file — same denial;
+3. owner-file control — verifies;
+4. **project-shared** file control — verifies *and* downloads, proving parity in both directions;
+5. membership revocation — the shared service resolves the asset to nothing and the authorizer
+   answers with the uniform `MUSIC_REFERENCE_AUTH_ASSET_NOT_AVAILABLE`, never a file-specific code.
+
+Local result on the review-round tree: `dotnet build` 0 errors; `~MusicReferenceAssetAuthorization`
+`Failed: 0, Passed: 43`; `~MusicReference` `Failed: 0, Passed: 75` (the 43 include the 5 new
+persistence tests, the pre-existing stub suite, and the interface-contract tests).
+
+**Refresh.** The branch was merged append-only onto the then-current `main`
+(`1e2cb80a015165564392cad87d8ab0a4b037a376`) — no rebase, no force-push, prior commits preserved —
+and re-pushed to `feat/music-reference-asset-authorization-20261114`. The PR delta against current
+`main` is the three original files plus this section. Exact-head CI for the new head is recorded in
+the PR conversation and the #1212 ledger, not asserted here. The `security-review-required` hold and
+every §7 condition stand: this round merges, deploys, closes nothing, and waives no gate.
+
+---
+
 ## Appendix A — checks a reviewer can repeat
 
 ```bash

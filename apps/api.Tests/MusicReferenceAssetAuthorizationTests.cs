@@ -1,8 +1,12 @@
 using System.Text.Json;
+using Microsoft.Data.Sqlite;
+using Microsoft.EntityFrameworkCore;
 using Taslim.Api.Assets;
+using Taslim.Api.Authorization;
 using Taslim.Api.Contracts;
 using Taslim.Api.Domain;
 using Taslim.Api.Music;
+using Taslim.Api.Persistence;
 using Xunit;
 
 namespace Taslim.Api.Tests;
@@ -478,5 +482,222 @@ public sealed class MusicReferenceAssetAuthorizationTests
         var forbiddenMembers = new[] { "storagekey", "storedfilename", "originalfilename", "path", "url", "provider" };
         var memberNames = typeof(MusicReferenceAuthorizedAsset).GetProperties().Select(p => p.Name.ToLowerInvariant()).ToArray();
         Assert.All(memberNames, name => Assert.All(forbiddenMembers, forbidden => Assert.DoesNotContain(forbidden, name, StringComparison.Ordinal)));
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Real-DbContext integration contracts (independent review of head 6aaf29c1, 2026-11-24).
+// The unit suite above routes ownership through a fake asset service; these tests run the same
+// authorizer against the real AssetService (real EF-Core queries, real AssetVisibility
+// expression, real workspace-membership check) on an in-memory SQLite database. They pin the
+// premise the review raised — AssetVisibility resolves a personal asset for its creator even
+// when the backing StoredFile belongs to another member (and even when that file is bound to a
+// conversation) — and the fix's two sides: the authorizer now denies with
+// MUSIC_REFERENCE_AUTH_FILE_NOT_READABLE, and its answer agrees with the server's own download
+// rule (AssetService.GetDownloadAsync -> ASSET_FILE_UNAVAILABLE) on the very same row. The
+// project-shared shape passes both, proving the parity gate refuses contradictions rather than
+// the legitimate sharing AssetService itself honors. No deployed creation path is known to
+// produce the contradicting rows (GeneratedAssetPublisher binds a job's asset to a file the job
+// stored); these states are constructed at the database level to lock the fail-closed invariant
+// for any future writer or lifecycle mutation. This remains an unwired slice: nothing here is a
+// deployed-exposure claim.
+// ---------------------------------------------------------------------------------------------
+public sealed class MusicReferenceAssetAuthorizationPersistenceTests
+{
+    private static readonly Guid MemberId = Guid.NewGuid(); // B: a second member of the same workspace
+
+    private sealed class Fixture : IAsyncDisposable
+    {
+        private Fixture(SqliteConnection connection, TaslimDbContext db, Guid workspaceId, Guid ownerId, Guid projectId, Guid conversationId)
+        {
+            Connection = connection;
+            Db = db;
+            WorkspaceId = workspaceId;
+            OwnerId = ownerId;
+            ProjectId = projectId;
+            ConversationId = conversationId;
+            Assets = new AssetService(db, new WorkspaceAccessService(db));
+            Authorizer = new MusicReferenceAssetAuthorizer(Assets);
+        }
+
+        private SqliteConnection Connection { get; }
+        public TaslimDbContext Db { get; }
+        public Guid WorkspaceId { get; }
+        public Guid OwnerId { get; }
+        public Guid ProjectId { get; }
+        public Guid ConversationId { get; }
+        public AssetService Assets { get; }
+        public MusicReferenceAssetAuthorizer Authorizer { get; }
+
+        public static async Task<Fixture> CreateAsync()
+        {
+            var connection = new SqliteConnection("DataSource=:memory:");
+            await connection.OpenAsync();
+            var options = new DbContextOptionsBuilder<TaslimDbContext>().UseSqlite(connection).Options;
+            var db = new TaslimDbContext(options);
+            await db.Database.EnsureCreatedAsync();
+
+            var now = DateTime.UtcNow;
+            var workspaceId = Guid.NewGuid();
+            var owner = new ApplicationUser { Id = Guid.NewGuid(), UserName = $"owner-{Guid.NewGuid():N}", NormalizedUserName = "OWNER", DisplayName = "Owner", CreatedAt = now, UpdatedAt = now };
+            var member = new ApplicationUser { Id = MemberId, UserName = $"member-{Guid.NewGuid():N}", NormalizedUserName = "MEMBER", DisplayName = "Member", CreatedAt = now, UpdatedAt = now };
+            db.Users.AddRange(owner, member);
+            db.Workspaces.Add(new Workspace { Id = workspaceId, Name = "Reference Studio", Slug = $"reference-studio-{Guid.NewGuid():N}", Type = WorkspaceType.Business, CreatedAt = now, UpdatedAt = now });
+            db.WorkspaceMembers.AddRange(
+                new WorkspaceMember { Id = Guid.NewGuid(), WorkspaceId = workspaceId, UserId = owner.Id, Role = WorkspaceRole.Owner, JoinedAt = now },
+                new WorkspaceMember { Id = Guid.NewGuid(), WorkspaceId = workspaceId, UserId = member.Id, Role = WorkspaceRole.Member, JoinedAt = now });
+            var project = new Project { Id = Guid.NewGuid(), WorkspaceId = workspaceId, Name = "Shared Project", CreatedAt = now, UpdatedAt = now };
+            db.Projects.Add(project);
+            var conversation = new Conversation { Id = Guid.NewGuid(), WorkspaceId = workspaceId, UserId = member.Id, Title = "Member conversation", CreatedAt = now, UpdatedAt = now };
+            db.Conversations.Add(conversation);
+            await db.SaveChangesAsync();
+            return new Fixture(connection, db, workspaceId, owner.Id, project.Id, conversation.Id);
+        }
+
+        // A personal music asset created by the owner and backed by the given stored file.
+        public async Task<Asset> AddOwnerAssetAsync(StoredFile file)
+        {
+            var now = DateTime.UtcNow;
+            Db.StoredFiles.Add(file);
+            var asset = new Asset
+            {
+                Id = Guid.NewGuid(),
+                WorkspaceId = WorkspaceId,
+                CreatedByUserId = OwnerId,
+                StoredFile = file,
+                Name = "Reference",
+                AssetType = AssetTypes.Music,
+                MimeType = "audio/mpeg",
+                Status = AssetStatus.Active,
+                CreatedAt = now,
+                UpdatedAt = now,
+            };
+            Db.Assets.Add(asset);
+            await Db.SaveChangesAsync();
+            return asset;
+        }
+
+        public StoredFile MakeFile(Guid ownerId, Guid? projectId = null, Guid? conversationId = null) => new()
+        {
+            Id = Guid.NewGuid(),
+            WorkspaceId = WorkspaceId,
+            UserId = ownerId,
+            ProjectId = projectId,
+            ConversationId = conversationId,
+            ContentType = "audio/mpeg",
+            OriginalFileName = "member-upload.mp3",
+            StoredFileName = "SENTINEL-STORED-NAME",
+            Extension = ".mp3",
+            SizeBytes = 4_000_000,
+            Status = StoredFileStatus.Ready,
+            StorageKey = "SENTINEL-STORAGE-KEY",
+            CreatedAt = DateTime.UtcNow,
+            ProcessedAt = DateTime.UtcNow,
+        };
+
+        public async ValueTask DisposeAsync()
+        {
+            await Db.DisposeAsync();
+            await Connection.DisposeAsync();
+        }
+    }
+
+    private static MusicReferenceAssetSelection Audio(Guid assetId) => new("audio", assetId);
+
+    [Fact]
+    public async Task Creator_asset_backed_by_another_members_personal_file_denies_instead_of_marking_access_verified()
+    {
+        // The reviewed contradiction, on real queries: AssetVisibility lets the asset creator
+        // resolve the row regardless of the backing file's user linkage, but the download rule
+        // (CanReadStoredFile, via GetDownloadAsync) refuses that file to the same requester.
+        // The authorizer must agree with the download rule, not with the visibility shortcut.
+        await using var fixture = await Fixture.CreateAsync();
+        var asset = await fixture.AddOwnerAssetAsync(fixture.MakeFile(MemberId));
+
+        // Premise the review reported, verified end-to-end on the real service: the creator
+        // still resolves the asset (so a bare denial of GetAsync would have been the wrong fix
+        // — the file-specific rule is the one that has to gate authorization).
+        Assert.NotNull(await fixture.Assets.GetAsync(fixture.OwnerId, asset.Id));
+
+        var outcome = await fixture.Authorizer.AuthorizeAsync(fixture.OwnerId, fixture.WorkspaceId, [Audio(asset.Id)]);
+        Assert.False(outcome.AllAuthorized);
+        Assert.Empty(outcome.Assets);
+        var denial = Assert.Single(outcome.Denials);
+        Assert.Equal(MusicReferenceAssetAuthorizationCodes.FileNotReadable, denial.Code);
+        // Denial messages stay identifier-free, like every other code in this path.
+        Assert.DoesNotContain(asset.Id.ToString(), denial.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("SENTINEL", JsonSerializer.Serialize(outcome), StringComparison.Ordinal);
+
+        // Parity with the server's own download rule on the very same row.
+        var download = await Assert.ThrowsAsync<AssetValidationException>(
+            () => fixture.Assets.GetDownloadAsync(fixture.OwnerId, asset.Id));
+        Assert.Equal("ASSET_FILE_UNAVAILABLE", download.Code);
+    }
+
+    [Fact]
+    public async Task Creator_asset_backed_by_another_members_conversation_file_denies_too()
+    {
+        // Conversation-scoped files are the second half of the reported state: never readable
+        // through another account's asset, and already excluded from generated-asset rebinding
+        // by the publisher gate. Fail-closed here as well.
+        await using var fixture = await Fixture.CreateAsync();
+        var asset = await fixture.AddOwnerAssetAsync(
+            fixture.MakeFile(MemberId, projectId: fixture.ProjectId, conversationId: fixture.ConversationId));
+
+        var outcome = await fixture.Authorizer.AuthorizeAsync(fixture.OwnerId, fixture.WorkspaceId, [Audio(asset.Id)]);
+        Assert.False(outcome.AllAuthorized);
+        Assert.Equal(MusicReferenceAssetAuthorizationCodes.FileNotReadable, Assert.Single(outcome.Denials).Code);
+    }
+
+    [Fact]
+    public async Task Creator_asset_backed_by_its_own_file_still_verifies_on_the_real_service()
+    {
+        // Positive control: the parity gate must not become "refuse the owner's own library".
+        await using var fixture = await Fixture.CreateAsync();
+        var asset = await fixture.AddOwnerAssetAsync(fixture.MakeFile(fixture.OwnerId));
+
+        var outcome = await fixture.Authorizer.AuthorizeAsync(fixture.OwnerId, fixture.WorkspaceId, [Audio(asset.Id)]);
+        Assert.True(outcome.AllAuthorized);
+        Assert.Empty(outcome.Denials);
+        var record = Assert.Single(outcome.Assets);
+        Assert.Equal(asset.Id, record.AssetId);
+        Assert.Equal("audio/mpeg", record.ContentType);
+        Assert.Equal(MusicReferenceAssetAuthorizationCodes.VerifiedByService, record.VerifiedByService);
+    }
+
+    [Fact]
+    public async Task Creator_asset_backed_by_a_project_shared_file_verifies_as_the_download_rule_does()
+    {
+        // The other positive half: a member's file inside a workspace project is exactly what
+        // CanReadStoredFile (and GetDownloadAsync) allow, so the authorizer must keep allowing
+        // it too. Parity means both directions.
+        await using var fixture = await Fixture.CreateAsync();
+        var asset = await fixture.AddOwnerAssetAsync(fixture.MakeFile(MemberId, projectId: fixture.ProjectId));
+
+        var outcome = await fixture.Authorizer.AuthorizeAsync(fixture.OwnerId, fixture.WorkspaceId, [Audio(asset.Id)]);
+        Assert.True(outcome.AllAuthorized);
+        Assert.Empty(outcome.Denials);
+        var download = await fixture.Assets.GetDownloadAsync(fixture.OwnerId, asset.Id);
+        Assert.NotNull(download);
+    }
+
+    [Fact]
+    public async Task Membership_revocation_resolves_the_asset_to_nothing_at_the_access_layer()
+    {
+        // Workspace isolation/revocation on real queries: removing the membership makes the
+        // shared service itself return null, so the authorizer reports the uniform
+        // "not available" code and never reaches a file-specific one.
+        await using var fixture = await Fixture.CreateAsync();
+        var asset = await fixture.AddOwnerAssetAsync(fixture.MakeFile(fixture.OwnerId));
+        Assert.True((await fixture.Authorizer.AuthorizeAsync(fixture.OwnerId, fixture.WorkspaceId, [Audio(asset.Id)])).AllAuthorized);
+
+        var membership = await fixture.Db.WorkspaceMembers.SingleAsync(item => item.UserId == fixture.OwnerId);
+        fixture.Db.WorkspaceMembers.Remove(membership);
+        await fixture.Db.SaveChangesAsync();
+
+        Assert.Null(await fixture.Assets.GetAsync(fixture.OwnerId, asset.Id));
+        var outcome = await fixture.Authorizer.AuthorizeAsync(fixture.OwnerId, fixture.WorkspaceId, [Audio(asset.Id)]);
+        Assert.False(outcome.AllAuthorized);
+        Assert.Equal(MusicReferenceAssetAuthorizationCodes.AssetNotAvailable, Assert.Single(outcome.Denials).Code);
     }
 }
