@@ -35,8 +35,13 @@ public sealed class ActivityCenterService(TaslimDbContext db, WorkspaceAccessSer
                         ? query.Where(job => job.Status == parsed)
                         : query.Where(job => false);
         }
-        if (!string.IsNullOrWhiteSpace(filter.JobType))
-            query = query.Where(job => job.JobType == filter.JobType);
+        if (ActivityContractMapper.ExpandJobTypeFilter(filter.JobType) is { } jobTypeFilter)
+        {
+            var includes = jobTypeFilter.IncludeJobTypes;
+            var excludes = jobTypeFilter.ExcludeJobTypes;
+            if (includes.Count > 0) query = query.Where(job => includes.Contains(job.JobType));
+            if (excludes.Count > 0) query = query.Where(job => !excludes.Contains(job.JobType));
+        }
 
         var totalCount = await query.CountAsync(cancellationToken);
         var unreadCount = await db.GenerationJobs.AsNoTracking()
