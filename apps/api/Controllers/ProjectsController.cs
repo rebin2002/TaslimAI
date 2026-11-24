@@ -232,7 +232,14 @@ public sealed class ProjectsController(TaslimDbContext db, WorkspaceAccessServic
             return ApiResults.Error(this, StatusCodes.Status409Conflict, "PROJECT_REVISION_CONFLICT",
                 "Another edit reached this project first. Re-read it and apply your change again.");
         }
-        return Ok(ToDto(await db.Projects.AsNoTracking().FirstAsync(item => item.Id == projectId, cancellationToken)));
+        // The stamp published here is the one the row actually carries after the
+        // write, which is what makes it usable as the If-Match base of an open
+        // draft. Success used to answer with the payload only, so a client that
+        // fenced its edits had to re-read the row (or lose its binding) after every
+        // archive, and a status flip looked like a revision it could not name.
+        var committed = await db.Projects.AsNoTracking().FirstAsync(item => item.Id == projectId, cancellationToken);
+        Response.Headers.ETag = ProjectRevision.FormatETag(committed.UpdatedAt);
+        return Ok(ToDto(committed));
     }
 
     [HttpPost("api/projects/{projectId:guid}/restore")]
@@ -254,7 +261,14 @@ public sealed class ProjectsController(TaslimDbContext db, WorkspaceAccessServic
             return ApiResults.Error(this, StatusCodes.Status409Conflict, "PROJECT_REVISION_CONFLICT",
                 "Another edit reached this project first. Re-read it and apply your change again.");
         }
-        return Ok(ToDto(await db.Projects.AsNoTracking().FirstAsync(item => item.Id == projectId, cancellationToken)));
+        // The stamp published here is the one the row actually carries after the
+        // write, which is what makes it usable as the If-Match base of an open
+        // draft. Success used to answer with the payload only, so a client that
+        // fenced its edits had to re-read the row (or lose its binding) after every
+        // archive, and a status flip looked like a revision it could not name.
+        var committed = await db.Projects.AsNoTracking().FirstAsync(item => item.Id == projectId, cancellationToken);
+        Response.Headers.ETag = ProjectRevision.FormatETag(committed.UpdatedAt);
+        return Ok(ToDto(committed));
     }
 
     /// <summary>
