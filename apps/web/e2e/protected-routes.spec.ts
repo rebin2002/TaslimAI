@@ -3,11 +3,6 @@ import { test, expect } from "./fixtures";
 // `next` records the login return path the server gate promises when it differs
 // from the requested path itself (the private project-detail gate redirects to
 // the Projects list, matching apps/web/src/app/projects/[projectId]/page.tsx).
-//
-// `/activity` and `/notifications` are deliberately NOT listed here: their
-// server gates are carried by PR #1255, which ships its own census in
-// apps/web/e2e/activity-notifications-route-auth.spec.ts. Asserting them from
-// this vehicle would make #833 depend on an unmerged PR.
 const protectedEntryPoints = [
   { path: "/projects", label: "Projects" },
   { path: "/account", label: "Account" },
@@ -17,6 +12,8 @@ const protectedEntryPoints = [
   { path: "/create", label: "Create" },
   { path: "/create/social", label: "Social Studio" },
   { path: "/chat/e2e-anonymous-boundary", label: "Chat conversation" },
+  { path: "/activity", label: "Activity" },
+  { path: "/notifications", label: "Notifications" },
   { path: "/assets", label: "Assets" },
   { path: "/account/usage", label: "Usage" },
   { path: "/account/memory", label: "Memory" },
@@ -55,6 +52,8 @@ const newlyServerGatedRoutes = [
   { path: "/create/document" },
   { path: "/create/social" },
   { path: "/chat/e2e-auth-boundary" },
+  { path: "/activity" },
+  { path: "/notifications" },
   { path: "/assets" },
   { path: "/account/usage" },
   { path: "/account/memory" },
