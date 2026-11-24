@@ -114,6 +114,41 @@ public sealed class GeneratedMediaImageValidationTests
         GeneratedMediaSecurity.ValidateContent(descriptor, WebpVp8xAnimated(), new Taslim.Api.Files.FileOptions());
     }
 
+    [Fact]
+    public void Webp_with_an_animated_frame_carrying_alpha_first_is_accepted()
+    {
+        // A compliant animated file may put the frame's ALPH chunk before its VP8/VP8L sub-chunk, so
+        // the frame must be found by walking the ANMF sub-chunks rather than by reading one fixed
+        // offset. Both ALPH sizes are exercised because the odd case carries a pad byte.
+        var descriptor = GeneratedMediaSecurity.ValidateDescriptor("animated-alpha.webp", "image/webp");
+        var descriptorEven = GeneratedMediaSecurity.ValidateDescriptor("animated-alpha-even.webp", "image/webp");
+
+        GeneratedMediaSecurity.ValidateContent(descriptor, WebpVp8xAnimated(alphaPayloadLength: 7), new Taslim.Api.Files.FileOptions());
+        GeneratedMediaSecurity.ValidateContent(descriptorEven, WebpVp8xAnimated(alphaPayloadLength: 8), new Taslim.Api.Files.FileOptions());
+    }
+
+    [Fact]
+    public void Webp_with_an_animated_frame_holding_only_an_alpha_chunk_is_rejected_before_generated_storage()
+    {
+        // The frame header and an ALPH chunk describe transparency, not samples: an ANMF with no
+        // VP8/VP8L sub-chunk is an empty animation.
+        var descriptor = GeneratedMediaSecurity.ValidateDescriptor("alpha-only.webp", "image/webp");
+
+        Assert.Throws<FileUploadValidationException>(() =>
+            GeneratedMediaSecurity.ValidateContent(descriptor, WebpVp8xAnimated(includeFrameImage: false), new Taslim.Api.Files.FileOptions()));
+    }
+
+    [Fact]
+    public void Webp_with_an_animated_frame_shorter_than_the_frame_header_is_rejected_before_generated_storage()
+    {
+        // 12 bytes before the nested chunk was the shape an earlier version of this gate accepted.
+        // The ANMF header is 16 bytes, so a payload that cannot hold it has no frame at all.
+        var descriptor = GeneratedMediaSecurity.ValidateDescriptor("short-anmf.webp", "image/webp");
+
+        Assert.Throws<FileUploadValidationException>(() =>
+            GeneratedMediaSecurity.ValidateContent(descriptor, WebpVp8xAnimated(shortFrameHeader: true), new Taslim.Api.Files.FileOptions()));
+    }
+
     private static byte[] PngSignature() => [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
 
     private static byte[] CompletePng(uint width, uint height)
@@ -193,16 +228,24 @@ public sealed class GeneratedMediaImageValidationTests
         return WebpBody([header, frame], 4 + header.Length + frame.Length);
     }
 
-    private static byte[] WebpVp8xAnimated()
+    private static byte[] WebpVp8xAnimated(int alphaPayloadLength = 0, bool includeFrameImage = true, bool shortFrameHeader = false)
     {
-        var header = WebpChunk("VP8X", new byte[] { 0x02, 0, 0, 0, 0x3F, 0, 0, 0x3F, 0, 0 });
-        var inner = WebpChunk("VP8 ", Enumerable.Repeat((byte)0x20, 12).ToArray());
+        var header = WebpChunk("VP8X", new byte[] { 0x04, 0, 0, 0, 0x3F, 0, 0, 0x3F, 0, 0 });
         var framePayload = new List<byte>();
-        // Twelve bytes precede the nested chunk: cell width, cell height, x offset and y offset
-        // (two each), duration (three) and the disposal/blending flags (one).
-        framePayload.AddRange(new byte[] { 0x3F, 0, 0x3F, 0, 0, 0, 0, 0, 0, 0, 0, 0x00 });
-        framePayload.AddRange(inner);
+        // Sixteen bytes precede the frame's sub-chunks: canvas x, canvas y, tile width, tile height
+        // and duration as three-byte little-endian fields, then the disposal/blending/loop flags.
+        var frameHeader = shortFrameHeader
+            ? new byte[] { 0x3F, 0, 0x3F, 0, 0x3F, 0, 0x3F, 0, 0, 0, 0, 0x00 }
+            : AnimatedFrameHeader();
+        framePayload.AddRange(frameHeader);
+        if (alphaPayloadLength > 0)
+            framePayload.AddRange(WebpChunk("ALPH", Enumerable.Repeat((byte)0x01, alphaPayloadLength).ToArray()));
+        if (includeFrameImage)
+            framePayload.AddRange(WebpChunk("VP8 ", Enumerable.Repeat((byte)0x20, 12).ToArray()));
         var animated = WebpChunk("ANMF", [.. framePayload]);
         return WebpBody([header, animated], 4 + header.Length + animated.Length);
     }
+
+    private static byte[] AnimatedFrameHeader() =>
+        new byte[] { 0x3F, 0, 0, 0x3F, 0, 0, 0x1F, 0, 0, 0x1F, 0, 0, 0x0A, 0, 0, 0x00 };
 }

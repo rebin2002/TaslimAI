@@ -247,9 +247,15 @@ public static class GeneratedMediaSecurity
         // the scan data still looked complete. Here each segment is skipped by its declared
         // length, entropy-coded data is stepped over with its 0xFF00 byte stuffing honoured, and
         // the file is complete only when the walk reaches EOI with nothing but fill bytes behind
-        // it. Restart markers are handled inside the scan, so a multi-scan JPEG is not rejected.
+        // it. A well-formed walk is not by itself evidence of a picture: reaching EOI immediately
+        // after SOI, or after nothing but metadata segments (APPn/COM/DNL), is a container with no
+        // image either, so EOI is only accepted once the walk has also seen a frame definition
+        // (an SOFn marker) and a scan start (SOS). Restart markers are handled inside the scan, so
+        // a multi-scan or progressive JPEG is not rejected.
         var index = 2;
         var inScanData = false;
+        var sawFrameDefinition = false;
+        var sawScanStart = false;
         while (index + 1 < content.Length)
         {
             if (inScanData)
@@ -268,7 +274,7 @@ public static class GeneratedMediaSecurity
             if (index >= content.Length) return false;
 
             var marker = content[index++];
-            if (marker == 0xD9) return IsJpegFill(content[index..]);
+            if (marker == 0xD9) return sawFrameDefinition && sawScanStart && IsJpegFill(content[index..]);
             if (marker is 0x01) continue;
             if (marker >= 0xD0 && marker <= 0xD7)
             {
@@ -276,8 +282,16 @@ public static class GeneratedMediaSecurity
                 continue;
             }
 
+            // 0xC0-0xCF are the frame markers, except 0xC4 (DHT), 0xC8 (reserved) and 0xCC (DAC).
+            if (marker is >= 0xC0 and <= 0xCF and not 0xC4 and not 0xC8 and not 0xCC)
+                sawFrameDefinition = true;
+
             if (!TryReadSegmentLength(content, ref index)) return false;
-            if (marker == 0xDA) inScanData = true;
+            if (marker == 0xDA)
+            {
+                inScanData = true;
+                sawScanStart = true;
+            }
         }
 
         return false;
@@ -340,17 +354,31 @@ public static class GeneratedMediaSecurity
 
     private static bool HasAnimatedWebpFrame(ReadOnlySpan<byte> content, int payloadStart, int payloadEnd)
     {
-        // An ANMF payload opens with 12 bytes of canvas position, duration and disposal/blending
-        // flags, then holds the complete chunk carrying the frame, so a frame counts only when that
-        // nested chunk is a VP8 or VP8L chunk with a non-empty body fitting the declared ANMF range.
-        var nested = payloadStart + 12;
-        if (nested + 8 > payloadEnd || payloadEnd > content.Length) return false;
+        // An ANMF payload opens with the 16-byte frame header - canvas x, canvas y, tile width,
+        // tile height and duration as three-byte little-endian fields plus the disposal/blending
+        // and loop flag byte - and continues with whole sub-chunks in the same
+        // FourCC + 32-bit length + payload + even-alignment pad layout as the outer container. The
+        // frame image lives in one of those sub-chunks, and a compliant encoder may put an ALPH
+        // chunk (or any other chunk) ahead of it, so the sub-chunks are iterated rather than
+        // assumed to start at a fixed offset. The frame counts when any sub-chunk is a non-empty
+        // VP8 or VP8L chunk whose declared body fits inside the ANMF range.
+        const int FrameHeaderSize = 16;
+        if (payloadEnd > content.Length || payloadStart + FrameHeaderSize > payloadEnd) return false;
 
-        var nestedType = content[nested..(nested + 4)];
-        if (!nestedType.SequenceEqual("VP8 "u8) && !nestedType.SequenceEqual("VP8L"u8)) return false;
+        var index = payloadStart + FrameHeaderSize;
+        while (index + 8 <= payloadEnd)
+        {
+            var nestedType = content[index..(index + 4)];
+            var nestedLength = BinaryPrimitives.ReadUInt32LittleEndian(content[(index + 4)..(index + 8)]);
+            if (nestedLength > int.MaxValue - 8) return false;
+            var nestedEnd = (long)index + 8 + nestedLength;
+            if (nestedEnd > payloadEnd) return false;
+            if ((nestedType.SequenceEqual("VP8 "u8) || nestedType.SequenceEqual("VP8L"u8)) && nestedLength > 0)
+                return true;
+            index = (int)nestedEnd + (int)(nestedLength & 1);
+        }
 
-        var nestedLength = BinaryPrimitives.ReadUInt32LittleEndian(content[(nested + 4)..(nested + 8)]);
-        return nestedLength > 0 && (long)nested + 8 + nestedLength <= payloadEnd;
+        return false;
     }
 
     private static bool IsFtyp(ReadOnlySpan<byte> content) =>

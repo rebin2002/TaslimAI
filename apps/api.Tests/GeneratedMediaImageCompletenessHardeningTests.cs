@@ -31,6 +31,7 @@ public sealed class GeneratedMediaImageCompletenessHardeningTests
         var complete = Concat(
             new byte[] { 0xFF, 0xD8 },
             Comment(new byte[] { 0x41, 0xFF, 0xD9, 0x42 }),
+            FrameDefinition(),
             StartOfScan(),
             new byte[] { 0x12, 0x34, 0xFF, 0x00, 0x56, 0x78, 0x9A },
             new byte[] { 0xFF, 0xD9 });
@@ -39,10 +40,52 @@ public sealed class GeneratedMediaImageCompletenessHardeningTests
     }
 
     [Fact]
+    public void Jpeg_with_only_start_and_end_of_image_markers_is_rejected()
+    {
+        // SOI followed straight by EOI is a well-formed walk that contains no picture: no frame
+        // definition was declared and no scan was started, so the terminator proves nothing.
+        var empty = Concat(new byte[] { 0xFF, 0xD8 }, new byte[] { 0xFF, 0xD9 });
+
+        Assert.Throws<FileUploadValidationException>(() => Validate(empty, ".jpg", "image/jpeg"));
+    }
+
+    [Fact]
+    public void Jpeg_with_metadata_segments_but_no_frame_or_scan_is_rejected()
+    {
+        // The same hole one step further along: an application segment (the shape a thumbnail-only
+        // or comment-only stub has) terminated by EOI still carries no image data. The declared
+        // length is 14, i.e. the twelve payload bytes plus the two length bytes themselves, so the
+        // segment ends exactly where EOI begins: the only thing refusing this file is the new
+        // frame-and-scan rule, not an accidental length overrun.
+        var metadataOnly = Concat(
+            new byte[] { 0xFF, 0xD8 },
+            new byte[] { 0xFF, 0xE0, 0x00, 0x0E },
+            "JFIF"u8.ToArray(),
+            new byte[8],
+            new byte[] { 0xFF, 0xD9 });
+
+        Assert.Throws<FileUploadValidationException>(() => Validate(metadataOnly, ".jpeg", "image/jpeg"));
+    }
+
+    [Fact]
+    public void Jpeg_with_a_frame_definition_but_no_scan_is_rejected()
+    {
+        // Declaring a frame is not delivering one: without SOS there is no entropy-coded data.
+        var noScan = Concat(
+            new byte[] { 0xFF, 0xD8 },
+            FrameDefinition(),
+            new byte[] { 0xFF, 0xC4, 0x00, 0x04, 0x00, 0x00 },
+            new byte[] { 0xFF, 0xD9 });
+
+        Assert.Throws<FileUploadValidationException>(() => Validate(noScan, ".jpeg", "image/jpeg"));
+    }
+
+    [Fact]
     public void Jpeg_allows_only_fill_and_padding_bytes_after_the_terminal_marker()
     {
         var withFill = Concat(
             new byte[] { 0xFF, 0xD8 },
+            FrameDefinition(),
             StartOfScan(),
             new byte[] { 0x12, 0xFF, 0x00, 0x34 },
             new byte[] { 0xFF, 0xD9 },
@@ -52,6 +95,7 @@ public sealed class GeneratedMediaImageCompletenessHardeningTests
 
         var withTrailingGarbage = Concat(
             new byte[] { 0xFF, 0xD8 },
+            FrameDefinition(),
             StartOfScan(),
             new byte[] { 0x12, 0xFF, 0x00, 0x34 },
             new byte[] { 0xFF, 0xD9 },
@@ -65,6 +109,7 @@ public sealed class GeneratedMediaImageCompletenessHardeningTests
     {
         var multiScan = Concat(
             new byte[] { 0xFF, 0xD8 },
+            FrameDefinition(),
             StartOfScan(),
             new byte[] { 0x12, 0x34, 0xFF, 0x00, 0x56 },
             new byte[] { 0xFF, 0xD2 },
@@ -130,6 +175,13 @@ public sealed class GeneratedMediaImageCompletenessHardeningTests
         Concat(
             new byte[] { 0xFF, 0xDA, 0x00, 0x08 },
             new byte[] { 0x01, 0x01, 0x00, 0x00, 0x3F, 0x00 });
+
+    private static byte[] FrameDefinition() =>
+        // SOF0, 8-bit precision, one component: what a baseline encoder emits before the scan.
+        Concat(
+            new byte[] { 0xFF, 0xC0, 0x00, 0x0B, 0x08 },
+            new byte[] { 0x00, 0x01, 0x00, 0x01 },
+            new byte[] { 0x01, 0x01, 0x11, 0x00 });
 
     private static byte[] Webp(int chunkPayloadLength, int declaredChunkLength, int declaredRiffLength, byte[]? payload = null)
     {
