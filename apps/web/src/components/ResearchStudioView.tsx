@@ -9,6 +9,11 @@ import { useAuth } from "@/components/AuthProvider";
 import { AccessibleProgressBar } from "@/components/AccessibleProgressBar";
 import { useLocale } from "@/components/LocaleProvider";
 import { ApiError, api, type Asset, type GenerationJob, type Project, type ResearchJobResult, type ResearchSource, type StoredFile } from "@/lib/api";
+import {
+  filterStudioDownloadableRepresentations,
+  readStudioRepresentationDownloadability,
+  type StudioRepresentationAvailabilityFacts,
+} from "@/lib/studioRepresentationAvailability";
 import { canCancelResearchJob, clearResearchActiveJobId, displayResearchProgress, isCurrentResearchJob, isResearchSourceReady, isRestorableResearchJob, isSafeExternalUrl, mergeResearchSources, nextResearchPollDelay, parseResearchJobResult, persistResearchActiveJobId, readResearchActiveJobId, researchSourcesPanelStatus, researchStudioState, shouldPollResearchJob, type ResearchSourcesLoadStatus } from "@/lib/researchStudioState";
 
 const extensions = [".pdf", ".docx", ".txt", ".md", ".csv", ".xlsx"];
@@ -59,14 +64,13 @@ export function ResearchStudioView() {
     const workspaceVersion = workspaceGeneration.current;
     setLoadingSources(true);
     try {
-      const [active, archived, available, researchAssets] = await Promise.all([
+      const [active, available, researchAssets] = await Promise.all([
         api.listProjects(workspaceId, "Active"),
-        api.listProjects(workspaceId, "Archived"),
         api.listFiles(workspaceId),
         api.listAssets(workspaceId, { assetType: "research", pageSize: 4, sort: "recent" }),
       ]);
       if (observedWorkspaceId.current !== workspaceId || workspaceGeneration.current !== workspaceVersion) return;
-      setProjects([...active, ...archived]);
+      setProjects(active);
       setFiles(available.filter((file) => extensions.includes(file.extension.toLowerCase())));
       setRecentResearch(researchAssets.items);
     } catch {
@@ -141,6 +145,14 @@ export function ResearchStudioView() {
     });
     return () => { active = false; };
   }, [workspace, current]);
+  // Keep an in-view completed report readable, but never restore terminal jobs
+  // when Research Studio is opened again from Create. Saved assets live in Assets.
+  useEffect(() => {
+    if (current && !shouldPollResearchJob(current) && isCurrentResearchJob(current, workspace?.id ?? "")) {
+      clearResearchActiveJobId(current.workspaceId);
+      restoreJobId.current = null;
+    }
+  }, [current, workspace?.id]);
   useEffect(() => {
     if (!current || !shouldPollResearchJob(current)) return;
     const jobId = current.id;
@@ -345,6 +357,12 @@ export function ResearchStudioView() {
 
   const parsed = parseResearchJobResult(current);
   const result = mergeResearchSources(parsed, sourceDetails);
+  // #1049: the published ResultJson snapshot is immutable, so a rendition can be pruned after
+  // completion while the snapshot still advertises its download button. The live per-representation
+  // facts arrive as the optional `representationDownloads` companion field (#1117/#1124 API half),
+  // read through the shared studio helper. No field, no change: legacy payloads keep advertising
+  // every rendition exactly as before.
+  const representationDownloadability = readStudioRepresentationDownloadability(current);
   const state = researchStudioState(current, result);
   const readyFiles = files.filter((file) => isResearchSourceReady(file));
   const progress = displayResearchProgress(current);
@@ -411,9 +429,9 @@ export function ResearchStudioView() {
       ) : state === "failed" || state === "cancelled" ? (
         <section className="account-card research-generation-state research-terminal-state" aria-live="polite"><XCircle size={28} /><p className="section-eyebrow">{t(`jobs.status${statusKey}`)}</p><h2>{current.errorMessage || t("research.failedSafe")}</h2><div className="research-result-actions"><button className="primary-button" onClick={createAnother}><RefreshCw size={15} /> {t("research.createAnother")}</button><Link className="secondary-button" href="/assets">{t("research.openAssets")}</Link></div></section>
       ) : state === "succeeded" && result?.assetId ? (
-        <ResearchResultView result={result} sourcesLoadStatus={sourcesLoadStatus} onRetrySources={() => void retrySources()} working={working} downloadError={downloadError} onDownload={(id, name) => void downloadRepresentation(id, name)} onExport={() => void downloadSourceManifest()} onCreateAnother={createAnother} t={t} />
+        <ResearchResultView result={result} downloadability={representationDownloadability} sourcesLoadStatus={sourcesLoadStatus} onRetrySources={() => void retrySources()} working={working} downloadError={downloadError} onDownload={(id, name) => void downloadRepresentation(id, name)} onExport={() => void downloadSourceManifest()} onCreateAnother={createAnother} t={t} />
       ) : state === "completed-unavailable" ? (
-        <section className="account-card research-generation-state research-terminal-state"><RefreshCw size={28} /><p className="section-eyebrow">{t("jobs.statusSucceeded")}</p><h2>{t("research.completedLoadError")}</h2><p>{t("research.completedLoadHint")}</p><div className="research-result-actions"><button className="primary-button" onClick={() => void retryCompleted()} disabled={retryingCompleted}>{retryingCompleted ? t("research.working") : t("research.retry")}</button><Link className="secondary-button" href="/assets">{t("research.openAssets")}</Link></div></section>
+        <section className="account-card research-generation-state research-terminal-state"><RefreshCw size={28} /><p className="section-eyebrow">{t("jobs.statusSucceeded")}</p><h2>{t("research.completedLoadError")}</h2><p>{t("research.completedLoadHint")}</p><div className="research-result-actions"><button className="primary-button" onClick={() => void retryCompleted()} disabled={retryingCompleted}>{retryingCompleted ? t("research.working") : t("research.retry")}</button><Link className="secondary-button" href="/assets">{t("research.openAssets")}</Link><button className="secondary-button" onClick={createAnother}><RefreshCw size={15} /> {t("research.createAnother")}</button></div></section>
       ) : (
         <ResearchProgressView current={current} statusKey={statusKey} progress={progress} error={error} working={working} onCancel={() => void cancel()} t={t} />
       )}
@@ -426,10 +444,16 @@ function ResearchProgressView({ current, statusKey, progress, error, working, on
   return <section className="account-card research-generation-state research-progress-state" aria-live="polite"><div className="research-progress-topline"><div className="research-progress-icon"><LoaderCircle size={24} aria-hidden="true" /></div><div><p className="section-eyebrow">{t("research.progressEyebrow")}</p><h2>{t(`jobs.status${statusKey}`)}</h2></div></div><p className="research-progress-copy">{t("research.progressText")}</p><div className="research-job-status-line"><span className={`research-job-dot research-job-dot-${current.status.toLowerCase()}`} aria-hidden="true" /><strong>{t(`jobs.status${statusKey}`)}</strong><span>{t("research.jobProgress")}</span><b>{progress}%</b></div><AccessibleProgressBar className="generation-progress-track" label={t("jobs.progress")} value={progress} />{error && <div className="form-error" role="alert"><XCircle size={15} /> {error}</div>}{canCancelResearchJob(current) && <button className="secondary-button generation-cancel-button" onClick={onCancel} disabled={working}><XCircle size={15} /> {t("research.cancel")}</button>}</section>;
 }
 
-function ResearchResultView({ result, sourcesLoadStatus, onRetrySources, working, downloadError, onDownload, onExport, onCreateAnother, t }: { result: ResearchJobResult; sourcesLoadStatus: ResearchSourcesLoadStatus; onRetrySources: () => void; working: boolean; downloadError: string; onDownload: (id: string, name: string) => void; onExport: () => void; onCreateAnother: () => void; t: Translate }) {
+export function ResearchResultView({ result, downloadability = null, sourcesLoadStatus, onRetrySources, working, downloadError, onDownload, onExport, onCreateAnother, t }: { result: ResearchJobResult; sourcesLoadStatus: ResearchSourcesLoadStatus; onRetrySources: () => void; working: boolean; downloadError: string; onDownload: (id: string, name: string) => void; onExport: () => void; onCreateAnother: () => void; t: Translate; downloadability?: StudioRepresentationAvailabilityFacts | null }) {
   const sources = result.sources ?? [];
-  return <section className="research-report-shell" aria-live="polite">
-    <div className="research-result-heading"><div><p className="section-eyebrow">{t("research.resultEyebrow")}</p><h2>{result.title || t("research.resultTitle")}</h2>{result.subtitle && <p className="research-report-subtitle">{result.subtitle}</p>}</div><span className="form-success"><CheckCircle2 size={16} /> {t("research.savedToAssets")}</span></div>
+  // Only the report renditions the Research result advertises are download controls, and only
+  // for as long as the API says their stored file is Ready. The gate runs after the type filter
+  // so a withheld PDF never disturbs the ready DOCX beside it, and the sources-CSV export keeps
+  // its own route (it is not a representation download).
+  const advertisedRepresentations = (result.representations ?? []).filter((representation) => ["docx", "pdf"].includes(representation.type));
+  const downloadableRepresentations = filterStudioDownloadableRepresentations(advertisedRepresentations, downloadability);
+  return <section className="research-report-shell" aria-live="polite" aria-labelledby="research-result-title">
+    <div className="research-result-heading"><div><p className="section-eyebrow">{t("research.resultEyebrow")}</p><h2 id="research-result-title">{result.title || t("research.resultTitle")}</h2>{result.subtitle && <p className="research-report-subtitle">{result.subtitle}</p>}</div><span className="form-success"><CheckCircle2 size={16} /> {t("research.savedToAssets")}</span></div>
     <div className="research-result-meta"><span>{t("research.sourceCount", { count: String(result.sourceCount ?? sources.length) })}</span><span>·</span><span>{t("research.references")}</span></div>
     <div className="research-report-layout">
       <article className="research-report-content">
@@ -441,13 +465,34 @@ function ResearchResultView({ result, sourcesLoadStatus, onRetrySources, working
       <aside className="research-evidence-rail"><ResearchSourcesPanel sources={sources} load={sourcesLoadStatus} onRetry={onRetrySources} t={t} /></aside>
     </div>
     <details className="research-mobile-sources"><summary><span>{t("research.sourcesTitle")}</span><strong>{sources.length}</strong></summary><ResearchSourcesPanel sources={sources} load={sourcesLoadStatus} onRetry={onRetrySources} t={t} /></details>
-    {downloadError && <div className="form-error"><XCircle size={15} /> {downloadError}</div>}
-    <div className="research-result-actions">{result.representations?.filter((representation) => ["docx", "pdf"].includes(representation.type)).map((representation) => <button className="secondary-button" key={representation.id} type="button" onClick={() => onDownload(representation.id, representation.fileName)} disabled={working}><Download size={15} /> {representation.type.toUpperCase()}</button>)}{!result.representations?.some((representation) => ["docx", "pdf"].includes(representation.type)) && <span className="research-no-downloads">{t("research.noDownloads")}</span>}<button className="secondary-button" type="button" onClick={onExport} disabled={working}><Download size={15} /> {t("research.references")} CSV</button><Link className="secondary-button" href="/assets">{t("research.openAssets")}</Link><button className="primary-button" onClick={onCreateAnother}><RefreshCw size={15} /> {t("research.createAnother")}</button></div>
+    {downloadError && <div className="form-error" role="alert"><XCircle size={15} /> {downloadError}</div>}
+    <div className="research-result-actions">{downloadableRepresentations.map((representation) => <button className="secondary-button" key={representation.id} type="button" onClick={() => onDownload(representation.id, representation.fileName)} disabled={working}><Download size={15} /> {representation.type.toUpperCase()}</button>)}{downloadableRepresentations.length === 0 && <span className="research-no-downloads">{t("research.noDownloads")}</span>}<button className="secondary-button" type="button" onClick={onExport} disabled={working}><Download size={15} /> {t("research.references")} CSV</button><Link className="secondary-button" href="/assets">{t("research.openAssets")}</Link><button className="primary-button" onClick={onCreateAnother}><RefreshCw size={15} /> {t("research.createAnother")}</button></div>
   </section>;
 }
 
-function EvidenceRail({ sources, t }: { sources: ResearchSource[]; t: Translate }) {
-  return <div className="research-evidence-panel"><div className="research-sources-heading"><div><p className="research-section-kicker">{t("research.evidenceRail")}</p><h3>{t("research.sourcesTitle")}</h3></div><span>{sources.length}</span></div>{sources.length === 0 ? <p className="research-no-evidence">{t("research.noSources")}</p> : sources.map((source) => <article className="research-source-card" key={source.citationId}><div className="research-source-card-heading"><span className="research-citation">[{source.citationId}]</span><div><h4>{source.title}</h4><small>{source.publisher || source.domain} · {source.sourceType}</small></div>{isSafeExternalUrl(source.url) ? <a href={source.url ?? undefined} target="_blank" rel="noreferrer" aria-label={`${t("research.openSource")}: ${source.title}`}><ExternalLink size={15} /></a> : null}</div>{source.snippet && <p>{source.snippet}</p>}{source.evidence?.slice(0, 3).map((evidence, index) => <div className="research-evidence" key={`${source.citationId}-${index}`}><strong>{evidence.topic || t("research.evidence")}</strong><span>{evidence.excerpt}</span></div>)}</article>)}</div>;
+/**
+ * Render-boundary mirror of the server-side citation policy (apps/api/Research/
+ * ResearchCitationUrlPolicy.cs, pinned by ResearchCitationUrlIngestTests.cs). A stored
+ * locator such as "https://taslim.ai:secret@evil.example/report" names one host in the
+ * prefix the reader checks while the browser navigates to the authority after the "@".
+ * The ingest policy rejects that shape, but persisted rows reach this view verbatim
+ * from the detail endpoint and were never backfilled, so the evidence rail must fail
+ * closed on the click itself: absolute http(s), a host, and no "@" below the authority.
+ * An "@" in the path, query or fragment is a legitimate locator and stays clickable.
+ */
+export function isSafeCitationLocator(value: string | null) {
+  if (!value || !isSafeExternalUrl(value)) return false;
+  const locator = value.replace(/[\t\n\r]/g, "").trim();
+  try {
+    const url = new URL(locator);
+    if (!url.hostname) return false;
+    const authority = locator.slice(url.protocol.length).replace(/^\/\//, "").split(/[/?#\\]/, 1)[0] ?? "";
+    return !authority.includes("@");
+  } catch { return false; }
+}
+
+export function EvidenceRail({ sources, t }: { sources: ResearchSource[]; t: Translate }) {
+  return <div className="research-evidence-panel"><div className="research-sources-heading"><div><p className="research-section-kicker">{t("research.evidenceRail")}</p><h3>{t("research.sourcesTitle")}</h3></div><span>{sources.length}</span></div>{sources.length === 0 ? <p className="research-no-evidence">{t("research.noSources")}</p> : sources.map((source) => <article className="research-source-card" key={source.citationId}><div className="research-source-card-heading"><span className="research-citation">[{source.citationId}]</span><div><h4>{source.title}</h4><small>{source.publisher || source.domain} · {source.sourceType}</small></div>{isSafeCitationLocator(source.url) ? <a href={source.url ?? undefined} target="_blank" rel="noreferrer" aria-label={`${t("research.openSource")} ${source.citationId}: ${source.title}`}><ExternalLink size={15} /></a> : null}</div>{source.snippet && <p>{source.snippet}</p>}{source.evidence?.slice(0, 3).map((evidence, index) => <div className="research-evidence" key={`${source.citationId}-${index}`}><strong>{evidence.topic || t("research.evidence")}</strong><span>{evidence.excerpt}</span></div>)}</article>)}</div>;
 }
 
 function RecentResearch({ assets, loading, locale, t }: { assets: Asset[]; loading: boolean; locale: string; t: Translate }) {

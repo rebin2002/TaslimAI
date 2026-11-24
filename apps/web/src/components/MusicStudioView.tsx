@@ -14,6 +14,12 @@ import { api, type Asset, type GenerationJob, type MusicGenerationInput, type Pr
 import { findMediaJobArtifact, mediaJobArtifactDownloadState } from "@/lib/mediaJobArtifactState";
 import { canCancelMusicJob, isMusicProviderUnavailable, parseMusicJobResult } from "@/lib/musicStudioState";
 import {
+  decideMusicStudioSubmit,
+  musicStudioPreflightCopy,
+  type MusicStudioBriefDraft,
+  type MusicStudioSubmitDecision,
+} from "@/lib/musicStudioPreflight";
+import {
   REFERENCE_AUDIO_ACCEPT,
   clearReferenceAudioSelection,
   formatReferenceAudioSize,
@@ -25,12 +31,77 @@ import {
   type ReferenceAudioCandidate,
   type ReferenceAudioState,
 } from "@/lib/musicReferenceAudioState";
+import { LyricsSectionEditor } from "@/components/music/LyricsSectionEditor";
+import { MusicLyricsPreflightPanel } from "@/components/music/MusicLyricsPreflightPanel";
+import {
+  musicStudioLyricsComposerCopy,
+  musicStudioLyricsEditorLabels,
+  musicStudioLyricsEditorLimits,
+  musicStudioLyricsPreflightLabelOverrides,
+} from "@/components/music/musicStudioLyricsLabels";
+import {
+  buildMusicStudioLyricsPreflightInput,
+  clearMusicStudioLyricsDraftState,
+  emptyMusicStudioLyricsDraftState,
+  persistMusicStudioLyricsDraftState,
+  readMusicStudioLyricsDraftState,
+  type MusicStudioLyricsDraftState,
+} from "@/lib/musicStudioLyricsDraftState";
 
 const genres = ["auto", "ambient", "cinematic", "classical", "electronic", "folk", "hip_hop", "jazz", "lofi", "pop", "rock", "world", "other"] as const;
 const moods = ["calm", "energetic", "uplifting", "melancholic", "inspiring", "dramatic", "playful", "romantic", "focused", "other"] as const;
 const durations = [15, 30, 60, 120, 180, 300, 600] as const;
 const vocalPreferences = ["instrumental", "vocal", "either"] as const;
 const languages = ["auto", "en", "ar", "ku"] as const;
+
+// The in-flight status-read cadence. The first read keeps the studio's original
+// 650ms wait; a failed read backs off linearly to a ceiling, so one transient
+// 5xx can neither silence the studio nor hammer the API.
+export const musicPollIntervalMs = 650;
+export const musicPollMaxDelayMs = 8_000;
+
+/** The wait before the next in-flight status read, given the failures before it. */
+export function nextMusicPollDelay(retryAttempt = 0): number {
+  return Math.min(musicPollIntervalMs * Math.max(1, retryAttempt + 1), musicPollMaxDelayMs);
+}
+
+/**
+ * The in-flight status poll failed. The backoff keeps re-reading on its own, but
+ * the member has to be told: this asserts over the polite progress region and
+ * carries only the localized copy the studio already owns, never the provider's
+ * own message, which is English and server-facing (`ApiError.message` is
+ * "Something went wrong." for any unlabeled failure, src/lib/api.ts).
+ *
+ * It is fed `pollError`, the status-read slot, and nothing else. A refused
+ * cancel is a claim about a different request, so it renders through
+ * `MusicStudioActionNoticeView` with its own copy rather than being relabelled
+ * as a polling failure.
+ */
+export function MusicStudioPollingNoticeView({ message }: { message: string }) {
+  return (
+    <div className="music-inline-error" role="alert" aria-live="assertive">
+      <XCircle size={15} aria-hidden="true" />
+      <span>{message}</span>
+    </div>
+  );
+}
+
+/**
+ * A member-initiated action failed while the job was still in flight - today a
+ * refused cancel. Rendered identically, because both are one localized line
+ * above the action row, but a separate component fed by a separate slot so the
+ * two claims cannot be conflated by state or withdrawn by a later status read.
+ */
+export function MusicStudioActionNoticeView({ message }: { message: string }) {
+  return (
+    <div className="music-inline-error" role="alert" aria-live="assertive">
+      <XCircle size={15} aria-hidden="true" />
+      <span>{message}</span>
+    </div>
+  );
+}
+
+
 
 type AudioPlayerProps = {
   assetId: string;
@@ -193,13 +264,43 @@ export function ReferenceAudioPanel({ state, candidates, loading, t, onFileSelec
   </section>;
 }
 
+type MusicGenerationActionProps = Readonly<{
+  decision: MusicStudioSubmitDecision;
+  working: boolean;
+  noticeId: string;
+  t: (key: string) => string;
+}>;
+
+// The studio's only route to a generation request, rendered from the preflight
+// decision so the copy that pauses creation and the state of the action cannot
+// disagree. While the pause is what blocks the brief the button says so: a dead
+// control with no announced reason is a dead end for keyboard and screen-reader
+// users, and the notice is the only place that reason lives.
+export function MusicGenerationAction({ decision, working, noticeId, t }: MusicGenerationActionProps) {
+  return <button
+    className={decision.reasonKey ? "music-generate-button is-paused" : "music-generate-button"}
+    type="submit"
+    disabled={!decision.permitted}
+    aria-disabled={!decision.permitted || undefined}
+    aria-describedby={decision.reasonKey ? noticeId : undefined}
+    title={decision.reasonKey ? t(decision.reasonKey) : undefined}
+  ><Sparkles size={17} /> {working ? t("music.working") : t("music.generate")} <span aria-hidden="true">↗</span></button>;
+}
+
 function RecentMusicLibrary({ assets, loading, error, locale, t }: { assets: Asset[]; loading: boolean; error: string; locale: string; t: (key: string, values?: Record<string, string>) => string }) {
+  // The error card keeps this component's two-line shape, but the bold line is
+  // the panel's own label and `error` is the message slot, so the failure is
+  // stated once and always in the member's language. Before this change the
+  // slot carried `ApiError.message` - English server prose, src/lib/api.ts -
+  // under the localized `music.libraryLoadError` heading, so a Kurdish member
+  // read one claim in ku and the same claim again in English. The apostrophe
+  // free wording keeps this lane clear of react/no-unescaped-entities.
   return <section className="music-library-panel" aria-labelledby="music-library-title">
     <div className="music-section-heading">
       <div><p className="music-overline">{t("music.libraryEyebrow")}</p><h2 id="music-library-title">{t("music.libraryTitle")}</h2><p>{t("music.librarySubtitle")}</p></div>
       <Link className="music-text-link" href="/assets?type=music">{t("music.openAssets")} <span aria-hidden="true">↗</span></Link>
     </div>
-    {loading ? <div className="music-library-loading"><LoaderCircle size={18} className="music-spin" /> <span>{t("music.libraryLoading")}</span></div> : error ? <div className="music-library-empty is-error"><AlertCircle size={20} /><div><strong>{t("music.libraryLoadError")}</strong><p>{error}</p></div></div> : assets.length === 0 ? <div className="music-library-empty"><Music2 size={24} /><div><strong>{t("music.libraryEmpty")}</strong><p>{t("music.libraryEmptyDescription")}</p></div></div> : <div className="music-library-list">{assets.map((asset) => <article className="music-library-row" key={asset.id}>
+    {loading ? <div className="music-library-loading"><LoaderCircle size={18} className="music-spin" /> <span>{t("music.libraryLoading")}</span></div> : error ? <div className="music-library-empty is-error"><AlertCircle size={20} /><div><strong>{t("music.libraryTitle")}</strong><p>{error}</p></div></div> : assets.length === 0 ? <div className="music-library-empty"><Music2 size={24} /><div><strong>{t("music.libraryEmpty")}</strong><p>{t("music.libraryEmptyDescription")}</p></div></div> : <div className="music-library-list">{assets.map((asset) => <article className="music-library-row" key={asset.id}>
       <MusicArtwork />
       <div className="music-library-main">
         <div className="music-library-title"><div><h3>{asset.name}</h3><p>{asset.projectName ?? t("music.workspaceTrack")}</p></div><time dateTime={asset.createdAt}>{formatAssetDate(asset.createdAt, locale)}</time></div>
@@ -225,6 +326,9 @@ export function MusicStudioView() {
 function WorkspaceMusicStudio({ workspace }: { workspace: ReturnType<typeof useAuth>["workspace"] }) {
   const { t, locale } = useLocale();
   const searchParams = useSearchParams();
+  // The lyrics draft is browser-local and owner-keyed, so the member id is
+  // needed alongside the workspace the wrapper already resolved.
+  const { user } = useAuth();
   const [projects, setProjects] = useState<Project[]>([]);
   const [recentMusic, setRecentMusic] = useState<Asset[]>([]);
   const [description, setDescription] = useState("");
@@ -243,6 +347,20 @@ function WorkspaceMusicStudio({ workspace }: { workspace: ReturnType<typeof useA
   const [loadingLibrary, setLoadingLibrary] = useState(true);
   const [libraryError, setLibraryError] = useState("");
   const [error, setError] = useState("");
+  // Counts consecutive failed status reads. It is both the backoff input and
+  // the polling effect's dependency: without it a rejected read leaves every
+  // dependency unchanged, the effect never re-runs and the studio stops
+  // updating while still announcing an in-flight generation.
+  const [pollRetry, setPollRetry] = useState(0);
+  // The status-read failure is its own slot, separate from `error`. One string
+  // cannot hold two claims: `error` belongs to member actions (submit, cancel)
+  // and is replaced only by the next action, while `pollError` belongs to the
+  // background read and is withdrawn by the next good read. Sharing the slot
+  // made a refused cancel announce itself as a polling failure, and forced the
+  // good-read cleanup to guess which claim it held by comparing translated copy
+  // - a check that silently stops working wherever two locales happen to share
+  // a string.
+  const [pollError, setPollError] = useState("");
   const [referenceAudio, setReferenceAudio] = useState<ReferenceAudioState>({ candidate: null, previewObjectUrl: null, rejectedReasonKey: null });
   const [referenceAudioAssets, setReferenceAudioAssets] = useState<Asset[]>([]);
   const [loadingReferenceLibrary, setLoadingReferenceLibrary] = useState(true);
@@ -274,9 +392,17 @@ function WorkspaceMusicStudio({ workspace }: { workspace: ReturnType<typeof useA
     try {
       const result = await api.listAssets(workspace.id, { assetType: "music", status: "Active", sort: "recent", page: 1, pageSize: 5 });
       setRecentMusic(result.items);
-    } catch (caught) {
+    } catch {
+      // Localized copy, never the rejection's own text, for the same reason as
+      // the Voice compose form: `ApiError.message` is the server's English
+      // string (`src/lib/api.ts`: `body?.error?.message ?? "Something went
+      // wrong."`) and this slot renders inside the library panel, which a ku
+      // or ar member reads in their own language. Listing recent music
+      // involves no provider, so the raw text would carry no information the
+      // member could act on. `error` stays the message slot and the bold line
+      // keeps the panel's own label, so the card states the failure once.
       setRecentMusic([]);
-      setLibraryError(caught instanceof Error ? caught.message : t("music.libraryLoadError"));
+      setLibraryError(t("music.libraryLoadError"));
     } finally {
       setLoadingLibrary(false);
     }
@@ -308,13 +434,26 @@ function WorkspaceMusicStudio({ workspace }: { workspace: ReturnType<typeof useA
     const timer = window.setTimeout(async () => {
       try {
         const next = await api.getGenerationJob(current.id);
-        if (active) setCurrent(next);
-      } catch (caught) {
-        if (active) setError(caught instanceof Error ? caught.message : t("music.pollError"));
+        if (active) {
+          setCurrent(next);
+          setPollRetry(0);
+          // A good read says nothing about whether an earlier cancel was
+          // accepted, so it dismisses only its own notice.
+          setPollError("");
+        }
+      } catch {
+        if (active) {
+          setPollRetry((attempt) => attempt + 1);
+          // The read failed, not the generation: keep the last known status
+          // visible and say only what the studio can claim, in the member's own
+          // locale. The rejection's own text is deliberately not surfaced,
+          // because ApiError carries the server's English message.
+          setPollError(t("music.pollError"));
+        }
       }
-    }, 650);
+    }, nextMusicPollDelay(pollRetry));
     return () => { active = false; window.clearTimeout(timer); };
-  }, [current, t]);
+  }, [current, pollRetry, t]);
 
   useEffect(() => {
     if (current?.status !== "Succeeded") return;
@@ -345,23 +484,85 @@ function WorkspaceMusicStudio({ workspace }: { workspace: ReturnType<typeof useA
     applyReferenceAudioResult(clearReferenceAudioSelection(referenceAudio));
   }
 
-  async function generate(event: React.FormEvent) {
-    event.preventDefault();
-    if (!workspace || description.trim().length < 3 || purpose.trim().length < 3) {
-      setError(t("music.required"));
+  const workspaceId = workspace?.id ?? "";
+  // Wiring follow-up, step 1 of docs/MUSIC_STUDIO_PREFLIGHT_UI.md: PR #772's
+  // LyricsSectionEditor and the provider-free preflight panel are consumed
+  // here, so authored sections are measured against the mirrored contract as
+  // the user types and survive a tab switch the way every sibling studio's
+  // unsent brief already does. Nothing in this block submits: sung lyrics are
+  // gated on provider capability, which is false for every configured
+  // provider, so a clean handoff is recorded into the browser-local draft.
+  const lyricsOwnerId = user?.id ?? "";
+  const [lyricsDraft, setLyricsDraft] = useState<MusicStudioLyricsDraftState>(emptyMusicStudioLyricsDraftState);
+  const [lyricsDraftNotice, setLyricsDraftNotice] = useState("");
+  const lyricsDraftHydratedScope = useRef("");
+  const lyricsDraftJustHydrated = useRef(false);
+  useEffect(() => {
+    // Restore once per owner scope, and never while a job owns the surface:
+    // an in-flight request is not a draft.
+    if (!lyricsOwnerId || !workspaceId || current) return;
+    const ownerKey = `${lyricsOwnerId}:${workspaceId}`;
+    if (lyricsDraftHydratedScope.current === ownerKey) return;
+    lyricsDraftHydratedScope.current = ownerKey;
+    setLyricsDraft(readMusicStudioLyricsDraftState(lyricsOwnerId, workspaceId));
+    setLyricsDraftNotice("");
+    // Even an incoming empty scope must skip the first mirror, or the
+    // outgoing workspace's rows are briefly written under the new owner.
+    lyricsDraftJustHydrated.current = true;
+  }, [current, lyricsOwnerId, workspaceId]);
+  useEffect(() => {
+    if (!lyricsOwnerId || !workspaceId || current) return;
+    if (lyricsDraftHydratedScope.current !== `${lyricsOwnerId}:${workspaceId}`) return;
+    if (lyricsDraftJustHydrated.current) {
+      lyricsDraftJustHydrated.current = false;
       return;
     }
-    // The reference audio path is selection and preview only for now: the job
-    // contract has no reference field yet, so never let a selection imply that
-    // it will reach a (possibly paid) provider call.
-    if (referenceAudio.candidate) {
-      setError(t("music.reference.note"));
+    persistMusicStudioLyricsDraftState(lyricsOwnerId, workspaceId, lyricsDraft);
+  }, [current, lyricsDraft, lyricsOwnerId, workspaceId]);
+  const lyricsPreflightInput = useMemo(() => buildMusicStudioLyricsPreflightInput(lyricsDraft, {
+    vocalLanguage: language,
+    // A local pick has no asset id yet and must fail closed in the contract
+    // rather than leak a file name or a blob URL into a request shape.
+    reference: referenceAudio.candidate
+      ? { mediaType: "audio", assetId: referenceAudio.candidate.assetId }
+      : null,
+  }), [language, lyricsDraft, referenceAudio.candidate]);
+  function handleLyricsDraftClear() {
+    if (lyricsOwnerId && workspaceId) clearMusicStudioLyricsDraftState(lyricsOwnerId, workspaceId);
+    setLyricsDraft(emptyMusicStudioLyricsDraftState());
+    setLyricsDraftNotice("");
+  }
+  // One decision drives the disabled action, the reason announced on it and the
+  // submit guard below, so the affordance can never again promise a request the
+  // published preflight copy says will not run.
+  const submitDraft: MusicStudioBriefDraft = {
+    workspaceReady: workspaceId !== "",
+    submitting: working,
+    referenceSelected: referenceAudio.candidate !== null,
+    description,
+    purpose,
+  };
+  const submitDecision = decideMusicStudioSubmit(submitDraft);
+  const preflightCopy = musicStudioPreflightCopy();
+
+  async function generate(event: React.FormEvent) {
+    event.preventDefault();
+    // Paused creation outranks the brief itself: nothing leaves the browser, so
+    // no private description is posted to a route that can only refuse it and no
+    // request can reach a provider. The same guard covers implicit submission
+    // from a text field, where the disabled button would not have helped.
+    if (!submitDecision.permitted) {
+      if (submitDecision.messageKey) setError(t(submitDecision.messageKey));
       return;
     }
     setWorking(true);
     setError("");
+    // A fresh job starts on the base cadence: a backoff accumulated by the
+    // previous job must not delay the first read of this one.
+    setPollRetry(0);
+    setPollError("");
     const input: MusicGenerationInput = {
-      workspaceId: workspace.id,
+      workspaceId,
       projectId: projectId || null,
       description: description.trim(),
       purpose: purpose.trim(),
@@ -399,6 +600,7 @@ function WorkspaceMusicStudio({ workspace }: { workspace: ReturnType<typeof useA
   function createAnother() {
     setCurrent(null);
     setError("");
+    setPollError("");
   }
 
   const result = useMemo(() => parseMusicJobResult(current), [current]);
@@ -414,11 +616,13 @@ function WorkspaceMusicStudio({ workspace }: { workspace: ReturnType<typeof useA
 
   return <div className="music-studio-page">
     <section className="music-studio-hero">
-      <div className="music-studio-hero-copy"><div className="music-live-mark"><span /> {t("music.providerStatus")}</div><p className="music-overline">{t("music.eyebrow")}</p><h1>{t("music.title")}</h1><p className="music-studio-subtitle">{t("music.subtitle")}</p></div>
+      <div className="music-studio-hero-copy">{preflightCopy ? <div className="music-live-mark"><span /> {t(preflightCopy.eyebrowKey)}</div> : null}<p className="music-overline">{t("music.eyebrow")}</p><h1>{t("music.title")}</h1><p className="music-studio-subtitle">{t("music.subtitle")}</p></div>
       <MusicArtwork large />
     </section>
 
-    <div className="music-studio-notice"><WandSparkles size={17} /><p><strong>{t("music.providerUnavailableTitle")}</strong> {t("music.providerUnavailableText")}</p></div>
+    {/* The preflight notice is the reason the primary action is inert, so it is
+         referenced by the button rather than sitting next to it as decoration. */}
+    {preflightCopy ? <div id="music-preflight-note" className="music-studio-notice" role="status"><WandSparkles size={17} aria-hidden="true" /><p><strong>{t(preflightCopy.titleKey)}</strong> {t(preflightCopy.textKey)}</p></div> : null}
 
     {!current ? <form className="music-studio-workspace" onSubmit={(event) => void generate(event)}>
       <section className="music-create-panel">
@@ -431,17 +635,39 @@ function WorkspaceMusicStudio({ workspace }: { workspace: ReturnType<typeof useA
           <label className="music-choice-field"><span>{t("music.duration")}</span><select value={durationSeconds} onChange={(event) => setDurationSeconds(Number(event.target.value))}>{durations.map((value) => <option key={value} value={value}>{t("music.durationValue", { seconds: String(value) })}</option>)}</select></label>
           <label className="music-choice-field"><span>{t("music.vocalPreference")}</span><select value={vocalPreference} onChange={(event) => setVocalPreference(event.target.value)}>{vocalPreferences.map((value) => <option key={value} value={value}>{t(`music.vocal.${value}`)}</option>)}</select></label>
         </div>
-        <details className="music-optional-controls"><summary>{t("music.moreOptions")}</summary><div className="music-optional-grid"><label className="music-choice-field"><span>{t("music.language")}</span><select value={language} onChange={(event) => setLanguage(event.target.value)}>{languages.map((value) => <option key={value} value={value}>{t(`music.language.${value}`)}</option>)}</select></label><label className="music-choice-field"><span>{t("music.project")}</span><select value={projectId} onChange={(event) => setProjectId(event.target.value)} disabled={loadingProjects}><option value="">{t("music.noProject")}</option>{projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}</select></label><label className="music-choice-field"><span>{t("music.titleLabel")}</span><input value={title} onChange={(event) => setTitle(event.target.value)} maxLength={160} placeholder={t("music.titlePlaceholder")} /></label><label className="music-primary-field music-field-wide"><span>{t("music.additionalInstructions")}</span><textarea className="is-short" value={additionalInstructions} onChange={(event) => setAdditionalInstructions(event.target.value)} maxLength={2000} placeholder={t("music.additionalInstructionsPlaceholder")} /></label></div></details>
+        <details className="music-optional-controls"><summary>{t("music.moreOptions")}</summary><div className="music-optional-grid"><label className="music-choice-field"><span>{t("music.language")}</span><select id="music-vocal-language" value={language} onChange={(event) => setLanguage(event.target.value)}>{languages.map((value) => <option key={value} value={value}>{t(`music.language.${value}`)}</option>)}</select></label><label className="music-choice-field"><span>{t("music.project")}</span><select value={projectId} onChange={(event) => setProjectId(event.target.value)} disabled={loadingProjects}><option value="">{t("music.noProject")}</option>{projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}</select></label><label className="music-choice-field"><span>{t("music.titleLabel")}</span><input value={title} onChange={(event) => setTitle(event.target.value)} maxLength={160} placeholder={t("music.titlePlaceholder")} /></label><label className="music-primary-field music-field-wide"><span>{t("music.additionalInstructions")}</span><textarea className="is-short" value={additionalInstructions} onChange={(event) => setAdditionalInstructions(event.target.value)} maxLength={2000} placeholder={t("music.additionalInstructionsPlaceholder")} /></label></div></details>
         <ReferenceAudioPanel state={referenceAudio} candidates={referenceCandidates} loading={loadingReferenceLibrary} t={t} onFileSelected={handleReferenceFilePicked} onStoredPicked={handleReferenceStoredPicked} onClear={handleReferenceAudioClear} />
+        <section className="music-lyrics-composition" aria-labelledby="music-lyrics-composition-title">
+          <div className="music-section-heading"><div><p className="music-overline">{musicStudioLyricsComposerCopy.eyebrow}</p><h2 id="music-lyrics-composition-title">{musicStudioLyricsComposerCopy.heading}</h2><p>{musicStudioLyricsComposerCopy.subtitle}</p></div></div>
+          <LyricsSectionEditor
+            value={lyricsDraft.sections}
+            language={language}
+            labels={musicStudioLyricsEditorLabels}
+            maxSections={musicStudioLyricsEditorLimits.maxSections}
+            onChange={(sections) => setLyricsDraft((previous) => ({ ...previous, sections }))}
+          />
+          <div className="music-lyrics-attestations">
+            <label className="music-lyrics-attestation"><input type="checkbox" checked={lyricsDraft.lyricsRightsConfirmed} onChange={(event) => setLyricsDraft((previous) => ({ ...previous, lyricsRightsConfirmed: event.target.checked }))} /><span>{musicStudioLyricsComposerCopy.lyricsRightsLabel}</span></label>
+            {referenceAudio.candidate ? <label className="music-lyrics-attestation"><input type="checkbox" checked={lyricsDraft.referenceRightsConfirmed} onChange={(event) => setLyricsDraft((previous) => ({ ...previous, referenceRightsConfirmed: event.target.checked }))} /><span>{musicStudioLyricsComposerCopy.referenceRightsLabel}</span></label> : null}
+          </div>
+          <MusicLyricsPreflightPanel
+            input={lyricsPreflightInput}
+            labels={musicStudioLyricsPreflightLabelOverrides}
+            onHandoff={(payload) => setLyricsDraftNotice(musicStudioLyricsComposerCopy.handoffRecorded(payload.lyrics.length))}
+            onBlocked={(result) => setLyricsDraftNotice(musicStudioLyricsComposerCopy.handoffWithheld(result.issues.length))}
+          />
+          {lyricsDraftNotice ? <p className="music-lyrics-draft-notice" id="music-lyrics-draft-notice" role="status" aria-live="polite">{lyricsDraftNotice}</p> : null}
+          {lyricsDraft.sections.length > 0 ? <button type="button" className="music-text-link" onClick={handleLyricsDraftClear}>{musicStudioLyricsComposerCopy.clearDraft}</button> : null}
+        </section>
         {error && <div className="music-inline-error"><XCircle size={15} /> {error}</div>}
-        <button className="music-generate-button" type="submit" disabled={working || referenceAudio.candidate !== null || description.trim().length < 3 || purpose.trim().length < 3}><Sparkles size={17} /> {working ? t("music.working") : t("music.generate")} <span aria-hidden="true">↗</span></button>
+        <MusicGenerationAction decision={submitDecision} working={working} noticeId="music-preflight-note" t={t} />
       </section>
       <aside className="music-side-panel"><div className="music-side-icon"><Headphones size={20} /></div><p className="music-overline">{t("music.guidanceTitle")}</p><h2>{t("music.guidanceText")}</h2><ol><li>{t("music.guidanceOne")}</li><li>{t("music.guidanceTwo")}</li><li>{t("music.guidanceThree")}</li></ol><div className="music-side-footer"><Clock3 size={14} /> {t("music.safetyNote")}</div></aside>
     </form> : isSuccess && result?.assetId ? <section className="music-result-panel" aria-live="polite">
       <div className="music-result-heading"><div><p className="music-overline">{t("music.resultEyebrow")}</p><h2>{t("music.resultTitle")}</h2></div><span className="music-success-badge"><CheckCircle2 size={15} /> {t("music.savedToAssets")}</span></div>
       <div className="music-result-hero"><MusicArtwork large /><div className="music-result-copy"><h3>{result.title ?? current.title ?? t("music.generatedTitle")}</h3><p>{result.format?.toUpperCase() ?? "AUDIO"}{result.durationSeconds ? ` · ${t("music.durationValue", { seconds: String(result.durationSeconds) })}` : ""}</p><AudioPlayer assetId={result.assetId} title={result.title ?? t("music.generatedTitle")} durationSeconds={result.durationSeconds} /></div></div>
       <div className="music-result-actions"><MediaJobArtifactDownload href={api.assetFileUrl(result.assetId)} state={resultArtifactState} className="music-action-button is-primary" label={t("music.download")} unavailableLabel={t("assets.fileUnavailable")} />{current.projectId && <Link className="music-action-button" href={`/projects/${current.projectId}`}><FolderOpen size={15} /> {t("music.openProject")}</Link>}<Link className="music-action-button" href={`/assets?search=${encodeURIComponent(result.title ?? t("music.generatedTitle"))}`}><Music2 size={15} /> {t("music.openAssets")}</Link><button className="music-action-button is-quiet" type="button" onClick={createAnother}><RefreshCw size={15} /> {t("music.createAnother")}</button></div>
-    </section> : isFailure ? <section className="music-state-panel is-failure" aria-live="polite"><div className="music-state-icon"><AlertCircle size={24} /></div><p className="music-overline">{isMusicProviderUnavailable(current) ? t("music.providerStatus") : t("music.progressEyebrow")}</p><h2>{failureCopy.title}</h2><p>{failureCopy.text}</p><button className="music-action-button is-primary" type="button" onClick={createAnother}><RefreshCw size={15} /> {t("music.retry")}</button></section> : <section className="music-state-panel" aria-live="polite"><div className="music-state-icon is-active"><LoaderCircle size={24} className="music-spin" aria-hidden="true" /></div><p className="music-overline">{t("music.progressEyebrow")}</p><h2>{t(`jobs.status${current.status}`)}</h2><p>{t("music.progressText")}</p><div className="music-progress-meta"><span>{t("jobs.progress")}</span><strong>{current.progressPercent}%</strong></div><AccessibleProgressBar className="music-progress-track" label={t("jobs.progress")} value={current.progressPercent} />{canCancelMusicJob(current) && <button className="music-action-button" type="button" onClick={() => void cancel()} disabled={working}><XCircle size={15} /> {t("music.cancel")}</button>}</section>}
+    </section> : isFailure ? <section className="music-state-panel is-failure" aria-live="polite"><div className="music-state-icon"><AlertCircle size={24} /></div><p className="music-overline">{isMusicProviderUnavailable(current) ? t("music.providerStatus") : t("music.progressEyebrow")}</p><h2>{failureCopy.title}</h2><p>{failureCopy.text}</p><button className="music-action-button is-primary" type="button" onClick={createAnother}><RefreshCw size={15} /> {t("music.retry")}</button></section> : <section className="music-state-panel" aria-live="polite"><div className="music-state-icon is-active"><LoaderCircle size={24} className="music-spin" aria-hidden="true" /></div><p className="music-overline">{t("music.progressEyebrow")}</p><h2>{t(`jobs.status${current.status}`)}</h2><p>{t("music.progressText")}</p><div className="music-progress-meta"><span>{t("jobs.progress")}</span><strong>{current.progressPercent}%</strong></div><AccessibleProgressBar className="music-progress-track" label={t("jobs.progress")} value={current.progressPercent} />{pollError && <MusicStudioPollingNoticeView message={pollError} />}{error && <MusicStudioActionNoticeView message={error} />}{canCancelMusicJob(current) && <button className="music-action-button" type="button" onClick={() => void cancel()} disabled={working}><XCircle size={15} /> {t("music.cancel")}</button>}</section>}
 
     <RecentMusicLibrary assets={recentMusic} loading={loadingLibrary} error={libraryError} locale={locale} t={t} />
     <p className="music-studio-footnote">{t("music.safetyNote")}</p>
