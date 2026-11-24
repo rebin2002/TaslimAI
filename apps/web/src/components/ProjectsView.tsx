@@ -2,10 +2,11 @@
 import { localeTag } from "@/lib/i18n";
 
 import Link from "next/link";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Archive, ArrowUpRight, BriefcaseBusiness, CalendarDays, FolderOpen, Pencil, Plus, RotateCcw } from "lucide-react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { api, type Project, type ProjectInput } from "@/lib/api";
+import { ProjectRevisionSession } from "@/lib/projectRevision";
 import { useAuth } from "@/components/AuthProvider";
 import { useLocale } from "@/components/LocaleProvider";
 import { ProjectForm } from "@/components/ProjectForm";
@@ -42,6 +43,11 @@ export function ProjectsView() {
   // earlier walk must not overwrite the tab that replaced it.
   const projectLoadRef = useRef<AbortController | null>(null);
   const visibleProjects = scopedProjectList(projects, workspace?.id, status);
+  // The edit modal declares the revision the draft was built on. The session
+  // belongs to one project id: opening the editor for another row - or closing
+  // it and reopening - starts from no token at all, so a captured revision can
+  // never be replayed against a different project.
+  const editRevision = useMemo(() => (editing ? new ProjectRevisionSession(editing.id) : null), [editing]);
 
   const load = useCallback(async () => {
     if (!workspace) {
@@ -87,20 +93,17 @@ export function ProjectsView() {
     router.push(`/projects/${project.id}`);
   }
 
-  async function update(input: ProjectInput) {
-    if (!editing) return;
-    await api.updateProject(editing.id, input);
-    await load();
-  }
-
   async function archive(project: Project) {
     if (!window.confirm(t("projects.archiveConfirm"))) return;
-    await api.archiveProject(project.id);
+    const archived = await api.archiveProjectWithRevision(project.id);
+    // Status changes move the stamp; keep an open edit session honest about it.
+    if (editRevision && editing?.id === project.id) editRevision.adopt(archived.revision);
     await load();
   }
 
   async function restore(project: Project) {
-    await api.restoreProject(project.id);
+    const restored = await api.restoreProjectWithRevision(project.id);
+    if (editRevision && editing?.id === project.id) editRevision.adopt(restored.revision);
     await load();
   }
 
@@ -137,6 +140,6 @@ export function ProjectsView() {
         {status === "Active" ? <div><button onClick={() => { setEditing(project); setFormOpen(true); }} aria-label={t("projects.edit")}><Pencil size={14} /></button><button onClick={() => void archive(project)} aria-label={t("projects.archive")}><Archive size={14} /></button></div> : <button onClick={() => void restore(project)} className="restore-action"><RotateCcw size={14} /> {t("projects.restore")}</button>}
       </div>
     </article>)}</div>}
-    {formOpen && workspace && (!editing || editing.workspaceId === workspace.id) && <ProjectForm project={editing} onClose={() => { setFormOpen(false); setEditing(undefined); }} onSubmit={editing ? update : create} />}
+    {formOpen && workspace && (!editing || editing.workspaceId === workspace.id) && <ProjectForm project={editing} onClose={() => { setFormOpen(false); setEditing(undefined); }} onSubmit={create} revision={editRevision} onSaved={() => { void load(); }} />}
   </div>;
 }

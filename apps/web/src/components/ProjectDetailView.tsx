@@ -2,10 +2,11 @@
 import { localeTag } from "@/lib/i18n";
 
 import Link from "next/link";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Activity, Archive, ArrowLeft, ArrowUpRight, BarChart3, CalendarDays, FileText, FolderOpen, LibraryBig, MessageSquare, Pencil, Plus, RotateCcw, Sparkles } from "lucide-react";
 import { useParams, useRouter } from "next/navigation";
-import { api, type Project, type ProjectInput, type ProjectOverview } from "@/lib/api";
+import { api, type Project, type ProjectOverview } from "@/lib/api";
+import { ProjectRevisionSession } from "@/lib/projectRevision";
 import { useLocale } from "@/components/LocaleProvider";
 import { ProjectForm } from "@/components/ProjectForm";
 import { ProjectContextEditor } from "@/components/ProjectContextEditor";
@@ -51,6 +52,13 @@ export function ProjectDetailView() {
   // about a project the member navigated away from must not act on the page
   // at all — not its snapshot, not the access-ended epoch, not the error banner.
   const routeProjectId = useRef(params.projectId);
+
+  // The revision token for the project this route names. It is captured when
+  // the member begins editing and advanced by every write this page makes -
+  // including archive and restore, whose own new stamp would otherwise strand
+  // an open draft on a revision the row has already moved past. Keyed on the
+  // route parameter, so a token can never be carried over to another project.
+  const revision = useMemo(() => new ProjectRevisionSession(params.projectId), [params.projectId]);
 
   useEffect(() => {
     let active = true;
@@ -105,8 +113,11 @@ export function ProjectDetailView() {
     // this project. If the route has moved on by the time it lands, retire it.
     const targetProjectId = overview.project.id;
     try {
-      const archived = await api.archiveProject(targetProjectId);
-      if (routeProjectId.current === targetProjectId) replaceProject(archived);
+      const archived = await api.archiveProjectWithRevision(targetProjectId);
+      // A status change is not a content conflict: adopt the revision it
+      // committed so the draft stays savable against the row it still describes.
+      revision.adopt(archived.revision);
+      if (routeProjectId.current === targetProjectId) replaceProject(archived.project);
     }
     catch (caught) {
       if (routeProjectId.current !== targetProjectId) return;
@@ -125,8 +136,9 @@ export function ProjectDetailView() {
     if (!overview) return;
     const targetProjectId = overview.project.id;
     try {
-      const restored = await api.restoreProject(targetProjectId);
-      if (routeProjectId.current === targetProjectId) replaceProject(restored);
+      const restored = await api.restoreProjectWithRevision(targetProjectId);
+      revision.adopt(restored.revision);
+      if (routeProjectId.current === targetProjectId) replaceProject(restored.project);
     }
     catch (caught) {
       if (routeProjectId.current !== targetProjectId) return;
@@ -205,11 +217,11 @@ export function ProjectDetailView() {
       </section>
     </div>
 
-    <ProjectContextEditor project={project} onSaved={replaceProject} />
+    <ProjectContextEditor project={project} onSaved={replaceProject} revision={revision} />
     <ProjectFilesSection project={project} />
     <ProjectAssetsSection project={project} />
     <section className="project-metadata-card account-card"><div><p className="section-eyebrow">{t("projects.metadataEyebrow")}</p><h2>{t("projects.metadataTitle")}</h2></div><dl><div><dt>{t("projects.metadataCreated")}</dt><dd>{formatDate(project.createdAt, locale)}</dd></div><div><dt>{t("projects.metadataUpdated")}</dt><dd>{formatDate(project.updatedAt, locale)}</dd></div><div><dt>{t("projects.metadataWorkspace")}</dt><dd>{workspace.name}</dd></div><div><dt>{t("projects.metadataRole")}</dt><dd>{t(roleKey)}</dd></div></dl></section>
-    {formOpen && <ProjectForm project={project} onClose={() => setFormOpen(false)} onSubmit={async (input: ProjectInput) => { const updated = await api.updateProject(project.id, input); replaceProject(updated); setFormOpen(false); }} />}
+    {formOpen && <ProjectForm project={project} onClose={() => setFormOpen(false)} revision={revision} onSaved={replaceProject} />}
   </div>;
 }
 

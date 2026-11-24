@@ -234,6 +234,30 @@ public sealed class ProjectPatchRevisionConflictTests : IClassFixture<TaslimApiF
         Assert.Equal("Committed by the second writer", survivor.Description);
     }
 
+    [Fact]
+    public async Task PublishedRevision_IsReadableByAnOriginSeparatedBrowser()
+    {
+        // The fence only protects a browser that can read the revision it must
+        // declare. ETag is not a CORS-safelisted response header, so a frontend
+        // served from another origin would see the answer without the token and
+        // could not send a conditional write at all. The served topology is
+        // same-origin through the web proxy; this pins the other one.
+        var (editorA, _, project) = await CreateProjectWithTwoTabsAsync();
+        using var request = new HttpRequestMessage(HttpMethod.Get, $"/api/projects/{project.Id}");
+        request.Headers.Add("Origin", "http://localhost:3000");
+        using var response = await editorA.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var published = response.Headers.TryGetValues("ETag", out var publishedValues) ? publishedValues.FirstOrDefault() : null;
+        Assert.False(string.IsNullOrWhiteSpace(published), "the read must publish a revision");
+        // The published value is a strong quoted token; the client carries it
+        // verbatim rather than rebuilding it from a parsed timestamp.
+        Assert.StartsWith("\"", published);
+        Assert.EndsWith("\"", published);
+        Assert.Contains("ETag", response.Headers.GetValues("Access-Control-Expose-Headers"));
+        Assert.Contains("http://localhost:3000", response.Headers.GetValues("Access-Control-Allow-Origin"));
+    }
+
     private async Task<(HttpClient EditorA, HttpClient EditorB, ProjectDto Project)> CreateProjectWithTwoTabsAsync()
     {
         var email = $"patch-conflict-{Guid.NewGuid():N}@example.com";

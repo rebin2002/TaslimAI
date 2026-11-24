@@ -106,10 +106,27 @@ class TestDocument extends TestNode {
   private find(predicate: (node: TestNode) => boolean): TestNode | null { const visit = (node: TestNode): TestNode | null => predicate(node) ? node : node.childNodes.map(visit).find(Boolean) ?? null; return visit(this); }
 }
 
-const harness = vi.hoisted(() => ({
-  t: (key: string) => key,
-  api: { updateProject: vi.fn() },
-}));
+const harness = vi.hoisted(() => {
+  // The editor writes through the revision fence now: a save declares the
+  // revision captured for that row. `updateProjectWithRevision` delegates to
+  // `updateProject`, so every assertion below still observes the same call,
+  // with the same arguments, on the same project id it has always checked.
+  const api: {
+    updateProject: ReturnType<typeof vi.fn>;
+    getProjectWithRevision: ReturnType<typeof vi.fn>;
+    updateProjectWithRevision: ReturnType<typeof vi.fn>;
+    revision: string | null;
+  } = {
+    updateProject: vi.fn(),
+    revision: '"2026-11-16T09:00:00.0000001Z"',
+    getProjectWithRevision: vi.fn(async () => ({ project: null, revision: api.revision })),
+    updateProjectWithRevision: vi.fn(async (projectId: string, input: unknown) => ({
+      project: await (api.updateProject as unknown as (projectId: string, input: unknown) => Promise<ProjectFixture>)(projectId, input),
+      revision: api.revision,
+    })),
+  };
+  return { t: (key: string) => key, api };
+});
 
 vi.mock("@/components/LocaleProvider", () => ({ useLocale: () => ({ t: harness.t }) }));
 vi.mock("@/lib/api", () => ({ api: harness.api }));
@@ -171,7 +188,10 @@ function saveButtonDisabled(): boolean {
 function submitContext(): Promise<void> {
   return act(async () => {
     findNodes(container, "FORM")[0].dispatchEvent({ type: "submit", bubbles: true });
-    await Promise.resolve();
+    // A fenced save reads the revision it is about to declare before it
+    // writes, so the submit path spans more than one microtask; drain them the
+    // way a browser turn does rather than asserting after a single tick.
+    await new Promise((resolve) => setTimeout(resolve, 0));
   });
 }
 
