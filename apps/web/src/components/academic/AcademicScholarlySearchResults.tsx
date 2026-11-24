@@ -142,6 +142,13 @@ export function AcademicScholarlySearchResults({ result, rows, page, isKnown, bu
           {t("sources.findNext")}
         </button>
       </div>
+      {/*
+        Rendered after the controls rather than above the list, because it is a statement about what
+        pressing those buttons does: the next page is a NEW search, not a slice of the results
+        already on screen, so an item can repeat or shift. The panel holds no cursor and caches no
+        pool, and no copy here may imply that it does.
+      */}
+      <p className={styles.filterNote}>{t("sources.findLimits")}</p>
     </>
   );
 }

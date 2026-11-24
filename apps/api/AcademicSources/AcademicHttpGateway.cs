@@ -26,6 +26,10 @@ public sealed class AcademicHttpGateway(HttpClient httpClient, AcademicSourceDis
 {
     private readonly IReadOnlyCollection<string> allowedHosts = options.AllowedEndpointHosts();
     private readonly IReadOnlyCollection<string> hostExceptions = options.EndpointHostExceptions;
+    /// <summary>Whether plaintext reads are refused. True for every runtime that was configured by
+    /// a deployment; false only where a test injected its own transport, because that switch has no
+    /// public setter and the options binder cannot reach it.</summary>
+    private readonly bool requireSecureTransport = !options.AllowInsecureProviderEndpoints;
 
     /// <summary>Query keys that carry provider credentials and must never cross an authority.</summary>
     private static readonly string[] CredentialQueryKeys =
@@ -75,13 +79,34 @@ public sealed class AcademicHttpGateway(HttpClient httpClient, AcademicSourceDis
                         response.Dispose();
                         throw Reject(current, AcademicSourceFailureCategories.BlockedEndpoint, (int)response.StatusCode);
                     }
+                    var redirectStatus = (int)response.StatusCode;
+                    // Same host is not the same place. `Authority` is host and port only and says
+                    // nothing about TLS, so an https → http hop on an allow-listed host read as
+                    // "same authority" and was followed with the query string intact — the reader's
+                    // search term, and for Google Books the configured key, in clear text. The hop's
+                    // transport is therefore judged before anything is sent to it: the general rule
+                    // first (plaintext is for an injected test transport only), then the one case
+                    // that no transport may perform, which is stepping DOWN from TLS on a host the
+                    // request was already talking to over TLS.
+                    RequireSecureTransport(target!);
+                    var sameAuthority = string.Equals(target!.Authority, current.Authority, StringComparison.OrdinalIgnoreCase);
+                    var sameScheme = string.Equals(target.Scheme, current.Scheme, StringComparison.OrdinalIgnoreCase);
+                    if (!sameScheme && sameAuthority && IsSecureScheme(current.Scheme))
+                    {
+                        response.Dispose();
+                        response = null;
+                        throw Reject(current, AcademicSourceFailureCategories.InsecureTransport, redirectStatus);
+                    }
                     // A hop that leaves the original authority could carry the request's
                     // credentials — including a Google Books key that rides the query string — to a
                     // host the operator never associated with them. Same-authority hops are the
                     // normal provider behaviour and stay untouched; a cross-authority hop is
                     // refused unless explicitly configured, and when allowed it is rebuilt without
-                    // any credential parameter.
-                    if (!string.Equals(target!.Authority, current.Authority, StringComparison.OrdinalIgnoreCase))
+                    // any credential parameter. A scheme change on the SAME host is not a new
+                    // authority: the only one left after the rule above is an upgrade into TLS,
+                    // which keeps its query, because moving a credential onto a better transport is
+                    // not the leak this branch is guarding.
+                    if (!sameAuthority)
                     {
                         response.Dispose();
                         response = null;
@@ -160,6 +185,38 @@ public sealed class AcademicHttpGateway(HttpClient httpClient, AcademicSourceDis
     {
         if (!AcademicSourceUrlGuard.IsAllowedEndpoint(endpoint, allowedHosts, hostExceptions))
             throw new AcademicSourceRejectedException(Details(endpoint, AcademicSourceFailureCategories.BlockedEndpoint, null));
+        RequireSecureTransport(endpoint);
+    }
+
+    /// <summary>
+    /// The transport rule, applied to the first request and to every hop: a scholarly read goes out
+    /// over TLS. The host allow list is not enough on its own — <c>www.googleapis.com</c> is
+    /// allow-listed whether the scheme is <c>https</c> or <c>http</c>, and the query string of every
+    /// one of these requests carries the reader's search term, with the Google Books read carrying
+    /// the deployment's configured key as well. So the scheme is decided here, before anything is
+    /// sent, rather than left to whatever the provider's <c>Location</c> header suggested.
+    /// <para>
+    /// A test transport that switched plaintext on may still not carry a credential in the clear:
+    /// that combination has no legitimate use and is refused the same way, so the escape hatch
+    /// cannot become the shape that leaks a key.
+    /// </para>
+    /// </summary>
+    private void RequireSecureTransport(Uri endpoint)
+    {
+        if (IsSecureScheme(endpoint.Scheme)) return;
+        if (requireSecureTransport || CarriesCredentialQuery(endpoint))
+            throw new AcademicSourceRejectedException(Details(endpoint, AcademicSourceFailureCategories.InsecureTransport, null));
+    }
+
+    private static bool IsSecureScheme(string scheme) =>
+        string.Equals(scheme, Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>True when the query string carries a parameter named like a provider credential.
+    /// Uses the same key list as the cross-authority scrub so the two cannot drift.</summary>
+    private static bool CarriesCredentialQuery(Uri endpoint)
+    {
+        var pairs = endpoint.Query.TrimStart('?').Split('&', StringSplitOptions.RemoveEmptyEntries);
+        return pairs.Any(pair => IsCredentialParameter(pair));
     }
 
     /// <summary>

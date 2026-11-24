@@ -102,6 +102,119 @@ public sealed class AcademicHttpGatewayTests
         Assert.Equal("too_many_redirects", exception.Details?.FailureCategory);
     }
 
+    // Transport policy. The endpoint allow list says WHICH host may be spoken to; these tests pin
+    // that it may only be spoken to over TLS, on every hop, because a scholarly request target is
+    // entirely query string — the reader's topic in `q=`, and for Google Books the deployment's
+    // configured key in `key=`. An https → http hop on the same host is the shape that used to read
+    // as "same authority" and be followed, so each case below asserts both the refusal and the
+    // request count: the plaintext address must never have been dialed.
+    [Fact]
+    public async Task Https_to_http_redirect_on_the_same_host_is_refused_and_never_requested()
+    {
+        var (gateway, handler) = Create((_, number) => number switch
+        {
+            1 => new HttpResponseMessage(HttpStatusCode.Moved)
+            {
+                Headers = { Location = new Uri("http://api.openalex.org/works?q=vaccine+policy&key=synthetic-provider-key") },
+            },
+            _ => AcademicFixture.Json("""{"plaintext":"served"}"""),
+        });
+        var exception = await Assert.ThrowsAsync<AcademicSourceRejectedException>(() => gateway.GetJsonAsync(
+            new Uri("https://api.openalex.org/works?q=vaccine+policy&key=synthetic-provider-key"), CancellationToken.None));
+        Assert.Equal("insecure_transport", exception.Details?.FailureCategory);
+        Assert.Equal(1, handler.RequestCount);
+        Assert.All(handler.Requests, request => Assert.False(
+            request.RequestUri!.ToString().StartsWith("http://", StringComparison.Ordinal),
+            $"a plaintext hop was requested: {request.RequestUri}"));
+    }
+
+    [Fact]
+    public async Task The_plaintext_hop_is_refused_even_when_the_test_switch_is_on()
+    {
+        // The downgrade rule is not the configuration rule: switching plaintext on for an injected
+        // test transport may not turn a TLS conversation into a cleartext one mid-flight.
+        var (gateway, handler) = Create((_, number) => number switch
+        {
+            1 => new HttpResponseMessage(HttpStatusCode.Redirect)
+            {
+                Headers = { Location = new Uri("http://api.openalex.org/works") },
+            },
+            _ => AcademicFixture.Json("{}"),
+        }, options => options.AllowInsecureProviderEndpoints = true);
+        var exception = await Assert.ThrowsAsync<AcademicSourceRejectedException>(() => gateway.GetJsonAsync(
+            OkEndpoint(), CancellationToken.None));
+        Assert.Equal("insecure_transport", exception.Details?.FailureCategory);
+        Assert.Equal(1, handler.RequestCount);
+    }
+
+    [Fact]
+    public async Task Plaintext_provider_endpoints_are_refused_before_any_traffic()
+    {
+        var (gateway, handler) = Create((_, _) => AcademicFixture.Json("{}"));
+        var exception = await Assert.ThrowsAsync<AcademicSourceRejectedException>(() => gateway.GetJsonAsync(
+            new Uri("http://api.openalex.org/works"), CancellationToken.None));
+        Assert.Equal("insecure_transport", exception.Details?.FailureCategory);
+        Assert.Equal(0, handler.RequestCount);
+    }
+
+    [Fact]
+    public async Task The_host_question_and_the_transport_question_stay_in_different_places()
+    {
+        // Two components, two decisions, and the order between them is the point. The allow-list
+        // classifier is shared with the rest of the product and answers only "is this host one we
+        // talk to" — it says nothing about TLS, and changing that shared answer is not this slice's
+        // call. The gateway owns the transport, so an allow-listed host is still refused when the
+        // request would go out in the clear. Pinned here so a future reader cannot conclude from the
+        // classifier alone that plaintext scholarly traffic was approved.
+        var options = AcademicFixture.Defaults();
+        Assert.True(AcademicSourceUrlGuard.IsAllowedEndpoint(
+            new Uri("http://api.openalex.org/works"), options.AllowedEndpointHosts()));
+        var (gateway, handler) = Create((_, _) => AcademicFixture.Json("{}"));
+        var exception = await Assert.ThrowsAsync<AcademicSourceRejectedException>(() => gateway.GetJsonAsync(
+            new Uri("http://api.openalex.org/works"), CancellationToken.None));
+        Assert.Equal("insecure_transport", exception.Details?.FailureCategory);
+        Assert.Equal(0, handler.RequestCount);
+    }
+
+    [Fact]
+    public async Task An_injected_test_transport_serves_plaintext_without_credentials()
+    {
+        var (gateway, handler) = Create((_, _) => AcademicFixture.Json("""{"plain":true}"""),
+            options => options.AllowInsecureProviderEndpoints = true);
+        var response = await gateway.GetJsonAsync(new Uri("http://api.openalex.org/works?q=topic"), CancellationToken.None);
+        Assert.True(response.IsSuccess);
+        Assert.Equal(1, handler.RequestCount);
+    }
+
+    [Fact]
+    public async Task The_test_switch_still_refuses_a_credential_in_the_clear()
+    {
+        var (gateway, handler) = Create((_, _) => AcademicFixture.Json("{}"),
+            options => options.AllowInsecureProviderEndpoints = true);
+        var exception = await Assert.ThrowsAsync<AcademicSourceRejectedException>(() => gateway.GetJsonAsync(
+            new Uri("http://api.openalex.org/works?key=synthetic-provider-key"), CancellationToken.None));
+        Assert.Equal("insecure_transport", exception.Details?.FailureCategory);
+        Assert.Equal(0, handler.RequestCount);
+    }
+
+    [Fact]
+    public async Task A_same_host_upgrade_into_tls_keeps_its_query_and_is_followed()
+    {
+        var (gateway, handler) = Create((_, number) => number switch
+        {
+            1 => new HttpResponseMessage(HttpStatusCode.Moved)
+            {
+                Headers = { Location = new Uri("https://api.openalex.org/works?q=topic") },
+            },
+            _ => AcademicFixture.Json("""{"secure":true}"""),
+        }, options => options.AllowInsecureProviderEndpoints = true);
+        var response = await gateway.GetJsonAsync(new Uri("http://api.openalex.org/works?q=topic"), CancellationToken.None);
+        Assert.True(response.IsSuccess);
+        Assert.Equal(2, handler.RequestCount);
+        Assert.Equal("https", handler.Requests[1].RequestUri!.Scheme);
+        Assert.Contains("q=topic", handler.Requests[1].RequestUri!.Query, StringComparison.Ordinal);
+    }
+
     [Fact]
     public async Task Oversized_payloads_are_refused_not_buffered()
     {

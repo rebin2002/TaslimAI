@@ -232,4 +232,14 @@ describe("paging and adding controls", () => {
     const { html } = render(discoveredPage({ sources: [discoveredRecord({ landingUrl: "javascript:alert(1)" })] }));
     expect(html).not.toContain("href=\"javascript:");
   });
+
+  it("tells the reader that a page turn is another search, not a slice of this one", () => {
+    // The panel keeps no cursor and caches no pool, so "next" issues a second search whose list may
+    // differ from the first. Copy promising a stable set would describe an implementation this
+    // feature does not have, so the caveat belongs where the reader is about to press the button.
+    const { text } = render(discoveredPage({ page: 1, totalMatched: scholarlySearchPageSize * 15, hasMore: true }));
+    expect(text).toMatch(/turning the page searches the catalogs again/i);
+    expect(text).toMatch(/appear twice, or move/i);
+    expect(text).not.toMatch(/same records on every page|stable (list|result|snapshot)|identical across pages/i);
+  });
 });

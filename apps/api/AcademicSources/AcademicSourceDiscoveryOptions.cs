@@ -29,6 +29,17 @@ public sealed class AcademicSourceDiscoveryOptions
 
     public string? GoogleBooksApiKey { get; set; }
 
+    /// <summary>
+    /// Permit plaintext HTTP provider endpoints and hops. <strong>Not reachable from
+    /// configuration</strong> — the setter is internal, so the options binder ignores it and no
+    /// deployment section, environment variable or command-line entry can turn it on. It exists for
+    /// a test that injects its own transport against a local fixture, which is the only place a
+    /// plaintext scholarly read is ever appropriate; the production runtime always requires TLS.
+    /// The endpoint allow list, the resolved-address checks and the credential scrubbing stay
+    /// exactly as strict either way, because none of them is about the scheme.
+    /// </summary>
+    internal bool AllowInsecureProviderEndpoints { get; set; }
+
     /// <summary>Contact address used for the providers' polite pools (OpenAlex <c>mailto</c>, Crossref User-Agent). Recommended in production.</summary>
     public string? ContactMailto { get; set; }
 
@@ -199,6 +210,12 @@ public sealed class AcademicSourceDiscoveryOptions
             if (!Uri.TryCreate(url, UriKind.Absolute, out var uri)
                 || (uri.Scheme != Uri.UriSchemeHttps && uri.Scheme != Uri.UriSchemeHttp))
             { failures.Add($"{name} is not an absolute http(s) URL"); continue; }
+            // A plaintext provider base is a configuration error, not a degraded mode: every one of
+            // these endpoints serves HTTPS, so the only way to write an http:// one is a typo or a
+            // proxy that a scholarly read — whose query string carries the reader's search term, and
+            // for Google Books the configured key — was never meant to pass through.
+            if (uri.Scheme == Uri.UriSchemeHttp && !AllowInsecureProviderEndpoints)
+                failures.Add($"{name} uses plaintext HTTP; scholarly provider endpoints must be HTTPS");
             if (uri.UserInfo.Length > 0) { failures.Add($"{name} embeds credentials"); continue; }
             if (AcademicSourceUrlGuard.TryParseIpLiteral(uri.Host, out var literal) && !AcademicSourceUrlGuard.IsPubliclyRoutable(literal))
                 failures.Add($"{name} points at a non-public address");

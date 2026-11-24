@@ -248,7 +248,15 @@ public sealed class AcademicSourceDiscoveryService(
         var isbns = (query.Isbns ?? []).Select(AcademicSourceIdentity.ToIsbn13)
             .Where(isbn => isbn is not null).Select(isbn => isbn!)
             .Distinct(StringComparer.Ordinal).Take(options.MaxIdentifierLookups).ToArray();
-        var maxResults = Math.Clamp(query.MaxResults <= 0 ? options.MaxResultsPerProvider : query.MaxResults, 1, options.MaxResultsPerProvider);
+        // What a catalog can actually hand back is bounded twice over: by the configured record
+        // ceiling, and by its own pagination budget of MaxPages walks of MaxPerPage rows. When the
+        // second is the smaller one, asking for the first is a promise the batch then repeats as
+        // fact — the provider returns its page budget, the "did this catalog stop at its ceiling"
+        // test compares that against a number it could never have reached, and a list that WAS cut
+        // off is reported as complete. The ask is therefore the reachable ceiling, which also keeps a
+        // tightened page budget from ever increasing the number of external calls per page.
+        var fetchCeiling = Math.Min(options.MaxResultsPerProvider, Math.Max(1, options.MaxPerPage * options.MaxPages));
+        var maxResults = Math.Clamp(query.MaxResults <= 0 ? fetchCeiling : query.MaxResults, 1, fetchCeiling);
         int? yearFrom = query.YearFrom is { } from && from >= 1000 && from <= 9999 ? from : null;
         int? yearTo = query.YearTo is { } to && to >= 1000 && to <= 9999 && (yearFrom is null || to >= yearFrom) ? to : null;
         var language = string.IsNullOrWhiteSpace(query.Language) ? null : Truncate(query.Language.Trim(), 16);

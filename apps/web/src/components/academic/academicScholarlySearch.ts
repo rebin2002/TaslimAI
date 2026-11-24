@@ -347,12 +347,19 @@ export type ScholarlySearchPageInfo = {
  * Paging facts for the control bar.
  *
  * Whether another page exists is decided by `totalMatched` against the page size, and *only* that:
- * the server reports the size of the bounded pool, which is the same on every page of ONE search
- * (asking again later is a new search with a new pool, so page state is kept per search).
- * `hasMore` is a different statement — the search was cut off by one of its ceilings, so more may
- * have matched than it surfaced — and using it as the next-page gate strands page 1 of any search
- * that returned more records than one page but stayed under the bound, because such a search
- * honestly reports `hasMore: false` while still having a page 2 to show.
+ * the server reports the size of the bounded pool it fetched for THIS request, and a client divides
+ * that by its page size to know how many pages it could ask for. `hasMore` is a different statement
+ * — the search was cut off by one of its ceilings, so more may have matched than it surfaced — and
+ * using it as the next-page gate strands page 1 of any search that returned more records than one
+ * page but stayed under the bound, because such a search honestly reports `hasMore: false` while
+ * still having a page 2 to ask for.
+ *
+ * What this deliberately does NOT model is a stable result set. Asking for page 2 sends a second,
+ * independent search: no cursor is kept, no pool is cached, and a catalog that re-ranked the topic,
+ * added a record, or answered differently this time can hand back a list where an item the reader
+ * already saw appears again, or one they had not reached yet moves. The count is therefore the size
+ * of the pool as it looked at the moment of one response — page state is kept per search precisely
+ * because two searches are not the same search.
  *
  * `pageCount` stays capped by `maxScholarlySearchPage`, so the control can never offer a page the
  * API would reject as too deep.

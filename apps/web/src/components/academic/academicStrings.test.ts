@@ -169,6 +169,19 @@ describe("customer-facing copy rules", () => {
     expect(en("sources.findMore")).toMatch(/stopped at one of its own limits/i);
     expect(en("sources.findMore")).not.toMatch(/\d|bound is/i);
   });
+
+  // Paging honesty. The panel holds no cursor and caches no pool, so every page request is a second,
+  // independent search and the list it returns can differ: a record can appear again, or move. Copy
+  // that implied the pages were slices of one snapshot would be promising an implementation this
+  // feature does not have, so the caveat belongs in the sentence students read, not only in a
+  // comment in the source.
+  it("describes a page turn as another search rather than as a stable snapshot", () => {
+    const limits = en("sources.findLimits");
+    expect(limits).toMatch(/bounded number of records/i);
+    expect(limits).toMatch(/searches the catalogs again/i);
+    expect(limits).toMatch(/appear twice, or move/i);
+    expect(limits).not.toMatch(/same (records|list) on every page|stable|identical|never (change|move)/i);
+  });
 });
 
 describe("option labelers", () => {

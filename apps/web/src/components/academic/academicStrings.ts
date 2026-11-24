@@ -236,7 +236,12 @@ const enCopy = {
   "sources.findRetry": "Try again",
   "sources.findBusy": "Searching scholarly records…",
   "sources.findIdle": "No search yet. Records appear here once you search.",
-  "sources.findLimits": "Each search covers a bounded number of records and is paged, so a long list is cut off rather than guessed at.",
+  // Two separate facts are admitted here. The first is the bound on how much one search looks at.
+  // The second is what a page turn actually costs: nothing is cached, so "next page" asks the
+  // catalogs again instead of slicing a set already fetched, and a fresh search can return a
+  // slightly different list. Saying only the first part would imply the pages are slices of one
+  // stable snapshot, which is not what this feature does or promises.
+  "sources.findLimits": "Each search covers a bounded number of records, so a long list is cut off rather than guessed at. Turning the page searches the catalogs again, so a record can appear twice, or move, between pages.",
   "sources.findYearFrom": "Published from",
   "sources.findYearFromLabel": "From year",
   "sources.findYearTo": "Published to",

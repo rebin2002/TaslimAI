@@ -70,16 +70,22 @@ public sealed class AcademicSourcesController(
 
         var pageSize = EffectivePageSize(request.PageSize);
         var page = Math.Max(1, request.Page ?? 1);
-        // The bounded pool is fetched whole, once per request, and the page is a slice of it.
+        // The bounded pool is fetched whole, once per REQUEST, and the page is a slice of it.
         // Asking the providers for exactly `page * pageSize` instead made the reported universe a
         // function of which page the caller happened to request: page 1 at size 10 could only ever
         // see 10 records, so it reported "10 matched" while `hasMore` said otherwise, and a client
-        // that derived its page count from `totalMatched` had no reachable page 2. A page-
-        // independent pool also keeps the windows of one search consistent with each other: moving
-        // forward neither duplicates a record nor drops one that the previous page had shown. That
-        // consistency is a property of ONE search, not of the catalogs — asking again later fetches
-        // a fresh pool, and a catalog that had changed between the two requests can change the pool
-        // with it. Paging state therefore belongs to the search that returned it.
+        // that derived its page count from `totalMatched` had no reachable page 2.
+        // What that fixes is the shape of one response. What it does NOT provide is a snapshot:
+        // this endpoint keeps no cursor, no session and no cached pool, so the request for page 2 is
+        // a second, independent search rather than a continuation of the first. Inside the response
+        // in hand, `totalMatched` and the returned window always agree with each other; between two
+        // responses they agree only for as long as the catalogs happen to say the same thing. A
+        // catalog that added a record, re-ranked the topic, or failed on one request and not the
+        // other can therefore hand back a page that repeats an item the caller already saw, or omits
+        // one it had. Say the smaller thing and let the client page on `totalMatched` for what it is
+        // worth: consistency is promised within one search, never across two. A real cursor — or a
+        // pool cached per search — would be the way to promise more, and is deliberately not claimed
+        // here.
         var batch = await discovery.DiscoverAsync(new AcademicDiscoveryQuery
         {
             SearchTerm = string.IsNullOrWhiteSpace(request.Q) ? null : request.Q.Trim(),
@@ -89,10 +95,11 @@ public sealed class AcademicSourcesController(
             YearTo = request.YearTo,
             Language = string.IsNullOrWhiteSpace(request.Language) ? null : request.Language.Trim(),
             OpenAccessOnly = request.OpenAccessOnly ?? false,
-            // The per-provider ceiling, not a page depth: <see cref="AcademicSourceDiscoveryService"/>
-            // clamps this to MaxResultsPerProvider and the merger caps the combined pool at
+            // The per-provider ceiling, not a page depth: the discovery service clamps this to what a
+            // catalog can actually deliver (MaxResultsPerProvider, and no more than its own
+            // MaxPages x MaxPerPage walk) and the merger caps the combined pool at
             // MaxCombinedResults, so the fan-out stays bounded by configuration rather than by the
-            // page size a caller chose.
+            // page size a caller chose. Each request fetches afresh; see the note above.
             MaxResults = Options.MaxResultsPerProvider,
         }, cancellationToken);
 

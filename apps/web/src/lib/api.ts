@@ -1524,7 +1524,9 @@ export const api = {
   decideMovieReview: (projectId: string, reviewId: string, input: { status: string; decisionNote?: string | null }) => request<MovieCollaboration>(`/api/movie-studio/projects/${projectId}/collaboration/reviews/${reviewId}/decision`, { method: "POST", body: JSON.stringify(input) }, true),
   // Issue #1267 slice 1: a read-only, workspace-scoped scholarly search. It is a GET with no
   // CSRF token and no job creation, so it cannot spend credits or change any state; the abort
-  // signal lets a new page or a closed panel cancel the in-flight search.
+  // signal lets a new page or a closed panel cancel the in-flight search. Note what a call is: one
+  // search, every time. The server keeps no cursor and caches no pool, so asking for page 2 is a
+  // second lookup rather than a slice of the answer to page 1, and the two answers can differ.
   searchAcademicSources: (workspaceId: string, params: AcademicSourceSearchParams, signal?: AbortSignal) => {
     const query = new URLSearchParams();
     query.set("q", params.term.trim());

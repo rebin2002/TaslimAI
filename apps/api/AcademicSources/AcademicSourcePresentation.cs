@@ -67,11 +67,13 @@ public sealed record AcademicSourceSearchResponse(
     int Page,
     int PageSize,
     /// <summary>
-    /// Distinct records this bounded search surfaced, counted across the whole pool it fetched. The
-    /// number is stable across the pages of ONE search, because those pages are slices of one pool;
-    /// it is not a promise about the next search, which fetches a fresh pool and can see a catalog
-    /// that has since changed. A client derives its page count from this: a next page exists exactly
-    /// when the pool still has records past the current window.
+    /// Distinct records this bounded search surfaced, counted across the whole pool THIS request
+    /// fetched, so it agrees with <see cref="Sources"/> in this response and tells a client how many
+    /// pages exist at this page size. It is NOT a snapshot of the catalogs: this endpoint keeps no
+    /// cursor and caches no pool, so a request for another page is a second, independent search whose
+    /// pool can differ. A catalog that re-ranked the topic, added a record, or answered this time but
+    /// not last can make a later page repeat an item the caller already saw or omit one it had.
+    /// Consistency is promised within one response, never across two.
     /// </summary>
     int TotalMatched,
     /// <summary>

@@ -324,6 +324,84 @@ public sealed class AcademicSourceDiscoveryServiceTests
     }
 
     [Fact]
+    public async Task A_tightened_page_budget_becomes_the_ceiling_the_provider_is_asked_for()
+    {
+        // MaxResultsPerProvider says how much a catalog may return; MaxPages x MaxPerPage says how
+        // much the caller can ever look at. When the second is smaller, asking the catalog for the
+        // first is a promise the batch cannot keep: it returns ten rows, the truncation test then
+        // compares them against a record ceiling of two hundred, and a list that WAS cut off is
+        // reported as complete. The reachable number is what must be requested.
+        AcademicDiscoveryQuery? observed = null;
+        var hits = Enumerable.Range(0, 10).Select(index => Record("openalex", $"W{index}", $"Title {index}", doi: $"10.5555/page.{index}")).ToList();
+        var service = Create(
+            [new FakeWorkProvider("openalex", true, query =>
+            {
+                observed = query;
+                return Task.FromResult<IReadOnlyList<AcademicSourceRecord>>(hits);
+            })],
+            [],
+            [],
+            options =>
+            {
+                options.MaxResultsPerProvider = 200;
+                options.MaxPerPage = 5;
+                options.MaxPages = 2;
+            });
+
+        var batch = await service.DiscoverAsync(new AcademicDiscoveryQuery { SearchTerm = "flood" });
+
+        Assert.NotNull(observed);
+        Assert.Equal(10, observed!.MaxResults);
+        Assert.Equal(10, batch.Sources.Count);
+        Assert.True(batch.ResultCapped);
+    }
+
+    [Fact]
+    public async Task The_default_page_budget_neither_raises_nor_lowers_the_configured_ceiling()
+    {
+        AcademicDiscoveryQuery? observed = null;
+        var service = Create(
+            [new FakeWorkProvider("openalex", true, query =>
+            {
+                observed = query;
+                return Task.FromResult<IReadOnlyList<AcademicSourceRecord>>([]);
+            })],
+            [],
+            [],
+            options => options.MaxResultsPerProvider = 50);
+
+        await service.DiscoverAsync(new AcademicDiscoveryQuery { SearchTerm = "flood" });
+
+        // A query that asked for nothing kept its own smaller default ask: the reachable ceiling is
+        // a limit on what may be requested, not a new request volume, so this path performs exactly
+        // the calls it performed before the ceiling existed.
+        Assert.NotNull(observed);
+        Assert.Equal(25, observed!.MaxResults);
+
+        // Shipped defaults are 25 rows over 2 pages, exactly the 50-record catalog ceiling, so the
+        // reachable ceiling equals the configured one and no deployment notices a difference.
+        // 50 is also what the API asks for when it builds a discovery query, so this is the shape of
+        // a real request rather than a synthetic one.
+        await service.DiscoverAsync(new AcademicDiscoveryQuery { SearchTerm = "flood", MaxResults = 50 });
+        Assert.Equal(50, observed!.MaxResults);
+
+        // A caller asking for more than the walk can reach is pulled back to it rather than served
+        // the larger number and then told nothing was truncated.
+        AcademicDiscoveryQuery? clamped = null;
+        var deep = Create(
+            [new FakeWorkProvider("openalex", true, query =>
+            {
+                clamped = query;
+                return Task.FromResult<IReadOnlyList<AcademicSourceRecord>>([]);
+            })],
+            [],
+            [],
+            options => { options.MaxResultsPerProvider = 50; options.MaxPerPage = 10; options.MaxPages = 1; });
+        await deep.DiscoverAsync(new AcademicDiscoveryQuery { SearchTerm = "flood", MaxResults = 40 });
+        Assert.Equal(10, clamped!.MaxResults);
+    }
+
+    [Fact]
     public async Task Open_access_request_drops_identifier_rows_that_show_no_open_location()
     {
         // The catalogs' open-access parameter exists only on their text-search endpoints. An ISBN
