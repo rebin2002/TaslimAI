@@ -148,10 +148,15 @@ public static class MovieProductionWorkflow
     }
 
     public static bool IsGenerationJobTypeAllowed(string stage, string jobType) =>
-        SupportedGenerationJobTypes.Contains(jobType) &&
-        (stage is MovieProductionStages.StoryboardCandidate or MovieProductionStages.ProductionKeyframe
-            ? string.Equals(jobType, GenerationJobTypes.ImageGenerate, StringComparison.OrdinalIgnoreCase)
-            : true);
+        stage switch
+        {
+            MovieProductionStages.StoryboardCandidate or MovieProductionStages.ProductionKeyframe =>
+                string.Equals(jobType, GenerationJobTypes.ImageGenerate, StringComparison.OrdinalIgnoreCase),
+            MovieProductionStages.MotionPreview or MovieProductionStages.ProductionRender =>
+                string.Equals(jobType, GenerationJobTypes.MovieQuickGenerate, StringComparison.OrdinalIgnoreCase)
+                || string.Equals(jobType, GenerationJobTypes.MovieClipGenerate, StringComparison.OrdinalIgnoreCase),
+            _ => false,
+        };
 
     public static (string NextStage, string Status)? ApprovalResult(string stage) => stage switch
     {
