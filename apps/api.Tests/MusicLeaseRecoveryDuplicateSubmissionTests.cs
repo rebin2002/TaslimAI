@@ -108,12 +108,18 @@ public sealed class MusicLeaseRecoveryDuplicateSubmissionTests : IClassFixture<M
         Assert.Equal(UsageTransactionStatus.Failed, usage.Status);
         Assert.Equal(0m, usage.ChargedAmount);
 
-        // Unlike the retrieval-failure lane, a finished track is not known to exist here, so the
-        // customer's deliberate single retry must stay available.
+        // Fail-closed policy (explicit product directive): an informed customer retry is still a
+        // SECOND billable submission while the accepted outcome is unreconciled, so the retry
+        // endpoint refuses this code as well. Earlier this lane asserted the opposite posture,
+        // written when the code was only reachable from lease recovery; the no-resubmission
+        // guarantee now holds against the member too, not just against the worker.
         var retry = await SendWithCsrf(client, HttpMethod.Post, $"/api/generation/jobs/{job.Id}/retry", null, $"music-lease-retry-{Guid.NewGuid():N}");
-        Assert.Equal(HttpStatusCode.Accepted, retry.StatusCode);
-        var child = (await retry.Content.ReadFromJsonAsync<GenerationJobDto>(JsonOptions))!;
-        Assert.Equal(job.Id, child.RetryOfJobId);
+        Assert.Equal(HttpStatusCode.BadRequest, retry.StatusCode);
+        using var refusal = JsonDocument.Parse(await retry.Content.ReadAsStringAsync());
+        Assert.Equal(
+            GenerationJobErrorCodes.MusicSubmissionRetryBlocked,
+            refusal.RootElement.GetProperty("error").GetProperty("code").GetString());
+        Assert.Equal(0, await finalDb.GenerationJobs.AsNoTracking().CountAsync(item => item.RetryOfJobId == job.Id));
     }
 
     [Fact]
@@ -162,7 +168,7 @@ public sealed class MusicLeaseRecoveryDuplicateSubmissionTests : IClassFixture<M
     }
 
     [Fact]
-    public void Unconfirmed_submission_copy_keeps_the_customer_retry_and_leaks_nothing()
+    public void Unconfirmed_submission_copy_states_the_unknown_outcome_and_leaks_nothing()
     {
         var message = GenerationJobErrorMessages.For(GenerationJobErrorCodes.MusicProviderSubmissionUnconfirmed);
 
@@ -170,8 +176,14 @@ public sealed class MusicLeaseRecoveryDuplicateSubmissionTests : IClassFixture<M
         Assert.DoesNotContain("http", message, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("provider key", message, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("secret", message, StringComparison.OrdinalIgnoreCase);
-        // Deliberate contrast with the retrieval lane, whose copy must not invite a retry.
+        // Both music lanes now refuse a retry, so neither copy may invite one. The accepted-but-
+        // unconfirmed lane used to invite a deliberate customer retry; the billing-fairness policy
+        // closed that, because an informed retry is still a second paid submission whose sibling may
+        // already be running. What the copy must keep is the honest uncertainty, not a completion claim.
+        Assert.DoesNotContain("try again", message, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("try again", GenerationJobErrorMessages.For(GenerationJobErrorCodes.MusicOutputRetrievalFailed)!, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("may already have reached the provider", message, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("was generated", message, StringComparison.OrdinalIgnoreCase);
     }
 
     private CountingMusicProvider Provider() => factory.Services.GetRequiredService<CountingMusicProvider>();

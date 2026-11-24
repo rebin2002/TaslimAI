@@ -23,6 +23,7 @@ public sealed class OperationalFailureClassificationTests
     [InlineData("MUSIC_RETRIEVAL_RETRY_BLOCKED", "delivery", false)]
     // Lease expiry with an unknown submission outcome is terminalized, never auto-re-dispatched.
     [InlineData("MUSIC_PROVIDER_SUBMISSION_UNCONFIRMED", "provider", false)]
+    [InlineData("MUSIC_SUBMISSION_RETRY_BLOCKED", "provider", false)]
     [InlineData("MUSIC_PROVIDER_UNAVAILABLE", "provider", true)]
     public void Classifier_returns_bounded_operational_categories(string code, string category, bool retryable)
     {
