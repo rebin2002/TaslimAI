@@ -1,9 +1,9 @@
 "use client";
 
-import { FormEvent, useRef, useState } from "react";
+import { FormEvent, useEffect, useRef, useState } from "react";
 import { Check, ChevronDown, X } from "lucide-react";
 import type { Project, ProjectInput } from "@/lib/api";
-import { isRevisionConflict, isRevisionDiverged, isRevisionUnavailable, type ProjectRevisionSession } from "@/lib/projectRevision";
+import { draftBaseOf, isRevisionConflict, isRevisionDiverged, isRevisionUnavailable, type ProjectDraftBase, type ProjectRevisionSession } from "@/lib/projectRevision";
 import { useLocale } from "@/components/LocaleProvider";
 import { localeDirection } from "@/lib/i18n";
 
@@ -41,6 +41,37 @@ export function ProjectForm({ project, onClose, onSubmit, revision, onSaved }: R
   // Reload and keep-mine both write: a double click that ran them together would
   // let the wildcard overwrite the reload it raced.
   const busy = useRef(false);
+  // The immutable copy THIS DRAFT was seeded from, i.e. the row these fields were
+  // initialized with. It is not `project`: the parent may replace that prop with a
+  // newer answer from another form or a status write, and a copy the member never
+  // typed against cannot certify their text. Only a re-seed of the local fields - a
+  // different project, an explicit reload, or a write this form made - moves it.
+  const seedRef = useRef<ProjectDraftBase | null>(project ? draftBaseOf(project) : null);
+  const seededFrom = useRef(project?.id);
+  const projectId = project?.id;
+
+  useEffect(() => {
+    if (seededFrom.current !== projectId) {
+      // A different row: the fields belong to it now, so the seed follows them.
+      seededFrom.current = projectId;
+      setName(project?.name ?? "");
+      setDescription(project?.description ?? "");
+      setInstructions(project?.instructions ?? "");
+      setContextNotes(project?.contextNotes ?? "");
+      setType(project?.type ?? "General");
+      setConflict(false);
+      setDiverged(false);
+      setError("");
+      busy.current = false;
+      seedRef.current = project ? draftBaseOf(project) : null;
+    }
+    // Report the copy on screen once per draft, never once per parent render: a
+    // newer prop arriving from elsewhere must not re-certify these older fields.
+    if (revision && seedRef.current) revision.noteDraft(seedRef.current);
+    // The row's identity, not its content, bounds the draft: `project` changing
+    // underneath an open form is another writer's answer, not a re-seed.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [revision, projectId]);
 
   const draft = (): ProjectInput => ({ name, description: description || undefined, instructions: instructions || undefined, contextNotes: contextNotes || undefined, type });
 
@@ -52,7 +83,7 @@ export function ProjectForm({ project, onClose, onSubmit, revision, onSaved }: R
     // Bound to the content being edited, never to whatever stamp the row happens
     // to carry now: an out-of-date form reports a conflict instead of stamping
     // its stale draft with a revision it did not edit from.
-    void revision.begin(project).catch((caught) => {
+    void revision.begin().catch((caught) => {
       if (isRevisionConflict(caught)) {
         setDiverged(isRevisionDiverged(caught));
         setConflict(true);
@@ -66,7 +97,12 @@ export function ProjectForm({ project, onClose, onSubmit, revision, onSaved }: R
     event.preventDefault(); setSaving(true); setError(""); setConflict(false);
     setDiverged(false);
     try {
-      if (revision && project) { const saved = await revision.save(draft(), project); onSaved?.(saved.project); }
+      if (revision && project) {
+        const saved = await revision.save(draft());
+        // This form wrote the row, so the screen and the certified content match.
+        seedRef.current = draftBaseOf(saved.project);
+        onSaved?.(saved.project);
+      }
       else if (revision) throw new Error("An edit form needs the project it edits.");
       else await onSubmit?.(draft());
       onClose();
@@ -98,6 +134,8 @@ export function ProjectForm({ project, onClose, onSubmit, revision, onSaved }: R
       setInstructions(latest.instructions ?? "");
       setContextNotes(latest.contextNotes ?? "");
       setType(latest.type);
+      // Re-based onto the server's copy, which is what the reloaded token certifies.
+      seedRef.current = draftBaseOf(latest);
       setConflict(false);
       setDiverged(false);
       setError(t("projects.revisionReloaded"));
@@ -113,6 +151,7 @@ export function ProjectForm({ project, onClose, onSubmit, revision, onSaved }: R
     setSaving(true);
     try {
       const saved = await revision.saveOverLatest(draft());
+      seedRef.current = draftBaseOf(saved.project);
       setConflict(false);
       setDiverged(false);
       onSaved?.(saved.project);

@@ -17,8 +17,17 @@ import { api, type Project, type ProjectInput } from "./api";
  * a draft built from an older page would let the stale draft overwrite whatever
  * arrived in between, which is the very lost update the fence exists to prevent.
  * So a token is only ever held together with the content it was published for,
- * and it is only captured after the server's copy has been compared with what
- * the member is being shown.
+ * and it is only captured after the server's copy has been compared with what the
+ * member is being shown.
+ *
+ * "What the member is being shown" is the copy the draft's own fields were SEEDED
+ * from, reported once through {@link ProjectRevisionSession.noteDraft} - not the
+ * component's live `project` prop. That prop is replaced by every other writer's
+ * answer: a sibling form's save, or a status write on the same page, updates the
+ * parent's copy while a mounted textarea still displays the old one. Comparing the
+ * row against the newer prop would then certify the older fields, which is the same
+ * lost update arriving by another route. A draft that has never reported its seed
+ * holds no token at all, and no one else's write can give it one.
  *
  * The token is carried verbatim. The published format is
  * `yyyy-MM-dd'T'HH:mm:ss.fffffff'Z'` on a 100-nanosecond grid while a
@@ -52,13 +61,22 @@ const blank = (value: string | null | undefined): string | null => {
   return text === "" ? null : text;
 };
 
-export function draftBaseOf(project: Project): ProjectDraftBase {
+/**
+ * Anything carrying the editable fields: a full row as published, or the base a
+ * draft was seeded from. A component may only ever hand this module the copy its
+ * OWN LOCAL FIELDS were initialized from - never the row its parent happens to be
+ * re-rendering with - because those two diverge the moment another writer lands,
+ * and comparing against the newer one is what let a stale draft be certified.
+ */
+export type ProjectSnapshot = Project | ProjectDraftBase;
+
+export function draftBaseOf(snapshot: ProjectSnapshot): ProjectDraftBase {
   return {
-    name: project.name,
-    description: blank(project.description),
-    instructions: blank(project.instructions),
-    contextNotes: blank(project.contextNotes),
-    type: project.type,
+    name: snapshot.name,
+    description: blank(snapshot.description),
+    instructions: blank(snapshot.instructions),
+    contextNotes: blank(snapshot.contextNotes),
+    type: snapshot.type,
   };
 }
 
@@ -150,7 +168,12 @@ export class ProjectRevisionSession {
   private revision: string | null = null;
   private diverged: RevisionDivergedError | null = null;
   private base: ProjectDraftBase | null = null;
-  private pendingCapture: Promise<Project> | null = null;
+  private draft: ProjectDraftBase | null = null;
+  private pendingCapture: { promise: Promise<Project | null>; draft: ProjectDraftBase; epoch: number } | null = null;
+  // Bumped whenever the copy on screen or the binding changes. A read that was
+  // already in flight when it moves can no longer certify the draft: it describes
+  // the row as it was BEFORE the change, so it must not commit afterwards.
+  private epoch = 0;
   // A divergence is a decision point, not a transient error: it stays raised
   // until the member resolves it, so continued typing neither re-reads the row on
   // every keystroke nor quietly retries a write this client refused.
@@ -169,58 +192,111 @@ export class ProjectRevisionSession {
   /** The content the held token certifies, or null when nothing is bound. */
   get heldBase(): ProjectDraftBase | null { return this.base; }
 
+  /** The content the member is actually looking at, as the draft reported it. */
+  get heldDraft(): ProjectDraftBase | null { return this.draft; }
+
   /** True once this draft has a token that was published for its own base. */
   get isBound(): boolean { return this.revision !== null && this.base !== null; }
 
   /**
-   * Binds the revision of the row that still holds `displayed`'s content.
+   * Records the copy this draft's local fields were seeded from.
+   *
+   * Called when the draft is created and again whenever it is genuinely re-based
+   * (a different project, an explicit reload). The snapshot is the draft's own,
+   * captured once from the row it was built on, and is deliberately NOT the
+   * component's live `project` prop: that prop is replaced by every other writer's
+   * answer, and a prop the member never typed against cannot certify their text.
+   *
+   * Reporting different content invalidates everything derived from the old copy -
+   * the token, the verdict, any read still running - because none of it describes
+   * what is on screen now.
+   */
+  noteDraft(snapshot: ProjectSnapshot | null): void {
+    const next = snapshot ? draftBaseOf(snapshot) : null;
+    const rowId = snapshot ? (snapshot as { id?: unknown }).id : undefined;
+    if (typeof rowId === "string" && rowId !== this.projectId) {
+      // A different row's content is not this draft's seed: forgetting the draft
+      // makes the next save refuse instead of declaring a foreign revision.
+      this.draft = null;
+      this.epoch += 1;
+      this.revision = null;
+      this.base = null;
+      this.diverged = null;
+      return;
+    }
+    const unchanged = next === null
+      ? this.draft === null
+      : this.draft !== null && sameDraftBase(this.draft, next);
+    if (unchanged) return;
+    this.draft = next;
+    this.epoch += 1;
+    this.revision = null;
+    this.base = null;
+    this.diverged = null;
+  }
+
+  /**
+   * Binds the revision of the row that still holds the content on screen.
    *
    * Called when the member begins editing, and again at save time if nothing was
-   * bound. The read is what makes the binding honest: the server's copy is
-   * compared with the copy on screen, and only a match lets this draft claim the
-   * published token. A mismatch raises the conflict without touching the row, so
-   * an edit typed into a page that is already out of date can never be stamped as
-   * current. Concurrent beginnings share one read.
+   * bound, always against the draft's own seeded copy. The read is what makes the
+   * binding honest: the server's content is compared with that copy, and only a
+   * match lets this draft claim the published token. A mismatch raises the conflict
+   * without touching the row, so an edit typed into a page that is already out of
+   * date can never be stamped as current. Concurrent beginnings share one read.
    *
    * Once bound, the pair is kept until it is spent, refused as unusable, or
-   * replaced by a write this session made. The check belongs to the moment the
-   * token is TAKEN, not to every save afterwards: a draft that reloaded the row,
-   * or saved through a parent that has not yet re-rendered its copy, is still
-   * editing exactly the content its token was published for. Re-comparing a stale
-   * prop would refuse honest saves, and it would add nothing - a token that the
-   * row has moved past is caught by the server's own fence on the next write.
+   * replaced by a write this session made, or dropped because the copy on screen
+   * changed. The check belongs to the moment the token is TAKEN, not to every save
+   * afterwards: re-comparing at save time would need a live prop, which is the
+   * value this module refuses to trust, and a token the row has moved past is
+   * caught by the server's own fence on the next write anyway.
+   *
+   * Takes no snapshot argument on purpose. The content it compares against is the
+   * seed this draft reported when its fields were initialized, and accepting a
+   * copy here would put the caller's newest `project` prop back in the driver's
+   * seat, which is exactly how a stale draft gets certified.
+   *
+   * Resolves with the row that was read, or null when no read was needed.
    */
-  begin(displayed: Project): Promise<Project> {
-    const displayedBase = draftBaseOf(displayed);
+  begin(): Promise<Project | null> {
     if (this.diverged) return Promise.reject(this.diverged);
-    if (this.isBound) return Promise.resolve(displayed);
+    if (this.isBound) return Promise.resolve(null);
+    const draft = this.draft;
+    if (!draft) return Promise.reject(new RevisionUnavailableError());
     if (this.pendingCapture) {
-      // A capture started for another keystroke is only reusable by a draft that
-      // is showing the same content it was compared against.
-      return this.pendingCapture.then((project) => {
-        if (this.base && !sameDraftBase(this.base, displayedBase)) {
-          this.diverged ??= new RevisionDivergedError(this.revision);
-          throw this.diverged;
-        }
-        return project;
-      });
+      // A capture started for another keystroke is only reusable while this draft
+      // is still showing the same content it was compared against.
+      if (sameDraftBase(this.pendingCapture.draft, draft)) return this.pendingCapture.promise;
+      return this.pendingCapture.promise.then(() => this.begin(), () => this.begin());
     }
-    this.pendingCapture = (async () => {
+    const epoch = this.epoch;
+    const promise = (async (): Promise<Project | null> => {
       const { project, revision } = await api.getProjectWithRevision(this.projectId);
       if (!revision) throw new RevisionUnavailableError();
+      if (epoch !== this.epoch) {
+        // The draft was re-based, or a write landed and was folded in, while this
+        // read was in flight: the answer is about a superseded moment. Trust the
+        // newer state if it certified the draft, and otherwise treat the row as
+        // having moved rather than binding a token from a stale read.
+        if (this.isBound) return project;
+        this.diverged ??= new RevisionDivergedError(revision);
+        throw this.diverged;
+      }
       const serverBase = draftBaseOf(project);
-      if (!sameDraftBase(serverBase, displayedBase)) {
-        // The row moved since this page was rendered. The token just read
-        // certifies the NEW content, not the draft in front of the member, so it
-        // is not bound: the caller shows the conflict and the member picks.
+      if (!sameDraftBase(serverBase, draft)) {
+        // The row moved since this draft was built. The token just read certifies
+        // the NEW content, not what the member is looking at, so it is not bound:
+        // the caller shows the conflict and the member picks.
         this.diverged = new RevisionDivergedError(revision);
         throw this.diverged;
       }
       this.revision = revision;
       this.base = serverBase;
       return project;
-    })().finally(() => { this.pendingCapture = null; });
-    return this.pendingCapture;
+    })().finally(() => { if (this.pendingCapture?.promise === promise) this.pendingCapture = null; });
+    this.pendingCapture = { promise, draft, epoch };
+    return promise;
   }
 
   /** Drops the binding; the next save re-captures before it declares anything. */
@@ -228,6 +304,14 @@ export class ProjectRevisionSession {
     this.revision = null;
     this.base = null;
     this.diverged = null;
+    this.epoch += 1;
+  }
+
+  /** Forgets the binding AND the copy on screen: the draft is being torn down. */
+  reset(): void {
+    this.clear();
+    this.draft = null;
+    this.pendingCapture = null;
   }
 
   /**
@@ -235,13 +319,16 @@ export class ProjectRevisionSession {
    * restore, which change the row's status and therefore its revision, or a save
    * whose result another draft on the same page learned about.
    *
-   * Adoption is conditional, and that is the whole point of the pair. A status
-   * write answers with the row it changed: adopting its stamp is safe only while
-   * the row's editable content still matches what this draft was built from. When
-   * it does not, the row moved through a change this draft never saw, and blessing
-   * that stale draft with a brand-new token is precisely the lost update the fence
-   * exists to prevent - so the binding is dropped and the next save re-verifies
-   * (and refuses) instead of writing.
+   * Adoption is verified against the copy the member is looking at, which is the
+   * whole point of the pair. A status write answers with the row it changed: its
+   * stamp is safe to hold only while that row's editable content still matches
+   * this draft's seeded base. Then the draft really does describe the row, only at
+   * a newer revision, and adopting keeps it savable. When it does not match, the row
+   * moved through content this draft never saw - so the token is dropped and the
+   * divergence is latched at once instead of waiting for a keystroke, and the next
+   * save refuses rather than blessing a stale draft with a token it never earned.
+   * That holds for an UNBOUND session too: a draft whose content has never been
+   * compared with the row has nothing for someone else's stamp to certify.
    *
    * A write this session made itself is NOT adopted this way: its answer carries
    * the content this draft just submitted, which differs from the base by design.
@@ -249,10 +336,20 @@ export class ProjectRevisionSession {
    */
   adopt(answer: RevisionSaveResult): void {
     if (!answer.revision) return;
+    if (answer.project.id !== this.projectId) return;
     const published = draftBaseOf(answer.project);
-    if (this.base && !sameDraftBase(this.base, published)) {
-      // The row carries content this draft never saw: refuse to bless it.
-      this.clear();
+    const draft = this.draft;
+    if (!draft) {
+      // Nothing has ever been reported as on screen for this draft, so there is no
+      // token to refresh and no licence to invent one. Leave it unbound: the first
+      // capture compares the row with the draft and conflicts if they differ.
+      return;
+    }
+    this.epoch += 1;
+    if (!sameDraftBase(published, draft)) {
+      this.revision = null;
+      this.base = null;
+      this.diverged = new RevisionDivergedError(answer.revision);
       return;
     }
     this.diverged = null;
@@ -275,15 +372,19 @@ export class ProjectRevisionSession {
     this.diverged = null;
     this.revision = answer.revision;
     this.base = draftBaseOf(answer.project);
+    // The submitted content is what is on screen now, so the draft's own base moves
+    // with it. This session wrote it, which is the one case allowed to do that.
+    this.draft = this.base;
+    this.epoch += 1;
   }
 
   /**
    * Saves the draft against the revision that certifies it. A draft that never
-   * captured successfully binds at this point - against the content on screen,
-   * never a stamp taken from a row that has since moved.
+   * captured successfully binds at this point - against the content the draft was
+   * built on, never a stamp taken from a row that has since moved.
    */
-  async save(input: ProjectInput, displayed: Project): Promise<RevisionSaveResult> {
-    await this.begin(displayed);
+  async save(input: ProjectInput): Promise<RevisionSaveResult> {
+    await this.begin();
     const ifMatch = this.revision;
     if (!ifMatch || !this.base) throw new RevisionUnavailableError();
     try {
@@ -321,6 +422,10 @@ export class ProjectRevisionSession {
     if (!revision) throw new RevisionUnavailableError();
     this.revision = revision;
     this.base = draftBaseOf(project);
+    // The caller re-seeds its local fields from this answer, so the copy on screen
+    // and the certified content become the same row.
+    this.draft = this.base;
+    this.epoch += 1;
     return project;
   }
 }

@@ -174,6 +174,8 @@ vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
 const { createRoot } = await import("react-dom/client");
 const { ProjectContextEditor } = await import("@/components/ProjectContextEditor");
 const { makeProject, PROJECT_TOKEN, fence } = await import("@/lib/projectRevisionFenceFixtures");
+const { ProjectRevisionSession } = await import("@/lib/projectRevision");
+const { api } = await import("@/lib/api");
 
 let root: ReturnType<typeof createRoot> | null = null;
 let onSavedSpy = vi.fn();
@@ -240,6 +242,21 @@ async function mount(id = "project-a", instructions = "A instructions", notes = 
 async function switchTo(id: string, instructions: string, notes: string) {
   await act(async () => {
     root!.render(<ProjectContextEditor project={makeProject(id, instructions, notes)} onSaved={onSavedSpy} />);
+    await drain();
+  });
+}
+
+/**
+ * The parent re-renders the SAME project with a newer copy - what happens when a
+ * sibling form saves, or an archive lands and the view folds the answer into its
+ * overview. The mounted draft's fields do not move with it, which is the whole
+ * point: the fence must judge the row against what the member is looking at, not
+ * against the copy the parent happens to hold now.
+ */
+async function reparent(session?: InstanceType<typeof ProjectRevisionSession>) {
+  const latest = server.row("project-a").project;
+  await act(async () => {
+    root!.render(<ProjectContextEditor project={{ ...latest }} onSaved={onSavedSpy} {...(session ? { revision: session } : {})} />);
     await drain();
   });
 }
@@ -499,5 +516,82 @@ describe("ProjectContextEditor revision fence", () => {
     expect(findByClass(testContainer, "form-error").map((node) => node.textContent)).toEqual(["Name is required."]);
     expect(contextValues()[0]).toBe("Draft typed in tab A");
   });
-});
 
+  it("refuses to certify a draft the parent moved past while it sat untouched", async () => {
+    // The sibling-form race, on one page: another form saved, the view folded that
+    // answer into its own copy, and this editor - still displaying the older
+    // content, now with a NEWER prop - must not have its fields certified by it.
+    await mount();
+    server.commitFromElsewhere("project-a", { instructions: "Saved by the details form" });
+    await reparent();
+    expect(contextValues()[0]).toBe("A instructions");
+
+    await typeInstructions("Draft typed in the context form");
+    await submit();
+
+    expect(patchCalls()).toHaveLength(0);
+    expect(conflictBlock()[0]!.textContent).toContain("projects.revisionDiverged");
+    expect(contextValues()[0]).toBe("Draft typed in the context form");
+    expect(server.row("project-a").project.instructions).toBe("Saved by the details form");
+  });
+
+  it("refuses a save with no typing when the prop alone was refreshed", async () => {
+    // Same page, no keystroke at all: the textarea still holds what it was seeded
+    // with, so writing it would revert the other form's change behind a token this
+    // draft never earned.
+    await mount();
+    server.commitFromElsewhere("project-a", { instructions: "Saved by the details form" });
+    await reparent();
+
+    await submit();
+
+    expect(patchCalls()).toHaveLength(0);
+    expect(conflictBlock()[0]!.textContent).toContain("projects.revisionDiverged");
+    expect(server.row("project-a").project.instructions).toBe("Saved by the details form");
+  });
+
+  it("does not let a status write certify a draft whose row moved before its first keystroke", async () => {
+    // Archive FIRST, typing after: the session is unbound, the archive answer
+    // carries newer content, and adopting it used to bind that token to a draft
+    // nobody had compared. The save must refuse and the other tab must survive.
+    const session = new ProjectRevisionSession("project-a", "context");
+    await mount();
+    await act(async () => {
+      root!.render(<ProjectContextEditor project={makeProject("project-a", "A instructions", "A notes")} onSaved={onSavedSpy} revision={session} />);
+      await drain();
+    });
+    server.commitFromElsewhere("project-a", { instructions: "Saved in tab B" });
+    const archived = await api.archiveProjectWithRevision("project-a");
+    await act(async () => { session.adopt(archived); await drain(); });
+
+    await typeInstructions("Draft typed after archiving");
+    await submit();
+
+    expect(patchCalls()).toHaveLength(0);
+    expect(conflictBlock()[0]!.textContent).toContain("projects.revisionDiverged");
+    expect(contextValues()[0]).toBe("Draft typed after archiving");
+    expect(server.row("project-a").project.instructions).toBe("Saved in tab B");
+  });
+
+  it("keeps a draft savable across a status write that changed nothing it displays", async () => {
+    // The other side of the same rule, so the fix does not over-refuse: archiving
+    // moves the revision but not the content, and a draft showing that content
+    // should simply advance to the new token.
+    const session = new ProjectRevisionSession("project-a", "context");
+    await mount();
+    await act(async () => {
+      root!.render(<ProjectContextEditor project={makeProject("project-a", "A instructions", "A notes")} onSaved={onSavedSpy} revision={session} />);
+      await drain();
+    });
+    const archived = await api.archiveProjectWithRevision("project-a");
+    await act(async () => { session.adopt(archived); await drain(); });
+
+    await typeInstructions("Draft typed after archiving");
+    await submit();
+
+    expect(conflictBlock()).toHaveLength(0);
+    expect(patchCalls()).toHaveLength(1);
+    expect(patchCalls()[0]!.ifMatch).toBe(archived.revision);
+    expect(server.row("project-a").project.instructions).toBe("Draft typed after archiving");
+  });
+});

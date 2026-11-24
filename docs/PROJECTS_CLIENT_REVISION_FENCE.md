@@ -27,19 +27,28 @@ fields (`name`, `description`, `instructions`, `contextNotes`, `type`) — that 
 certifies. The pairing is the whole point.
 
 1. **Capture is verified against the copy on screen.** The first keystroke calls
-   `session.begin(displayed)`, where `displayed` is the project the component is
-   rendering — including the copy that arrived through the overview or the project
-   list, which never carried an `ETag` of its own. `begin` issues
-   `GET /api/projects/{id}` and compares the row it reads with that copy. Only a match
+   `session.noteDraft(seed)` and then `session.begin()`, where `seed` is the copy the
+   draft's own local fields were **initialized from** — the row that arrived through the
+   overview or the project list, which never carried an `ETag` of its own. `begin` issues
+   `GET /api/projects/{id}` and compares the row it reads with that seed. Only a match
    binds the published token; a mismatch raises `RevisionDivergedError` (a conflict)
    and binds nothing.
-   *Why a bare token is not enough:* a stamp read at the moment of the first keystroke
-   describes the row as it is **then**. If another tab saved between this page rendering
-   and that keystroke, adopting the new token while keeping the older fields would
-   certify the stale draft as current — the identical lost update the server fence exists
-   to prevent, reintroduced one layer up. The same applies to clicking Save without
+   *Why the seed and not the live prop:* the component's `project` prop is replaced by
+   every other writer's answer. A sibling form's save, or an archive whose answer carries
+   content this draft never displayed, updates the prop while the mounted textarea still
+   shows the older text. Comparing the row against the **newer** prop finds a match and
+   certifies the **older** fields — the same lost update, arriving one layer up. So the
+   seed is reported once, when the draft is created, and a draft moves it only where its
+   own fields move: a project switch, an explicit reload, or a write this draft made.
+   `begin()` and `save()` deliberately take no snapshot argument, so there is no way to
+   pass the newer copy by accident.
+   *Why a bare token is not enough either:* a stamp read at the moment of the first
+   keystroke describes the row as it is **then**. If another tab saved between this page
+   rendering and that keystroke, adopting the new token while keeping the older fields
+   would certify the stale draft as current. The same applies to clicking Save without
    typing, and to a capture that failed and is retried later: every path binds through
-   the same comparison.
+   the same comparison, and a session that has never been told what is on screen binds
+   nothing at all.
 2. **The token is carried verbatim.** The published format is
    `yyyy-MM-dd'T'HH:mm:ss.fffffff'Z'` (seven fractional digits, a 100-nanosecond grid).
    JavaScript's `Date` keeps three, so any value rebuilt from `project.updatedAt` would be
@@ -50,11 +59,14 @@ certifies. The pairing is the whole point.
    committed together with the row it left behind, so the session re-binds to that pair
    without a follow-up read. That avoids both an extra round trip and a race in which a
    third writer slips between the write and the re-read.
-4. **A binding is kept until it is spent.** The comparison belongs to the moment the token
-   is taken, not to every later save: a draft that reloaded the row, or that saved while
-   its parent has not yet re-rendered with the answer, is still editing exactly the content
-   its token certifies. Re-checking a stale prop would refuse honest saves and add nothing —
-   a token the row has moved past is caught by the server's own fence on the next write.
+4. **A binding is kept until the copy on screen changes.** The comparison belongs to the
+   moment the token is taken, not to every later save: a draft that reloaded the row, or
+   that saved while its parent has not yet re-rendered with the answer, is still editing
+   exactly the content its token certifies, and a token the row has moved past is caught by
+   the server's own fence on the next write. What does drop a binding is the draft itself
+   being re-based (`noteDraft` with different content) or a folded-in write that contradicts
+   it — and a read that was still in flight when either happened is abandoned rather than
+   committed, because its answer describes the moment before the change.
 5. **One session per draft, never one per page.** `ProjectDetailView` renders two editable
    drafts of the same row (details and context) and each submits the whole row, so it owns
    two sessions (`"details"` and `"context"`). A token earned by one draft's write must not
@@ -71,6 +83,11 @@ certifies. The pairing is the whole point.
 `ProjectsView` owns one session per opened edit row and `ProjectDetailView` one per draft,
 so that a status change made by the same view can advance a token that still describes the
 row rather than stranding an open draft on a revision the server has already moved past.
+Adoption runs through the same comparison as capture: the archived row's **content** must
+still equal what the draft reported it is showing. Then the stamp is adopted and the draft
+stays savable; if it does not, the token is dropped and the divergence is raised on the
+spot, so the next save refuses. A draft that has never reported its content adopts nothing —
+an unbound session cannot be certified by someone else's write.
 
 The unfenced `api.updateProject` remains in the module as the legacy transport for any
 caller outside these paths; nothing under `apps/web/src` uses it after this change.
@@ -170,12 +187,16 @@ retry never converts a conditional write into a wildcard.
 ## Tests
 
 * `src/lib/projectRevision.test.ts` — session behaviour against the shared server stub:
-  capture verified against the displayed copy, two-tab refusal, live revision on the conflict,
+  capture verified against the draft's seeded copy, two-tab refusal, live revision on the conflict,
   explicit wildcard override, reload re-basing, divergence before the first keystroke,
   no-keystroke save on a stale page, a latched divergence that neither re-reads nor retries,
   a failed capture retried both ways (row unmoved → binds, row moved → refuses), one shared
   read for concurrent beginnings, whitespace equivalence against the server's trimmed copy,
   per-draft isolation on one row, status adoption and its refusal to bless a moved row,
+  adoption refused for a draft that reported no content, adoption allowed where the reported
+  seed still matches, a status write that landed on content an untouched draft never saw, a
+  capture abandoned because the row moved while it was in flight, and a seed reported for some
+  other row,
   no re-read per save, no unfenced write, cross-project token isolation, verbatim
   100-nanosecond precision, legacy call silence.
 * `src/lib/projectRevisionFenceFixtures.ts` — the stub of the fenced endpoint (including
@@ -189,7 +210,11 @@ retry never converts a conditional write into a wildcard.
 * `src/components/ProjectContextEditor.revisionFence.test.tsx` — the UI through the real
   transport: prompt appearance, draft retention, both actions, route switching, the stale
   page refused before the first keystroke and on a bare Save, the divergence copy, recovery
-  through reload, and the two conflict actions cannot run together.
+  through reload, the two conflict actions cannot run together, and the mounted-draft cases:
+  a parent that replaced its copy after a sibling write, a bare Save after that replacement,
+  an archive that landed on content the draft never displayed, and — the other side of the
+  rule, so it does not over-refuse — a status write over unchanged content leaving the draft
+  savable on its new token.
 * `src/app/api/[...path]/route.test.ts` — the proxy forwards `If-Match` upstream and returns
   the `ETag` on both the `200` and the `409`.
 * `apps/api.Tests/ProjectPatchRevisionConflictTests.cs` —
@@ -204,4 +229,6 @@ retry never converts a conditional write into a wildcard.
   Postgres: stale refusal with the draft intact, keep-mine overwrite only after the click,
   reload re-basing followed by a successful save, revision dropped on navigation, a row that
   moved **before the first keystroke** refused with its draft preserved, and a Save with no
-  keystroke at all refused instead of silently reverting the other tab.
+  keystroke at all refused instead of silently reverting the other tab, the archive-before-
+  typing sequence on two tabs, and a context draft left behind by a sibling details save on
+  one page.

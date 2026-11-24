@@ -15,8 +15,11 @@ import { fence, makeProject, stampFrom, type Row } from "./projectRevisionFenceF
 // token: a stamp read at the moment of the first keystroke describes the row as
 // it is THEN, while the form is showing a copy rendered earlier. Certifying that
 // older copy with the newer token re-opens exactly the lost update the fence
-// closes. So every binding here compares the server's content with the content on
-// screen, and refuses when they differ.
+// closes. So every binding compares the server's content with the copy the draft
+// was SEEDED from - reported once through noteDraft, never taken from the live
+// prop a parent may have moved on from - and refuses when they differ. That also
+// means no one else's write can certify an unreported draft: adoption binds only
+// a token for content this draft has said it is showing.
 //
 // These cases run the real `@/lib/api` transport against the shared contract stub
 // in projectRevisionFenceFixtures.ts, which is the same stub the component suite
@@ -65,17 +68,19 @@ describe("project revision fence - two tabs on one account", () => {
     const viewA = displayed(store);
     const viewB = displayed(store);
     const tabA = new ProjectRevisionSession("project-1", "context");
-    await tabA.begin(viewA);
+    tabA.noteDraft(viewA);
+    await tabA.begin();
     expect(tabA.heldRevision).toBe(stampFrom(0));
 
     // The other tab commits first, moving the stamp on the row.
     const tabB = new ProjectRevisionSession("project-1", "context");
-    await tabB.begin(viewB);
-    await tabB.save({ name: "Renamed by tab B" }, viewB);
+    tabB.noteDraft(viewB);
+    await tabB.begin();
+    await tabB.save({ name: "Renamed by tab B" });
     expect(store.row("project-1").project.name).toBe("Renamed by tab B");
 
     // Tab A's page still shows the copy it edited from.
-    await tabA.save({ name: "Edited by tab A" }, viewA).catch(() => undefined);
+    await tabA.save({ name: "Edited by tab A" }).catch(() => undefined);
     // The refused write still declared the revision tab A's page was built on.
     const staleDeclaration = ifMatchOf(store.fetchMock.mock.calls.at(-1) as [string, RequestInit]);
     expect(staleDeclaration).toBe(stampFrom(0));
@@ -86,14 +91,16 @@ describe("project revision fence - two tabs on one account", () => {
     const { ProjectRevisionSession, isRevisionConflict } = await loadClient(store.fetchMock);
     const viewA = displayed(store);
     const tabA = new ProjectRevisionSession("project-1", "context");
-    await tabA.begin(viewA);
+    tabA.noteDraft(viewA);
+    await tabA.begin();
 
     const tabB = new ProjectRevisionSession("project-1", "context");
-    await tabB.begin(displayed(store));
-    await tabB.save({ name: "Renamed by tab B" }, displayed(store));
+    tabB.noteDraft(displayed(store));
+    await tabB.begin();
+    await tabB.save({ name: "Renamed by tab B" });
 
     let caught: unknown;
-    await tabA.save({ name: "Stale edit from tab A" }, viewA).catch((error) => { caught = error; });
+    await tabA.save({ name: "Stale edit from tab A" }).catch((error) => { caught = error; });
     // A server refusal, not a client-side divergence: tab A's token was honest,
     // the row simply moved while it held.
     expect(isRevisionConflict(caught)).toBe(true);
@@ -112,10 +119,12 @@ describe("project revision fence - two tabs on one account", () => {
     const { api, ProjectRevisionSession } = await loadClient(store.fetchMock);
     const viewA = displayed(store);
     const tabA = new ProjectRevisionSession("project-1", "context");
-    await tabA.begin(viewA);
+    tabA.noteDraft(viewA);
+    await tabA.begin();
     const tabB = new ProjectRevisionSession("project-1", "context");
-    await tabB.begin(displayed(store));
-    await tabB.save({ name: "Renamed by tab B" }, displayed(store));
+    tabB.noteDraft(displayed(store));
+    await tabB.begin();
+    await tabB.save({ name: "Renamed by tab B" });
 
     await expect(api.updateProjectWithRevision("project-1", { name: "x" }, stampFrom(0))).rejects.toMatchObject({
       status: 409,
@@ -129,12 +138,14 @@ describe("project revision fence - two tabs on one account", () => {
     const { ProjectRevisionSession } = await loadClient(store.fetchMock);
     const viewA = displayed(store);
     const tabA = new ProjectRevisionSession("project-1", "context");
-    await tabA.begin(viewA);
+    tabA.noteDraft(viewA);
+    await tabA.begin();
     const tabB = new ProjectRevisionSession("project-1", "context");
-    await tabB.begin(displayed(store));
-    await tabB.save({ name: "Renamed by tab B" }, displayed(store));
+    tabB.noteDraft(displayed(store));
+    await tabB.begin();
+    await tabB.save({ name: "Renamed by tab B" });
 
-    await tabA.save({ name: "Stale edit from tab A" }, viewA).catch(() => undefined);
+    await tabA.save({ name: "Stale edit from tab A" }).catch(() => undefined);
     const kept = await tabA.saveOverLatest({ name: "Stale edit from tab A" });
 
     expect(store.row("project-1").project.name).toBe("Stale edit from tab A");
@@ -142,7 +153,7 @@ describe("project revision fence - two tabs on one account", () => {
     expect(patches(store).slice(-1)[0]!.ifMatch).toBe("*");
     // The session now holds what that write committed, so a follow-up is honest.
     expect(tabA.heldRevision).toBe(kept.revision);
-    await tabA.save({ name: "Follow-up edit" }, kept.project);
+    await tabA.save({ name: "Follow-up edit" });
     expect(store.row("project-1").project.name).toBe("Follow-up edit");
   });
 
@@ -151,19 +162,21 @@ describe("project revision fence - two tabs on one account", () => {
     const { ProjectRevisionSession } = await loadClient(store.fetchMock);
     const viewA = displayed(store);
     const tabA = new ProjectRevisionSession("project-1", "context");
-    await tabA.begin(viewA);
+    tabA.noteDraft(viewA);
+    await tabA.begin();
     const tabB = new ProjectRevisionSession("project-1", "context");
-    await tabB.begin(displayed(store));
-    await tabB.save({ name: "Renamed by tab B", instructions: "New instructions" }, displayed(store));
+    tabB.noteDraft(displayed(store));
+    await tabB.begin();
+    await tabB.save({ name: "Renamed by tab B", instructions: "New instructions" });
 
-    await tabA.save({ name: "Stale edit from tab A" }, viewA).catch(() => undefined);
+    await tabA.save({ name: "Stale edit from tab A" }).catch(() => undefined);
     const latest = await tabA.reloadLatest();
 
     expect(latest.name).toBe("Renamed by tab B");
     expect(tabA.heldRevision).toBe(stampFrom(1));
     // Rebased cleanly: the token and the re-read content are bound together, so
     // the next save is accepted because it describes what is now on screen.
-    await tabA.save({ name: "Edit after reload" }, latest);
+    await tabA.save({ name: "Edit after reload" });
     expect(store.row("project-1").project.name).toBe("Edit after reload");
   });
 });
@@ -180,7 +193,8 @@ describe("project revision fence - a token only ever certifies the copy it was p
 
     const tabA = new ProjectRevisionSession("project-1", "context");
     let caught: unknown;
-    await tabA.begin(view).catch((error) => { caught = error; });
+    tabA.noteDraft(view);
+    await tabA.begin().catch((error) => { caught = error; });
 
     expect(isRevisionConflict(caught)).toBe(true);
     expect(isRevisionDiverged(caught)).toBe(true);
@@ -201,8 +215,9 @@ describe("project revision fence - a token only ever certifies the copy it was p
     store.commitFromElsewhere("project-1", { description: "Tab B's synopsis" });
 
     const tabA = new ProjectRevisionSession("project-1", "details");
+    tabA.noteDraft(view);
     let caught: unknown;
-    await tabA.save({ name: view.name, description: view.description ?? undefined, instructions: view.instructions ?? undefined, contextNotes: view.contextNotes ?? undefined, type: view.type }, view)
+    await tabA.save({ name: view.name, description: view.description ?? undefined, instructions: view.instructions ?? undefined, contextNotes: view.contextNotes ?? undefined, type: view.type })
       .catch((error) => { caught = error; });
 
     expect(isRevisionDiverged(caught)).toBe(true);
@@ -217,13 +232,15 @@ describe("project revision fence - a token only ever certifies the copy it was p
     store.commitFromElsewhere("project-1", { instructions: "Rewritten by tab B" });
     const tabA = new ProjectRevisionSession("project-1", "context");
 
-    await tabA.begin(view).catch(() => undefined);
+    tabA.noteDraft(view);
+    await tabA.begin().catch(() => undefined);
     const readsAfter = store.fetchMock.mock.calls.length;
     // Continued typing must not keep hammering the row looking for a token it
     // cannot honestly use, and a later save must not quietly go through.
-    await tabA.begin(view).catch(() => undefined);
+    tabA.noteDraft(view);
+    await tabA.begin().catch(() => undefined);
     let caught: unknown;
-    await tabA.save({ name: "Typed after the divergence" }, view).catch((error) => { caught = error; });
+    await tabA.save({ name: "Typed after the divergence" }).catch((error) => { caught = error; });
 
     expect(store.fetchMock.mock.calls).toHaveLength(readsAfter);
     expect(isRevisionDiverged(caught)).toBe(true);
@@ -245,7 +262,8 @@ describe("project revision fence - a token only ever certifies the copy it was p
     const tabA = new ProjectRevisionSession("project-1", "context");
 
     let first: unknown;
-    await tabA.begin(view).catch((error) => { first = error; });
+    tabA.noteDraft(view);
+    await tabA.begin().catch((error) => { first = error; });
     expect(first).toBeInstanceOf(TypeError);
     expect(tabA.heldRevision).toBeNull();
 
@@ -253,7 +271,7 @@ describe("project revision fence - a token only ever certifies the copy it was p
     store.commitFromElsewhere("project-1", { name: "Renamed while offline" });
 
     let caught: unknown;
-    await tabA.save({ name: "Saved after recapture" }, view).catch((error) => { caught = error; });
+    await tabA.save({ name: "Saved after recapture" }).catch((error) => { caught = error; });
     expect(isRevisionDiverged(caught)).toBe(true);
     expect(patches(store)).toHaveLength(0);
     expect(store.row("project-1").project.name).toBe("Renamed while offline");
@@ -269,9 +287,10 @@ describe("project revision fence - a token only ever certifies the copy it was p
     const { ProjectRevisionSession } = await loadClient(flaky);
     const view = displayed(store);
     const tabA = new ProjectRevisionSession("project-1", "context");
-    await tabA.begin(view).catch(() => undefined);
+    tabA.noteDraft(view);
+    await tabA.begin().catch(() => undefined);
 
-    const saved = await tabA.save({ name: "Saved after recapture" }, view);
+    const saved = await tabA.save({ name: "Saved after recapture" });
     expect(saved.project.name).toBe("Saved after recapture");
     expect(patches(store)[0]!.ifMatch).toBe(stampFrom(0));
   });
@@ -282,7 +301,8 @@ describe("project revision fence - a token only ever certifies the copy it was p
     const view = displayed(store);
     const session = new ProjectRevisionSession("project-1", "context");
 
-    await Promise.all([session.begin(view), session.begin(view), session.begin(view)]);
+    session.noteDraft(view);
+    await Promise.all([session.begin(), session.begin(), session.begin()]);
     const reads = store.fetchMock.mock.calls.filter((call) => String(call[0]).includes("/api/projects/"));
     expect(reads).toHaveLength(1);
     expect(session.heldRevision).toBe(stampFrom(0));
@@ -296,7 +316,8 @@ describe("project revision fence - a token only ever certifies the copy it was p
     const view = { ...displayed(store), instructions: "  Original instructions  ", contextNotes: "Original notes\n" };
     const session = new ProjectRevisionSession("project-1", "context");
 
-    await session.begin(view);
+    session.noteDraft(view);
+    await session.begin();
     expect(session.heldRevision).toBe(stampFrom(0));
   });
 
@@ -309,13 +330,13 @@ describe("project revision fence - a token only ever certifies the copy it was p
     const view = displayed(store);
     const details = new ProjectRevisionSession("project-1", "details");
     const context = new ProjectRevisionSession("project-1", "context");
-    await details.begin(view);
-    await context.begin(view);
+    details.noteDraft(view);
+    await details.begin();
+    context.noteDraft(view);
+    await context.begin();
 
     const written = await details.save(
-      { name: "Renamed in the details form", description: view.description ?? undefined, instructions: view.instructions ?? undefined, contextNotes: view.contextNotes ?? undefined, type: view.type },
-      view,
-    );
+      { name: "Renamed in the details form", description: view.description ?? undefined, instructions: view.instructions ?? undefined, contextNotes: view.contextNotes ?? undefined, type: view.type });
     // The details answer describes a row the context draft has never seen, so
     // folding it in would leave that draft bound to content it does not hold.
     context.adopt(written);
@@ -326,9 +347,7 @@ describe("project revision fence - a token only ever certifies the copy it was p
     // and it is refused before anything is declared.
     let caught: unknown;
     await context.save(
-      { name: view.name, description: view.description ?? undefined, instructions: "Typed into the stale context draft", contextNotes: view.contextNotes ?? undefined, type: view.type },
-      view,
-    ).catch((error) => { caught = error; });
+      { name: view.name, description: view.description ?? undefined, instructions: "Typed into the stale context draft", contextNotes: view.contextNotes ?? undefined, type: view.type }).catch((error) => { caught = error; });
     expect(isRevisionDiverged(caught)).toBe(true);
     expect(isRevisionConflict(caught)).toBe(true);
     expect(store.row("project-1").project.instructions).toBe("Original instructions");
@@ -341,13 +360,15 @@ describe("project revision fence - a token only ever certifies the copy it was p
     const view = displayed(store);
     const details = new ProjectRevisionSession("project-1", "details");
     const context = new ProjectRevisionSession("project-1", "context");
-    await details.begin(view);
-    await context.begin(view);
+    details.noteDraft(view);
+    await details.begin();
+    context.noteDraft(view);
+    await context.begin();
 
-    await details.save({ name: "Renamed in the details form" }, view);
+    await details.save({ name: "Renamed in the details form" });
     // The context draft's own token is now expired by that write, so its save is
     // a conflict the member decides on - not a silent overwrite of the rename.
-    const caught = await context.save({ name: view.name, instructions: "Typed in the context draft" }, view).catch((error) => error);
+    const caught = await context.save({ name: view.name, instructions: "Typed in the context draft" }).catch((error) => error);
     expect(isStatus(caught, 409)).toBe(true);
     expect(store.row("project-1").project.name).toBe("Renamed in the details form");
     // Recovering through the wildcard applies the context edit on top of it, keeping
@@ -364,7 +385,8 @@ describe("project revision fence - status writes", () => {
     const { api, ProjectRevisionSession } = await loadClient(store.fetchMock);
     const view = displayed(store);
     const session = new ProjectRevisionSession("project-1", "context");
-    await session.begin(view);
+    session.noteDraft(view);
+    await session.begin();
 
     // The real endpoint publishes the stamp it committed on success, which is
     // what makes this adoption possible; pinned against the backend by
@@ -380,14 +402,14 @@ describe("project revision fence - status writes", () => {
     expect(new Headers(archiveCall[1].headers).get("If-Match")).toBeNull();
 
     // The draft the member was writing stays savable against the moved row.
-    const saved = await session.save({ name: "Edited after archiving" }, view);
+    const saved = await session.save({ name: "Edited after archiving" });
     expect(saved.project.name).toBe("Edited after archiving");
     expect(saved.project.status).toBe("Archived");
 
     const restored = await api.restoreProjectWithRevision("project-1");
     session.adopt(restored);
     // The page carries the copy the member last saved, which is what it shows them.
-    await session.save({ name: "Edited after restoring" }, saved.project);
+    await session.save({ name: "Edited after restoring" });
     expect(store.row("project-1").project.status).toBe("Active");
   });
 
@@ -399,7 +421,8 @@ describe("project revision fence - status writes", () => {
     const { api, ProjectRevisionSession, isRevisionDiverged } = await loadClient(store.fetchMock);
     const view = displayed(store);
     const session = new ProjectRevisionSession("project-1", "context");
-    await session.begin(view);
+    session.noteDraft(view);
+    await session.begin();
 
     store.commitFromElsewhere("project-1", { instructions: "Rewritten by another tab" });
     const archived = await api.archiveProjectWithRevision("project-1");
@@ -408,20 +431,113 @@ describe("project revision fence - status writes", () => {
     // The binding was dropped rather than refreshed onto content this page does
     // not show, so the next save is refused instead of silently overwriting.
     expect(session.heldRevision).toBeNull();
-    const caught = await session.save({ name: "Stale draft after archive" }, view).catch((error) => error);
+    const caught = await session.save({ name: "Stale draft after archive" }).catch((error) => error);
     expect(isRevisionDiverged(caught)).toBe(true);
     expect(patches(store)).toHaveLength(0);
     expect(store.row("project-1").project.instructions).toBe("Rewritten by another tab");
   });
 
-  it("leaves an unbound draft free to adopt a status write, since it certified nothing", async () => {
+  it("refuses to adopt a status write into a draft that reported no content", async () => {
+    // The shape the re-review found: a draft that has never compared the row with
+    // what it displays used to take whoever's stamp it was handed and become
+    // "bound", so its first keystroke skipped the capture entirely and its save
+    // carried content nobody had verified. An unreported draft has nothing to
+    // certify, so there is nothing to bind.
+    const store = server([row()]);
+    const { api, ProjectRevisionSession, isRevisionUnavailable } = await loadClient(store.fetchMock);
+    const session = new ProjectRevisionSession("project-1", "context");
+    const archived = await api.archiveProjectWithRevision("project-1");
+    session.adopt(archived);
+    expect(session.heldRevision).toBeNull();
+    expect(session.heldBase).toBeNull();
+    // And a save that never captured refuses instead of writing unfenced.
+    const caught = await session.save({ name: "Edited after archiving" }).catch((error) => error);
+    expect(isRevisionUnavailable(caught)).toBe(true);
+    expect(patches(store)).toHaveLength(0);
+  });
+
+  it("advances a reported seed that the status write still matches", async () => {
+    // The safe counterpart: once the draft has said what it is showing, a status
+    // write over unchanged content is not a conflict - the draft still describes
+    // the row, only at a newer revision.
     const store = server([row()]);
     const { api, ProjectRevisionSession } = await loadClient(store.fetchMock);
     const session = new ProjectRevisionSession("project-1", "context");
+    session.noteDraft(displayed(store));
     const archived = await api.archiveProjectWithRevision("project-1");
     session.adopt(archived);
     expect(session.heldRevision).toBe(stampFrom(1));
     expect(session.heldBase?.name).toBe("project-1");
+    const saved = await session.save({ name: "Edited after archiving" });
+    expect(saved.project.name).toBe("Edited after archiving");
+    expect(patches(store).slice(-1)[0]!.ifMatch).toBe(stampFrom(1));
+  });
+
+  it("refuses a status write that landed on content the untouched draft never saw", async () => {
+    // Exactly the reported sequence, before a single keystroke: the page seeded
+    // from v1, another tab saved v2, the member archived, and the archive answered
+    // with v2's content. Adopting that stamp would certify v1's fields.
+    const store = server([row()]);
+    const { api, ProjectRevisionSession, isRevisionDiverged } = await loadClient(store.fetchMock);
+    const session = new ProjectRevisionSession("project-1", "context");
+    session.noteDraft(displayed(store));
+    store.commitFromElsewhere("project-1", { instructions: "Saved by tab B" });
+    const archived = await api.archiveProjectWithRevision("project-1");
+    session.adopt(archived);
+    // The verdict is latched on arrival rather than left for a keystroke to find.
+    expect(session.heldRevision).toBeNull();
+    const caught = await session.save({ name: "project-1", instructions: "Typed after archiving" }).catch((error) => error);
+    expect(isRevisionDiverged(caught)).toBe(true);
+    expect(patches(store)).toHaveLength(0);
+    expect(store.row("project-1").project.instructions).toBe("Saved by tab B");
+  });
+
+  it("abandons a capture that was still in flight when the row moved", async () => {
+    // Ordering, not luck: a read issued against the old row must not commit after a
+    // write landed, because its answer describes the moment before it.
+    const store = server([row()]);
+    // The read is held open so the row can genuinely move WHILE it is in flight -
+    // without the gate the capture settles before anything else can run, which
+    // would test the happy path instead of the interleaving.
+    let release: ((value: Response) => void) | null = null;
+    let pending: Response | null = null;
+    let held = false;
+    const gated = vi.fn(async (input: string, init?: RequestInit) => {
+      const response = await store.handler(input, init);
+      if ((init?.method ?? "GET").toUpperCase() === "GET" && !held) {
+        held = true;
+        pending = response;
+        return new Promise<Response>((resolve) => { release = resolve; });
+      }
+      return response;
+    });
+    const { api, ProjectRevisionSession, isRevisionDiverged } = await loadClient(gated);
+    const session = new ProjectRevisionSession("project-1", "context");
+    session.noteDraft(displayed(store));
+    const capture = session.begin();
+    store.commitFromElsewhere("project-1", { instructions: "Moved mid-flight" });
+    const archived = await api.archiveProjectWithRevision("project-1");
+    session.adopt({ project: store.row("project-1").project, revision: archived.revision });
+    // Only now does the stale answer arrive, describing a row that no longer exists.
+    release!(pending!);
+    const caught = await capture.catch((error) => error);
+    expect(isRevisionDiverged(caught)).toBe(true);
+    expect(session.heldRevision).toBeNull();
+    expect(patches(store)).toHaveLength(0);
+  });
+
+  it("refuses a seed reported for some other row", async () => {
+    const store = server([
+      row("project-1"),
+      { project: makeProject("project-2", "Other instructions", "Other notes"), revision: stampFrom(50_000) },
+    ]);
+    const { ProjectRevisionSession, isRevisionUnavailable } = await loadClient(store.fetchMock);
+    const session = new ProjectRevisionSession("project-1", "context");
+    session.noteDraft(displayed(store, "project-2"));
+    expect(session.heldDraft).toBeNull();
+    const caught = await session.save({ name: "Cross-row write" }).catch((error) => error);
+    expect(isRevisionUnavailable(caught)).toBe(true);
+    expect(patches(store)).toHaveLength(0);
   });
 });
 
@@ -431,11 +547,12 @@ describe("project revision fence - successful saves and session hygiene", () => 
     const { ProjectRevisionSession } = await loadClient(store.fetchMock);
     const session = new ProjectRevisionSession("project-1", "context");
     const view = displayed(store);
-    await session.begin(view);
+    session.noteDraft(view);
+    await session.begin();
 
-    const first = await session.save({ name: "First save" }, view);
+    const first = await session.save({ name: "First save" });
     expect(first.revision).toBe(stampFrom(1));
-    const second = await session.save({ name: "Second save" }, first.project);
+    const second = await session.save({ name: "Second save" });
     expect(second.revision).toBe(stampFrom(2));
     expect(session.heldRevision).toBe(stampFrom(2));
     expect(session.heldBase?.name).toBe("Second save");
@@ -449,8 +566,10 @@ describe("project revision fence - successful saves and session hygiene", () => 
     const store = server([row()]);
     const { ProjectRevisionSession } = await loadClient(store.fetchMock);
     const session = new ProjectRevisionSession("project-1", "context");
+    // The save path reports the same seed a mounted draft would.
+    session.noteDraft(displayed(store));
 
-    await session.save({ name: "Saved without an explicit begin" }, displayed(store));
+    await session.save({ name: "Saved without an explicit begin" });
     expect(patches(store)[0]!.ifMatch).toBe(stampFrom(0));
   });
 
@@ -464,10 +583,12 @@ describe("project revision fence - successful saves and session hygiene", () => 
     expect(isRevisionConflict({ status: 409, code: "REVISION_DIVERGED" })).toBe(true);
 
     const session = new ProjectRevisionSession("project-1", "context");
+    // A draft only certifies content it has reported as on screen.
+    session.noteDraft(displayed(store));
     session.adopt({ project: displayed(store), revision: "not-a-revision" });
-    await session.save({ name: "Rejected first" }, displayed(store)).catch(() => undefined);
+    await session.save({ name: "Rejected first" }).catch(() => undefined);
     // The unusable token was dropped, so the retry captured a real one and won.
-    const saved = await session.save({ name: "Recovered" }, displayed(store));
+    const saved = await session.save({ name: "Recovered" });
     expect(saved.project.name).toBe("Recovered");
   });
 
@@ -479,17 +600,22 @@ describe("project revision fence - successful saves and session hygiene", () => 
     const { ProjectRevisionSession, isRevisionConflict } = await loadClient(store.fetchMock);
 
     const sessionOne = new ProjectRevisionSession("project-1", "context");
-    await sessionOne.begin(displayed(store, "project-1"));
+    sessionOne.noteDraft(displayed(store, "project-1"));
+    await sessionOne.begin();
     const sessionTwo = new ProjectRevisionSession("project-2", "context");
-    await sessionTwo.begin(displayed(store, "project-2"));
+    sessionTwo.noteDraft(displayed(store, "project-2"));
+    await sessionTwo.begin();
     expect(sessionTwo.heldRevision).not.toBe(sessionOne.heldRevision);
 
     // A token borrowed across projects names a different row, and the fence
     // treats it as the conflict it is rather than as a save.
     const hijacked = new ProjectRevisionSession("project-2", "context");
+    // The draft reports what it is showing, exactly as a mounted form does, so the
+    // borrowed token is bound - and then refused by the row it does not name.
+    hijacked.noteDraft(displayed(store, "project-2"));
     hijacked.adopt({ project: displayed(store, "project-2"), revision: sessionOne.heldRevision });
     let caught: unknown;
-    await hijacked.save({ name: "wrong row" }, displayed(store, "project-2")).catch((error) => { caught = error; });
+    await hijacked.save({ name: "wrong row" }).catch((error) => { caught = error; });
     expect(isRevisionConflict(caught)).toBe(true);
     expect(store.row("project-2").project.name).toBe("project-2");
   });
@@ -502,8 +628,10 @@ describe("project revision fence - successful saves and session hygiene", () => 
     const { ProjectRevisionSession, isRevisionConflict, isRevisionUnavailable } = await loadClient(store.fetchMock);
     const view = displayed(store);
     const session = new ProjectRevisionSession("project-1", "context");
-
-    const caught = await session.save({ name: "Edited" }, view).then(() => null).catch((error: unknown) => error);
+    // The draft reported what it is showing, so the refusal below is about the
+    // missing header and not about a draft that never said what it displays.
+    session.noteDraft(view);
+    const caught = await session.save({ name: "Edited" }).then(() => null).catch((error: unknown) => error);
 
     expect(isRevisionUnavailable(caught)).toBe(true);
     expect(isRevisionConflict(caught)).toBe(false);
@@ -518,14 +646,15 @@ describe("project revision fence - successful saves and session hygiene", () => 
     const store = server([{ project, revision: token }]);
     const { ProjectRevisionSession } = await loadClient(store.fetchMock);
     const session = new ProjectRevisionSession("project-1", "context");
-    await session.begin(displayed(store));
+    session.noteDraft(displayed(store));
+    await session.begin();
 
     // A reconstruction through a JavaScript Date stops at three fractional
     // digits and would be refused outright by the production store.
     expect(session.heldRevision).toBe(token);
     expect(new Date(token.slice(1, -1)).toISOString()).not.toBe(token.slice(1, -1));
 
-    await session.save({ name: "Precision preserved" }, displayed(store));
+    await session.save({ name: "Precision preserved" });
     expect(patches(store)[0]!.ifMatch).toBe(token);
   });
 

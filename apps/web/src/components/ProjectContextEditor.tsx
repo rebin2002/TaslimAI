@@ -3,7 +3,7 @@
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { Check, FileText } from "lucide-react";
 import type { Project, ProjectInput } from "@/lib/api";
-import { isRevisionConflict, isRevisionDiverged, isRevisionUnavailable, ProjectRevisionSession } from "@/lib/projectRevision";
+import { draftBaseOf, isRevisionConflict, isRevisionDiverged, isRevisionUnavailable, ProjectRevisionSession, type ProjectDraftBase } from "@/lib/projectRevision";
 import { useLocale } from "@/components/LocaleProvider";
 
 export function ProjectContextEditor({ project, onSaved, revision }: Readonly<{
@@ -37,6 +37,15 @@ export function ProjectContextEditor({ project, onSaved, revision }: Readonly<{
   // has to drop the previous project's state rather than display, submit or
   // confirm it as the new project's context.
   const ownerRef = useRef(project.id);
+  // The immutable copy THIS DRAFT was seeded from: the exact content the local
+  // fields above were initialized with. It is deliberately not `project`, which is
+  // the parent's live copy and is replaced by every other writer's answer. The
+  // fence may only be told about the content the member actually typed into, so a
+  // sibling form's save, or an archive landing while this draft sits untouched,
+  // cannot make a newer row certify these older fields. It moves only where the
+  // local fields themselves are re-based: a project switch, a reload, or a write
+  // this draft made.
+  const seedRef = useRef<ProjectDraftBase>(draftBaseOf(project));
   // One revision session per project. The token it holds belongs to this id and
   // is never carried across a route switch: declaring another project's
   // revision would either be rejected as unusable or, worse, certify a draft
@@ -45,19 +54,25 @@ export function ProjectContextEditor({ project, onSaved, revision }: Readonly<{
   const session = revision ?? ownSession;
 
   useEffect(() => {
-    if (ownerRef.current === project.id) return;
-    ownerRef.current = project.id;
-    setInstructions(project.instructions ?? "");
-    setContextNotes(project.contextNotes ?? "");
-    setSaving(false);
-    setSaved(false);
-    setError("");
-    setConflict(false);
-    setDiverged(false);
-    busy.current = false;
+    if (ownerRef.current !== project.id) {
+      ownerRef.current = project.id;
+      setInstructions(project.instructions ?? "");
+      setContextNotes(project.contextNotes ?? "");
+      setSaving(false);
+      setSaved(false);
+      setError("");
+      setConflict(false);
+      setDiverged(false);
+      busy.current = false;
+      // The draft now describes a different row, so its seed moves with it.
+      seedRef.current = draftBaseOf(project);
+    }
+    // Tell the session what is on screen: once per draft, not once per parent
+    // render. After this point only the paths below re-base it.
+    session.noteDraft(seedRef.current);
     // Project identity intentionally controls the local draft boundary.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [project.id]);
+  }, [project.id, session]);
 
   // The revision is captured when the member begins editing, so the token
   // describes the copy the draft was written against. A failed capture is not
@@ -65,10 +80,11 @@ export function ProjectContextEditor({ project, onSaved, revision }: Readonly<{
   function beginEditing() {
     if (session.isBound || conflict) return;
     // The token is only ever bound to the content it was published for, so this
-    // read compares the row against `project` - the copy being edited. A page
-    // that is already out of date reports a conflict instead of stamping its
-    // stale draft with the newer revision.
-    void session.begin(project).catch((caught) => {
+    // read compares the row against the copy this draft was seeded from - never the
+    // parent's live prop, which may already describe a newer row that this textarea
+    // never displayed. A draft that is out of date reports a conflict instead of
+    // stamping its stale fields with the newer revision.
+    void session.begin().catch((caught) => {
       if (isRevisionConflict(caught)) {
         setDiverged(isRevisionDiverged(caught));
         setConflict(true);
@@ -78,10 +94,14 @@ export function ProjectContextEditor({ project, onSaved, revision }: Readonly<{
     });
   }
 
+  // The payload is the seeded copy plus this draft's own edits. Taking the
+  // untouched fields from `seedRef` rather than from `project` means a field some
+  // other writer moved can never ride along into this write: the fence refuses the
+  // write instead, and the member decides what happens to their text.
   const draft = (): ProjectInput => ({
-    name: project.name,
-    description: project.description ?? undefined,
-    type: project.type,
+    name: seedRef.current.name,
+    description: seedRef.current.description ?? undefined,
+    type: seedRef.current.type,
     instructions: instructions || undefined,
     contextNotes: contextNotes || undefined,
   });
@@ -94,11 +114,14 @@ export function ProjectContextEditor({ project, onSaved, revision }: Readonly<{
     setError("");
     setConflict(false);
     try {
-      const updated = await session.save(draft(), project);
+      const updated = await session.save(draft());
       // A reply that lands after the view moved on belongs to the project that has
       // just been left behind, so it is dropped instead of being written into the
       // overview of the project now on screen.
       if (ownerRef.current !== submittingProjectId) return;
+      // This draft wrote the row, so what is on screen and what the token certifies
+      // are now the same content.
+      seedRef.current = draftBaseOf(updated.project);
       onSaved(updated.project);
       setSaved(true);
     } catch (caught) {
@@ -130,6 +153,9 @@ export function ProjectContextEditor({ project, onSaved, revision }: Readonly<{
       if (ownerRef.current !== project.id) return;
       setInstructions(latest.instructions ?? "");
       setContextNotes(latest.contextNotes ?? "");
+      // Re-based onto the server's copy: these fields are now the content the
+      // reloaded token was published for.
+      seedRef.current = draftBaseOf(latest);
       setConflict(false);
       setDiverged(false);
       setError(t("projects.revisionReloaded"));
@@ -151,6 +177,7 @@ export function ProjectContextEditor({ project, onSaved, revision }: Readonly<{
     try {
       const updated = await session.saveOverLatest(draft());
       if (ownerRef.current !== submittingProjectId) return;
+      seedRef.current = draftBaseOf(updated.project);
       onSaved(updated.project);
       setConflict(false);
       setDiverged(false);

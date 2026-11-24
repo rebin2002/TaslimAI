@@ -189,3 +189,70 @@ test("refuses a save with no keystroke from a page that went stale while open", 
 
   await tabB.close();
 });
+
+test("refuses a context draft whose page archived a row another tab had changed", async ({ authenticatedPage }) => {
+  // The reviewed sequence, in a browser: tab B saves, tab A - whose context draft
+  // has not been touched - archives the row first. The archive answer publishes a
+  // newer revision over content tab A never displayed, and certifying tab A's
+  // older fields with it would silently revert tab B.
+  const project = await createProject(authenticatedPage, "E2E Fence Archive Before Typing");
+  const url = `/projects/${project.id}`;
+  authenticatedPage.on("dialog", (dialog) => { void dialog.accept(); });
+
+  await authenticatedPage.goto(url);
+  await expect(contextCard(authenticatedPage)).toBeVisible();
+
+  const tabB = await authenticatedPage.context().newPage();
+  await tabB.goto(url);
+  await expect(contextCard(tabB)).toBeVisible();
+  await instructionsField(tabB).fill("Saved by tab B before tab A archived");
+  await saveContext(tabB);
+  await expect(contextCard(tabB).locator(".form-success")).toBeVisible();
+  expect((await readProject(authenticatedPage.request, project.id)).instructions).toBe("Saved by tab B before tab A archived");
+
+  // Tab A archives from the detail header. The status write is unconditional by
+  // design; what must not happen is its revision being handed to a stale draft.
+  await authenticatedPage.getByRole("button", { name: /^archive$/i }).click();
+  await expect.poll(async () => (await readProject(authenticatedPage.request, project.id)).status).toBe("Archived");
+  // The draft still shows what it was seeded with, not tab B's text.
+  await expect(instructionsField(authenticatedPage)).not.toHaveValue("Saved by tab B before tab A archived");
+
+  await instructionsField(authenticatedPage).fill("Draft typed after archiving");
+  await expect(contextCard(authenticatedPage).locator(".revision-conflict")).toBeVisible();
+  await expect(contextCard(authenticatedPage).locator(".revision-conflict p")).toContainText(/older copy of the project/i);
+  expect((await readProject(authenticatedPage.request, project.id)).instructions).toBe("Saved by tab B before tab A archived");
+
+  // Submitting the refused draft writes nothing either.
+  await saveContext(authenticatedPage);
+  await expect(instructionsField(authenticatedPage)).toHaveValue("Draft typed after archiving");
+  expect((await readProject(authenticatedPage.request, project.id)).instructions).toBe("Saved by tab B before tab A archived");
+
+  await tabB.close();
+});
+
+test("refuses a context draft that a sibling details save left behind", async ({ authenticatedPage }) => {
+  // The same defect without an archive: two editable drafts share the page, and the
+  // details form's own save replaces the view's copy. The context card below still
+  // shows the content it was seeded from, so its next save must conflict rather
+  // than ride the newer revision.
+  const project = await createProject(authenticatedPage, "E2E Fence Sibling Forms");
+  await authenticatedPage.goto(`/projects/${project.id}`);
+  await expect(contextCard(authenticatedPage)).toBeVisible();
+
+  await authenticatedPage.getByRole("button", { name: /^edit$/i }).click();
+  const modal = authenticatedPage.locator(".project-form");
+  await expect(modal).toBeVisible();
+  await modal.locator("input").first().fill("Renamed by the details form");
+  await modal.getByRole("button", { name: /^save$/i }).click();
+  await expect.poll(async () => (await readProject(authenticatedPage.request, project.id)).name).toBe("Renamed by the details form");
+
+  // The context editor never displayed that rename, and its textarea still holds
+  // the copy it was built on - including the older name it would write back.
+  await instructionsField(authenticatedPage).fill("Typed into the context draft after a sibling saved");
+  await expect(contextCard(authenticatedPage).locator(".revision-conflict")).toBeVisible();
+  await expect(contextCard(authenticatedPage).locator(".revision-conflict p")).toContainText(/older copy of the project/i);
+  await saveContext(authenticatedPage);
+  await expect(instructionsField(authenticatedPage)).toHaveValue("Typed into the context draft after a sibling saved");
+  expect((await readProject(authenticatedPage.request, project.id)).name).toBe("Renamed by the details form");
+  expect((await readProject(authenticatedPage.request, project.id)).instructions).toBe("Use mock-safe test data only.");
+});
