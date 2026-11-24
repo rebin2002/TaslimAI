@@ -69,17 +69,19 @@ public sealed class AcademicHttpGateway(HttpClient httpClient, AcademicSourceDis
                 {
                     var location = response.Headers.Location;
                     var target = location is null ? null : location.IsAbsoluteUri ? location : new Uri(current, location);
-                    if (++redirects > options.MaxRedirectHops)
-                    {
-                        response.Dispose();
-                        throw Reject(current, "too_many_redirects", (int)response.StatusCode);
-                    }
-                    if (!AcademicSourceUrlGuard.IsAllowedEndpoint(target, allowedHosts, hostExceptions))
-                    {
-                        response.Dispose();
-                        throw Reject(current, AcademicSourceFailureCategories.BlockedEndpoint, (int)response.StatusCode);
-                    }
                     var redirectStatus = (int)response.StatusCode;
+                    // A redirect's body is never read, and every decision below can throw or restart
+                    // the loop: take the two values the decision needs, then release the response and
+                    // its connection before any of them runs. Each individual throw path used to
+                    // dispose, which is how `RequireSecureTransport` below came to be the one call
+                    // that could leave a ResponseHeadersRead response — body stream and pooled
+                    // connection alike — alive until the finalizer.
+                    response.Dispose();
+                    response = null;
+                    if (++redirects > options.MaxRedirectHops)
+                        throw Reject(current, "too_many_redirects", redirectStatus);
+                    if (!AcademicSourceUrlGuard.IsAllowedEndpoint(target, allowedHosts, hostExceptions))
+                        throw Reject(current, AcademicSourceFailureCategories.BlockedEndpoint, redirectStatus);
                     // Same host is not the same place. `Authority` is host and port only and says
                     // nothing about TLS, so an https → http hop on an allow-listed host read as
                     // "same authority" and was followed with the query string intact — the reader's
@@ -92,11 +94,7 @@ public sealed class AcademicHttpGateway(HttpClient httpClient, AcademicSourceDis
                     var sameAuthority = string.Equals(target!.Authority, current.Authority, StringComparison.OrdinalIgnoreCase);
                     var sameScheme = string.Equals(target.Scheme, current.Scheme, StringComparison.OrdinalIgnoreCase);
                     if (!sameScheme && sameAuthority && IsSecureScheme(current.Scheme))
-                    {
-                        response.Dispose();
-                        response = null;
                         throw Reject(current, AcademicSourceFailureCategories.InsecureTransport, redirectStatus);
-                    }
                     // A hop that leaves the original authority could carry the request's
                     // credentials — including a Google Books key that rides the query string — to a
                     // host the operator never associated with them. Same-authority hops are the
@@ -108,8 +106,6 @@ public sealed class AcademicHttpGateway(HttpClient httpClient, AcademicSourceDis
                     // not the leak this branch is guarding.
                     if (!sameAuthority)
                     {
-                        response.Dispose();
-                        response = null;
                         // HttpClient merges the client's default request headers into every send,
                         // so a credential configured on the client cannot be stripped for one hop.
                         // Refusing that hop is the only honest guarantee, and it is why the default
@@ -119,14 +115,24 @@ public sealed class AcademicHttpGateway(HttpClient httpClient, AcademicSourceDis
                         current = ScrubCredentials(target);
                         continue;
                     }
-                    response.Dispose();
-                    response = null;
                     current = target!;
                     continue;
                 }
 
                 if (passThroughStatusCodes is not null && passThroughStatusCodes.Contains((int)response.StatusCode))
-                    return new AcademicJsonResponse((int)response.StatusCode, default, false);
+                {
+                    // The adapter asked to see this status itself — a DOI 404 is an answer, not an
+                    // outage — but the body was never going to be parsed here. With
+                    // ResponseHeadersRead the payload stream and the pooled connection stay live
+                    // until something disposes the response, so releasing them is part of returning
+                    // the status: a ten-identifier DOI batch that all miss used to hand back up to
+                    // ten undisposed responses per request. Status semantics are unchanged; only the
+                    // lifetime is.
+                    var passThroughStatus = (int)response.StatusCode;
+                    response.Dispose();
+                    response = null;
+                    return new AcademicJsonResponse(passThroughStatus, default, false);
+                }
 
                 if (IsRetryableStatus(response.StatusCode) && attempt < options.MaxAttempts)
                 {

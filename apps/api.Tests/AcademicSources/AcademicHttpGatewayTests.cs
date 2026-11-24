@@ -1,3 +1,4 @@
+using System.IO;
 using System.Net;
 using Taslim.Api.AcademicSources;
 using Xunit;
@@ -306,6 +307,107 @@ public sealed class AcademicHttpGatewayTests
         Assert.Equal(404, response.StatusCode);
         Assert.False(response.IsSuccess);
         Assert.True(response.IsPassThroughStatus);
+    }
+
+    // Lifetime of the transport. The gateway sends with ResponseHeadersRead, so until something
+    // disposes an HttpResponseMessage, its payload stream — and the pooled connection under it — is
+    // still held. Two paths used to skip that: a status the caller asked to receive as a value
+    // (the DOI adapter's 404) returned the response to its caller while handing back only the
+    // status, and a redirect refused by the transport policy threw before reaching any of the
+    // dispose calls that sat inside the branch. A ten-identifier DOI batch whose identifiers all
+    // miss therefore released nothing, and the release path for the redirect ran on the finalizer.
+    [Fact]
+    public async Task Pass_through_status_releases_the_response_it_returns()
+    {
+        var content = new TrackedContent("no such doi");
+        var (gateway, _) = Create((_, _) => new HttpResponseMessage(HttpStatusCode.NotFound) { Content = content });
+        var response = await gateway.GetJsonAsync(OkEndpoint(), CancellationToken.None, new HashSet<int> { 404 });
+        Assert.Equal(404, response.StatusCode);
+        Assert.False(response.IsSuccess);
+        Assert.True(response.IsPassThroughStatus);
+        Assert.True(content.Disposed, "a pass-through response leaked its payload and connection");
+    }
+
+    [Fact]
+    public async Task A_status_that_was_not_asked_for_keeps_its_old_rejection()
+    {
+        // What the fix must not change: 404 becomes a value only when the caller lists it. Left
+        // alone, the same response is still the not_found rejection it always was.
+        var content = new TrackedContent("no such doi");
+        var (gateway, _) = Create((_, _) => new HttpResponseMessage(HttpStatusCode.NotFound) { Content = content });
+        var exception = await Assert.ThrowsAsync<AcademicSourceRejectedException>(() =>
+            gateway.GetJsonAsync(OkEndpoint(), CancellationToken.None));
+        Assert.Equal("not_found", exception.Details?.FailureCategory);
+        Assert.Equal(404, exception.Details?.HttpStatusCode);
+        Assert.True(content.Disposed);
+    }
+
+    [Fact]
+    public async Task Refused_downgrade_redirect_disposes_the_redirect_response()
+    {
+        var content = new TrackedContent("redirect body");
+        var (gateway, handler) = Create((_, number) => number switch
+        {
+            1 => new HttpResponseMessage(HttpStatusCode.Moved)
+            {
+                Headers = { Location = new Uri("http://api.openalex.org/works?q=vaccine+policy&key=synthetic-provider-key") },
+                Content = content,
+            },
+            _ => AcademicFixture.Json("""{"leaked":"yes"}"""),
+        });
+        var exception = await Assert.ThrowsAsync<AcademicSourceRejectedException>(() => gateway.GetJsonAsync(
+            new Uri("https://api.openalex.org/works?q=vaccine+policy&key=synthetic-provider-key"), CancellationToken.None));
+        Assert.Equal("insecure_transport", exception.Details?.FailureCategory);
+        Assert.Equal(1, handler.RequestCount);
+        Assert.True(content.Disposed, "the refused redirect leaked its payload and connection");
+    }
+
+    [Fact]
+    public async Task Blocked_and_exhausted_redirects_release_the_response_with_their_status()
+    {
+        var blocked = new TrackedContent("blocked body");
+        var (gateway, handler) = Create((_, _) => new HttpResponseMessage(HttpStatusCode.Found)
+        {
+            Headers = { Location = new Uri("https://internal.corp.example/steal") },
+            Content = blocked,
+        });
+        var exception = await Assert.ThrowsAsync<AcademicSourceRejectedException>(() => gateway.GetJsonAsync(
+            OkEndpoint(), CancellationToken.None));
+        Assert.Equal("blocked_endpoint", exception.Details?.FailureCategory);
+        Assert.Equal(1, handler.RequestCount);
+        Assert.True(blocked.Disposed, "the off-allow-list redirect leaked its payload");
+
+        var looped = new TrackedContent("loop body");
+        var (loopGateway, _) = Create((_, _) => new HttpResponseMessage(HttpStatusCode.Found)
+        {
+            Headers = { Location = new Uri("https://api.openalex.org/works") },
+            Content = looped,
+        }, options => options.MaxRedirectHops = 1);
+        var ceiling = await Assert.ThrowsAsync<AcademicSourceRejectedException>(() => loopGateway.GetJsonAsync(
+            OkEndpoint(), CancellationToken.None));
+        Assert.Equal("too_many_redirects", ceiling.Details?.FailureCategory);
+        Assert.Equal(302, ceiling.Details?.HttpStatusCode);
+        Assert.True(looped.Disposed, "the hop-ceiling redirect leaked its payload");
+    }
+
+    private sealed class TrackedContent(string body) : HttpContent
+    {
+        public bool Disposed { get; private set; }
+
+        protected override Task SerializeToStreamAsync(Stream stream, TransportContext? context) =>
+            stream.WriteAsync(System.Text.Encoding.UTF8.GetBytes(body)).AsTask();
+
+        protected override bool TryComputeLength(out long length)
+        {
+            length = System.Text.Encoding.UTF8.GetByteCount(body);
+            return true;
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing) Disposed = true;
+            base.Dispose(disposing);
+        }
     }
 
     private sealed class HangingHandler : HttpMessageHandler
