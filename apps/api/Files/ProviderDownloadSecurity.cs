@@ -355,21 +355,23 @@ public sealed class ProviderDownloadSecurity(IProviderUrlPolicy urlPolicy)
 /// so a redirect can never land on a private destination.
 ///
 /// Semantics deliberately mirror the platform auto-redirect handler: relative targets resolve
-/// against the hop URI; 301/302/303 rewrite methods other than GET/HEAD to GET (a body cannot be
-/// replayed under a rewritten method); 307/308 preserve method and replay a buffered copy of the
-/// body (up to a small cap). Credential-like headers (Authorization, Proxy-Authorization, Cookie,
+/// against the hop URI, GET/HEAD methods are preserved end-to-end, and credential-like headers
+/// (Authorization, Proxy-Authorization, Cookie,
 /// and any header whose name contains key/token/secret/signature) are dropped when a hop changes
 /// origin, so a cross-origin CDN never receives provider API credentials. A refused hop surfaces
 /// as an <see cref="HttpRequestException"/> wrapping the policy's stable
 /// <see cref="InvalidDataException"/> so existing provider failure mapping keeps classifying
 /// failures unchanged; no URL material is echoed into messages. When the hop budget is exhausted
 /// the final 3xx is returned to the caller rather than chased further, and a malformed
-/// <c>Location</c> is likewise surfaced, never followed.
+/// <c>Location</c> is likewise surfaced, never followed. Following is limited to bodyless GET/HEAD
+/// artifact fetches: a 3xx on any mutating method (the paid generation POST submissions included,
+/// which the create paths deliberately never retry) is surfaced to the provider unchanged — a
+/// provider-supplied 307/308 must never resend a prompt/request body (another origin's public
+/// endpoint could run a fresh billable generation), and even a same-origin POST->GET rewrite would
+/// silently reissue provider-controlled requests the submissions opted out of.
 /// </summary>
 public sealed class ProviderRedirectResolver : DelegatingHandler
 {
-    private const int ReplayableBodyLimit = 5 * 1024 * 1024;
-
     private static readonly HashSet<string> ExplicitCredentialHeaders = new(StringComparer.OrdinalIgnoreCase)
     {
         "Authorization",
@@ -407,6 +409,9 @@ public sealed class ProviderRedirectResolver : DelegatingHandler
             if (!IsRedirectStatus(response.StatusCode) || response.Headers.Location is null)
                 return response;
 
+            if (!IsBodylessRead(current.Method))
+                return response; // Mutating submissions (POST etc.) never follow, replay, or rewrite.
+
             var target = ResolveTarget(current.RequestUri!, response.Headers.Location);
             if (target is null)
                 return response; // Malformed Location: surface the 3xx like the platform handler.
@@ -427,7 +432,7 @@ public sealed class ProviderRedirectResolver : DelegatingHandler
                 throw new HttpRequestException("Provider download redirect was refused.", exception);
             }
 
-            var next = await BuildNextRequest(current, response.StatusCode, target, cancellationToken).ConfigureAwait(false);
+            var next = BuildNextRequest(current, target);
             redirects++;
             response.Dispose();
             if (currentOwned) current.Dispose();
@@ -435,6 +440,9 @@ public sealed class ProviderRedirectResolver : DelegatingHandler
             currentOwned = true;
         }
     }
+
+    private static bool IsBodylessRead(HttpMethod method) =>
+        HttpMethod.Get.Equals(method) || HttpMethod.Head.Equals(method);
 
     private static bool IsRedirectStatus(HttpStatusCode statusCode) =>
         statusCode is HttpStatusCode.Moved
@@ -449,40 +457,15 @@ public sealed class ProviderRedirectResolver : DelegatingHandler
         return Uri.TryCreate(from, location, out var combined) && combined.IsAbsoluteUri ? combined : null;
     }
 
-    private static async ValueTask<HttpRequestMessage> BuildNextRequest(
-        HttpRequestMessage previous,
-        HttpStatusCode statusCode,
-        Uri target,
-        CancellationToken cancellationToken)
+    private static HttpRequestMessage BuildNextRequest(HttpRequestMessage previous, Uri target)
     {
-        var method = statusCode switch
-        {
-            HttpStatusCode.Moved or HttpStatusCode.Found or HttpStatusCode.SeeOther
-                => previous.Method == HttpMethod.Get || previous.Method == HttpMethod.Head
-                    ? previous.Method
-                    : HttpMethod.Get,
-            _ => previous.Method, // 307/308 preserve the method.
-        };
-
-        var next = new HttpRequestMessage(method, target)
+        // Only bodyless reads reach here (SendAsync gates the methods), so the hop preserves
+        // GET/HEAD as-is and carries no content to replay.
+        var next = new HttpRequestMessage(previous.Method, target)
         {
             Version = previous.Version,
             VersionPolicy = previous.VersionPolicy,
         };
-
-        // 307/308 replay the body from a buffered copy (the previous request owns its content, and
-        // disposing it must not strand the replay); Get/Head hops and rewritten 301/302/303 POSTs
-        // carry none, matching the platform handler.
-        if (method != HttpMethod.Get && method != HttpMethod.Head && previous.Content is not null)
-        {
-            var body = await previous.Content.ReadAsByteArrayAsync(cancellationToken).ConfigureAwait(false);
-            if (body.Length > ReplayableBodyLimit)
-                throw new HttpRequestException("Provider download redirect body was too large to replay.");
-            var replay = new ByteArrayContent(body);
-            foreach (var header in previous.Content.Headers)
-                replay.Headers.TryAddWithoutValidation(header.Key, header.Value);
-            next.Content = replay;
-        }
 
         CopyHeaders(previous, next, crossOrigin: !IsSameOrigin(previous.RequestUri!, target));
         return next;

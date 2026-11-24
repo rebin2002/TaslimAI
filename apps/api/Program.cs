@@ -350,7 +350,10 @@ builder.Services.AddHttpClient<DirectVideoHttpProviderAdapter>()
     // The pinned handler disables auto-redirect (every hop must pass endpoint admission), so this
     // bounded resolver revalidates and follows legitimate public 3xx output hops for adapters whose
     // fetch code has no manual loop of its own (Mubert keeps its own loop; StableAudio's audio
-    // arrives inline in its 200 responses, so no API redirect hop is load-bearing there).
+    // arrives inline in its 200 responses, so no API redirect hop is load-bearing there). Following
+    // is limited to bodyless GET/HEAD artifact fetches: a 3xx on a generation POST is surfaced to
+    // the provider's failure mapping, never followed, rewritten, or replayed (the create paths
+    // deliberately never retry a billable submission).
     .AddHttpMessageHandler(services => new ProviderRedirectResolver(services.GetRequiredService<IProviderUrlPolicy>()));
 builder.Services.Configure<VideoGenerationAdapterOptions>(builder.Configuration.GetSection("VideoGenerationAdapters"));
 builder.Services.AddSingleton<IVideoGenerationAdapter, UnavailableVideoGenerationAdapter>();

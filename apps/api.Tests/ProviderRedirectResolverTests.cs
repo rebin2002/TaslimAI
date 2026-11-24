@@ -14,9 +14,11 @@ namespace Taslim.Api.Tests;
 // fetches run on the pinned handler (AllowAutoRedirect=false), so a legitimate public
 // 301/302/303/307/308 CDN hop — previously auto-followed by the shadowed default client — now
 // fails outright because none of those adapters has Mubert's manual redirect loop. These tests
-// pin the resolution: ProviderRedirectResolver follows bounded hops, but ONLY after
-// IProviderUrlPolicy re-classifies each Location (https + 443 + public), never replays
-// credentials to another origin, and surfaces refusals as provider-mappable failures.
+// pin the resolution: ProviderRedirectResolver follows bounded hops, but ONLY bodyless GET/HEAD
+// artifact fetches, ONLY after IProviderUrlPolicy re-classifies each Location (https + 443 +
+// public), never replays credentials to another origin, never follows or rewrites a mutating
+// submission (3xx on POST is surfaced, not reissued), and surfaces refusals as
+// provider-mappable failures.
 public sealed class ProviderRedirectResolverTests
 {
     private static readonly IPAddress PublicV4 = IPAddress.Parse("93.184.216.34");
@@ -66,37 +68,64 @@ public sealed class ProviderRedirectResolverTests
         Assert.All(handler.Requests, request => Assert.Equal("HEAD", request.Method));
     }
 
-    [Fact]
-    public async Task Rewrites_post_to_get_on_moved_like_redirects()
+    // Reviews on bc10c885: the resolver wraps the whole typed client, including the PAID
+    // generation POST submissions, whose create paths deliberately never retry. A provider
+    // 3xx must therefore never reissue a mutating request — not as a 307/308 body replay
+    // (cross-origin: another public origin could run a fresh billable generation with the
+    // user's prompt; header stripping does not protect the body), and not as a 301/302/303
+    // POST->GET rewrite of a provider-supplied target either. The 3xx is surfaced to the
+    // provider's own failure mapping, exactly like the pre-resolver pinned handler.
+    [Theory]
+    [InlineData("301", true)]
+    [InlineData("302", true)]
+    [InlineData("303", true)]
+    [InlineData("307", true)]
+    [InlineData("308", true)]
+    [InlineData("307", false)]
+    [InlineData("308", false)]
+    public async Task Mutating_submissions_never_follow_replay_or_rewrite_on_any_redirect(string code, bool crossOrigin)
     {
-        var handler = new StubPrimaryHandler(request => request.RequestUri!.Host == "out.example.test"
-            ? Redirect(HttpStatusCode.Found, "https://cdn.example.test/v.mp4")
-            : Ok());
+        var status = (HttpStatusCode)int.Parse(code, System.Globalization.CultureInfo.InvariantCulture);
+        var target = crossOrigin ? "https://cdn.example.test/task" : "https://out.example.test/task-next";
+        var handler = new StubPrimaryHandler(_ => Redirect(status, target));
         var (client, _) = Client(handler);
 
-        using var response = await client.PostAsync(
-            "https://out.example.test/task", new StringContent("prompt-text", Encoding.UTF8, "text/plain"));
+        // Realistic provider submission: private prompt JSON + provider credentials.
+        using var submission = new HttpRequestMessage(HttpMethod.Post, "https://out.example.test/task")
+        {
+            Content = new StringContent(
+                "{\"prompt\":\"user-secret-prompt\",\"referenceUrl\":\"https://files.example.test/private.png\"}",
+                Encoding.UTF8, "application/json"),
+        };
+        submission.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", "api-secret");
+        submission.Headers.TryAddWithoutValidation("x-manus-api-key", "manus-secret");
 
-        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
-        Assert.Equal("POST", handler.Requests[0].Method);
-        Assert.Equal("GET", handler.Requests[1].Method);
-        Assert.Null(handler.Requests[1].Body);
+        using var response = await client.SendAsync(submission);
+
+        // Surfaced unchanged, zero follow-ups: no second request, so no second body, no
+        // billable resend, and nothing private leaves toward the redirect target.
+        Assert.Equal(status, response.StatusCode);
+        var echo = Assert.Single(handler.Requests);
+        Assert.Equal("POST", echo.Method);
+        Assert.Equal("https://out.example.test/task", echo.Url);
+        Assert.Contains("user-secret-prompt", echo.Body);
     }
 
     [Fact]
-    public async Task Replays_method_and_body_on_307()
+    public async Task Cross_origin_307_on_post_does_not_reach_the_redirect_target_at_all()
     {
-        var handler = new StubPrimaryHandler(request => request.RequestUri!.Host == "out.example.test"
-            ? Redirect(HttpStatusCode.TemporaryRedirect, "https://cdn.example.test/task")
-            : Ok());
+        // The exact reviewed scenario: public cross-origin 307 from a submission POST. The
+        // resolver must not even dial (let alone POST to) the lookalike target.
+        var handler = new StubPrimaryHandler(_ =>
+            Redirect(HttpStatusCode.TemporaryRedirect, "https://evil-public-cdn.example.test/generate"));
         var (client, _) = Client(handler);
 
         using var response = await client.PostAsync(
-            "https://out.example.test/task", new StringContent("prompt-text", Encoding.UTF8, "text/plain"));
+            "https://api.example.test/v1/generate",
+            new StringContent("{\"prompt\":\"private\"}", Encoding.UTF8, "application/json"));
 
-        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
-        Assert.Equal("POST", handler.Requests[1].Method);
-        Assert.Equal("prompt-text", handler.Requests[1].Body);
+        Assert.Equal(HttpStatusCode.TemporaryRedirect, response.StatusCode);
+        Assert.Equal(new[] { "https://api.example.test/v1/generate" }, handler.Requests.Select(request => request.Url));
     }
 
     [Theory]
