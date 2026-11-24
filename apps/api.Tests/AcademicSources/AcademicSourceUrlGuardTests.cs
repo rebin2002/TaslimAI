@@ -81,10 +81,18 @@ public sealed class AcademicSourceUrlGuardTests
         Assert.NotEmpty(new AcademicSourceDiscoveryOptions { CrossrefBaseUrl = "https://[64:ff9b:1::a9fe:a9fe]" }.Validate());
         Assert.NotEmpty(new AcademicSourceDiscoveryOptions { OpenLibraryBaseUrl = "https://[2001:2::1]" }.Validate());
         Assert.NotEmpty(new AcademicSourceDiscoveryOptions { GoogleBooksBaseUrl = "https://[2001:20::1]" }.Validate());
-        Assert.NotEmpty(new AcademicSourceDiscoveryOptions { OpenAlexBaseUrl = "https://[2620:4f80::1]" }.Validate());
+        Assert.NotEmpty(new AcademicSourceDiscoveryOptions { OpenAlexBaseUrl = "https://[5f00::1]" }.Validate());
+        Assert.NotEmpty(new AcademicSourceDiscoveryOptions { CrossrefBaseUrl = "https://[3fff::1]" }.Validate());
         // Neighbouring public space must still validate, or the guard has become an over-block.
         Assert.Empty(new AcademicSourceDiscoveryOptions { OpenAlexBaseUrl = "https://[2620:4f81::1]" }.Validate());
         Assert.Empty(new AcademicSourceDiscoveryOptions { OpenAlexBaseUrl = "https://[2001:200::1]" }.Validate());
+        // 2620:4f80::/32 has no IANA special-purpose row (the registry's AS112 direct-delegation
+        // row is 2620:4f:8000::/48, RFC 7534), so a base URL there is operator space and must
+        // still validate. Same for a DNS64 spelling of a public v4 provider.
+        Assert.Empty(new AcademicSourceDiscoveryOptions { OpenAlexBaseUrl = "https://[2620:4f80::1]" }.Validate());
+        Assert.Empty(new AcademicSourceDiscoveryOptions { OpenAlexBaseUrl = "https://[64:ff9b::808:808]" }.Validate());
+        Assert.Empty(new AcademicSourceDiscoveryOptions { OpenAlexBaseUrl = "https://[5f01::1]" }.Validate());
+        Assert.Empty(new AcademicSourceDiscoveryOptions { OpenAlexBaseUrl = "https://[3fff:1000::1]" }.Validate());
         Assert.Empty(new AcademicSourceDiscoveryOptions().Validate());
     }
 
@@ -103,7 +111,7 @@ public sealed class AcademicSourceUrlGuardTests
         // base URL in the special-use tail never reaches the endpoint allow list.
         foreach (var literal in new[] { "[::a9fe:a9fe]", "[ff02::1]", "[fe00::1]", "[::7f00:1]",
                      "[64:ff9b::a9fe:a9fe]", "[64:ff9b:1::8.8.8.8]", "[2001:1::1]", "[2001:10::1]",
-                     "[2001:20::1]", "[2620:4f80::1]" })
+                     "[2001:20::1]", "[5f00::1]", "[3fff::1]" })
         {
             var admitted = new AcademicSourceDiscoveryOptions { OpenAlexBaseUrl = "https://" + literal }
                 .Normalize().AllowedEndpointHosts();
@@ -116,6 +124,13 @@ public sealed class AcademicSourceUrlGuardTests
             new Uri("https://[2620:4f81::1]/"), ["2620:4f81::1"]));
         Assert.False(AcademicSourceUrlGuard.IsAllowedEndpoint(
             new Uri("https://[64:ff9b::a9fe:a9fe]/"), ["64:ff9b::a9fe:a9fe"]));
+        // A DNS64-synthesised answer for a public v4 provider stays admissible as an explicitly
+        // configured endpoint (64:ff9b::808:808 is 8.8.8.8), and the ARIN space next to the
+        // unsupported rule that was removed on review stays admissible too.
+        Assert.Contains("64:ff9b::808:808", new AcademicSourceDiscoveryOptions
+        { OpenAlexBaseUrl = "https://[64:ff9b::808:808]" }.Normalize().AllowedEndpointHosts());
+        Assert.Contains("2620:4f80::1", new AcademicSourceDiscoveryOptions
+        { OpenAlexBaseUrl = "https://[2620:4f80::1]" }.Normalize().AllowedEndpointHosts());
     }
 
     [Fact]
@@ -192,20 +207,27 @@ public sealed class AcademicSourceUrlGuardTests
     public void Publicly_routable_ipv6_classification(string address, bool expected)
         => Assert.Equal(expected, AcademicSourceUrlGuard.IsPubliclyRoutable(IPAddress.Parse(address)));
 
-    // Residual of the same rule set: v6 space that is special-use but sits in the globally-routed
-    // 0000::/8 and 2000::/3 regions, so neither IsIPv6LinkLocal nor the fc00::/6 tail catches it.
-    // NAT64 / IPv4-translatable prefixes embed a v4 destination that is only reachable through a
-    // stateful translator, and 2001::/23 plus 2620:4f80::/32 are IETF/ORCHID assignments.
+    // Residual of the same rule set: v6 space that the IANA IPv6 Special-Purpose Address Registry
+    // marks as non-public but that sits in the globally routed 0000::/8 and 2000::/3 regions, so
+    // neither IsIPv6LinkLocal nor the fc00::/6 tail catches it. Rows are cited by their registry
+    // RFC. The well-known NAT64 prefix 64:ff9b::/96 (RFC 6052) is the DNS64 spelling (RFC 6147) of
+    // an IPv4 destination, so it is judged on its embedded v4 rather than as a block: what must
+    // stay closed is the metadata and private destination, what must stay open is the public one.
     [Theory]
     [InlineData("64:ff9b::a9fe:a9fe", false)] // NAT64 of 169.254.169.254, the metadata address
     [InlineData("64:ff9b::7f00:1", false)]    // NAT64 of 127.0.0.1
     [InlineData("64:ff9b::a00:1", false)]     // NAT64 of 10.0.0.1
     [InlineData("64:ff9b::ac10:1", false)]    // NAT64 of 172.16.0.1
     [InlineData("64:ff9b::c000:201", false)]  // NAT64 of 192.0.2.1, v4 documentation
-    [InlineData("64:ff9b::d5c6:d6d7", false)] // NAT64 of a public v4: translator space, refused
-    [InlineData("64:ff9b::", false)]          // the /96 prefix itself
+    [InlineData("64:ff9b::ffff:ffff", false)] // NAT64 of 255.255.255.255, v4 reserved
+    [InlineData("64:ff9b::", false)]          // embedded 0.0.0.0, refused by 0.0.0.0/8
+    [InlineData("64:ff9b::808:808", true)]    // NAT64 of public 8.8.8.8: reachable on DNS64 networks
+    [InlineData("64:ff9b::104:1002", true)]   // NAT64 of public 104.16.1.2
+    [InlineData("64:ff9b::d5c6:d6d7", true)]  // NAT64 of a public v4 stays public, like ::/96
     [InlineData("64:ff9b:1::8.8.8.8", false)] // 64:ff9b:1::/48 local-use, even embedding a public v4
     [InlineData("64:ff9b:1::a9fe:a9fe", false)]
+    [InlineData("64:ff9b:1::", false)]        // the local-use /48 prefix itself
+    [InlineData("64:ff9b:1:ffff::1", false)]  // inside the /48, bytes 6..15 unconstrained
     [InlineData("2001:1::1", false)]          // PCP anycast
     [InlineData("2001:1::4", false)]          // LWP/FFA anycast
     [InlineData("2001:2::1", false)]          // IPv6 benchmarking
@@ -214,14 +236,20 @@ public sealed class AcademicSourceUrlGuardTests
     [InlineData("2001:20::1", false)]         // ORCHIDv2
     [InlineData("2001:2f::1", false)]         // last address of the ORCHIDv2 /28
     [InlineData("2001:1::ffff:ffff", false)]  // inside 2001::/23, not the Teredo /32
-    [InlineData("2620:4f80::1", false)]       // ORCHIDv2 configuration use
     // Boundaries: the assignments above must not swallow neighbouring real provider space.
-    [InlineData("2620:4f7f:ffff::1", true)]   // immediately below 2620:4f80::/32
-    [InlineData("2620:4f81::1", true)]        // immediately above it
+    [InlineData("2620:4f7f:ffff::1", true)]   // ARIN provider space, unchanged
+    [InlineData("2620:4f80::1", true)]        // no IANA special-purpose row: the /32 stays public
+    [InlineData("2620:4f:8000::1", true)]     // AS112 direct delegation, RFC 7534, is globally reachable
+    [InlineData("2620:4f81::1", true)]        // neighbouring /32 stays public
     [InlineData("2001:200::1", true)]          // first /20 above 2001::/23
     [InlineData("2001:448:1234::5", true)]     // academic provider space
     [InlineData("2001:4860:4860::8888", true)] // public DNS64/v6 provider space
-    [InlineData("5f00::1", true)]              // unassigned but globally routable: stays public
+    [InlineData("5f00::1", false)]              // SRv6 SIDs, RFC 9602: not globally reachable
+    [InlineData("5f00:ffff:ffff::1", false)]    // last address of the SRv6 /16
+    [InlineData("5f01::1", true)]               // immediately above the SRv6 /16 stays public
+    [InlineData("3fff::1", false)]              // documentation, RFC 9637
+    [InlineData("3fff:0fff::1", false)]         // last address of the 3fff::/20
+    [InlineData("3fff:1000::1", true)]          // first /20 above the documentation block
     [InlineData("2002:c000:204::1", false)]    // 6to4 stays refused (unchanged behaviour)
     [InlineData("3ffe:1::1", false)]           // legacy 6bone stays refused (unchanged behaviour)
     [InlineData("2001:db8::1", false)]         // documentation stays refused (unchanged behaviour)
