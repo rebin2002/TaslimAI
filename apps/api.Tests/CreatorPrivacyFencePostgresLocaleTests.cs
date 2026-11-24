@@ -68,16 +68,20 @@ public sealed class CreatorPrivacyFencePostgresLocaleTests : IAsyncLifetime
     /// functional fold assertions below, so the equivalence claim can never outlive the locale.
     /// Names are compared after normalization (lowercase, hyphens stripped) because PostgreSQL
     /// reports initdb locale names in its own canonical spelling: the hosted CI postgres:15
-    /// service (run 45445603482, job 138628387109) reports datcollate 'en_US.utf8' — the same
+    /// service (runs 45445603482 / 45448739618, jobs 138628387109 / 138639644516) reports
+    /// datcollate 'en_US.utf8' — the same
     /// glibc en_US.UTF-8 locale, ASCII-sane — while a local initdb under C.UTF-8 reports
-    /// 'C.UTF-8'. Normalization only folds spellings of the same locale identity; a genuinely
-    /// different locale (tr_TR.utf8, de_DE.utf8, SQL_ASCII…) is still rejected by the name AND
-    /// by the functional dotless-i canary below, which is the decisive gate.
+    /// 'C.UTF-8'. Normalization (lowercase; '-' and '_' dropped) only folds spellings of the
+    /// same locale identity; a genuinely
+    /// different locale (tr_TR.utf8, de_DE.utf8, SQL_ASCII…) is still rejected by name AND
+    /// by the functional fold assertions below, which is the decisive gate.
     /// </summary>
     private static readonly string[] AsciiSaneCollations = ["c", "posix", "c.utf8", "enus.utf8"];
 
     private static string NormalizeCollationName(string name) =>
-        name.Trim().ToLowerInvariant().Replace("-", string.Empty, StringComparison.Ordinal);
+        name.Trim().ToLowerInvariant()
+            .Replace("-", string.Empty, StringComparison.Ordinal)
+            .Replace("_", string.Empty, StringComparison.Ordinal);
 
     [DisposablePostgresFact]
     public async Task Postgres_locale_folds_ascii_job_types_like_the_canonical_rule()
