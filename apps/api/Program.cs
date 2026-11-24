@@ -351,16 +351,32 @@ builder.Services.Configure<MovieVideoOptions>(builder.Configuration.GetSection("
 builder.Services.Configure<MovieDialogueVoiceOptions>(builder.Configuration.GetSection("MovieDialogueVoice"));
 builder.Services.Configure<DirectVideoProviderOptions>(builder.Configuration.GetSection("DirectVideoProviders"));
 builder.Services.AddHttpClient<DirectVideoHttpProviderAdapter>()
-    .ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler { AllowAutoRedirect = false });
+    .ConfigurePrimaryHttpMessageHandler(services => ProviderPinnedConnections.CreatePinnedHandler(services.GetRequiredService<IProviderHostResolver>()))
+    // The pinned handler disables auto-redirect (every hop must pass endpoint admission), so this
+    // bounded resolver revalidates and follows legitimate public 3xx output hops for adapters whose
+    // fetch code has no manual loop of its own (Mubert keeps its own loop; StableAudio's audio
+    // arrives inline in its 200 responses, so no API redirect hop is load-bearing there). Following
+    // is limited to bodyless GET/HEAD artifact fetches: a 3xx on a generation POST is surfaced to
+    // the provider's failure mapping, never followed, rewritten, or replayed (the create paths
+    // deliberately never retry a billable submission).
+    .AddHttpMessageHandler(services => new ProviderRedirectResolver(services.GetRequiredService<IProviderUrlPolicy>()));
 builder.Services.Configure<VideoGenerationAdapterOptions>(builder.Configuration.GetSection("VideoGenerationAdapters"));
 builder.Services.AddSingleton<IVideoGenerationAdapter, UnavailableVideoGenerationAdapter>();
 builder.Services.AddSingleton<VideoGenerationAdapterExecutionService>();
 builder.Services.AddScoped<MovieVideoExecutionStore>();
 builder.Services.AddHttpClient<RunwayMovieVideoProvider>()
-    .ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler { AllowAutoRedirect = false });
-builder.Services.AddHttpClient<ManusMovieVideoProvider>();
-builder.Services.AddSingleton<RunwayMovieVideoProvider>();
-builder.Services.AddSingleton<ManusMovieVideoProvider>();
+    .ConfigurePrimaryHttpMessageHandler(services => ProviderPinnedConnections.CreatePinnedHandler(services.GetRequiredService<IProviderHostResolver>()))
+    .AddHttpMessageHandler(services => new ProviderRedirectResolver(services.GetRequiredService<IProviderUrlPolicy>()));
+builder.Services.AddHttpClient<ManusMovieVideoProvider>()
+    .ConfigurePrimaryHttpMessageHandler(services => ProviderPinnedConnections.CreatePinnedHandler(services.GetRequiredService<IProviderHostResolver>()))
+    .AddHttpMessageHandler(services => new ProviderRedirectResolver(services.GetRequiredService<IProviderUrlPolicy>()));
+// No bare AddSingleton<RunwayMovieVideoProvider>()/AddSingleton<ManusMovieVideoProvider>() here.
+// A later last-wins singleton registration shadows the typed client above (Microsoft DI resolves
+// the final descriptor) and rebuilds the provider on the container's default HttpClient, so the
+// pinned primary handler never reaches the provider the registry uses — the exact composition bug
+// the #358 review proved on e9903fa8. The registry factory below resolves each typed client once;
+// because the registry itself is a singleton, each provider still exists exactly once for the
+// lifetime of the app (the same pattern the music lane uses with IMusicGenerationProvider).
 builder.Services.AddSingleton<IMovieVideoProviderRegistry>(services => new MovieVideoProviderRegistry(
 [
     services.GetRequiredService<RunwayMovieVideoProvider>(),
@@ -447,11 +463,16 @@ builder.Services.AddScoped<IGenerationJobHandler, ResearchGenerationJobHandler>(
 builder.Services.AddSingleton<ISocialPromptBuilder, SocialPromptBuilder>();
 builder.Services.AddScoped<ISocialGenerationProvider, AiSocialGenerationProvider>();
 builder.Services.AddScoped<IGenerationJobHandler, SocialGenerationJobHandler>();
-builder.Services.AddSingleton<IProviderUrlPolicy, ProviderUrlPolicy>();
+// The resolver seam keeps endpoint admission testable (fixed address tables instead of live
+// DNS) and gives the URL policy and the pinned connect callback one shared answer source.
+builder.Services.AddSingleton<IProviderHostResolver, SystemProviderHostResolver>();
+builder.Services.AddSingleton<IProviderUrlPolicy>(services =>
+    new ProviderUrlPolicy(services.GetRequiredService<IProviderHostResolver>()));
 builder.Services.AddHttpClient<MubertMusicGenerationProvider>()
-    .ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler { AllowAutoRedirect = false });
+    .ConfigurePrimaryHttpMessageHandler(services => ProviderPinnedConnections.CreatePinnedHandler(services.GetRequiredService<IProviderHostResolver>()));
 builder.Services.AddSingleton<IMusicGenerationProvider>(services => services.GetRequiredService<MubertMusicGenerationProvider>());
-builder.Services.AddHttpClient<StableAudioMusicGenerationProvider>();
+builder.Services.AddHttpClient<StableAudioMusicGenerationProvider>()
+    .ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler { AllowAutoRedirect = false });
 builder.Services.AddSingleton<IMusicGenerationProvider>(services => services.GetRequiredService<StableAudioMusicGenerationProvider>());
 builder.Services.AddScoped<IGenerationJobHandler, MusicGenerationJobHandler>();
 builder.Services.AddSingleton<IMovieSoundProvider>(services =>

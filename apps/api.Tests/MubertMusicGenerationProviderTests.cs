@@ -174,6 +174,30 @@ public sealed class MubertMusicGenerationProviderTests
         Assert.Equal(3, handler.Requests.Count);
     }
 
+    // The redirect hop is where a widened deny set earns its keep: the guard runs again on every
+    // Location: value, so a provider that bounces to a special-use target must be refused before
+    // the client ever issues that request. 2002::/16 is the case a private/metadata sweep misses
+    // because the literal looks routable until the embedded IPv4 is considered.
+    [Theory]
+    [InlineData("https://[2002:7f00:1::]/track.mp3")]
+    [InlineData("https://192.88.99.1/track.mp3")]
+    [InlineData("https://[::a9fe:a9fe]/track.mp3")]
+    public async Task Redirect_to_special_use_target_is_rejected_before_it_is_requested(string location)
+    {
+        var handler = new MubertHandler(
+            (_, requestNumber) => requestNumber switch
+            {
+                1 => Json(HttpStatusCode.OK, "{\"data\":{\"id\":\"track-reserved-redirect\",\"session_id\":\"session\"}}"),
+                2 => Json(HttpStatusCode.OK, "{\"data\":{\"generations\":[{\"status\":\"completed\",\"url\":\"https://1.1.1.1/track.mp3\"}]}}"),
+                3 => Redirect(HttpStatusCode.Found, location),
+                _ => throw new InvalidOperationException("reserved redirect target must not be requested"),
+            });
+        var provider = CreateProvider(handler, urlPolicy: new ProviderUrlPolicy());
+
+        await Assert.ThrowsAsync<MusicOutputInvalidException>(() => provider.GenerateAsync(Input()));
+        Assert.Equal(3, handler.Requests.Count);
+    }
+
     [Fact]
     public async Task Hanging_download_after_the_track_completed_is_a_retrieval_failure_not_a_retryable_timeout()
     {
