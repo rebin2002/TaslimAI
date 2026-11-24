@@ -2,13 +2,14 @@
 import { localeTag } from "@/lib/i18n";
 
 import Link from "next/link";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Archive, ArrowUpRight, BriefcaseBusiness, CalendarDays, FolderOpen, Pencil, Plus, RotateCcw } from "lucide-react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { api, type Project, type ProjectInput } from "@/lib/api";
 import { useAuth } from "@/components/AuthProvider";
 import { useLocale } from "@/components/LocaleProvider";
 import { ProjectForm } from "@/components/ProjectForm";
+import { scopedProjectList } from "@/lib/projectListPagination";
 
 const typeKey = (type: string) => `project.type.${type.toLowerCase()}`;
 
@@ -37,23 +38,48 @@ export function ProjectsView() {
   const [error, setError] = useState("");
   const workspaceTypeLabel = workspace?.type === "Business" ? t("projects.businessWorkspace") : t("projects.personalWorkspace");
   const workspaceRoleLabel = workspace ? t(`projects.role.${workspace.role.toLowerCase()}`) : "";
+  // Only the most recent tab/workspace load may publish its pages; a slow
+  // earlier walk must not overwrite the tab that replaced it.
+  const projectLoadRef = useRef<AbortController | null>(null);
+  const visibleProjects = scopedProjectList(projects, workspace?.id, status);
 
   const load = useCallback(async () => {
-    if (!workspace) return;
+    if (!workspace) {
+      projectLoadRef.current?.abort();
+      setProjects([]);
+      setError("");
+      setLoading(false);
+      return;
+    }
+    projectLoadRef.current?.abort();
+    const controller = new AbortController();
+    projectLoadRef.current = controller;
     setLoading(true);
+    // A failed page must not redisplay the previously completed list.
+    setProjects([]);
     setError("");
     try {
-      setProjects(await api.listProjects(workspace.id, status));
+      // A single request only ever returns one server page; walking all
+      // pages is what keeps the tab counts honest for large workspaces.
+      const items = await api.listAllProjects(workspace.id, status, controller.signal);
+      if (controller.signal.aborted) return;
+      setProjects(items);
     } catch (caught) {
+      if (controller.signal.aborted) return;
       setError(caught instanceof Error ? caught.message : t("projects.loadError"));
     } finally {
-      setLoading(false);
+      if (!controller.signal.aborted) setLoading(false);
     }
   }, [status, t, workspace]);
 
   // Loading remote projects after the workspace or tab changes is an external synchronization.
-  // eslint-disable-next-line react-hooks/set-state-in-effect
-  useEffect(() => { void load(); }, [load]);
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    void load();
+    // A multi-page walk outlives a fast navigation; stop paying for results
+    // no component instance will publish.
+    return () => { projectLoadRef.current?.abort(); };
+  }, [load]);
 
   async function create(input: ProjectInput) {
     if (!workspace) return;
@@ -95,12 +121,12 @@ export function ProjectsView() {
     </div>
 
     <div className="project-tabs" role="tablist" aria-label={t("projects.title")}>
-      <button role="tab" aria-selected={status === "Active"} className={status === "Active" ? "is-active" : ""} onClick={() => setStatus("Active")}>{t("projects.active")} <span>{status === "Active" ? projects.length : ""}</span></button>
-      <button role="tab" aria-selected={status === "Archived"} className={status === "Archived" ? "is-active" : ""} onClick={() => setStatus("Archived")}>{t("projects.archived")} <span>{status === "Archived" ? projects.length : ""}</span></button>
+      <button role="tab" aria-selected={status === "Active"} className={status === "Active" ? "is-active" : ""} onClick={() => setStatus("Active")}>{t("projects.active")} <span>{status === "Active" ? visibleProjects.length : ""}</span></button>
+      <button role="tab" aria-selected={status === "Archived"} className={status === "Archived" ? "is-active" : ""} onClick={() => setStatus("Archived")}>{t("projects.archived")} <span>{status === "Archived" ? visibleProjects.length : ""}</span></button>
     </div>
 
     {error && <div className="inline-error" role="alert">{error}</div>}
-    {loading ? <div className="loading-state"><span className="loading-spinner" /></div> : projects.length === 0 ? <div className="projects-empty"><span className="empty-icon"><FolderOpen size={24} /></span><h2>{status === "Active" ? t("projects.emptyTitle") : t("projects.emptyArchivedTitle")}</h2><p>{status === "Active" ? t("projects.emptyDescription") : t("projects.emptyArchivedDescription")}</p>{status === "Active" && <button className="primary-button" onClick={() => setFormOpen(true)}><Plus size={16} /> {t("projects.newProject")}</button>}</div> : <div className="project-list project-list-premium">{projects.map((project) => <article className={`project-card project-card-premium ${projectAccent(project.type)}`} key={project.id}>
+    {loading ? <div className="loading-state"><span className="loading-spinner" /></div> : visibleProjects.length === 0 ? <div className="projects-empty"><span className="empty-icon"><FolderOpen size={24} /></span><h2>{status === "Active" ? t("projects.emptyTitle") : t("projects.emptyArchivedTitle")}</h2><p>{status === "Active" ? t("projects.emptyDescription") : t("projects.emptyArchivedDescription")}</p>{status === "Active" && <button className="primary-button" onClick={() => setFormOpen(true)}><Plus size={16} /> {t("projects.newProject")}</button>}</div> : <div className="project-list project-list-premium">{visibleProjects.map((project) => <article className={`project-card project-card-premium ${projectAccent(project.type)}`} key={project.id}>
       <Link href={`/projects/${project.id}`} className="project-card-main">
         <span className="project-card-icon"><FolderOpen size={19} /></span>
         <span className="project-card-copy"><span className="project-card-kicker">{t(typeKey(project.type))}</span><strong>{project.name}</strong><small>{project.description || t("projects.noDescription")}</small></span>
@@ -111,6 +137,6 @@ export function ProjectsView() {
         {status === "Active" ? <div><button onClick={() => { setEditing(project); setFormOpen(true); }} aria-label={t("projects.edit")}><Pencil size={14} /></button><button onClick={() => void archive(project)} aria-label={t("projects.archive")}><Archive size={14} /></button></div> : <button onClick={() => void restore(project)} className="restore-action"><RotateCcw size={14} /> {t("projects.restore")}</button>}
       </div>
     </article>)}</div>}
-    {formOpen && <ProjectForm project={editing} onClose={() => { setFormOpen(false); setEditing(undefined); }} onSubmit={editing ? update : create} />}
+    {formOpen && workspace && (!editing || editing.workspaceId === workspace.id) && <ProjectForm project={editing} onClose={() => { setFormOpen(false); setEditing(undefined); }} onSubmit={editing ? update : create} />}
   </div>;
 }

@@ -195,7 +195,10 @@ public sealed class DirectVideoHttpProviderAdapter(
     {
         if (string.IsNullOrWhiteSpace(path) || Uri.TryCreate(path.Trim(), UriKind.Absolute, out _))
             throw new DirectVideoProviderException(DirectVideoErrorCategory.InvalidRequest, DirectVideoErrorCodes.RequestInvalid);
-        return new Uri(Configuration.ApiBaseUri!, path.Trim().TrimStart('/'));
+        var baseUri = Configuration.ApiBaseUri!;
+        if (!baseUri.AbsoluteUri.EndsWith("/", StringComparison.Ordinal))
+            baseUri = new Uri(baseUri.AbsoluteUri + "/", UriKind.Absolute);
+        return new Uri(baseUri, path.Trim().TrimStart('/'));
     }
 
     private void EnsureAvailable()

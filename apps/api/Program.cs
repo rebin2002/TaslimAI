@@ -411,7 +411,9 @@ builder.Services.AddSingleton<AiContextBuilder>();
 builder.Services.AddHttpClient<OpenAiProvider>();
 builder.Services.AddHttpClient<OpenAiImageGenerationProvider>();
 builder.Services.AddHttpClient<OpenAiVoiceGenerationProvider>();
-builder.Services.AddHttpClient<OpenAiResearchSearchProvider>();
+// Research requests have their own bounded cancellation token (ResearchGenerationOptions.ProviderTimeoutSeconds).
+// The HttpClient default 100-second timeout must not preempt longer deep web searches.
+builder.Services.AddHttpClient<OpenAiResearchSearchProvider>(client => client.Timeout = Timeout.InfiniteTimeSpan);
 builder.Services.AddHttpClient<AzureSpeechVoiceGenerationProvider>();
 builder.Services.AddSingleton<IAiModelRouter, AiModelRouter>();
 builder.Services.AddSingleton<IAiProvider, MockAiProvider>();
