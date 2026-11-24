@@ -77,8 +77,12 @@ export function fence(rows: Row[], startTicks = 0, publishEtag = true) {
 
     if (statusMatch && method === "POST") {
       // Documented scope: archive and restore run against the live row. They do
-      // not inspect If-Match, but they still advance the revision monotonically,
-      // so a client that adopts the published stamp is never stranded.
+      // not inspect If-Match, but they advance the revision monotonically and
+      // publish the stamp they committed, so a client holding an open draft can
+      // fold it in instead of being stranded on a spent token. Pinned against the
+      // real backend by
+      // StatusWrite_PublishesTheCommittedRevision_AndThatTokenCarriesAnOpenDraftForward
+      // in apps/api.Tests/ProjectPatchRevisionConflictTests.cs.
       const archive = statusMatch[2] === "archive";
       const next = stampFrom(++ticks);
       const updated: Row = {

@@ -1,31 +1,45 @@
 # Project Revision Fence — Client Integration
 
-Status: implemented in `apps/web`. Companion to the server-side fence that shipped in
-PR #1256 (merged at `bfe6e81f`), which itself carries the guarantees first specified in
-PR #929 and regression-pinned in PR #1174.
+Contracts for `apps/web`'s use of the project `ETag` / `If-Match` fence that
+`apps/api` already implements. The server-side rules — the stamp format, the fenced
+`PATCH`, the monotonic compare-and-set, the wildcard and legacy semantics — are the
+ones merged in #929 and hardened in #1256; they are described by the API's own tests.
+This document covers the client half, and the two places where the endpoints had to
+match what a browser can actually do.
 
 ## Why this document exists
 
-The API has refused conflicting project edits since `bfe6e81f`: every `Project` row
-carries a revision stamp (`UpdatedAt`), `GET /api/projects/{id}` publishes it as an
-`ETag`, and `PATCH /api/projects/{id}` declines any write whose `If-Match` names a
-revision that no longer holds the row.
-
-That protection only applies to a client that actually declares a revision. Until this
-change, `apps/web/src/lib/api.ts` sent no `If-Match` on any project write, so every
-browser edit took the server's backward-compatible last-write-wins path: two tabs of the
-same member, or a member and a collaborator, silently replaced each other, and the loser's
-stale text landed on top of the newer save with nothing shown to anyone. The server was
-safe; the client never used it.
+The fence was complete on the server and unused by the browser.
+`apps/web/src/lib/api.ts` sent no `If-Match`, and `ProjectDetailView`, `ProjectsView`
+and `ProjectContextEditor` all saved through that call. Every browser edit therefore
+took the API's last-write-wins path: two tabs open on one project resolved into
+"whoever saved second is right", and the loser's stale text silently replaced a newer
+save that the member had watched succeed. The client integration is the difference
+between a fence that exists and a fence that protects.
 
 ## Where the revision comes from
 
-`apps/web/src/lib/projectRevision.ts` — `ProjectRevisionSession`, one per project id.
+`apps/web/src/lib/projectRevision.ts` — `ProjectRevisionSession`, one per **editable
+draft**, keyed on the project id it edits.
 
-1. **Capture at the start of editing.** The first keystroke in an edit form calls
-   `session.begin()`, which issues `GET /api/projects/{id}` and records the `ETag` from
-   that answer. The token therefore describes the copy the draft was written against —
-   which is the only thing an `If-Match` precondition can honestly mean.
+A session holds a PAIR: the revision token and the exact draft base — the editable
+fields (`name`, `description`, `instructions`, `contextNotes`, `type`) — that the token
+certifies. The pairing is the whole point.
+
+1. **Capture is verified against the copy on screen.** The first keystroke calls
+   `session.begin(displayed)`, where `displayed` is the project the component is
+   rendering — including the copy that arrived through the overview or the project
+   list, which never carried an `ETag` of its own. `begin` issues
+   `GET /api/projects/{id}` and compares the row it reads with that copy. Only a match
+   binds the published token; a mismatch raises `RevisionDivergedError` (a conflict)
+   and binds nothing.
+   *Why a bare token is not enough:* a stamp read at the moment of the first keystroke
+   describes the row as it is **then**. If another tab saved between this page rendering
+   and that keystroke, adopting the new token while keeping the older fields would
+   certify the stale draft as current — the identical lost update the server fence exists
+   to prevent, reintroduced one layer up. The same applies to clicking Save without
+   typing, and to a capture that failed and is retried later: every path binds through
+   the same comparison.
 2. **The token is carried verbatim.** The published format is
    `yyyy-MM-dd'T'HH:mm:ss.fffffff'Z'` (seven fractional digits, a 100-nanosecond grid).
    JavaScript's `Date` keeps three, so any value rebuilt from `project.updatedAt` would be
@@ -33,8 +47,18 @@ safe; the client never used it.
    arrived and never parses it. `api.getProjectWithRevision` returns the header, not a
    derived field.
 3. **Advance from the write's own answer.** A successful `PATCH` publishes the revision it
-   committed, so the session adopts it without a follow-up read. That avoids both an extra
-   round trip and a race in which a third writer slips between the write and the re-read.
+   committed together with the row it left behind, so the session re-binds to that pair
+   without a follow-up read. That avoids both an extra round trip and a race in which a
+   third writer slips between the write and the re-read.
+4. **A binding is kept until it is spent.** The comparison belongs to the moment the token
+   is taken, not to every later save: a draft that reloaded the row, or that saved while
+   its parent has not yet re-rendered with the answer, is still editing exactly the content
+   its token certifies. Re-checking a stale prop would refuse honest saves and add nothing —
+   a token the row has moved past is caught by the server's own fence on the next write.
+5. **One session per draft, never one per page.** `ProjectDetailView` renders two editable
+   drafts of the same row (details and context) and each submits the whole row, so it owns
+   two sessions (`"details"` and `"context"`). A token earned by one draft's write must not
+   certify the other draft's independently populated fields.
 
 ## What each edit path does
 
@@ -42,32 +66,45 @@ safe; the client never used it.
 | --- | --- | --- |
 | Project context (instructions / notes) | `ProjectContextEditor` | Fenced `PATCH`; conflict prompt |
 | Name, description, type | `ProjectForm` (used by the detail view and the project list) | Fenced `PATCH`; conflict prompt, draft retained |
-| Archive / restore | `ProjectDetailView`, `ProjectsView` | Unconditional by design; adopts the published revision (see below) |
+| Archive / restore | `ProjectDetailView`, `ProjectsView` | Unconditional by design; conditionally adopts the published revision (see below) |
 
-`ProjectsView` and `ProjectDetailView` own the session so that a status change made by the
-same view can advance the token instead of stranding an open draft on a revision the server
-has already moved past.
+`ProjectsView` owns one session per opened edit row and `ProjectDetailView` one per draft,
+so that a status change made by the same view can advance a token that still describes the
+row rather than stranding an open draft on a revision the server has already moved past.
 
 The unfenced `api.updateProject` remains in the module as the legacy transport for any
 caller outside these paths; nothing under `apps/web/src` uses it after this change.
 
 ## Conflict handling
 
-When the server answers `409 PROJECT_REVISION_CONFLICT`:
+Two answers produce the same prompt, with different wording:
 
-* nothing of the draft is written (the API applies no fields on a refusal);
+* the server refused a declared revision — `409 PROJECT_REVISION_CONFLICT`;
+* this client found, before attempting anything, that the row no longer matches the copy
+  being edited — `REVISION_DIVERGED` (`RevisionDivergedError`), raised while binding.
+
+In both cases:
+
+* nothing of the draft is written (the API applies no fields on a refusal, and a divergence
+  never issues a `PATCH` at all);
 * the unsaved input stays on screen, exactly as typed;
-* the member is shown `projects.revisionConflict`, localised in English, Arabic and Kurdish,
-  with two explicit actions and no automatic retry:
+* the member is shown `projects.revisionConflict` or `projects.revisionDiverged`, localised
+  in English, Arabic and Kurdish, with two explicit actions and no automatic retry:
   * **Load the latest saved version** — `session.reloadLatest()` re-reads the row, replaces
     the draft, and re-bases the session on the newly published revision;
   * **Keep my changes and save over the newer version** — `session.saveOverLatest()` sends
     `If-Match: *`, which is the API's documented "apply over the live row" path. This is the
     only way a newer revision is overwritten, and it requires that click.
+* Both actions are serialized by an in-flight guard and disabled while either runs. Reload
+  and keep-mine both write, and a double click that ran them together would let a wildcard
+  overwrite the reload it raced.
 * The expired token is never quietly swapped for the live one. A `409` answer carries the
   revision that currently holds the row (`ApiError.revision`, taken from the response's
   `ETag`), but that value is used only for display of, and for the deliberate reload of,
   the newer copy. An unresolved conflict is not an implicit acceptance of either side.
+* A divergence latches: continued typing does not re-read the row looking for a usable
+  token, and a later save does not quietly go through. It is cleared by the member's choice
+  (reload, or the wildcard write) or by dropping the draft.
 * A `400 INVALID_IF_MATCH` — which can only be a client defect, since the token did not come
   from this endpoint — drops the unusable token and re-captures on the next save rather than
   replaying a broken header.
@@ -81,17 +118,26 @@ need a precondition there:
 
 * A status toggle carries no user-authored content that can be lost, so a "conflict" answer
   would have nothing for the member to reconcile.
-* Both endpoints publish the revision they committed, and both move it forward monotonically
-  (the atomic, non-decreasing update fixed in #1256). The client therefore adopts the stamp
-  from the archive/restore answer, so the member's own status click cannot strand their
-  open text draft on a revision the server has already passed.
+* Both endpoints now publish the stamp they committed on their success answer as well as on
+  the conflict path (before this change only the `409` carried an `ETag`, so a client holding
+  an open draft had nothing to adopt and had to re-read or lose its binding). Both move the
+  revision forward monotonically through the atomic compare-and-set fixed in #1256, so an
+  archive that lands on top of another writer's commit sits ahead of it rather than reusing
+  or rewinding its stamp.
+* Adoption is **conditional**, and that is the part that matters for correctness. A status
+  answer is folded into a draft's binding only while the row's editable content still
+  matches the base that binding certifies. If it does not — the row moved through a change
+  this draft never saw, which is exactly what an out-of-band save followed by an archive looks
+  like — the binding is dropped, and the draft's next save is refused rather than blessed with
+  the archive's brand-new token. A status click must never certify a stale unsaved draft.
 * The consequence, stated plainly: a concurrent archive from another tab cannot be refused.
   Archive/restore remain last-write-wins by design. If a future requirement makes concurrent
   archiving user-visible (for example an undo affordance), the precondition belongs on those
   endpoints first and the client follows with `archiveProjectWithRevision` already in place.
 
-No behaviour was added to the API in this change; the endpoints, their fences, and their
-authorization checks are unchanged.
+The only API-side changes in this lane are ones a browser requires and that weaken nothing:
+the `Frontend` CORS policy exposing `ETag`, and the archive/restore success answers publishing
+the revision they committed. Their fences, authorization checks and status semantics are unchanged.
 
 ## Transport
 
@@ -124,23 +170,38 @@ retry never converts a conditional write into a wildcard.
 ## Tests
 
 * `src/lib/projectRevision.test.ts` — session behaviour against the shared server stub:
-  capture-at-edit-start, two-tab refusal, live revision on the conflict, explicit wildcard
-  override, reload re-basing, no re-read per save, no unfenced write, cross-project token
-  isolation, archive/restore adoption, verbatim 100-nanosecond precision, legacy call silence.
+  capture verified against the displayed copy, two-tab refusal, live revision on the conflict,
+  explicit wildcard override, reload re-basing, divergence before the first keystroke,
+  no-keystroke save on a stale page, a latched divergence that neither re-reads nor retries,
+  a failed capture retried both ways (row unmoved → binds, row moved → refuses), one shared
+  read for concurrent beginnings, whitespace equivalence against the server's trimmed copy,
+  per-draft isolation on one row, status adoption and its refusal to bless a moved row,
+  no re-read per save, no unfenced write, cross-project token isolation, verbatim
+  100-nanosecond precision, legacy call silence.
 * `src/lib/projectRevisionFenceFixtures.ts` — the stub of the fenced endpoint (including
-  `400 INVALID_IF_MATCH` and monotonic archive stamps) shared by the lib and component
-  suites, so the two cannot drift into describing different servers.
+  `400 INVALID_IF_MATCH`, archive/restore stamps published on success, and monotonic status
+  stamps) shared by the lib and component suites, so the two cannot drift into describing
+  different servers.
 * `src/lib/api.projectRevision.test.ts` — the transport: header captured byte for byte,
   `null` when no `ETag` was published (never an invented token), `If-Match` sent with the
   CSRF header, revision adopted from a successful write and from a refusal, wildcard
   forwarded verbatim, archive/restore sending no `If-Match`.
 * `src/components/ProjectContextEditor.revisionFence.test.tsx` — the UI through the real
-  transport: prompt appearance, draft retention, both actions, route switching.
+  transport: prompt appearance, draft retention, both actions, route switching, the stale
+  page refused before the first keystroke and on a bare Save, the divergence copy, recovery
+  through reload, and the two conflict actions cannot run together.
 * `src/app/api/[...path]/route.test.ts` — the proxy forwards `If-Match` upstream and returns
   the `ETag` on both the `200` and the `409`.
 * `apps/api.Tests/ProjectPatchRevisionConflictTests.cs` —
   `PublishedRevision_IsReadableByAnOriginSeparatedBrowser` pins that an origin-separated read
-  gets both the published `ETag` and `Access-Control-Expose-Headers: ETag`.
+  gets both the published `ETag` and `Access-Control-Expose-Headers: ETag`;
+  `StatusWrite_PublishesTheCommittedRevision_AndThatTokenCarriesAnOpenDraftForward` pins the
+  archive/restore stamp on success and its use as the base of a following edit;
+  `StatusWrite_AfterAnotherWriterCommitted_LeavesStatusUnconditionalButStampMonotonic` pins
+  that the status write stays unconditional while still sitting ahead of the commit it landed
+  on, so an expired `ETag` never becomes live again.
 * `e2e/projects-revision-conflict-tabs.spec.ts` — two real browser tabs against the API and
   Postgres: stale refusal with the draft intact, keep-mine overwrite only after the click,
-  reload re-basing followed by a successful save, and revision dropped on navigation.
+  reload re-basing followed by a successful save, revision dropped on navigation, a row that
+  moved **before the first keystroke** refused with its draft preserved, and a Save with no
+  keystroke at all refused instead of silently reverting the other tab.

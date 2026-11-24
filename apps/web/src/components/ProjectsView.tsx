@@ -47,7 +47,7 @@ export function ProjectsView() {
   // belongs to one project id: opening the editor for another row - or closing
   // it and reopening - starts from no token at all, so a captured revision can
   // never be replayed against a different project.
-  const editRevision = useMemo(() => (editing ? new ProjectRevisionSession(editing.id) : null), [editing]);
+  const editRevision = useMemo(() => (editing ? new ProjectRevisionSession(editing.id, "list-edit") : null), [editing]);
 
   const load = useCallback(async () => {
     if (!workspace) {
@@ -97,13 +97,15 @@ export function ProjectsView() {
     if (!window.confirm(t("projects.archiveConfirm"))) return;
     const archived = await api.archiveProjectWithRevision(project.id);
     // Status changes move the stamp; keep an open edit session honest about it.
-    if (editRevision && editing?.id === project.id) editRevision.adopt(archived.revision);
+    // Adoption is conditional on the row content still matching this draft, so a
+    // status write never certifies a stale unsaved draft.
+    if (editRevision && editing?.id === project.id) editRevision.adopt(archived);
     await load();
   }
 
   async function restore(project: Project) {
     const restored = await api.restoreProjectWithRevision(project.id);
-    if (editRevision && editing?.id === project.id) editRevision.adopt(restored.revision);
+    if (editRevision && editing?.id === project.id) editRevision.adopt(restored);
     await load();
   }
 

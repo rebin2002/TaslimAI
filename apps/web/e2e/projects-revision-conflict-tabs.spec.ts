@@ -7,6 +7,9 @@ import { apiJson, createProject, expect, test } from "./fixtures";
 // the release depends on:
 //
 //   * the second tab's save succeeds and the row really holds its text;
+//   * a tab that goes stale BEFORE its first keystroke - or that only clicks Save -
+//     is refused as well, so a token read after another tab's commit can never
+//     certify the older copy still on screen;
 //   * the first tab's save is refused, its typed draft stays on screen, and nothing
 //     of it reaches the row;
 //   * "keep my changes" only overwrites after that explicit click;
@@ -114,4 +117,75 @@ test("drops the previous project's revision when the member navigates to another
   expect((await readProject(authenticatedPage.request, second.id)).instructions).toBe("Text that belongs to the second project");
   // The abandoned draft never leaks into the project that was edited first.
   expect((await readProject(authenticatedPage.request, first.id)).instructions).toBe("Use mock-safe test data only.");
+});
+
+test("refuses a draft whose page went stale before the first keystroke", async ({ authenticatedPage }) => {
+  const project = await createProject(authenticatedPage, "E2E Fence Stale View");
+  const url = `/projects/${project.id}`;
+
+  // Tab A has the page open and touches nothing.
+  await authenticatedPage.goto(url);
+  await expect(contextCard(authenticatedPage)).toBeVisible();
+
+  // Tab B loads the same row, edits it and saves: the copy tab A is looking at is
+  // now the older one, and the only revision the server would hand out at this
+  // point belongs to content tab A has never seen.
+  const tabB = await authenticatedPage.context().newPage();
+  await tabB.goto(url);
+  await expect(contextCard(tabB)).toBeVisible();
+  await instructionsField(tabB).fill("Saved before tab A ever typed");
+  await saveContext(tabB);
+  await expect(contextCard(tabB).locator(".form-success")).toBeVisible();
+  expect((await readProject(authenticatedPage.request, project.id)).instructions).toBe("Saved before tab A ever typed");
+
+  // Tab A starts editing now. The mismatch is caught when it tries to bind a
+  // revision, not when it submits, and nothing was written either way.
+  await instructionsField(authenticatedPage).fill("Draft typed into a stale page");
+  await expect(contextCard(authenticatedPage).locator(".revision-conflict")).toBeVisible();
+  await expect(contextCard(authenticatedPage).locator(".revision-conflict p")).toContainText(/older copy of the project/i);
+  expect((await readProject(authenticatedPage.request, project.id)).instructions).toBe("Saved before tab A ever typed");
+
+  // Saving the stale draft is refused too: the typed text stays, the row does not move.
+  await saveContext(authenticatedPage);
+  await expect(instructionsField(authenticatedPage)).toHaveValue("Draft typed into a stale page");
+  expect((await readProject(authenticatedPage.request, project.id)).instructions).toBe("Saved before tab A ever typed");
+
+  // Overwriting is only what an explicit choice does.
+  await contextCard(authenticatedPage).getByRole("button", { name: /keep my changes/i }).click();
+  await expect(contextCard(authenticatedPage).locator(".form-success")).toBeVisible();
+  expect((await readProject(authenticatedPage.request, project.id)).instructions).toBe("Draft typed into a stale page");
+
+  await tabB.close();
+});
+
+test("refuses a save with no keystroke from a page that went stale while open", async ({ authenticatedPage }) => {
+  const project = await createProject(authenticatedPage, "E2E Fence Silent Overwrite");
+  const url = `/projects/${project.id}`;
+
+  await authenticatedPage.goto(url);
+  await expect(contextCard(authenticatedPage)).toBeVisible();
+
+  const tabB = await authenticatedPage.context().newPage();
+  await tabB.goto(url);
+  await expect(contextCard(tabB)).toBeVisible();
+  await instructionsField(tabB).fill("Saved from the second tab, no keystroke in the first");
+  await saveContext(tabB);
+  await expect(contextCard(tabB).locator(".form-success")).toBeVisible();
+
+  // Clicking Save without editing used to post the page's older copy under a
+  // revision it had never seen: a silent revert of tab B with no signal at all.
+  await saveContext(authenticatedPage);
+  await expect(contextCard(authenticatedPage).locator(".revision-conflict")).toBeVisible();
+  await expect(contextCard(authenticatedPage).locator(".revision-conflict p")).toContainText(/older copy of the project/i);
+  expect((await readProject(authenticatedPage.request, project.id)).instructions).toBe("Saved from the second tab, no keystroke in the first");
+
+  // Reloading gives tab A the current copy and a token that can save it.
+  await contextCard(authenticatedPage).getByRole("button", { name: /load the latest saved version/i }).click();
+  await expect(instructionsField(authenticatedPage)).toHaveValue("Saved from the second tab, no keystroke in the first");
+  await instructionsField(authenticatedPage).fill("Edited after catching up");
+  await saveContext(authenticatedPage);
+  await expect(contextCard(authenticatedPage).locator(".form-success")).toBeVisible();
+  expect((await readProject(authenticatedPage.request, project.id)).instructions).toBe("Edited after catching up");
+
+  await tabB.close();
 });

@@ -108,18 +108,23 @@ class TestDocument extends TestNode {
 
 const harness = vi.hoisted(() => {
   // The editor writes through the revision fence now: a save declares the
-  // revision captured for that row. `updateProjectWithRevision` delegates to
-  // `updateProject`, so every assertion below still observes the same call,
-  // with the same arguments, on the same project id it has always checked.
+  // revision captured for that row, and a capture only binds when the row it reads
+  // back still holds the content the form is showing. `current` is that row -
+  // whatever this instance was last rendered with, which is the honest server here,
+  // since nothing else saves in these cases. `updateProjectWithRevision` delegates
+  // to `updateProject`, so every assertion below still observes the same call, with
+  // the same arguments, on the same project id it has always checked.
   const api: {
     updateProject: ReturnType<typeof vi.fn>;
     getProjectWithRevision: ReturnType<typeof vi.fn>;
     updateProjectWithRevision: ReturnType<typeof vi.fn>;
     revision: string | null;
+    current: ProjectFixture | null;
   } = {
     updateProject: vi.fn(),
     revision: '"2026-11-16T09:00:00.0000001Z"',
-    getProjectWithRevision: vi.fn(async () => ({ project: null, revision: api.revision })),
+    current: null,
+    getProjectWithRevision: vi.fn(async () => ({ project: api.current, revision: api.revision })),
     updateProjectWithRevision: vi.fn(async (projectId: string, input: unknown) => ({
       project: await (api.updateProject as unknown as (projectId: string, input: unknown) => Promise<ProjectFixture>)(projectId, input),
       revision: api.revision,
@@ -198,6 +203,9 @@ function submitContext(): Promise<void> {
 function mountedProject(): Promise<void> {
   return act(async () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
+    // A fenced save is a capture read followed by the write, so a browser turn
+    // here spans two microtask drains.
+    await new Promise((resolve) => setTimeout(resolve, 0));
   });
 }
 
@@ -224,6 +232,7 @@ afterEach(() => {
 });
 
 function mount(initial: ProjectFixture, onSaved = vi.fn()) {
+  harness.api.current = initial;
   act(() => {
     root = createRoot(container as unknown as Element);
     root.render(<ProjectContextEditor project={initial} onSaved={onSaved} />);
@@ -232,6 +241,7 @@ function mount(initial: ProjectFixture, onSaved = vi.fn()) {
 }
 
 function switchTo(next: ProjectFixture, onSaved: (project: Project) => void) {
+  harness.api.current = next;
   act(() => {
     root.render(<ProjectContextEditor project={next} onSaved={onSaved} />);
   });
@@ -242,7 +252,8 @@ describe("ProjectContextEditor project freshness", () => {
     const onSaved = vi.fn();
     await act(async () => {
       root = createRoot(container as unknown as Element);
-      root.render(<ProjectContextEditor project={project("project-a", "A instructions", "A notes")} onSaved={onSaved} />);
+      harness.api.current = project("project-a", "A instructions", "A notes");
+      root.render(<ProjectContextEditor project={harness.api.current} onSaved={onSaved} />);
       await new Promise((resolve) => setTimeout(resolve, 0));
     });
 
@@ -339,3 +350,4 @@ describe("ProjectContextEditor project freshness", () => {
     expect(findByClass(container, "form-error")).toHaveLength(0);
   });
 });
+

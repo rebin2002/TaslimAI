@@ -258,6 +258,81 @@ public sealed class ProjectPatchRevisionConflictTests : IClassFixture<TaslimApiF
         Assert.Contains("http://localhost:3000", response.Headers.GetValues("Access-Control-Allow-Origin"));
     }
 
+    [Fact]
+    public async Task StatusWrite_PublishesTheCommittedRevision_AndThatTokenCarriesAnOpenDraftForward()
+    {
+        // An edit draft holds the token it captured when editing began. Archive and
+        // restore advance the row's revision, so unless they publish the stamp they
+        // committed, an open draft is left declaring a token the row no longer has -
+        // and the honest client has to drop its binding rather than keep typing into
+        // a page it can no longer save. Success used to answer with the payload only.
+        var (editorA, _, project) = await CreateProjectWithTwoTabsAsync();
+        var baseToken = FormatIfMatchToken(await ReadRevisionAsync(editorA, project.Id));
+
+        var archived = await PostStatusAsync(editorA, $"/api/projects/{project.Id}/archive");
+        Assert.Equal(HttpStatusCode.OK, archived.StatusCode);
+        var published = archived.Headers.ETag?.ToString();
+        Assert.False(string.IsNullOrWhiteSpace(published), "an archive that moves the revision must publish it");
+        var archivedRow = await archived.Content.ReadFromJsonAsync<ProjectDto>();
+        Assert.NotNull(archivedRow);
+        Assert.Equal("Archived", archivedRow!.Status);
+        // The token names the stamp the row carries now, not the one read before the write.
+        Assert.True(Taslim.Api.Projects.ProjectRevision.TryParseETag(published!, out var publishedStamp));
+        Assert.Equal(archivedRow.UpdatedAt.Ticks, publishedStamp.Ticks);
+
+        // The point for the browser: the draft keeps saving with the published token.
+        var edit = await PatchAsync(editorA, project.Id, published!, Form(project, name: "Renamed across an archive"));
+        Assert.Equal(HttpStatusCode.OK, edit.StatusCode);
+
+        // And the pre-archive token is expired: the status flip cannot be undone blindly.
+        var stale = await PatchAsync(editorA, project.Id, baseToken, Form(project, name: "Must not resurrect"));
+        Assert.Equal(HttpStatusCode.Conflict, stale.StatusCode);
+
+        var restored = await PostStatusAsync(editorA, $"/api/projects/{project.Id}/restore");
+        Assert.Equal(HttpStatusCode.OK, restored.StatusCode);
+        var restoredToken = restored.Headers.ETag?.ToString();
+        Assert.False(string.IsNullOrWhiteSpace(restoredToken), "a restore that moves the revision must publish it");
+        Assert.NotEqual(published, restoredToken);
+        var restoredRow = await restored.Content.ReadFromJsonAsync<ProjectDto>();
+        Assert.NotNull(restoredRow);
+        Assert.Equal("Active", restoredRow!.Status);
+        Assert.True(Taslim.Api.Projects.ProjectRevision.TryParseETag(restoredToken!, out var restoredStamp));
+        Assert.Equal(restoredRow.UpdatedAt.Ticks, restoredStamp.Ticks);
+        Assert.True(restoredRow.UpdatedAt > archivedRow.UpdatedAt, "status writes must advance, never rewind or reuse");
+    }
+
+    [Fact]
+    public async Task StatusWrite_AfterAnotherWriterCommitted_LeavesStatusUnconditionalButStampMonotonic()
+    {
+        // Archive keeps its documented scope: it is a status write under the live-row
+        // fence, so a concurrent content commit must not turn it into a conflict. What
+        // it must still obey is the revision guarantee - the stamp it publishes has to
+        // be ahead of the commit it landed on top of, or that commit's already-expired
+        // ETag would become live again.
+        var (editorA, editorB, project) = await CreateProjectWithTwoTabsAsync();
+        var baseToken = FormatIfMatchToken(await ReadRevisionAsync(editorA, project.Id));
+        var bSave = await PatchAsync(editorB, project.Id, baseToken, Form(project, description: "B landed first"));
+        Assert.Equal(HttpStatusCode.OK, bSave.StatusCode);
+        var bRow = await bSave.Content.ReadFromJsonAsync<ProjectDto>();
+        Assert.NotNull(bRow);
+
+        var archived = await PostStatusAsync(editorA, $"/api/projects/{project.Id}/archive");
+        Assert.Equal(HttpStatusCode.OK, archived.StatusCode);
+        var archivedRow = await archived.Content.ReadFromJsonAsync<ProjectDto>();
+        Assert.NotNull(archivedRow);
+        Assert.True(archivedRow!.UpdatedAt > bRow!.UpdatedAt, "the status write must sit ahead of the commit it landed on");
+
+        // B's token was live when B saved; the archive expired it, so B's retry is a
+        // conflict rather than a silent walk-over of the archive.
+        var bRetry = await PatchAsync(editorB, project.Id, bSave.Headers.ETag!.ToString(), Form(project, description: "B retries"));
+        Assert.Equal(HttpStatusCode.Conflict, bRetry.StatusCode);
+
+        var survivor = await editorA.GetFromJsonAsync<ProjectDto>($"/api/projects/{project.Id}");
+        Assert.NotNull(survivor);
+        Assert.Equal("B landed first", survivor!.Description);
+        Assert.Equal("Archived", survivor.Status);
+    }
+
     private async Task<(HttpClient EditorA, HttpClient EditorB, ProjectDto Project)> CreateProjectWithTwoTabsAsync()
     {
         var email = $"patch-conflict-{Guid.NewGuid():N}@example.com";
@@ -325,6 +400,14 @@ public sealed class ProjectPatchRevisionConflictTests : IClassFixture<TaslimApiF
         request.Headers.Add("X-CSRF-TOKEN", token);
         if (ifMatch is not null) request.Headers.TryAddWithoutValidation("If-Match", ifMatch);
         request.Content = JsonContent.Create(body);
+        return await client.SendAsync(request);
+    }
+
+    private static async Task<HttpResponseMessage> PostStatusAsync(HttpClient client, string path)
+    {
+        var token = await GetCsrfAsync(client);
+        using var request = new HttpRequestMessage(HttpMethod.Post, path);
+        request.Headers.Add("X-CSRF-TOKEN", token);
         return await client.SendAsync(request);
     }
 

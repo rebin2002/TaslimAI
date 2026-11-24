@@ -3,7 +3,7 @@
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { Check, FileText } from "lucide-react";
 import type { Project, ProjectInput } from "@/lib/api";
-import { isRevisionConflict, isRevisionUnavailable, ProjectRevisionSession } from "@/lib/projectRevision";
+import { isRevisionConflict, isRevisionDiverged, isRevisionUnavailable, ProjectRevisionSession } from "@/lib/projectRevision";
 import { useLocale } from "@/components/LocaleProvider";
 
 export function ProjectContextEditor({ project, onSaved, revision }: Readonly<{
@@ -24,6 +24,13 @@ export function ProjectContextEditor({ project, onSaved, revision }: Readonly<{
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState("");
   const [conflict, setConflict] = useState(false);
+  // True when this client found the row already differs from the copy on screen,
+  // rather than the server refusing a declared revision. The decision is the same,
+  // the explanation is not.
+  const [diverged, setDiverged] = useState(false);
+  // One conflict action at a time: reload and keep-mine both write, and a double
+  // click that ran both would let a wildcard overwrite the reload it raced.
+  const busy = useRef(false);
   // Identity of the project that owns this mounted instance's draft, its save
   // feedback, and any request still in flight. The view stays mounted while the
   // route parameter changes, so a switch of project - and with it of workspace -
@@ -34,7 +41,7 @@ export function ProjectContextEditor({ project, onSaved, revision }: Readonly<{
   // is never carried across a route switch: declaring another project's
   // revision would either be rejected as unusable or, worse, certify a draft
   // that was never built on the row being saved.
-  const ownSession = useMemo(() => new ProjectRevisionSession(project.id), [project.id]);
+  const ownSession = useMemo(() => new ProjectRevisionSession(project.id, "context"), [project.id]);
   const session = revision ?? ownSession;
 
   useEffect(() => {
@@ -46,6 +53,8 @@ export function ProjectContextEditor({ project, onSaved, revision }: Readonly<{
     setSaved(false);
     setError("");
     setConflict(false);
+    setDiverged(false);
+    busy.current = false;
     // Project identity intentionally controls the local draft boundary.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [project.id]);
@@ -54,8 +63,19 @@ export function ProjectContextEditor({ project, onSaved, revision }: Readonly<{
   // describes the copy the draft was written against. A failed capture is not
   // retried here: the save re-captures rather than sending an unfenced write.
   function beginEditing() {
-    if (session.heldRevision) return;
-    void session.begin().catch(() => setError(t("projects.revisionLoadError")));
+    if (session.isBound || conflict) return;
+    // The token is only ever bound to the content it was published for, so this
+    // read compares the row against `project` - the copy being edited. A page
+    // that is already out of date reports a conflict instead of stamping its
+    // stale draft with the newer revision.
+    void session.begin(project).catch((caught) => {
+      if (isRevisionConflict(caught)) {
+        setDiverged(isRevisionDiverged(caught));
+        setConflict(true);
+      } else {
+        setError(t("projects.revisionLoadError"));
+      }
+    });
   }
 
   const draft = (): ProjectInput => ({
@@ -74,7 +94,7 @@ export function ProjectContextEditor({ project, onSaved, revision }: Readonly<{
     setError("");
     setConflict(false);
     try {
-      const updated = await session.save(draft());
+      const updated = await session.save(draft(), project);
       // A reply that lands after the view moved on belongs to the project that has
       // just been left behind, so it is dropped instead of being written into the
       // overview of the project now on screen.
@@ -88,6 +108,7 @@ export function ProjectContextEditor({ project, onSaved, revision }: Readonly<{
       if (isRevisionConflict(caught)) {
         // The conflict block carries the explanation and the two choices; the
         // generic error line stays free so the message is not shown twice.
+        setDiverged(isRevisionDiverged(caught));
         setConflict(true);
       } else if (isRevisionUnavailable(caught)) {
         setError(t("projects.revisionLoadError"));
@@ -101,6 +122,8 @@ export function ProjectContextEditor({ project, onSaved, revision }: Readonly<{
   }
 
   async function reloadLatest() {
+    if (busy.current) return;
+    busy.current = true;
     setSaving(true);
     try {
       const latest = await session.reloadLatest();
@@ -108,29 +131,35 @@ export function ProjectContextEditor({ project, onSaved, revision }: Readonly<{
       setInstructions(latest.instructions ?? "");
       setContextNotes(latest.contextNotes ?? "");
       setConflict(false);
+      setDiverged(false);
       setError(t("projects.revisionReloaded"));
       onSaved(latest);
     } catch (caught) {
       if (ownerRef.current !== project.id) return;
       setError(caught instanceof Error ? caught.message : t("projects.loadError"));
     } finally {
+      busy.current = false;
       if (ownerRef.current === project.id) setSaving(false);
     }
   }
 
   async function keepMyDraft() {
     const submittingProjectId = project.id;
+    if (busy.current) return;
+    busy.current = true;
     setSaving(true);
     try {
       const updated = await session.saveOverLatest(draft());
       if (ownerRef.current !== submittingProjectId) return;
       onSaved(updated.project);
       setConflict(false);
+      setDiverged(false);
       setSaved(true);
     } catch (caught) {
       if (ownerRef.current !== submittingProjectId) return;
       setError(caught instanceof Error ? caught.message : t("projects.saveError"));
     } finally {
+      busy.current = false;
       if (ownerRef.current === submittingProjectId) setSaving(false);
     }
   }
@@ -140,10 +169,10 @@ export function ProjectContextEditor({ project, onSaved, revision }: Readonly<{
     <label><span>{t("projects.instructions")}</span><textarea maxLength={4000} rows={4} value={instructions} onChange={(event) => { beginEditing(); setInstructions(event.target.value); }} placeholder={t("projects.instructionsPlaceholder")} /></label>
     <label><span>{t("projects.contextNotes")}</span><textarea maxLength={8000} rows={5} value={contextNotes} onChange={(event) => { beginEditing(); setContextNotes(event.target.value); }} placeholder={t("projects.contextNotesPlaceholder")} /></label>
     {conflict && <div className="revision-conflict" role="alert">
-      <p>{t("projects.revisionConflict")}</p>
+      <p>{t(diverged ? "projects.revisionDiverged" : "projects.revisionConflict")}</p>
       <div className="revision-conflict-actions">
-        <button type="button" className="secondary-button" onClick={() => { void reloadLatest(); }}>{t("projects.revisionReloadAction")}</button>
-        <button type="button" className="primary-button" onClick={() => { void keepMyDraft(); }}>{t("projects.revisionKeepMineAction")}</button>
+        <button type="button" className="secondary-button" disabled={saving} onClick={() => { void reloadLatest(); }}>{t("projects.revisionReloadAction")}</button>
+        <button type="button" className="primary-button" disabled={saving} onClick={() => { void keepMyDraft(); }}>{t("projects.revisionKeepMineAction")}</button>
       </div>
     </div>}
     {error && <div className="form-error" role="alert">{error}</div>}

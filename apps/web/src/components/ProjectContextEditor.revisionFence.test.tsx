@@ -128,7 +128,13 @@ class TestDocument extends TestNode {
  *
  * Before this lane the editor sent no `If-Match` at all, so two open tabs
  * always landed on the API's last-write-wins path and a stale draft silently
- * replaced a newer one. The stub below reproduces the published contract: the
+ * replaced a newer one. The harder case, pinned here too: a page that went stale
+ * BEFORE the first keystroke must not be allowed to claim whatever token the row
+ * happens to carry at that moment, because that token certifies content the member
+ * never saw. So the editor hands the session the copy on screen, and a mismatch is
+ * a conflict raised before any write is attempted.
+ *
+ * The stub below reproduces the published contract: the
  * seven-digit fractional stamp of the production store, a write that moves it
  * forward, a declared revision that must still hold the row, the wildcard that
  * applies over whatever the row holds, and the live revision carried on the
@@ -370,6 +376,115 @@ describe("ProjectContextEditor revision fence", () => {
     // draft is written into the project the member navigated to.
     expect(call.ifMatch).not.toBe(PROJECT_TOKEN);
     expect((call.body as { instructions?: string }).instructions).toBe("B instructions");
+  });
+
+  it("refuses to certify a page whose row moved before the first keystroke", async () => {
+    // The reported race: the overview rendered an older copy, another tab saved,
+    // and only then did the member start typing. Adopting the token that read
+    // returns at that moment would stamp the stale draft as current and silently
+    // overwrite the other tab's edit - the lost update the fence exists to stop.
+    await mount();
+    server.commitFromElsewhere("project-a", { instructions: "Saved in tab B", name: "Renamed in tab B" });
+    await typeInstructions("Draft typed in tab A");
+
+    // The divergence is caught while capturing, before any PATCH is attempted.
+    expect(patchCalls()).toHaveLength(0);
+    expect(conflictBlock()).toHaveLength(1);
+    expect(conflictBlock()[0]!.textContent).toContain("projects.revisionDiverged");
+    expect(findByClass(testContainer, "form-error")).toHaveLength(0);
+
+    // Saving now still writes nothing; the draft stays on screen for the choice.
+    await submit();
+    expect(patchCalls()).toHaveLength(0);
+    expect(contextValues()[0]).toBe("Draft typed in tab A");
+    expect(server.row("project-a").project.instructions).toBe("Saved in tab B");
+    expect(server.row("project-a").project.name).toBe("Renamed in tab B");
+  });
+
+  it("refuses a save with no typing when the row moved while the page was open", async () => {
+    // Clicking Save without editing used to send the displayed copy against a
+    // freshly read token, reverting the other tab's change with no keystroke and
+    // no conflict to notice.
+    await mount();
+    server.commitFromElsewhere("project-a", { description: "Tab B's synopsis" });
+    await submit();
+
+    expect(patchCalls()).toHaveLength(0);
+    expect(conflictBlock()[0]!.textContent).toContain("projects.revisionDiverged");
+    expect(server.row("project-a").project.description).toBe("Tab B's synopsis");
+  });
+
+  it("recovers from a pre-save divergence by reloading, then saves honestly", async () => {
+    await mount();
+    server.commitFromElsewhere("project-a", { instructions: "Saved in tab B" });
+    await typeInstructions("Draft typed in tab A");
+    expect(conflictBlock()).toHaveLength(1);
+
+    await clickByLabel("projects.revisionReloadAction");
+    // Re-reading the row is not a write.
+    expect(patchCalls()).toHaveLength(0);
+    expect(contextValues()[0]).toBe("Saved in tab B");
+    expect(conflictBlock()).toHaveLength(0);
+
+    await typeInstructions("Edit after reload");
+    await submit();
+    expect(patchCalls()).toHaveLength(1);
+    // The token declared is the one the reload read, so the write lands.
+    expect(patchCalls()[0]!.ifMatch).not.toBe(PROJECT_TOKEN);
+    expect(server.row("project-a").project.instructions).toBe("Edit after reload");
+  });
+
+  it("runs only one conflict action at a time", async () => {
+    await mount();
+    await typeInstructions("Draft typed in tab A");
+    server.commitFromElsewhere("project-a", { instructions: "Saved in tab B" });
+    await submit();
+    expect(conflictBlock()).toHaveLength(1);
+    const before = patchCalls().length;
+
+    // Hold the reload's read open and click keep-mine meanwhile: a wildcard that
+    // fired now would race the reload and could overwrite the copy it was about
+    // to put on screen, which is the decision the member has not made yet.
+    let release: (() => void) | undefined;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const handler = server.handler;
+    fetchMock.mockImplementation(async (input: string, init?: RequestInit) => {
+      if ((init?.method ?? "GET").toUpperCase() === "GET" && String(input).endsWith("/api/projects/project-a")) {
+        await gate;
+      }
+      return handler(input, init);
+    });
+
+    const reload = findNodes(testContainer, "BUTTON")
+      .find((node) => (node.textContent ?? "").includes("projects.revisionReloadAction"))!;
+
+    await act(async () => {
+      reload.dispatchEvent({ type: "click", bubbles: true });
+      await drain();
+    });
+    // Re-queried after the re-render: both actions are inert while one is running.
+    const isDisabled = (node: TestNode) => node.disabled || node.getAttribute("disabled") !== null;
+    const running = findNodes(testContainer, "BUTTON");
+    expect(isDisabled(running.find((node) => (node.textContent ?? "").includes("projects.revisionReloadAction"))!)).toBe(true);
+    expect(isDisabled(running.find((node) => (node.textContent ?? "").includes("projects.revisionKeepMineAction"))!)).toBe(true);
+
+    await act(async () => {
+      findNodes(testContainer, "BUTTON")
+        .find((node) => (node.textContent ?? "").includes("projects.revisionKeepMineAction"))!
+        .dispatchEvent({ type: "click", bubbles: true });
+      await drain();
+    });
+    expect(patchCalls()).toHaveLength(before);
+
+    release?.();
+    await act(async () => {
+      await drain();
+      await drain();
+    });
+    // The reload finished and still no wildcard write happened.
+    expect(patchCalls()).toHaveLength(before);
+    expect(contextValues()[0]).toBe("Saved in tab B");
+    expect(conflictBlock()).toHaveLength(0);
   });
 
   it("reports a save failure that is not a conflict as an ordinary error", async () => {

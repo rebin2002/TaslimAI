@@ -1,9 +1,9 @@
 "use client";
 
-import { FormEvent, useState } from "react";
+import { FormEvent, useRef, useState } from "react";
 import { Check, ChevronDown, X } from "lucide-react";
 import type { Project, ProjectInput } from "@/lib/api";
-import { isRevisionConflict, isRevisionUnavailable, type ProjectRevisionSession } from "@/lib/projectRevision";
+import { isRevisionConflict, isRevisionDiverged, isRevisionUnavailable, type ProjectRevisionSession } from "@/lib/projectRevision";
 import { useLocale } from "@/components/LocaleProvider";
 import { localeDirection } from "@/lib/i18n";
 
@@ -37,6 +37,10 @@ export function ProjectForm({ project, onClose, onSubmit, revision, onSaved }: R
   // The fence refused the revision this draft was built on. The draft stays
   // exactly as typed until the member chooses what happens to it.
   const [conflict, setConflict] = useState(false);
+  const [diverged, setDiverged] = useState(false);
+  // Reload and keep-mine both write: a double click that ran them together would
+  // let the wildcard overwrite the reload it raced.
+  const busy = useRef(false);
 
   const draft = (): ProjectInput => ({ name, description: description || undefined, instructions: instructions || undefined, contextNotes: contextNotes || undefined, type });
 
@@ -44,14 +48,26 @@ export function ProjectForm({ project, onClose, onSubmit, revision, onSaved }: R
   // revision the draft was actually built on. A capture that fails is not
   // retried here: the save re-captures rather than sending an unfenced write.
   function beginEditing() {
-    if (!revision || revision.heldRevision) return;
-    void revision.begin().catch(() => setError(t("projects.revisionLoadError")));
+    if (!revision || !project || revision.isBound || conflict) return;
+    // Bound to the content being edited, never to whatever stamp the row happens
+    // to carry now: an out-of-date form reports a conflict instead of stamping
+    // its stale draft with a revision it did not edit from.
+    void revision.begin(project).catch((caught) => {
+      if (isRevisionConflict(caught)) {
+        setDiverged(isRevisionDiverged(caught));
+        setConflict(true);
+      } else {
+        setError(t("projects.revisionLoadError"));
+      }
+    });
   }
 
   async function submit(event: FormEvent) {
     event.preventDefault(); setSaving(true); setError(""); setConflict(false);
+    setDiverged(false);
     try {
-      if (revision) { const saved = await revision.save(draft()); onSaved?.(saved.project); }
+      if (revision && project) { const saved = await revision.save(draft(), project); onSaved?.(saved.project); }
+      else if (revision) throw new Error("An edit form needs the project it edits.");
       else await onSubmit?.(draft());
       onClose();
     }
@@ -60,6 +76,7 @@ export function ProjectForm({ project, onClose, onSubmit, revision, onSaved }: R
         // Nothing was written. Keep the draft, keep the expired token, and ask
         // the member which copy should win; never re-declare a newer revision
         // behind their back.
+        setDiverged(isRevisionDiverged(caught));
         setConflict(true);
       } else if (isRevisionUnavailable(caught)) {
         setError(t("projects.revisionLoadError"));
@@ -71,7 +88,8 @@ export function ProjectForm({ project, onClose, onSubmit, revision, onSaved }: R
   }
 
   async function reloadLatest() {
-    if (!revision) return;
+    if (!revision || busy.current) return;
+    busy.current = true;
     setSaving(true);
     try {
       const latest = await revision.reloadLatest();
@@ -81,24 +99,27 @@ export function ProjectForm({ project, onClose, onSubmit, revision, onSaved }: R
       setContextNotes(latest.contextNotes ?? "");
       setType(latest.type);
       setConflict(false);
+      setDiverged(false);
       setError(t("projects.revisionReloaded"));
       onSaved?.(latest);
     }
     catch (caught) { setError(caught instanceof Error ? caught.message : t("projects.loadError")); }
-    finally { setSaving(false); }
+    finally { busy.current = false; setSaving(false); }
   }
 
   async function keepMyDraft() {
-    if (!revision) return;
+    if (!revision || busy.current) return;
+    busy.current = true;
     setSaving(true);
     try {
       const saved = await revision.saveOverLatest(draft());
       setConflict(false);
+      setDiverged(false);
       onSaved?.(saved.project);
       onClose();
     }
     catch (caught) { setError(caught instanceof Error ? caught.message : t("projects.saveError")); }
-    finally { setSaving(false); }
+    finally { busy.current = false; setSaving(false); }
   }
 
   return <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
@@ -110,10 +131,10 @@ export function ProjectForm({ project, onClose, onSubmit, revision, onSaved }: R
       <label><span>{t("projects.instructions")}</span><textarea maxLength={4000} rows={4} value={instructions} onChange={(event) => { beginEditing(); setInstructions(event.target.value); }} placeholder={t("projects.instructionsPlaceholder")} dir="auto" /></label>
       <label><span>{t("projects.contextNotes")}</span><textarea maxLength={8000} rows={5} value={contextNotes} onChange={(event) => { beginEditing(); setContextNotes(event.target.value); }} placeholder={t("projects.contextNotesPlaceholder")} dir="auto" /></label>
       {conflict && <div className="revision-conflict" role="alert">
-        <p>{t("projects.revisionConflict")}</p>
+        <p>{t(diverged ? "projects.revisionDiverged" : "projects.revisionConflict")}</p>
         <div className="revision-conflict-actions">
-          <button type="button" className="secondary-button" onClick={() => { void reloadLatest(); }}>{t("projects.revisionReloadAction")}</button>
-          <button type="button" className="primary-button" onClick={() => { void keepMyDraft(); }}>{t("projects.revisionKeepMineAction")}</button>
+          <button type="button" className="secondary-button" disabled={saving} onClick={() => { void reloadLatest(); }}>{t("projects.revisionReloadAction")}</button>
+          <button type="button" className="primary-button" disabled={saving} onClick={() => { void keepMyDraft(); }}>{t("projects.revisionKeepMineAction")}</button>
         </div>
       </div>}
       {error && <div className="form-error" role="alert">{error}</div>}
