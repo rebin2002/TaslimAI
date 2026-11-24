@@ -53,6 +53,17 @@ public sealed class MubertMusicGenerationProvider(
         // the internal timeout cancelling underneath a download - is a retrieval failure and must not
         // surface as the retryable timeout code, because a retry would POST a second paid track.
         var billableOutputReceived = false;
+        // Set as soon as the create POST is answered with a track id. Mubert has then ACCEPTED a paid
+        // generation, but whether it finished - and whether it was charged - is unknown to us until a
+        // status poll says so. This middle stage is deliberately distinct from "nothing was submitted":
+        // reporting MUSIC_PROVIDER_TIMEOUT here invites the job layer's automatic retry, which re-runs
+        // CreateAsync and POSTs a second track while the first may still be running and billing. Until
+        // the provider exposes a way to enumerate accepted tracks by our own request id, the policy is
+        // to stop the machine from submitting again (the terminal retrieval class, retry-blocked at
+        // GenerationJobExecution.RetryAsync) and to leave the track id in the log so the pending
+        // generation can be reconciled by hand.
+        var providerSubmissionAccepted = false;
+        string? providerTrackId = null;
 
         try
         {
@@ -72,6 +83,8 @@ public sealed class MubertMusicGenerationProvider(
             var created = ReadEnvelope<MubertTrackResource>(createdBody)?.Data
                 ?? throw new MusicProviderFailureException();
             if (string.IsNullOrWhiteSpace(created.Id)) throw new MusicProviderFailureException();
+            providerSubmissionAccepted = true;
+            providerTrackId = created.Id;
 
             MubertGenerationResource? generation = null;
             for (pollAttempts = 1; pollAttempts <= Math.Max(1, settings.MubertMaxPollAttempts); pollAttempts++)
@@ -100,7 +113,19 @@ public sealed class MubertMusicGenerationProvider(
             }
 
             if (string.IsNullOrWhiteSpace(generation?.Url))
-                throw new MusicProviderTimeoutException();
+            {
+                // Bounded polling ran out on a track Mubert accepted but never confirmed as finished.
+                // Same reconciliation posture as an unconfirmed timeout: the submission is not repeated.
+                logger.LogWarning(
+                    "Mubert music provider stopped polling an accepted track whose completion was never confirmed; the generation was not re-submitted. ProviderKey={ProviderKey}; ModelKey={ModelKey}; ProviderOperationId={ProviderOperationId}; PollAttempts={PollAttempts}",
+                    Key,
+                    settings.Model,
+                    providerTrackId,
+                    pollAttempts);
+                throw providerSubmissionAccepted
+                    ? new MusicOutputRetrievalFailedException()
+                    : new MusicProviderTimeoutException();
+            }
 
             var download = await DownloadWithTransportRecoveryAsync(new Uri(generation.Url, UriKind.Absolute), timeout.Token);
             var format = NormalizeFormat(settings.MubertFormat);
@@ -140,6 +165,20 @@ public sealed class MubertMusicGenerationProvider(
                     "Mubert music provider timed out while retrieving an already-completed track. ProviderKey={ProviderKey}; ModelKey={ModelKey}",
                     Key,
                     settings.Model);
+                throw new MusicOutputRetrievalFailedException();
+            }
+
+            if (providerSubmissionAccepted)
+            {
+                // Accepted, unconfirmed: the paid generation may exist, so the retryable timeout code
+                // would be a duplicate-submission instruction. Terminal, with the id kept for
+                // reconciliation; nothing provider-sensitive is carried in the message.
+                logger.LogWarning(
+                    exception,
+                    "Mubert music provider timed out before an accepted track's completion could be confirmed; the generation was not re-submitted. ProviderKey={ProviderKey}; ModelKey={ModelKey}; ProviderOperationId={ProviderOperationId}",
+                    Key,
+                    settings.Model,
+                    providerTrackId);
                 throw new MusicOutputRetrievalFailedException();
             }
 

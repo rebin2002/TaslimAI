@@ -79,8 +79,13 @@ public sealed class MubertMusicGenerationProviderTests
     }
 
     [Fact]
-    public async Task Polling_is_bounded_and_times_out_without_fabricating_audio()
+    public async Task Bounded_polling_of_an_accepted_track_stops_without_a_second_billable_submission()
     {
+        // The create was accepted (track-3 exists on Mubert's side) and the bounded polling window ran
+        // out while it still reported processing. Billing state is unknown, so this is NOT the retryable
+        // timeout class: RetryAsync re-runs CreateAsync, which would POST a second paid track. The job
+        // stops on the terminal retrieval class instead, having sent exactly one billable POST. No audio
+        // is fabricated either way.
         var handler = new MubertHandler(
             (_, requestNumber) => requestNumber switch
             {
@@ -89,8 +94,11 @@ public sealed class MubertMusicGenerationProviderTests
             });
         var provider = CreateProvider(handler, maxPollAttempts: 2, pollIntervalMilliseconds: 100);
 
-        await Assert.ThrowsAsync<MusicProviderTimeoutException>(() => provider.GenerateAsync(Input()));
+        var failure = await Assert.ThrowsAsync<MusicOutputRetrievalFailedException>(() => provider.GenerateAsync(Input()));
+
+        Assert.IsAssignableFrom<MusicProviderUnavailableException>(failure);
         Assert.Equal(3, handler.Requests.Count);
+        Assert.Single(handler.Requests, request => request.Method == HttpMethod.Post);
     }
 
     [Fact]
@@ -232,10 +240,14 @@ public sealed class MubertMusicGenerationProviderTests
     }
 
     [Fact]
-    public async Task Timeout_before_the_track_exists_stays_a_retryable_provider_timeout()
+    public async Task Timeout_while_an_accepted_track_is_still_pending_is_terminal_not_a_retryable_timeout()
     {
-        // Nothing was billed when the status response itself never arrives, so the retryable timeout
-        // class is the right answer here: only a fault after completion is terminal.
+        // The create POST was answered with a track id, so Mubert has accepted a paid generation; the
+        // status GET then never completes. Billing is unknown at that point, which is exactly why the
+        // retryable class is unsafe: RetryAsync would re-run CreateAsync and POST a second track while
+        // the accepted one may still be running. The job therefore stops on the terminal retrieval
+        // class, with exactly one billable POST sent and the accepted id logged for reconciliation
+        // (see the provider's providerSubmissionAccepted branch).
         var handler = new MubertHandler((_, requestNumber) => requestNumber switch
         {
             1 => Json(HttpStatusCode.OK, "{\"data\":{\"id\":\"track-pre-timeout\",\"session_id\":\"session\"}}"),
@@ -243,6 +255,24 @@ public sealed class MubertMusicGenerationProviderTests
             {
                 Content = new StreamContent(new BlockingStream()),
             },
+        });
+        var provider = CreateProvider(handler, providerTimeoutSeconds: 1);
+
+        var failure = await Assert.ThrowsAsync<MusicOutputRetrievalFailedException>(() => provider.GenerateAsync(Input()));
+
+        Assert.IsAssignableFrom<MusicProviderUnavailableException>(failure);
+        Assert.Single(handler.Requests, request => request.Method == HttpMethod.Post);
+    }
+
+    [Fact]
+    public async Task Timeout_before_the_create_is_answered_stays_a_retryable_provider_timeout()
+    {
+        // The genuinely unsubmitted stage: the track-creation POST itself never returns a body, so no
+        // generation id exists and nothing can have been charged. The retryable timeout class is correct
+        // here, and it is the only music timeout that stays retryable.
+        var handler = new MubertHandler((_, _) => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StreamContent(new BlockingStream()),
         });
         var provider = CreateProvider(handler, providerTimeoutSeconds: 1);
 

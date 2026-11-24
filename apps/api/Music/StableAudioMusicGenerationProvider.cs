@@ -48,6 +48,15 @@ public sealed class StableAudioMusicGenerationProvider(
         // so it must not be reported as the retryable timeout code: a retry would POST a second
         // billable generation and orphan the first.
         var billableResultReceived = false;
+        // Set as soon as the text-to-audio POST is answered with a generation id. Stability has then
+        // accepted a paid generation, while its completion and charge are still unknown to us. This
+        // middle stage is deliberately distinct from "nothing was submitted": the retryable timeout
+        // code makes the job layer re-run CreateAsync, which posts a second generation while the
+        // accepted one may still be running and billing. The policy is to stop the machine from
+        // submitting again (terminal, retry-blocked at GenerationJobExecution.RetryAsync) and keep the
+        // generation id in the log so the pending result can be reconciled by hand.
+        var providerSubmissionAccepted = false;
+        string? providerGenerationId = null;
 
         try
         {
@@ -62,6 +71,8 @@ public sealed class StableAudioMusicGenerationProvider(
                 BuildForm(request, model, format),
                 timeout.Token);
             var generationId = ReadGenerationId(createdBody);
+            providerSubmissionAccepted = true;
+            providerGenerationId = generationId;
 
             byte[]? output = null;
             string? contentType = null;
@@ -133,11 +144,22 @@ public sealed class StableAudioMusicGenerationProvider(
             }
 
             if (output is null || string.IsNullOrWhiteSpace(contentType))
-                throw billableResultReceived
+            {
+                if (!billableResultReceived)
+                    logger.LogWarning(
+                        "Stable Audio music provider stopped polling an accepted generation whose completion was never confirmed; the generation was not re-submitted. ProviderKey={ProviderKey}; ProviderOperationId={ProviderOperationId}; PollAttempts={PollAttempts}",
+                        Key,
+                        providerGenerationId,
+                        pollAttempts);
+
+                throw billableResultReceived || providerSubmissionAccepted
                     // A 2xx result that yielded no usable body is post-billing: the generation exists
-                    // and was charged, so this is a retrieval failure, not a retryable timeout.
+                    // and was charged, so this is a retrieval failure, not a retryable timeout. Bounded
+                    // polling of an accepted-but-unconfirmed generation takes the same posture: the
+                    // submission is not repeated, and the id stays in the log for reconciliation.
                     ? new MusicOutputRetrievalFailedException()
                     : new MusicProviderTimeoutException();
+            }
 
             var normalizedContentType = NormalizeContentType(contentType, format);
             if (!MusicOutputInspector.HasValidAudioSignature(output, format))
@@ -176,6 +198,18 @@ public sealed class StableAudioMusicGenerationProvider(
                     exception,
                     "Stable Audio music provider timed out while retrieving an already-completed generation. ProviderKey={ProviderKey}",
                     Key);
+                throw new MusicOutputRetrievalFailedException();
+            }
+
+            if (providerSubmissionAccepted)
+            {
+                // Accepted, unconfirmed: charging state unknown, so the retryable timeout code would
+                // instruct a second paid submission. Terminal instead, with the id logged.
+                logger.LogWarning(
+                    exception,
+                    "Stable Audio music provider timed out before an accepted generation's completion could be confirmed; the generation was not re-submitted. ProviderKey={ProviderKey}; ProviderOperationId={ProviderOperationId}",
+                    Key,
+                    providerGenerationId);
                 throw new MusicOutputRetrievalFailedException();
             }
 
