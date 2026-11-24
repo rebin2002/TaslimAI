@@ -120,6 +120,19 @@ public sealed class MovieShotProductionContractTests
         Assert.Contains("shot-plan", contract.Approval.StageProvenanceJson, StringComparison.Ordinal);
     }
 
+    [Theory]
+    [InlineData("[]")]
+    [InlineData("\"text\"")]
+    [InlineData("null")]
+    public void Projection_treats_non_object_quality_requirements_as_absent(string qualityRequirementsJson)
+    {
+        var shot = new MovieShot { QualityRequirementsJson = qualityRequirementsJson };
+
+        var contract = MovieShotProductionContractProjection.FromShot(shot);
+
+        Assert.Null(contract.QualityRequirements);
+    }
+
     [Fact]
     public void Contract_serialization_does_not_introduce_provider_or_model_fields()
     {
