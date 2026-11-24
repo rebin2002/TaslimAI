@@ -15,27 +15,31 @@ import { studioCategories } from "@/lib/navigation";
  * from mentioning health at all, and the destination screen was source-scanned
  * for `<form>`, `<input>`, `<textarea>` and `/api/` markers. That shape is now
  * obsolete and preclusive. The chooser lane ships a navigation-only Health Care
- * card and the route lane shipped the gated `/create/health` preview, so the
- * absence leg fails on current main
- * (`expect(chooserSource).not.toContain("/create/health")`), and the collection
- * markers would keep failing the day Health Care grows the functionality it
- * advertises.
+ * card and the route lane ships the gated `/create/health` preview, so the
+ * absence leg fails on current main 04fcca0da63e
+ * (`expect(chooserSource).not.toContain("/create/health")`, measured
+ * 1 failed | 8 passed), and `studioCategories` carries no health entry at all,
+ * so the old enumeration never even looked at the real menu surface. The
+ * collection markers would keep failing the day Health Care grows the
+ * functionality it advertises.
  *
  * Truthfulness is still the requirement, so this revision keeps the durable
  * invariants and drops the prohibitions:
  *
  *   1. every Health Care card the mobile menu renders must point at a real,
  *      routable screen on disk - the menu may not advertise a phantom;
- *   2. that screen must carry its own authentication gates and stay unindexed,
- *      because the app has no Next middleware to fall back on;
+ *   2. that screen must actually await its own server gate on this route, must
+ *      render the client gate, and must stay unindexed, because the app has no
+ *      Next middleware to fall back on;
  *   3. no other health-named link may appear in the mobile menu without
- *      satisfying the same two rules;
+ *      satisfying the same rules;
  *   4. every enabled Create-menu card still resolves to a screen on disk.
  *
  * Nothing here asserts which controls, uploads or provider calls a health
  * screen may eventually contain: that is a product decision, not a privacy
- * invariant. The synthetic fixtures pin that distinction explicitly, so the
- * guard is demonstrably discriminating and demonstrably not preclusive.
+ * invariant. The synthetic fixtures pin that distinction explicitly, and each
+ * check is call-shaped rather than a bare marker search, so deleting a gate
+ * while leaving its import behind is reported instead of hidden.
  *
  * Test-only. Edits no source file, reads no user or provider data, and touches
  * no path owned by another lane.
@@ -51,14 +55,22 @@ type HealthMenuLink = {
   text: string;
 };
 
-function pageFileFor(href: string): URL {
-  return new URL(`../app${href}/page.tsx`, import.meta.url);
-}
+/** Next allows either extension for a route segment; accept both. */
+const PAGE_FILE_NAMES = ["page.tsx", "page.ts"] as const;
 
 function liveRouteFact(href: string): RouteScreenFact {
-  const url = pageFileFor(href);
-  if (!existsSync(url)) return { exists: false, source: "" };
-  return { exists: true, source: readFileSync(url, "utf8") };
+  for (const fileName of PAGE_FILE_NAMES) {
+    const url = new URL(`../app${href}/${fileName}`, import.meta.url);
+    if (existsSync(url)) return { exists: true, source: readFileSync(url, "utf8") };
+  }
+  return { exists: false, source: "" };
+}
+
+/** The awaited authentication gate for this exact route, if the screen has one. */
+function awaitedGatePaths(source: string): string[] {
+  return [...source.matchAll(/await\s+requireAuthenticatedPage\(\s*["'`]([^"'`]+)["'`]\s*\)/g)].map(
+    (match) => match[1],
+  );
 }
 
 /**
@@ -75,13 +87,16 @@ function destinationTruthViolations(href: string, fact: RouteScreenFact): string
     violations.push(`${href}: advertised health destination has no routable screen (false capability)`);
     return violations;
   }
-  if (!fact.source.includes("requireAuthenticatedPage")) {
-    violations.push(`${href}: route screen is not server-gated for authentication`);
+  const gates = awaitedGatePaths(fact.source);
+  if (gates.length === 0) {
+    violations.push(`${href}: route screen never awaits requireAuthenticatedPage, so it is not server-gated`);
+  } else if (!gates.some((path) => path === href || path.startsWith(`${href}/`))) {
+    violations.push(`${href}: route screen gates ${gates.join(", ")} instead of this route`);
   }
-  if (!fact.source.includes("ProtectedPage")) {
-    violations.push(`${href}: route screen is not client-gated for authentication`);
+  if (!/<ProtectedPage[\s/>]/.test(fact.source)) {
+    violations.push(`${href}: route screen does not render ProtectedPage, so it is not client-gated`);
   }
-  if (!fact.source.includes("index: false")) {
+  if (!/index:\s*false/.test(fact.source)) {
     violations.push(`${href}: route screen does not opt out of indexing and broad publication`);
   }
   return violations;
@@ -142,32 +157,33 @@ describe("issue #714 mobile Create menu Health Care truthfulness", () => {
 
 /**
  * Synthetic fixtures only. Each screen is described by the capability it has,
- * never by fabricated user content, and the builder keeps one invariant per
+ * never by fabricated user content, and the builder changes one invariant per
  * fixture so a leg cannot pass because two markers were removed together.
  */
 function screenSource(options: {
-  serverGate: boolean;
+  serverGate: "thisRoute" | "otherRoute" | "importOnly" | "none";
   clientGate: boolean;
   unindexed: boolean;
   collectsData?: boolean;
 }): string {
   const lines = ['import { HealthPlaceholderPage } from "@/components/HealthPlaceholderPage";'];
   if (options.clientGate) lines.push('import { ProtectedPage } from "@/components/ProtectedPage";');
-  if (options.serverGate) lines.push('import { requireAuthenticatedPage } from "@/lib/serverAuth";');
+  if (options.serverGate !== "none") lines.push('import { requireAuthenticatedPage } from "@/lib/serverAuth";');
   lines.push('export const dynamic = "force-dynamic";');
   lines.push(options.unindexed ? "    index: false," : "    index: true,");
-  if (options.serverGate) lines.push('  await requireAuthenticatedPage("/create/health");');
+  if (options.serverGate === "thisRoute") lines.push('  await requireAuthenticatedPage("/create/health");');
+  if (options.serverGate === "otherRoute") lines.push('  await requireAuthenticatedPage("/create/image");');
+  const wrapper = options.clientGate ? ["<ProtectedPage>", "</ProtectedPage>"] : ["", ""];
   const body = options.collectsData
-    ? '  return <ProtectedPage><form><input type="file" name="lab-report" />' +
-      '<button onClick={() => fetch("/api/health/reports/analyze")}>Analyze</button></form></ProtectedPage>;'
-    : options.clientGate
-      ? "  return <ProtectedPage><HealthPlaceholderPage entry=\"create\" /></ProtectedPage>;"
-      : "  return <HealthPlaceholderPage entry=\"create\" />;";
+    ? `  return ${wrapper[0]}<form><input type="file" name="lab-report" />` +
+      '<button onClick={() => fetch("/api/health/reports/analyze")}>Analyze</button></form>' +
+      `${wrapper[1]};`
+    : `  return ${wrapper[0]}<HealthPlaceholderPage entry="create" />${wrapper[1]};`;
   lines.push(body);
   return lines.join("\n");
 }
 
-const gatedComingSoon = screenSource({ serverGate: true, clientGate: true, unindexed: true });
+const gatedComingSoon = screenSource({ serverGate: "thisRoute", clientGate: true, unindexed: true });
 
 describe("truthfulness guard discrimination (synthetic fixtures)", () => {
   it("accepts the current navigation-only coming-soon preview screen", () => {
@@ -176,7 +192,7 @@ describe("truthfulness guard discrimination (synthetic fixtures)", () => {
 
   it("accepts a future health screen that uploads and analyses through the API", () => {
     const future = screenSource({
-      serverGate: true,
+      serverGate: "thisRoute",
       clientGate: true,
       unindexed: true,
       collectsData: true,
@@ -189,29 +205,43 @@ describe("truthfulness guard discrimination (synthetic fixtures)", () => {
     expect(violations.join("\n")).toMatch(/no routable screen \(false capability\)/);
   });
 
-  it("rejects a screen that dropped only the server gate", () => {
-    const source = screenSource({ serverGate: false, clientGate: true, unindexed: true });
+  it("rejects a screen that dropped its server gate", () => {
+    const source = screenSource({ serverGate: "none", clientGate: true, unindexed: true });
     const violations = destinationTruthViolations("/create/health", { exists: true, source });
     expect(violations.join("\n")).toMatch(/not server-gated/);
     expect(violations).toHaveLength(1);
   });
 
-  it("rejects a screen that dropped only the client gate", () => {
-    const source = screenSource({ serverGate: true, clientGate: false, unindexed: true });
+  it("rejects a screen that kept the gate import but never awaits it", () => {
+    const source = screenSource({ serverGate: "importOnly", clientGate: true, unindexed: true });
+    const violations = destinationTruthViolations("/create/health", { exists: true, source });
+    expect(violations.join("\n")).toMatch(/not server-gated/);
+    expect(violations).toHaveLength(1);
+  });
+
+  it("rejects a screen that gates a different route than the one it serves", () => {
+    const source = screenSource({ serverGate: "otherRoute", clientGate: true, unindexed: true });
+    const violations = destinationTruthViolations("/create/health", { exists: true, source });
+    expect(violations.join("\n")).toMatch(/gates \/create\/image instead of this route/);
+    expect(violations).toHaveLength(1);
+  });
+
+  it("rejects a screen that dropped the client gate", () => {
+    const source = screenSource({ serverGate: "thisRoute", clientGate: false, unindexed: true });
     const violations = destinationTruthViolations("/create/health", { exists: true, source });
     expect(violations.join("\n")).toMatch(/not client-gated/);
     expect(violations).toHaveLength(1);
   });
 
   it("rejects a screen that allowed indexing", () => {
-    const source = screenSource({ serverGate: true, clientGate: true, unindexed: false });
+    const source = screenSource({ serverGate: "thisRoute", clientGate: true, unindexed: false });
     const violations = destinationTruthViolations("/create/health", { exists: true, source });
     expect(violations.join("\n")).toMatch(/does not opt out of indexing/);
     expect(violations).toHaveLength(1);
   });
 
-  it("still rejects a screen with no gates at all", () => {
-    const source = screenSource({ serverGate: false, clientGate: false, unindexed: false });
+  it("rejects a screen with none of the three invariants", () => {
+    const source = screenSource({ serverGate: "none", clientGate: false, unindexed: false });
     expect(destinationTruthViolations("/create/health", { exists: true, source })).toHaveLength(3);
   });
 });
