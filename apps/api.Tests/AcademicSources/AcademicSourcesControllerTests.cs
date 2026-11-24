@@ -168,16 +168,43 @@ public sealed class AcademicSourcesControllerTests
         var firstPage = Assert.IsType<OkObjectResult>(first);
         var firstBody = Assert.IsType<AcademicSourceSearchResponse>(firstPage.Value);
         Assert.Equal(10, firstBody.Sources.Count);
-        Assert.Equal(10, firstBody.TotalMatched);
-        Assert.True(firstBody.HasMore);
         Assert.Equal("Record 0", firstBody.Sources[0].Title);
+        // The pool is fetched page-independently, so the universe reported is the same on every
+        // page and is larger than one window: page 1 of a 50-record pool has 4 more pages, and a
+        // client that derives its page count from TotalMatched can reach them.
+        Assert.Equal(50, firstBody.TotalMatched);
+        Assert.False(firstBody.HasMore);
 
         var secondBody = Assert.IsType<AcademicSourceSearchResponse>(Assert.IsType<OkObjectResult>(second).Value);
         Assert.Equal("Record 10", secondBody.Sources[0].Title);
         Assert.Equal(10, secondBody.Sources.Count);
-        // The fake produced exactly the requested depth (20), which is what a bounded
-        // provider says at a depth boundary: more may exist, the flag stays honest.
-        Assert.True(secondBody.HasMore);
+        Assert.Equal(50, secondBody.TotalMatched);
+        Assert.False(secondBody.HasMore);
+        // Same pool both times: the requests differ only in which window was sliced, so paging
+        // neither repeats a record nor drops one another page has already shown.
+        Assert.Equal(2, fake.Queries.Count);
+        Assert.Equal(fake.Queries[0].MaxResults, fake.Queries[1].MaxResults);
+        var overlap = firstBody.Sources.Select(source => source.Title).Intersect(secondBody.Sources.Select(source => source.Title));
+        Assert.Empty(overlap);
+    }
+
+    [Fact]
+    public async Task Pool_truncated_at_the_browse_bound_reports_more_matches_exist()
+    {
+        await using var db = await CreateDbAsync();
+        // A pool that filled MaxCombinedResults is the one case where "more exists" is provable:
+        // the catalogues were cut off at the bound. It is a statement about the bound, not about
+        // whether the current page has a successor.
+        var fake = new RecordingDiscovery((_, _) => Task.FromResult(Batch(Records(150))));
+        var controller = CreateController(db, fake, enabled: true);
+        var workspaceId = await MemberWorkspaceIdAsync(db);
+
+        var body = Assert.IsType<AcademicSourceSearchResponse>(Assert.IsType<OkObjectResult>(
+            await controller.Search(workspaceId, new AcademicSourceSearchRequest { Q = "market access", Page = 1, PageSize = 10 }, CancellationToken.None)).Value);
+
+        Assert.Equal(150, body.TotalMatched);
+        Assert.True(body.HasMore);
+        Assert.Equal(10, body.Sources.Count);
     }
 
     [Fact]
@@ -195,7 +222,7 @@ public sealed class AcademicSourcesControllerTests
     }
 
     [Fact]
-    public async Task Request_depth_flows_into_the_bounded_query()
+    public async Task Request_is_bounded_by_configuration_not_by_page_depth()
     {
         await using var db = await CreateDbAsync();
         var fake = new RecordingDiscovery((_, _) => Task.FromResult(Batch([])));
@@ -204,7 +231,9 @@ public sealed class AcademicSourcesControllerTests
         await controller.Search(await MemberWorkspaceIdAsync(db), new AcademicSourceSearchRequest { Q = "  vaccination uptake  ", Page = 3, PageSize = 10, YearFrom = 2015, YearTo = 2024, OpenAccessOnly = true }, CancellationToken.None);
 
         var query = Assert.Single(fake.Queries);
-        Assert.Equal(30, query.MaxResults);
+        // Depth is a slice decision made after the pool exists; what goes to the providers is the
+        // configured per-provider ceiling, independent of which page was asked for.
+        Assert.Equal(Options.Create(new AcademicSourceDiscoveryOptions { Enabled = true }.Normalize()).Value.MaxResultsPerProvider, query.MaxResults);
         Assert.Equal("vaccination uptake", query.SearchTerm);
         Assert.Equal(2015, query.YearFrom);
         Assert.Equal(2024, query.YearTo);

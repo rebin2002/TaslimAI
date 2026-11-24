@@ -66,8 +66,19 @@ public sealed record AcademicSourceSearchResponse(
     Guid WorkspaceId,
     int Page,
     int PageSize,
-    /// <summary>Records the server-side bounded search produced before the page window was taken.</summary>
+    /// <summary>
+    /// Distinct records the bounded search surfaced, counted across the whole pool, so the number is
+    /// the same on every page of one search. A client derives its page count from this: a next page
+    /// exists exactly when the pool still has records past the current window.
+    /// </summary>
     int TotalMatched,
+    /// <summary>
+    /// True when the search filled its own browse bound (<c>TotalMatched == MaxCombinedResults</c>),
+    /// i.e. the catalogs were cut off and further matches may exist that this search will never
+    /// surface. This is NOT a "there is a next page" flag: that is answered by
+    /// <see cref="TotalMatched"/> against <see cref="PageSize"/>. Treating it as the next-page
+    /// signal strands a caller on page 1 of any search shorter than the bound.
+    /// </summary>
     bool HasMore,
     /// <summary>True when part of the catalog pool did not answer; the result is not exhaustive.</summary>
     bool Partial,

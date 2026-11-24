@@ -137,6 +137,23 @@ describe("customer-facing copy rules", () => {
     expect(en("capability.planned.budget")).toMatch(/approval/i);
     expect(en("capability.planned.budget")).not.toMatch(/\d/);
   });
+
+  // Scholarly record search is off in the shipped configuration default
+  // (`AcademicSourceDiscovery.Enabled = false`), and the endpoint answers 503 while it is. Only
+  // the variant shown after the server actually answered a search may claim the capability is
+  // live; the pre-flight text describes what the feature does, and the refusal text states that
+  // this deployment has not turned it on.
+  it("keeps each discovery notice honest about whether search is switched on", () => {
+    expect(en("sources.discoveryBody")).not.toMatch(/is live|is enabled|for your workspace/i);
+    expect(en("sources.discoveryBody")).toMatch(/scholarly record search returns/i);
+    expect(en("sources.discoveryBodyLive")).toMatch(/is live for your workspace/i);
+    expect(en("sources.discoveryOffTitle")).toMatch(/not turned on/i);
+    expect(en("sources.discoveryOffBody")).toMatch(/has not enabled scholarly record search/i);
+    // Whatever the deployment status, no notice may imply the works themselves were read or checked.
+    for (const key of ["sources.discoveryBody", "sources.discoveryBodyLive", "sources.discoveryOffBody"] as const) {
+      expect(en(key), key).not.toMatch(/we read the works|retraction checked|checks retractions for you/i);
+    }
+  });
 });
 
 describe("option labelers", () => {

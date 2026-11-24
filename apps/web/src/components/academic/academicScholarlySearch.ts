@@ -91,6 +91,41 @@ export function scholarlySearchFailureIsRetryable(failure: ScholarlySearchFailur
   return failure.kind === "rate_limited" || failure.kind === "unavailable" || failure.kind === "failed" || failure.kind === "rejected";
 }
 
+/**
+ * Which discovery notice the Sources panel is allowed to show. The panel ships the search
+ * control, but whether a given deployment has actually turned discovery on is a configuration
+ * fact the client cannot know before it asks, so the copy must not assert more than the client
+ * has observed:
+ *
+ * - `disabled` — a search came back `unavailable` (HTTP 503), which is exactly what
+ *   `AcademicSourceDiscovery.Enabled = false` produces. That is the shipped default, so this is
+ *   the state most students are in, and saying "search is live" here would be a false claim
+ *   about their own product.
+ * - `enabled` — a search answered, so the deployment has discovery configured and the live
+ *   sentence is now an observed fact rather than a promise.
+ * - `unknown` — nothing has been attempted yet, so the copy describes the affordance without
+ *   asserting that this deployment has it switched on.
+ */
+export type ScholarlyDiscoveryNotice = {
+  tone: "info" | "warning";
+  titleKey: string;
+  bodyKey: string;
+  state: "unknown" | "enabled" | "disabled";
+};
+
+export function scholarlyDiscoveryNotice(input: {
+  state: ScholarlySearchState;
+  failureKind?: ScholarlySearchFailure["kind"] | null;
+}): ScholarlyDiscoveryNotice {
+  if (input.failureKind === "unavailable") {
+    return { tone: "warning", titleKey: "sources.discoveryOffTitle", bodyKey: "sources.discoveryOffBody", state: "disabled" };
+  }
+  if (input.state === "done") {
+    return { tone: "info", titleKey: "sources.discoveryTitle", bodyKey: "sources.discoveryBodyLive", state: "enabled" };
+  }
+  return { tone: "info", titleKey: "sources.discoveryTitle", bodyKey: "sources.discoveryBody", state: "unknown" };
+}
+
 export type ScholarlySearchOutcome = { ok: true; page: AcademicSourceSearchResponse } | { ok: false; failure: ScholarlySearchFailure };
 
 /**
@@ -297,14 +332,24 @@ export type ScholarlySearchPageInfo = {
   totalMatched: number;
   /** Pages this search can show, capped by the server-side browse bound. */
   pageCount: number;
+  /** Server flag: the search hit its browse bound, so matches exist beyond what was surfaced. */
   hasMore: boolean;
   canPrev: boolean;
   canNext: boolean;
 };
 
 /**
- * Paging facts for the control bar. `pageCount` is derived from what the bounded search actually
- * produced and the server bound, so the Next control never promises a page the API will refuse.
+ * Paging facts for the control bar.
+ *
+ * Whether another page exists is decided by `totalMatched` against the page size, and *only* that:
+ * the server reports the size of the bounded pool, which is identical on every page of one search.
+ * `hasMore` is a different statement — it says the pool filled the server's browse bound, so the
+ * catalog list was cut off — and using it as the next-page gate strands page 1 of any search that
+ * returned more records than one page but fewer than the bound, because such a search honestly
+ * reports `hasMore: false` while still having a page 2 to show.
+ *
+ * `pageCount` stays capped by `maxScholarlySearchPage`, so the control can never offer a page the
+ * API would reject as too deep.
  */
 export function scholarlySearchPageInfo(result: AcademicSourceSearchResponse, rows: readonly ScholarlySearchRow[]): ScholarlySearchPageInfo {
   const pageSize = Math.max(1, result.pageSize || scholarlySearchPageSize);
@@ -319,7 +364,7 @@ export function scholarlySearchPageInfo(result: AcademicSourceSearchResponse, ro
     pageCount,
     hasMore: result.hasMore,
     canPrev: page > 1,
-    canNext: result.hasMore && page < pageCount && page < maxScholarlySearchPage(pageSize),
+    canNext: page < pageCount,
   };
 }
 

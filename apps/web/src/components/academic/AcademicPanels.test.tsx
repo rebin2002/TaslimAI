@@ -47,6 +47,11 @@ describe("AcademicSourcesPanel", () => {
     expect(html).toContain("Find records, then verify them");
     expect(html).toContain("It does not read the works");
     expect(html).toContain("No sources yet");
+    // Nothing has been searched yet and `AcademicSourceDiscovery.Enabled` is off in the shipped
+    // default configuration, so before a first answer the panel may only describe what the feature
+    // does — it must not state that search is live for this workspace, nor pre-empt a refusal.
+    expect(html).not.toContain("is live for your workspace");
+    expect(html).not.toContain("not turned on here");
     // Discovery is live, but nothing here starts a job or generates text.
     expect(html).not.toMatch(/start academic run|generate chapter|export docx/i);
   });

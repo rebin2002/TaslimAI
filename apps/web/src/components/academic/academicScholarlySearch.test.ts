@@ -15,6 +15,7 @@ import {
   maxScholarlySearchPage,
   narrowSourceType,
   scholarlyAccessNoteKey,
+  scholarlyDiscoveryNotice,
   scholarlyDoiCheckKey,
   scholarlyRowToSource,
   scholarlySearchFailureIsRetryable,
@@ -248,6 +249,70 @@ describe("paging facts", () => {
     expect(info.canNext).toBe(false);
     expect(info.canPrev).toBe(false);
     expect(info.shown).toBe(1);
+  });
+
+  // The defect this slice had: the API used to size its fetch to page × pageSize, so page 1 of
+  // size 10 could report at most totalMatched 10 — one page — and Next was unreachable even while
+  // hasMore said otherwise. With the pool now fetched page-independently, a longer pool must open
+  // page 2 from page 1 whether or not the pool was truncated.
+  it("opens the next page from page 1 whenever the pool holds more than one page", () => {
+    const pool = Array.from({ length: 24 }, (_, i) => source({ title: `Synthetic record ${i + 1}`, doi: `10.5555/synth.${i + 1}` }));
+    const firstPage = response({ page: 1, totalMatched: pool.length, hasMore: false, sources: pool.slice(0, scholarlySearchPageSize) });
+    const info = pageInfoFor(firstPage);
+    expect(info.pageCount).toBe(3);
+    expect(info.canNext).toBe(true);
+    expect(info.hasMore).toBe(false);
+    // Second page of the same pool stays navigable in both directions.
+    const second = pageInfoFor(response({ page: 2, totalMatched: pool.length, hasMore: false, sources: pool.slice(10, 20) }));
+    expect(second.canPrev).toBe(true);
+    expect(second.canNext).toBe(true);
+    // The last page of the pool closes Next, bound or not.
+    const third = pageInfoFor(response({ page: 3, totalMatched: pool.length, hasMore: false, sources: pool.slice(20, 24) }));
+    expect(third.canNext).toBe(false);
+    expect(third.canPrev).toBe(true);
+  });
+
+  it("treats hasMore as the browse bound, not as a next-page signal", () => {
+    // A pool truncated at the combined bound still pages normally inside what it returned.
+    const truncated = pageInfoFor(response({ page: 2, totalMatched: scholarlySearchMaxDepth, hasMore: true }));
+    expect(truncated.canNext).toBe(true);
+    const truncatedLast = pageInfoFor(response({ page: maxScholarlySearchPage(scholarlySearchPageSize), totalMatched: scholarlySearchMaxDepth, hasMore: true }));
+    expect(truncatedLast.canNext).toBe(false);
+  });
+});
+
+describe("discovery capability notice", () => {
+  // Copy must not claim a capability the deployment has not demonstrated: before any search, and
+  // while the server reports the feature switched off, the studio may only describe the feature
+  // generically; "live for your workspace" is earned by an answered search, and an explicit 503
+  // gets its own statement.
+  it("stays capability-neutral before the first search", () => {
+    const notice = scholarlyDiscoveryNotice({ state: "idle", failureKind: null });
+    expect(notice.state).toBe("unknown");
+    expect(notice.tone).toBe("info");
+    expect(notice.bodyKey).toBe("sources.discoveryBody");
+  });
+
+  it("says live only after a search actually answered", () => {
+    const notice = scholarlyDiscoveryNotice({ state: "done", failureKind: null });
+    expect(notice.state).toBe("enabled");
+    expect(notice.bodyKey).toBe("sources.discoveryBodyLive");
+  });
+
+  it("speaks plainly when the deployment refused with unavailable", () => {
+    for (const state of ["failed", "done"] as const) {
+      const notice = scholarlyDiscoveryNotice({ state, failureKind: "unavailable" });
+      expect(notice.state).toBe("disabled");
+      expect(notice.tone).toBe("warning");
+      expect(notice.titleKey).toBe("sources.discoveryOffTitle");
+      expect(notice.bodyKey).toBe("sources.discoveryOffBody");
+    }
+  });
+
+  it("keeps a different refusal, such as a rate limit, capability-neutral", () => {
+    const notice = scholarlyDiscoveryNotice({ state: "failed", failureKind: "rate_limited" });
+    expect(notice.state).toBe("unknown");
+    expect(notice.bodyKey).toBe("sources.discoveryBody");
   });
 });
 

@@ -19,10 +19,12 @@ namespace Taslim.Api.Controllers;
 ///   <see cref="WorkspaceAccessService.IsMemberAsync"/> gate every other workspace route uses;
 ///   a non-member gets 403 before any provider fan-out happens, so a guessed workspace id in
 ///   another student's URL cannot be used to make the server search on their behalf.
-/// - Deep-limited and rate-limited. The search depth, page size, identifier counts and term
+/// - Deep-limited and rate-limited. The per-provider ask, page size, identifier counts and term
 ///   length are clamped server-side from <see cref="AcademicSourceDiscoveryOptions"/>, and the
 ///   shared "search" partition policy bounds requests per user (plus the global concurrency
-///   limiter), so one caller cannot drive the provider pool.
+///   limiter), so one caller cannot drive the provider pool. Paging walks a pool whose size is
+///   fixed by the search itself, never by the page that was asked for; see
+///   <see cref="Search"/> for what <c>totalMatched</c> and <c>hasMore</c> mean.
 /// - Cancellable. The request cancellation token flows into discovery; a client that aborts
 ///   (page change, superseded search, closed tab) stops the in-flight provider work.
 ///
@@ -65,10 +67,13 @@ public sealed class AcademicSourcesController(
 
         var pageSize = Math.Clamp(request.PageSize ?? 10, 1, Math.Min(MaxPageSize, Options.MaxResultsPerProvider));
         var page = Math.Max(1, request.Page ?? 1);
-        // Long arithmetic: validation has already proved this product is within
-        // MaxCombinedResults, so a crafted page number cannot reach an int overflow here.
-        var depth = (int)Math.Min((long)page * pageSize, Options.MaxCombinedResults);
-
+        // The bounded pool is fetched whole, once per request, and the page is a slice of it.
+        // Asking the providers for exactly `page * pageSize` instead made the reported universe a
+        // function of which page the caller happened to request: page 1 at size 10 could only ever
+        // see 10 records, so it reported "10 matched" while `hasMore` said otherwise, and a client
+        // that derived its page count from `totalMatched` had no reachable page 2. A page-
+        // independent pool also makes the pages themselves consistent, so moving forward neither
+        // duplicates a record nor drops one that the previous page had shown.
         var batch = await discovery.DiscoverAsync(new AcademicDiscoveryQuery
         {
             SearchTerm = string.IsNullOrWhiteSpace(request.Q) ? null : request.Q.Trim(),
@@ -78,14 +83,27 @@ public sealed class AcademicSourcesController(
             YearTo = request.YearTo,
             Language = string.IsNullOrWhiteSpace(request.Language) ? null : request.Language.Trim(),
             OpenAccessOnly = request.OpenAccessOnly ?? false,
-            MaxResults = depth,
+            // The per-provider ceiling, not a page depth: <see cref="AcademicSourceDiscoveryService"/>
+            // clamps this to MaxResultsPerProvider and the merger caps the combined pool at
+            // MaxCombinedResults, so the fan-out stays bounded by configuration rather than by the
+            // page size a caller chose.
+            MaxResults = Options.MaxResultsPerProvider,
         }, cancellationToken);
 
-        // The merged batch is capped at MaxResults = depth, so any record at or beyond the
-        // requested window proves the result set was cut — regardless of which provider said so.
-        var totalMatched = batch.Sources.Count;
-        var hasMore = totalMatched >= depth;
-        var window = batch.Sources.Skip((page - 1) * pageSize).Take(pageSize)
+        // `totalMatched` is what the bounded search actually surfaced: the number of distinct
+        // records in the pool, before the window was taken. Pages above the first therefore exist
+        // exactly when the pool has records past the current window.
+        var pool = batch.Sources;
+        var totalMatched = pool.Count;
+        // `hasMore` is a statement about the search bound, not about the current page: it is true
+        // only when the pool filled MaxCombinedResults, i.e. the catalogs were cut off at the
+        // browse bound and further matches may exist that this search will never surface. A
+        // smaller pool means the whole bounded search is already in hand, even when more pages of
+        // it remain to be read.
+        var hasMore = totalMatched >= Options.MaxCombinedResults;
+        // Long arithmetic: validation has already proved page * pageSize stays within
+        // MaxCombinedResults, so this offset cannot overflow and cannot outrun the pool.
+        var window = pool.Skip((page - 1) * pageSize).Take(pageSize)
             .Select(AcademicSourcePresentation.ToDto)
             .ToArray();
 

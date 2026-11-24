@@ -11,6 +11,10 @@
  *   library record it produces keeps the catalogue's own access level, never `full_text`.
  * - Nothing identifies where the record came from beyond "scholarly records" and the retrieval
  *   date. No service name, no internal identifier, no cost or quota vocabulary.
+ * - An identifier check is an answer the student asked for, not decoration on a result list. A
+ *   DOI that resolved to nothing still has to report that it is unregistered, so the checks render
+ *   even when the search returned zero records; bailing out on an empty list previously threw
+ *   away the one piece of information the search had actually established.
  */
 import { doiUrl, isSafeHttpUrl } from "./academicSourceLibrary";
 import { asKey, type AcademicLabelers, type AcademicTranslate } from "./academicStrings";
@@ -46,27 +50,22 @@ function formatRetrievedDate(iso: string | null): string | null {
 }
 
 export function AcademicScholarlySearchResults({ result, rows, page, isKnown, busy, t, labels, onAdd, onPage }: AcademicScholarlySearchResultsProps) {
-  if (rows.length === 0) {
-    return (
-      <>
-        {result.partial ? (
-          <AcademicPartialNotice t={t} />
-        ) : null}
-        <p className={styles.emptyState}>{t("sources.findEmpty")}</p>
-      </>
-    );
-  }
-
   return (
     <>
       {result.partial ? <AcademicPartialNotice t={t} /> : null}
 
-      <p className={styles.filterNote}>{t("sources.findMatches", { count: String(result.totalMatched), shown: String(rows.length) })}</p>
-      {page.hasMore ? (
-        <p className={styles.filterNote}>
-          {t("sources.findMore", { limit: String(Math.min(scholarlySearchMaxDepth, scholarlySearchPageSize * maxScholarlySearchPage())) })}
-        </p>
-      ) : null}
+      {rows.length === 0 ? (
+        <p className={styles.emptyState}>{t("sources.findEmpty")}</p>
+      ) : (
+        <>
+          <p className={styles.filterNote}>{t("sources.findMatches", { count: String(result.totalMatched), shown: String(rows.length) })}</p>
+          {page.hasMore ? (
+            <p className={styles.filterNote}>
+              {t("sources.findMore", { limit: String(Math.min(scholarlySearchMaxDepth, scholarlySearchPageSize * maxScholarlySearchPage())) })}
+            </p>
+          ) : null}
+        </>
+      )}
 
       {result.doiChecks.length > 0 ? (
         <div className={styles.filterNote} role="note">
@@ -81,59 +80,61 @@ export function AcademicScholarlySearchResults({ result, rows, page, isKnown, bu
         </div>
       ) : null}
 
-      <ul className={styles.sourceList}>
+      {rows.length === 0 ? null : (
+        <ul className={styles.sourceList}>
         {rows.map((row) => {
-          const known = isKnown(row);
-          const link = row.url && isSafeHttpUrl(row.url) ? row.url : null;
-          const retrieved = formatRetrievedDate(row.retrievedAt);
-          return (
-            <li key={row.key} className={styles.sourceRow}>
-              <div className={styles.sourceRowHead}>
-                <span className={styles.sourceType}>{labels.sourceType(row.sourceType)}</span>
-                <span className={styles.accessPill}>{labels.access(row.access)}</span>
-                {row.fullTextIndicated ? <span className={styles.accessPill}>{t("sources.findIndicated")}</span> : null}
-              </div>
-              <p className={styles.citationText}>
-                {row.title}
-                {row.year != null ? ` (${row.year})` : ""}
-              </p>
-              <p className={styles.sourceMeta}>{row.authors.length > 0 ? row.authors.join("; ") : t("sources.findNoAuthors")}</p>
-              {row.containerTitle || row.publisher ? <p className={styles.sourceMeta}>{[row.containerTitle, row.publisher].filter(Boolean).join(" — ")}</p> : null}
-              <div className={styles.sourceMeta}>
-                {row.doi ? (
-                  <a className={styles.identifierLink} href={doiUrl(row.doi)} target="_blank" rel="noopener noreferrer">
-                    {t("sources.doiLabel")}: {row.doi}
-                  </a>
-                ) : null}
-                {row.isbn ? (
-                  <span className={styles.identifierText}>
-                    {t("sources.isbnLabel")}: {row.isbn}
-                  </span>
-                ) : null}
-                {!row.doi && !row.isbn ? <span className={styles.identifierMissing}>{t("sources.noIdentifier")}</span> : null}
-              </div>
-              <p className={styles.missingNote}>{t(asKey(row.accessNoteKey))}</p>
-              <p className={styles.missingNote}>{t("flag.retractionUnchecked")}</p>
-              {row.abstract ? (
-                <p className={styles.missingNote}>
-                  <strong>{t("sources.findAbstractLabel")}</strong> {row.abstract}
+            const known = isKnown(row);
+            const link = row.url && isSafeHttpUrl(row.url) ? row.url : null;
+            const retrieved = formatRetrievedDate(row.retrievedAt);
+            return (
+              <li key={row.key} className={styles.sourceRow}>
+                <div className={styles.sourceRowHead}>
+                  <span className={styles.sourceType}>{labels.sourceType(row.sourceType)}</span>
+                  <span className={styles.accessPill}>{labels.access(row.access)}</span>
+                  {row.fullTextIndicated ? <span className={styles.accessPill}>{t("sources.findIndicated")}</span> : null}
+                </div>
+                <p className={styles.citationText}>
+                  {row.title}
+                  {row.year != null ? ` (${row.year})` : ""}
                 </p>
-              ) : null}
-              <p className={styles.missingNote}>{retrieved ? t("sources.findRetrieved", { date: retrieved }) : t("sources.findProvenance")}</p>
-              <div className={styles.sourceRowActions}>
-                <button type="button" className={styles.secondaryButton} disabled={busy || known} onClick={() => onAdd(row)}>
-                  {known ? t("sources.findInLibrary") : t("sources.add")}
-                </button>
-                {link ? (
-                  <a className={styles.textLink} href={link} target="_blank" rel="noopener noreferrer">
-                    {t("sources.findOpen")}
-                  </a>
+                <p className={styles.sourceMeta}>{row.authors.length > 0 ? row.authors.join("; ") : t("sources.findNoAuthors")}</p>
+                {row.containerTitle || row.publisher ? <p className={styles.sourceMeta}>{[row.containerTitle, row.publisher].filter(Boolean).join(" — ")}</p> : null}
+                <div className={styles.sourceMeta}>
+                  {row.doi ? (
+                    <a className={styles.identifierLink} href={doiUrl(row.doi)} target="_blank" rel="noopener noreferrer">
+                      {t("sources.doiLabel")}: {row.doi}
+                    </a>
+                  ) : null}
+                  {row.isbn ? (
+                    <span className={styles.identifierText}>
+                      {t("sources.isbnLabel")}: {row.isbn}
+                    </span>
+                  ) : null}
+                  {!row.doi && !row.isbn ? <span className={styles.identifierMissing}>{t("sources.noIdentifier")}</span> : null}
+                </div>
+                <p className={styles.missingNote}>{t(asKey(row.accessNoteKey))}</p>
+                <p className={styles.missingNote}>{t("flag.retractionUnchecked")}</p>
+                {row.abstract ? (
+                  <p className={styles.missingNote}>
+                    <strong>{t("sources.findAbstractLabel")}</strong> {row.abstract}
+                  </p>
                 ) : null}
-              </div>
-            </li>
-          );
-        })}
-      </ul>
+                <p className={styles.missingNote}>{retrieved ? t("sources.findRetrieved", { date: retrieved }) : t("sources.findProvenance")}</p>
+                <div className={styles.sourceRowActions}>
+                  <button type="button" className={styles.secondaryButton} disabled={busy || known} onClick={() => onAdd(row)}>
+                    {known ? t("sources.findInLibrary") : t("sources.add")}
+                  </button>
+                  {link ? (
+                    <a className={styles.textLink} href={link} target="_blank" rel="noopener noreferrer">
+                      {t("sources.findOpen")}
+                    </a>
+                  ) : null}
+                </div>
+              </li>
+            );
+          })}
+        </ul>
+      )}
 
       <div className={styles.filterToggles}>
         <button type="button" className={styles.control} disabled={!page.canPrev || busy} onClick={() => onPage(page.page - 1)}>

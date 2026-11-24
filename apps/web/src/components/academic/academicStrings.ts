@@ -216,7 +216,14 @@ const enCopy = {
   "summary.guideNotes": "Referencing guide notes",
 
   "sources.discoveryTitle": "Find records, then verify them",
-  "sources.discoveryBody": "Scholarly record search is live for your workspace: it returns bibliographic records — title, authors, identifiers and at most a catalogue abstract — that you can add to your library. It does not read the works, screen them, or check retraction status, and those steps still belong to you. Add any source you verified yourself at any time.",
+  // Three statements, matched to what the deployment has actually shown: whether record search is
+  // served is a configuration fact (`AcademicSourceDiscovery.Enabled`, off by default), so the
+  // neutral text describes what the feature does without claiming it is switched on, "live" is for
+  // after a search answered, and the "off" pair speaks for itself when the server returned 503.
+  "sources.discoveryBody": "Scholarly record search returns bibliographic records — title, authors, identifiers and at most a catalogue abstract — that you can add to your library. It does not read the works, screen them, or check retraction status, and those steps still belong to you. Add any source you verified yourself at any time.",
+  "sources.discoveryBodyLive": "Scholarly record search is live for your workspace: it returns bibliographic records — title, authors, identifiers and at most a catalogue abstract — that you can add to your library. It does not read the works, screen them, or check retraction status, and those steps still belong to you. Add any source you verified yourself at any time.",
+  "sources.discoveryOffTitle": "Record search is not turned on here",
+  "sources.discoveryOffBody": "This deployment has not enabled scholarly record search, so searching returns no records until an administrator turns it on. Everything else here works: add any source you verified yourself, at any time.",
   "sources.findTitle": "Find scholarly sources",
   "sources.findIntro": "Search the scholarly records available to this workspace. A result is a lead: read the work yourself before you cite it.",
   "sources.findLabel": "Search scholarly records",

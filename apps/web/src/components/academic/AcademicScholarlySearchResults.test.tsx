@@ -133,12 +133,50 @@ describe("search result accounting", () => {
     expect(text).toContain("No scholarly record matched that search.");
     expect(text).not.toContain("record(s) matched");
   });
+
+  // A zero-row page used to bail out of rendering before the identifier checks, so an unregistered
+  // DOI — the one thing this search had proved — vanished with the list. The check is the answer
+  // the student asked for, not decoration on the list, so it has to survive an empty page.
+  it("keeps identifier checks visible when the page has no records", () => {
+    const result = discoveredPage({
+      sources: [],
+      totalMatched: 0,
+      doiChecks: [
+        { submittedDoi: "10.5555/unregistered.0001", isRegistered: false, failureCode: "not_registered" },
+        { submittedDoi: "10.5555/synth.2024.0001", isRegistered: true, failureCode: null },
+      ],
+    });
+    const { text } = render(result);
+    expect(text).toContain("No scholarly record matched that search.");
+    expect(text).toContain("10.5555/unregistered.0001 is not a registered DOI.");
+    expect(text).toContain("10.5555/synth.2024.0001 is a registered DOI.");
+    expect(text).not.toMatch(forbidden);
+  });
+
+  it("still offers the paging controls on an empty page", () => {
+    const { html } = render(discoveredPage({ sources: [], totalMatched: 0 }));
+    expect(html).toContain("Previous page");
+    expect(html).toContain("Next page");
+  });
 });
 
 describe("paging and adding controls", () => {
   function disabledLabels(html: string): string[] {
     return [...html.matchAll(/<button[^>]*disabled[^>]*>([\s\S]*?)<\/button>/g)].map((match) => match[1].replace(/<[^>]+>/g, "").trim());
   }
+
+  // Page 1 of a pool larger than one page must offer Next even when the pool was not truncated:
+  // the old page-sized fetch made totalMatched equal one page, so Next was unreachable here.
+  it("enables Next from page 1 of a multi-page pool", () => {
+    const pool = Array.from({ length: 24 }, (_, index) => discoveredRecord({ title: `Synthetic record ${index + 1}`, doi: `10.5555/synth.${index + 1}` }));
+    const { html, text } = render(
+      discoveredPage({ page: 1, totalMatched: pool.length, hasMore: false, sources: pool.slice(0, scholarlySearchPageSize) }),
+    );
+    expect(disabledLabels(html)).toContain("Previous page");
+    expect(disabledLabels(html)).not.toContain("Next page");
+    expect(text).toContain("24 record(s) matched; 10 on this page");
+    expect(text).not.toContain("More records matched than one search returns");
+  });
 
   it("starts with no previous page", () => {
     const { html } = render(discoveredPage({ page: 1, totalMatched: scholarlySearchPageSize * 15, hasMore: true }));

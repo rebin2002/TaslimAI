@@ -77,10 +77,52 @@ public sealed class AcademicSourcesApiTests : IClassFixture<AcademicSourcesApiFa
         Assert.Equal(2, body.GetProperty("page").GetInt32());
         Assert.Equal(5, body.GetProperty("pageSize").GetInt32());
         Assert.Equal("Synthesized study 5", body.GetProperty("sources")[0].GetProperty("title").GetString());
-        Assert.True(body.GetProperty("hasMore").GetBoolean());
-        Assert.Equal(10, factory.Discovery.LastQuery!.MaxResults);
+        // The fan-out is bounded by the configured per-provider ceiling, not by page depth, and the
+        // reported universe is that whole pool: 50 records, of which this is page 2 of 10. A pool
+        // below the browse bound means nothing was cut off, so `hasMore` is false even though pages
+        // remain — it describes the bound, not the next page.
+        Assert.Equal(50, body.GetProperty("totalMatched").GetInt32());
+        Assert.False(body.GetProperty("hasMore").GetBoolean());
+        Assert.Equal(50, factory.Discovery.LastQuery!.MaxResults);
         foreach (var key in InternalCatalogKeys)
             Assert.False(json.Contains(key, StringComparison.OrdinalIgnoreCase), $"response leaked provider key '{key}'");
+    }
+
+    [Fact]
+    public async Task Walking_the_pages_returns_disjoint_ordered_windows_of_one_pool()
+    {
+        // More than one page of real (synthetic) provider records, served through the actual
+        // endpoint: the defect this pins out was that page 1 reported a 10-record universe, so a
+        // client could never reach page 2 even while `hasMore` claimed more existed.
+        factory.Discovery.Behavior = (query, _) => Task.FromResult(new AcademicDiscoveryBatch
+        {
+            Sources = Enumerable.Range(0, Math.Min(query.MaxResults, 24)).Select(index => new AcademicSourceRecord
+            {
+                ProviderKey = "openalex",
+                ProviderWorkId = $"W{index}",
+                Title = $"Synthesized study {index}",
+                SourceType = AcademicSourceTypes.JournalArticle,
+                AccessLevel = AcademicAccessLevel.Metadata,
+                Doi = $"10.5555/synth.{index:D4}",
+            }).ToArray(),
+            ProviderOutcomes = [new AcademicProviderOutcome { ProviderKey = "openalex", Status = AcademicProviderOutcomeStatus.Ok, SourceCount = 24 }],
+        });
+
+        var titles = new List<string>();
+        for (var page = 1; page <= 3; page++)
+        {
+            var response = await factory.Client.GetAsync($"/api/workspaces/{factory.WorkspaceId}/academic-sources/search?q=market+access&page={page}&pageSize=10");
+            Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+            var body = JsonDocument.Parse(await response.Content.ReadAsStringAsync()).RootElement;
+            Assert.Equal(page, body.GetProperty("page").GetInt32());
+            Assert.Equal(24, body.GetProperty("totalMatched").GetInt32());
+            Assert.False(body.GetProperty("hasMore").GetBoolean());
+            Assert.Equal(page == 3 ? 4 : 10, body.GetProperty("sources").GetArrayLength());
+            titles.AddRange(body.GetProperty("sources").EnumerateArray().Select(source => source.GetProperty("title").GetString()!));
+        }
+
+        // Ordered, complete, and no record shown twice across the three windows.
+        Assert.Equal(Enumerable.Range(0, 24).Select(index => $"Synthesized study {index}"), titles);
     }
 
     [Fact]

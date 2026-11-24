@@ -42,6 +42,7 @@ import { asKey, type AcademicLabelers, type AcademicTranslate } from "./academic
 import {
   createScholarlySearchController,
   scholarlyRowToSource,
+  scholarlyDiscoveryNotice,
   scholarlySearchFailureIsRetryable,
   scholarlySearchFailureKey,
   scholarlySearchPageSize,
@@ -184,11 +185,17 @@ export function AcademicSourcesPanel({
 
   const failure = snapshot.failure;
   const showResults = snapshot.state === "done" && snapshot.result !== null;
+  // Whether discovery is actually served is a deployment fact, not a shipping fact: with
+  // `AcademicSourceDiscovery.Enabled` off — the shipped default — the endpoint answers 503, so
+  // asserting "search is live" here would misdescribe the student's own product. The notice
+  // therefore reports what has been observed: neutral before the first search, live only once a
+  // search has answered, and explicitly not-turned-on when the server said so.
+  const discoveryNotice = scholarlyDiscoveryNotice({ state: snapshot.state, failureKind: failure?.kind ?? null });
 
   return (
     <div className={styles.panelBody}>
-      <AcademicNotice tone="info" title={t("sources.discoveryTitle")}>
-        {t("sources.discoveryBody")}
+      <AcademicNotice tone={discoveryNotice.tone} title={t(asKey(discoveryNotice.titleKey))}>
+        {t(asKey(discoveryNotice.bodyKey))}
       </AcademicNotice>
 
       {scopedWorkspaceId ? (
