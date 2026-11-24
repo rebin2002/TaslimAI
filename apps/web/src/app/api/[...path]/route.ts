@@ -2,15 +2,15 @@ const configuredApiUrl = process.env.NEXT_PUBLIC_API_URL;
 if (process.env.NODE_ENV === "production" && (!configuredApiUrl || !configuredApiUrl.startsWith("https://")))
   throw new Error("NEXT_PUBLIC_API_URL must be an HTTPS URL in production.");
 const apiOrigin = (configuredApiUrl ?? "http://localhost:5000").replace(/\/$/, "");
-// The forwarding namespace the proxy is allowed to reach. Derived from the
-// configured origin so a deployment whose API base URL carries a path prefix
-// keeps forwarding exactly as before.
+// Every extra percent-encoding round is another spelling of the same relative
+// segment (%2e%2e, %252e%252e, ...), so decoding is iterated a bounded number of
+// times instead of assumed to stop after one pass.
+const MAX_RELATIVE_DECODE_ROUNDS = 4;
+// The namespace this proxy may forward into, resolved once from the configured
+// origin so a base path in NEXT_PUBLIC_API_URL keeps being respected.
 const apiNamespacePathname = new URL(`${apiOrigin}/api/`).pathname;
 const MAX_PROXY_BODY_BYTES = 25 * 1024 * 1024;
 const UPSTREAM_TIMEOUT_MS = 30_000;
-// Bounded percent-decode rounds used to recognize a dot-relative segment in
-// any repeated-encoding spelling (%2e%2e, %252e%252e, %25252e%25252e, ...).
-const MAX_RELATIVE_DECODE_ROUNDS = 4;
 // Remove the entire client-controlled forwarding namespace, not just today's
 // commonly recognized names (e.g. X-Forwarded-Client-Cert and future variants).
 // The upstream HTTPS/cookie trust boundary must never depend on client metadata.
@@ -27,6 +27,9 @@ function stripUntrustedForwardingHeaders(headers: Headers): void {
 // carries that hop's own auth challenge and credentials. The hop the browser
 // speaks to is this proxy rather than the API behind it, so an upstream value
 // for any of them describes our connection and must never be echoed to a client.
+// On the request side this set includes `connection` itself, so the deployed
+// explicit removal of that header is preserved exactly, widened to the rest of
+// the reserved namespace and to any fields a sender names inside Connection.
 const HOP_BY_HOP_HEADERS: readonly string[] = [
   "connection",
   "keep-alive",
@@ -56,24 +59,22 @@ type RouteContext = { params: Promise<{ path: string[] }> };
 
 const bodyMethods = new Set(["POST", "PUT", "PATCH", "DELETE"]);
 
-// Containment helper for the same-origin /api/[...path] proxy (draft PR #1105
-// red-by-design handler contract). encodeURIComponent does not encode "." or
-// "..", and the router decodes spellings such as %2e%2e before invoking the
-// handler, so a relative segment reaching here composes a target whose request
-// line the WHATWG URL parser collapses out of the /api/ namespace
-// (e.g. /api/v1/../../admin -> /admin) while the caller's session cookie keeps
-// traveling with it. Relative segments are refused outright, before the target
-// is composed, before any credential header is copied, and before the request
-// body is read; a percent-decode failure is treated as an ordinary
-// (non-relative) segment because the encoded form cannot collapse.
+// encodeURIComponent() leaves "." and ".." untouched, so a relative segment
+// supplied to the catch-all survives into the target string and the URL parser
+// collapses it out of the forwarded namespace: `/api/v1/../../admin` is parsed
+// as `/admin`, still carrying the caller's session cookie.
+//
+// Such a segment must be refused, never dropped. Removing it keeps the request
+// inside `/api/` but silently retargets it onto a *different* live endpoint
+// (`/api/users/../delete` -> `/api/users/delete`), so for a state-changing
+// method an authenticated request executes against a resource nobody
+// addressed. Refusal is the only outcome that preserves both containment and
+// the caller's intent.
+//
+// A percent-decode failure is treated as an ordinary segment: the encoded form
+// cannot be parsed as a dot segment by the URL parser.
 function isRelativePathSegment(segment: string): boolean {
   let candidate = segment;
-  // Bounded fixed-point decode: every additional percent-encoding round is
-  // another spelling of the same relative segment (%2e%2e, %252e%252e,
-  // %25252e%25252e, ...), and all of them must be refused rather than
-  // forwarded as encoded noise. A segment whose decoding reaches a fixed point
-  // without becoming exactly "." or ".." (an ordinary name such as "...env" or
-  // a dot-prefixed name with encoded separators) exits immediately.
   for (let round = 0; round < MAX_RELATIVE_DECODE_ROUNDS; round++) {
     if (candidate === "." || candidate === "..") return true;
     let decoded: string;
@@ -86,6 +87,16 @@ function isRelativePathSegment(segment: string): boolean {
     candidate = decoded;
   }
   return candidate === "." || candidate === "..";
+}
+
+// Fixed-text, non-disclosing envelope: it echoes neither the offending path nor
+// the segment nor the upstream origin, so it cannot be used to probe routing
+// internals the way the scanner traffic pinned by this lane does.
+function refuseInvalidPath(): Response {
+  return Response.json(
+    { error: { code: "INVALID_PATH", message: "The requested path is not valid." } },
+    { status: 400 },
+  );
 }
 
 // A Response may only carry an HTTP reason phrase (HTAB / SP / VCHAR / obs-text).
@@ -151,32 +162,21 @@ async function readBoundedBody(request: Request): Promise<ArrayBuffer | Response
 
 async function forward(request: Request, context: RouteContext): Promise<Response> {
   const { path } = await context.params;
-  // Fail closed on a dot-relative segment instead of dropping it: removing the
-  // segment silently rewrote a request that was meant to be rejected into a
-  // *different* valid endpoint (["v1","..","..","admin"] -> /api/v1/admin) and
-  // still forwarded the caller's session cookie and CSRF material to it. This
-  // refusal happens before the target is composed, before any header is copied
-  // and before the request body is read, and its envelope echoes neither the
-  // path, the offending segment, nor the upstream origin.
-  if (path.some(isRelativePathSegment))
-    return Response.json(
-      { error: { code: "INVALID_PATH", message: "The requested path is not valid." } },
-      { status: 400 },
-    );
+  // First guard: refuse dot-relative segments before the target is composed,
+  // before any header is copied and before the request body is read.
+  if (path.some(isRelativePathSegment)) return refuseInvalidPath();
   const target = `${apiOrigin}/api/${path.map((segment) => encodeURIComponent(segment)).join("/")}${new URL(request.url).search}`;
-  // Second, independent fail-closed assertion: if the composed target would
-  // ever normalize outside the forwarding namespace for any reason, refuse it
-  // before fetch() so neither the request line nor any credential header
-  // (session cookie included) can leave /api/. Valid paths, auth forwarding,
-  // and the 503/504/413 error envelopes are unchanged.
+  // Second, independent guard: if composition ever normalizes outside the
+  // forwarding namespace for any other reason, refuse before fetch() so neither
+  // the request line nor any credential header can leave it. Valid paths, auth
+  // forwarding and the existing 413/503/504 envelopes are unchanged.
   let targetPathname: string;
   try {
     targetPathname = new URL(target).pathname;
   } catch {
-    return Response.json({ error: { code: "INVALID_PATH", message: "The requested path is not valid." } }, { status: 400 });
+    return refuseInvalidPath();
   }
-  if (!targetPathname.startsWith(apiNamespacePathname))
-    return Response.json({ error: { code: "INVALID_PATH", message: "The requested path is not valid." } }, { status: 400 });
+  if (!targetPathname.startsWith(apiNamespacePathname)) return refuseInvalidPath();
   const headers = new Headers(request.headers);
   headers.delete("host");
   headers.delete("content-length");
@@ -185,9 +185,11 @@ async function forward(request: Request, context: RouteContext): Promise<Respons
   // can issue Secure cookies. Never let a browser manufacture that metadata
   // through this same-origin proxy.
   stripUntrustedForwardingHeaders(headers);
-  // `connection` was already dropped; clear the rest of the reserved namespace
-  // too so no client-side hop metadata (or Proxy-Authorization credential)
-  // reaches the API regardless of how the fetch implementation filters it.
+  // The deployed request-side `connection` removal is included in this set, so
+  // widening to the rest of the reserved namespace (and to Connection-extended
+  // field names) keeps client-side hop metadata and Proxy-Authorization
+  // credentials from reaching the API regardless of how the fetch
+  // implementation filters them.
   stripHopByHopHeaders(headers);
 
   const init: RequestInit & { duplex?: "half" } = {
@@ -222,11 +224,14 @@ async function forward(request: Request, context: RouteContext): Promise<Respons
   // From here the upstream owns the response head, so assembling the client
   // response must not be able to throw: a rejected Response escapes as a
   // framework 500 whose error surface is outside this contract, and leaves the
-  // upstream stream unread and its connection pinned.
+  // upstream stream unread and its connection pinned. The deployed removals of
+  // content-length, content-encoding and transfer-encoding are kept verbatim;
+  // the hop-by-hop strip widens them to the full reserved namespace.
   try {
     const responseHeaders = new Headers(upstream.headers);
     responseHeaders.delete("content-length");
     responseHeaders.delete("content-encoding");
+    responseHeaders.delete("transfer-encoding");
     stripHopByHopHeaders(responseHeaders);
 
     const setCookies = getSetCookieHeaders(responseHeaders);

@@ -16,10 +16,17 @@ import { GET } from "./route";
 //     multi-segment traversals before the proxy handler runs, so the only
 //     spelling that reaches the handler with a literal ".." segment is one
 //     supplied directly to the handler contract tested here.
-//  3. If such a segment ever reaches the handler, `${origin}/api/${seg}`
-//     is collapsed by the URL parser ("Request.url" below) and the request
-//     line leaves the /api/ namespace, e.g. /api/v1/../../admin -> /admin,
-//     which can reach API surfaces mounted outside /api (health endpoints).
+//  3. If such a segment reaches the handler, `${origin}/api/${seg}` is
+//     collapsed by the URL parser ("Request.url" below) and the request line
+//     leaves the /api/ namespace, e.g. /api/v1/../../admin -> /admin.
+//
+// Contract strengthened after review: the handler must REFUSE a dot-relative
+// segment, not silently drop it. Dropping kept the request inside /api/ but
+// rewrote it onto a different live endpoint (/api/users/../delete ->
+// /api/users/delete), which for a state-changing method means an authenticated
+// request executed against a resource the caller never addressed. Every case
+// below therefore asserts the disjunction "refused with no upstream call" OR
+// "forwarded byte-exactly", and never "forwarded to a rewritten path".
 
 type RouteContext = { params: Promise<{ path: string[] }> };
 
@@ -38,82 +45,133 @@ function recordingFetch() {
 
 const API_ORIGIN = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:5000";
 
+// The path the caller actually addressed, after per-segment encoding. A
+// compliant handler either never reaches fetch() or reaches it with exactly
+// this path — any other value means the request was silently retargeted.
+function addressedPathname(path: string[]): string {
+  return `/api/${path.map((segment) => encodeURIComponent(segment)).join("/")}`;
+}
+
+function isRefusedPath(path: string[]): boolean {
+  // Mirrors the handler's rule, expressed independently of it: a segment is
+  // relative when it, or any bounded percent-decode of it, is exactly "." or
+  // "..". Encoded spellings that merely *contain* dots are ordinary names.
+  return path.some((segment) => {
+    let candidate = segment;
+    for (let round = 0; round < 4; round++) {
+      if (candidate === "." || candidate === "..") return true;
+      try {
+        const decoded = decodeURIComponent(candidate);
+        if (decoded === candidate) return false;
+        candidate = decoded;
+      } catch {
+        return false;
+      }
+    }
+    return candidate === "." || candidate === "..";
+  });
+}
+
 describe("scanner probes at the same-origin API proxy boundary", () => {
   afterEach(() => {
     vi.unstubAllGlobals();
   });
 
-  it("keeps every ordinary scanner spelling inside /api/ and refuses the relative ones", async () => {
+  it("keeps every scanner-shaped request contained: refused, or forwarded byte-exactly, never rewritten", async () => {
     const fetchMock = recordingFetch();
     vi.stubGlobal("fetch", fetchMock);
-    // Ordinary (non-relative) scanner noise keeps forwarding byte-identically.
+    // Segments exactly as the App Router delivers them for the probe spellings
+    // that survive edge normalization, plus the sensitive leaf names verbatim.
     const cases: string[][] = [
       ["%2e%2e.env"],
       ["%2E%2E%2F%2E%2E%2F.env"],
       ["..%2f..%2f.env"],
       ["v1", "..%5c..%5c.env"],
+      [".", "health"],
+      ["%2e", "%2e", "%2e%2e", ".env"],
       ["auth", ".env"],
+      ["health", ".."],
     ];
+    let forwarded = 0;
+    let refused = 0;
     for (const path of cases) {
+      fetchMock.mockClear();
       const request = new Request(`http://localhost:3000/api/${path.join("/")}`, {
         headers: { cookie: "taslim.auth=synthetic-session" },
       });
-      await GET(request, context(path));
-    }
-    expect(fetchMock.mock.calls.length).toBe(cases.length);
-    for (const call of fetchMock.mock.calls) {
-      const [target] = call as [string, RequestInit];
+      const response = await GET(request, context(path));
+      if (isRefusedPath(path)) {
+        // Fail closed: no upstream call at all, so no rewritten path and no
+        // cookie egress is possible for this spelling.
+        refused += 1;
+        expect(response.status, `expected refusal for ${path.join("/")}`).toBe(400);
+        expect(fetchMock).not.toHaveBeenCalled();
+        continue;
+      }
+      forwarded += 1;
+      expect(response.status, `expected forward for ${path.join("/")}`).toBe(200);
+      expect(fetchMock.mock.calls.length).toBe(1);
+      const [target] = fetchMock.mock.calls[0] as [string, RequestInit];
       const resolved = new Request(target).url;
       const pathname = new URL(resolved).pathname;
-      // Containment contract: the upstream request line must stay under /api/
-      // and must never contain a bare "." or ".." segment that the URL parser
-      // could collapse onto a sibling namespace.
-      expect(pathname.startsWith("/api/")).toBe(true);
+      // Containment contract: under /api/, with no dot segment left standing.
+      expect(pathname.startsWith("/api/"), `escaped namespace: ${pathname}`).toBe(true);
       expect(pathname.split("/").filter((s) => s !== "" && s !== "api")).not.toContain("..");
       expect(pathname.split("/")).not.toContain(".");
+      // Non-rewrite contract: exactly the addressed path, no segment dropped.
+      expect(pathname, `silently retargeted: ${pathname}`).toBe(addressedPathname(path));
     }
-    // A genuine relative segment is now refused with a non-disclosing 400
-    // instead of being deleted from a request that still gets forwarded.
-    const refusedCases: string[][] = [
-      [".", "health"],
-      ["%2e", "%2e", "%2e%2e", ".env"],
-      ["health", ".."],
-    ];
-    for (const path of refusedCases) {
-      const response = await GET(
-        new Request(`http://localhost:3000/api/${path.join("/")}`, {
-          headers: { cookie: "taslim.auth=synthetic-session" },
-        }),
-        context(path),
-      );
-      expect(response.status, path.join("/")).toBe(400);
-    }
-    expect(fetchMock).toHaveBeenCalledTimes(cases.length);
+    // Guards against the loop degrading into a no-op if the case list changes.
+    expect(refused).toBeGreaterThan(0);
+    expect(forwarded).toBeGreaterThan(0);
   });
 
-  it("fails closed on a literal relative segment instead of collapsing or rewriting it", async () => {
+  it("refuses a literal relative segment outright instead of dropping it and retargeting", async () => {
     const fetchMock = recordingFetch();
     vi.stubGlobal("fetch", fetchMock);
-    // Direct handler-level injection of a resolved ".." segment: the spellings
-    // the deployed edge rejects before routing, pinned here as the containment
-    // contract for the handler itself (RED by design until route.ts refuses
-    // relative segments). Refusal, not deletion, is the contract: dropping the
-    // segment produced /api/v1/admin and authenticated it with the caller's
-    // cookie, so the spy below must record zero upstream calls.
-    const request = new Request("http://localhost:3000/api/x", {
+    // The reviewer-reported case: dropping ".." forwards /api/users/delete, a
+    // different endpoint, with the caller's session cookie attached.
+    const request = new Request("http://localhost:3000/api/users/../delete", {
+      method: "DELETE",
       headers: { cookie: "taslim.auth=synthetic-session" },
     });
-    const response = await GET(request, context(["v1", "..", "..", "admin"]));
+    const response = await GET(request, context(["users", "..", "delete"]));
     expect(response.status).toBe(400);
-    await expect(response.json()).resolves.toEqual({
-      error: { code: "INVALID_PATH", message: "The requested path is not valid." },
-    });
-    expect(fetchMock).toHaveBeenCalledTimes(0);
+    // Nothing reached the upstream, so nothing was retargeted and no
+    // credential travelled with it.
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
-  it("returns a non-disclosing unavailable envelope when the probe target cannot be served", async () => {
+  it("refuses the collapsing traversal spelling before any upstream call", async () => {
+    const fetchMock = recordingFetch();
+    vi.stubGlobal("fetch", fetchMock);
+    const request = new Request("http://localhost:3000/api/v1/../../admin");
+    const response = await GET(request, context(["v1", "..", "..", "admin"]));
+    expect(response.status).toBe(400);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("returns a fixed non-disclosing refusal that echoes no request material", async () => {
+    const fetchMock = recordingFetch();
+    vi.stubGlobal("fetch", fetchMock);
+    const request = new Request("http://localhost:3000/api/v1/../../admin");
+    const response = await GET(request, context(["v1", "..", "..", "admin"]));
+    expect(response.status).toBe(400);
+    const body = await response.json();
+    expect(body).toEqual({ error: { code: "INVALID_PATH", message: "The requested path is not valid." } });
+    const raw = JSON.stringify(body);
+    // Must not leak the upstream origin, the traversal segment, or the leaf.
+    expect(raw).not.toContain(API_ORIGIN);
+    expect(raw).not.toContain("admin");
+    expect(raw).not.toContain("..");
+  });
+
+  it("returns a non-disclosing unavailable envelope when a contained probe target cannot be served", async () => {
     const fetchMock = vi.fn().mockRejectedValue(new Error("getaddrinfo ENOTFOUND synthetic-upstream.invalid"));
     vi.stubGlobal("fetch", fetchMock);
+    // "%2e%2e.env" decodes to "...env": an ordinary single segment, so it is
+    // forwarded (contained) and the upstream-failure envelope still applies.
+    expect(isRefusedPath(["%2e%2e.env"])).toBe(false);
     const request = new Request("http://localhost:3000/api/%2e%2e.env");
     const response = await GET(request, context(["%2e%2e.env"]));
     expect(response.status).toBe(503);
@@ -122,20 +180,29 @@ describe("scanner probes at the same-origin API proxy boundary", () => {
     });
   });
 
-  it("does not forward session material when the containment contract holds", async () => {
+  it("keeps session material off any non-namespace or rewritten target", async () => {
     const fetchMock = recordingFetch();
     vi.stubGlobal("fetch", fetchMock);
-    // The synthetic cookie exists only to prove what would travel if a probe
-    // escaped the namespace. A relative segment now never reaches the
-    // upstream at all, rewritten or otherwise, so no cookie can travel.
-    const request = new Request("http://localhost:3000/api/v1/%2e%2e/%2e%2e/.env", {
-      headers: { cookie: "taslim.auth=synthetic-session" },
-    });
-    const response = await GET(request, context(["v1", "%2e%2e", "%2e%2e", ".env"]));
-    expect(response.status).toBe(400);
-    expect(fetchMock).toHaveBeenCalledTimes(0);
-    // Nothing about the probe, the namespace, or the fixed API origin is
-    // reflected back to the scanner.
-    await expect(response.clone().text()).resolves.not.toContain(API_ORIGIN);
+    const cookie = { cookie: "taslim.auth=synthetic-session" };
+    // Refused class: encoded relative segments carry nothing upstream.
+    for (const path of [["v1", "%2e%2e", "%2e%2e", ".env"], ["health", ".."], [".", "health"]]) {
+      fetchMock.mockClear();
+      const request = new Request(`http://localhost:3000/api/${path.join("/")}`, { headers: cookie });
+      const response = await GET(request, context(path));
+      expect(response.status, `expected refusal for ${path.join("/")}`).toBe(400);
+      expect(fetchMock, `cookie egress risk for ${path.join("/")}`).not.toHaveBeenCalled();
+    }
+    // Forwarded class: the only place a cookie may land is the addressed,
+    // in-namespace path.
+    for (const path of [["auth", ".env"], ["%2e%2e.env"]]) {
+      fetchMock.mockClear();
+      const request = new Request(`http://localhost:3000/api/${path.join("/")}`, { headers: cookie });
+      await GET(request, context(path));
+      expect(fetchMock.mock.calls.length).toBe(1);
+      const [target, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+      expect(target.startsWith(`${API_ORIGIN}/api/`)).toBe(true);
+      expect(new URL(new Request(target).url).pathname).toBe(addressedPathname(path));
+      expect(new Headers(init.headers).get("cookie")).toBe("taslim.auth=synthetic-session");
+    }
   });
 });
