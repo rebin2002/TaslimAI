@@ -46,6 +46,9 @@ describe("researchStudioState", () => {
   it("validates restored jobs and keeps active-job storage workspace-scoped", () => {
     expect(isResearchJob(job("Running"))).toBe(true);
     expect(isRestorableResearchJob(job("Running"), "workspace-1")).toBe(true);
+    expect(isRestorableResearchJob(job("Succeeded", '{"assetId":"asset-1"}'), "workspace-1")).toBe(false);
+    expect(isRestorableResearchJob(job("Failed"), "workspace-1")).toBe(false);
+    expect(isRestorableResearchJob(job("Cancelled"), "workspace-1")).toBe(false);
     expect(isCurrentResearchJob(job("Running"), "workspace-1", "job-1")).toBe(true);
     expect(isCurrentResearchJob({ ...job("Running"), id: "job-2" }, "workspace-1", "job-1")).toBe(false);
     expect(isCurrentResearchJob({ ...job("Running"), workspaceId: "workspace-2" }, "workspace-1", "job-1")).toBe(false);
