@@ -253,6 +253,44 @@ public sealed class MubertMusicGenerationProviderTests
         Assert.Single(handler.Requests, request => request.Method == HttpMethod.Post);
     }
 
+    [Fact]
+    public async Task Artifact_http_500_after_completion_stays_off_the_second_billable_track()
+    {
+        // A server error on the artifact GET used to raise MusicProviderFailureException, which is
+        // not a MusicProviderUnavailableException, so the transport-recovery wrapper never saw it and
+        // the job fell through to the generic retry-inviting music code: a retry would POST a second
+        // paid track and orphan the completed one. A transient status must instead spend its budget
+        // on re-GETs of the same URL and end at the post-billing retrieval terminal.
+        var handler = CompleteTrackHandler(_ => new HttpResponseMessage(HttpStatusCode.InternalServerError));
+        var provider = CreateProvider(handler, maxPollAttempts: 1, retryAttempts: 1, retryDelayMilliseconds: 1);
+
+        var failure = await Assert.ThrowsAsync<MusicOutputRetrievalFailedException>(() => provider.GenerateAsync(Input()));
+
+        Assert.IsAssignableFrom<MusicProviderUnavailableException>(failure);
+        // create POST, status GET, then the artifact GET plus one bounded re-fetch.
+        Assert.Equal(4, handler.Requests.Count);
+        Assert.Single(handler.Requests, request => request.Method == HttpMethod.Post);
+        Assert.All(
+            handler.Requests.Skip(2),
+            request => Assert.Contains("download.example", request.RequestUri!.ToString(), StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task Artifact_permanent_status_is_terminal_without_consuming_the_refetch_budget()
+    {
+        // A not-found artifact will not be healed by asking again, and it must still not be reported
+        // as the generic provider-failure class that invites a retry.
+        var handler = CompleteTrackHandler(_ => new HttpResponseMessage(HttpStatusCode.NotFound));
+        var provider = CreateProvider(handler, maxPollAttempts: 1, retryAttempts: 2, retryDelayMilliseconds: 1);
+
+        var failure = await Assert.ThrowsAsync<MusicOutputRetrievalFailedException>(() => provider.GenerateAsync(Input()));
+
+        Assert.IsAssignableFrom<MusicProviderUnavailableException>(failure);
+        // create POST, status GET, one artifact GET: no re-fetch and no second track.
+        Assert.Equal(3, handler.Requests.Count);
+        Assert.Single(handler.Requests, request => request.Method == HttpMethod.Post);
+    }
+
     private static MubertMusicGenerationProvider CreateProvider(
         HttpMessageHandler handler,
         string customerId = "customer",
