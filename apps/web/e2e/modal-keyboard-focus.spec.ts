@@ -88,7 +88,14 @@ async function expectFocusInsideDialog(page: Page) {
   expect(inside, `focus escaped the dialog (active: ${await page.evaluate(() => document.activeElement?.tagName ?? "null")})`).toBe(true);
 }
 
-test("project modal keeps keyboard focus contained and returns it to the opener", async ({ page }) => {
+test("project modal keeps keyboard focus contained and returns it to the opener", async ({ authenticatedPage: page }) => {
+  // `/projects` became a server-gated route on main (ea0dc6b9, PR #1237: `dynamic =
+  // "force-dynamic"` + `await requireAuthenticatedPage("/projects")`). That session probe
+  // runs inside the Next server process against the real API, so a browser-side
+  // `page.route` mock cannot satisfy it and the SSR render answers 307 -> `/login`.
+  // Authenticate through the shared fixture first, then layer the read-only synthetic
+  // mock on top: the dialog content stays deterministic and every in-flow write or
+  // unmapped read is still trapped by the assertions below.
   const api = await installReadOnlyApiMock(page);
   await page.goto("/projects");
 
