@@ -255,16 +255,26 @@ public sealed class MovieCharacterProductionSheetService(TaslimDbContext db, Mov
                 sheet.ApprovedAt = null; sheet.ApprovedByUserId = null; sheet.LockedAt = null; sheet.LockedByUserId = null; sheet.UpdatedAt = now;
                 db.MovieCharacterProductionSheets.Add(sheet);
             }
+            var observedApprovedAt = sheet.ApprovedAt;
+            var observedLockedAt = sheet.LockedAt;
+            await using var transaction = await db.Database.BeginTransactionAsync(cancellationToken);
             try
             {
                 await db.SaveChangesAsync(cancellationToken);
                 if (!isNewSheet)
                 {
-                    // Advance the canonical pointer only when this version is newer.
-                    // This avoids a stale writer overwriting a concurrent higher
-                    // version while keeping the canonical pointer monotonic.
-                    await db.MovieCharacterProductionSheets
-                        .Where(item => item.Id == sheet.Id && item.CurrentVersionNumber < versionNumber)
+                    // The version insert and the canonical pointer advance commit as ONE atomic
+                    // transaction: a failure, cancellation or crash can no longer leave a committed
+                    // version the pointer never adopts. Besides keeping the pointer monotonic, the
+                    // update is guarded on the approval/lock state observed when this draft was
+                    // read, so a lock or approval a concurrent writer committed in the window is
+                    // never silently erased - this allocation loses and rolls back instead.
+                    var advanced = await db.MovieCharacterProductionSheets
+                        .Where(item => item.Id == sheet.Id
+                            && item.CurrentVersionNumber < versionNumber
+                            && item.Status != MovieCharacterProductionSheetStatuses.Locked
+                            && item.ApprovedAt == observedApprovedAt
+                            && item.LockedAt == observedLockedAt)
                         .ExecuteUpdateAsync(setters => setters
                             .SetProperty(item => item.CurrentVersionNumber, versionNumber)
                             .SetProperty(item => item.Status, MovieCharacterProductionSheetStatuses.Draft)
@@ -273,7 +283,16 @@ public sealed class MovieCharacterProductionSheetService(TaslimDbContext db, Mov
                             .SetProperty(item => item.LockedAt, (DateTime?)null)
                             .SetProperty(item => item.LockedByUserId, (Guid?)null)
                             .SetProperty(item => item.UpdatedAt, now), cancellationToken);
+                    if (advanced == 0)
+                    {
+                        await transaction.RollbackAsync(cancellationToken);
+                        var latest = await db.MovieCharacterProductionSheets.AsNoTracking()
+                            .FirstAsync(item => item.Id == sheet.Id, cancellationToken);
+                        if (latest.Status == MovieCharacterProductionSheetStatuses.Locked) throw new MovieCharacterProductionSheetLockedException();
+                        throw new MovieCharacterProductionSheetValidationException("SHEET_STATE_CHANGED", "The production sheet changed while this draft version was being allocated. Retry the save.");
+                    }
                 }
+                await transaction.CommitAsync(cancellationToken);
                 return MovieCharacterProductionSheetMapper.ToDto(await Query().FirstAsync(item => item.Id == sheet.Id, cancellationToken));
             }
             catch (DbUpdateConcurrencyException) when (attempt + 1 < MaximumVersionAllocationAttempts)
@@ -342,10 +361,36 @@ public sealed class MovieCharacterProductionSheetService(TaslimDbContext db, Mov
         var version = sheet.Versions.SingleOrDefault(item => item.VersionNumber == sheet.CurrentVersionNumber) ?? throw new MovieCharacterProductionSheetValidationException("VERSION_MISSING", "The current production-sheet version is missing.");
         EnsureComplete(version);
         var now = DateTime.UtcNow;
-        sheet.Status = MovieCharacterProductionSheetStatuses.Approved; sheet.ApprovedAt = now; sheet.ApprovedByUserId = userId; sheet.UpdatedAt = now;
-        version.Status = MovieCharacterProductionSheetStatuses.Approved; version.ApprovedAt = now; version.ApprovedByUserId = userId;
-        await db.SaveChangesAsync(cancellationToken);
-        return MovieCharacterProductionSheetMapper.ToDto(sheet);
+        var pointer = sheet.CurrentVersionNumber;
+        // The entities are loaded through the AsNoTracking read path, so mutating them would
+        // never reach the database. Persist the transition with guarded set-based updates inside
+        // one transaction: the write only lands while the sheet still shows the pointer and the
+        // unlocked state this request observed, otherwise it surfaces as a state conflict.
+        await using var transaction = await db.Database.BeginTransactionAsync(cancellationToken);
+        var sheetRows = await db.MovieCharacterProductionSheets
+            .Where(item => item.Id == sheetId && item.CurrentVersionNumber == pointer && item.Status != MovieCharacterProductionSheetStatuses.Locked)
+            .ExecuteUpdateAsync(setters => setters
+                .SetProperty(item => item.Status, MovieCharacterProductionSheetStatuses.Approved)
+                .SetProperty(item => item.ApprovedAt, now)
+                .SetProperty(item => item.ApprovedByUserId, userId)
+                .SetProperty(item => item.UpdatedAt, now), cancellationToken);
+        var versionRows = sheetRows == 1
+            ? await db.MovieCharacterProductionSheetVersions
+                .Where(item => item.MovieCharacterProductionSheetId == sheetId && item.VersionNumber == pointer && item.Status != MovieCharacterProductionSheetStatuses.Locked)
+                .ExecuteUpdateAsync(setters => setters
+                    .SetProperty(item => item.Status, MovieCharacterProductionSheetStatuses.Approved)
+                    .SetProperty(item => item.ApprovedAt, now)
+                    .SetProperty(item => item.ApprovedByUserId, userId), cancellationToken)
+            : 0;
+        if (sheetRows != 1 || versionRows != 1)
+        {
+            await transaction.RollbackAsync(cancellationToken);
+            var latest = await db.MovieCharacterProductionSheets.AsNoTracking().FirstAsync(item => item.Id == sheetId, cancellationToken);
+            if (latest.Status == MovieCharacterProductionSheetStatuses.Locked) throw new MovieCharacterProductionSheetLockedException();
+            throw new MovieCharacterProductionSheetValidationException("SHEET_STATE_CHANGED", "The production sheet changed while the approval was being written. Retry the approval.");
+        }
+        await transaction.CommitAsync(cancellationToken);
+        return MovieCharacterProductionSheetMapper.ToDto(await Query().FirstAsync(item => item.Id == sheetId, cancellationToken));
     }
 
     public async Task<MovieCharacterProductionSheetDto?> LockAsync(Guid userId, Guid sheetId, CancellationToken cancellationToken = default)
@@ -356,10 +401,38 @@ public sealed class MovieCharacterProductionSheetService(TaslimDbContext db, Mov
         if (sheet.Status != MovieCharacterProductionSheetStatuses.Approved) throw new MovieCharacterProductionSheetValidationException("APPROVAL_REQUIRED", "Approve the current production-sheet version before locking it.");
         var version = sheet.Versions.Single(item => item.VersionNumber == sheet.CurrentVersionNumber);
         var now = DateTime.UtcNow;
-        sheet.Status = MovieCharacterProductionSheetStatuses.Locked; sheet.LockedAt = now; sheet.LockedByUserId = userId; sheet.UpdatedAt = now;
-        version.Status = MovieCharacterProductionSheetStatuses.Locked; version.LockedAt = now; version.LockedByUserId = userId;
-        await db.SaveChangesAsync(cancellationToken);
-        return MovieCharacterProductionSheetMapper.ToDto(sheet);
+        var pointer = sheet.CurrentVersionNumber;
+        // Same detached-entity defect as ApproveAsync: persist through guarded set-based updates
+        // in one transaction so the lock really lands and only while the sheet is still the same
+        // approved version this request observed.
+        await using var transaction = await db.Database.BeginTransactionAsync(cancellationToken);
+        var sheetRows = await db.MovieCharacterProductionSheets
+            .Where(item => item.Id == sheetId && item.CurrentVersionNumber == pointer && item.Status == MovieCharacterProductionSheetStatuses.Approved)
+            .ExecuteUpdateAsync(setters => setters
+                .SetProperty(item => item.Status, MovieCharacterProductionSheetStatuses.Locked)
+                .SetProperty(item => item.LockedAt, now)
+                .SetProperty(item => item.LockedByUserId, userId)
+                .SetProperty(item => item.UpdatedAt, now), cancellationToken);
+        var versionRows = sheetRows == 1
+            ? await db.MovieCharacterProductionSheetVersions
+                .Where(item => item.MovieCharacterProductionSheetId == sheetId && item.VersionNumber == pointer && item.Status == MovieCharacterProductionSheetStatuses.Approved)
+                .ExecuteUpdateAsync(setters => setters
+                    .SetProperty(item => item.Status, MovieCharacterProductionSheetStatuses.Locked)
+                    .SetProperty(item => item.LockedAt, now)
+                    .SetProperty(item => item.LockedByUserId, userId), cancellationToken)
+            : 0;
+        if (sheetRows != 1 || versionRows != 1)
+        {
+            await transaction.RollbackAsync(cancellationToken);
+            var latest = await db.MovieCharacterProductionSheets.AsNoTracking().FirstAsync(item => item.Id == sheetId, cancellationToken);
+            if (latest.Status == MovieCharacterProductionSheetStatuses.Locked)
+                return MovieCharacterProductionSheetMapper.ToDto(await Query().FirstAsync(item => item.Id == sheetId, cancellationToken));
+            if (latest.Status != MovieCharacterProductionSheetStatuses.Approved)
+                throw new MovieCharacterProductionSheetValidationException("APPROVAL_REQUIRED", "Approve the current production-sheet version before locking it.");
+            throw new MovieCharacterProductionSheetValidationException("SHEET_STATE_CHANGED", "The production sheet changed while the lock was being written. Retry the lock.");
+        }
+        await transaction.CommitAsync(cancellationToken);
+        return MovieCharacterProductionSheetMapper.ToDto(await Query().FirstAsync(item => item.Id == sheetId, cancellationToken));
     }
 
     public async Task<MovieCharacterProductionSheetDto?> UnlockAsync(Guid userId, Guid sheetId, CancellationToken cancellationToken = default)
@@ -369,10 +442,40 @@ public sealed class MovieCharacterProductionSheetService(TaslimDbContext db, Mov
         if (sheet.Status != MovieCharacterProductionSheetStatuses.Locked) return MovieCharacterProductionSheetMapper.ToDto(sheet);
         var version = sheet.Versions.Single(item => item.VersionNumber == sheet.CurrentVersionNumber);
         var now = DateTime.UtcNow;
-        sheet.Status = MovieCharacterProductionSheetStatuses.Draft; sheet.LockedAt = null; sheet.LockedByUserId = null; sheet.ApprovedAt = null; sheet.ApprovedByUserId = null; sheet.UpdatedAt = now;
-        version.Status = MovieCharacterProductionSheetStatuses.Draft; version.LockedAt = null; version.LockedByUserId = null; version.ApprovedAt = null; version.ApprovedByUserId = null;
-        await db.SaveChangesAsync(cancellationToken);
-        return MovieCharacterProductionSheetMapper.ToDto(sheet);
+        var pointer = sheet.CurrentVersionNumber;
+        // Same detached-entity defect as ApproveAsync: persist through guarded set-based updates
+        // in one transaction so the unlock really lands and only while the sheet is still locked
+        // at the same version this request observed.
+        await using var transaction = await db.Database.BeginTransactionAsync(cancellationToken);
+        var sheetRows = await db.MovieCharacterProductionSheets
+            .Where(item => item.Id == sheetId && item.CurrentVersionNumber == pointer && item.Status == MovieCharacterProductionSheetStatuses.Locked)
+            .ExecuteUpdateAsync(setters => setters
+                .SetProperty(item => item.Status, MovieCharacterProductionSheetStatuses.Draft)
+                .SetProperty(item => item.LockedAt, (DateTime?)null)
+                .SetProperty(item => item.LockedByUserId, (Guid?)null)
+                .SetProperty(item => item.ApprovedAt, (DateTime?)null)
+                .SetProperty(item => item.ApprovedByUserId, (Guid?)null)
+                .SetProperty(item => item.UpdatedAt, now), cancellationToken);
+        var versionRows = sheetRows == 1
+            ? await db.MovieCharacterProductionSheetVersions
+                .Where(item => item.MovieCharacterProductionSheetId == sheetId && item.VersionNumber == pointer && item.Status == MovieCharacterProductionSheetStatuses.Locked)
+                .ExecuteUpdateAsync(setters => setters
+                    .SetProperty(item => item.Status, MovieCharacterProductionSheetStatuses.Draft)
+                    .SetProperty(item => item.LockedAt, (DateTime?)null)
+                    .SetProperty(item => item.LockedByUserId, (Guid?)null)
+                    .SetProperty(item => item.ApprovedAt, (DateTime?)null)
+                    .SetProperty(item => item.ApprovedByUserId, (Guid?)null), cancellationToken)
+            : 0;
+        if (sheetRows != 1 || versionRows != 1)
+        {
+            await transaction.RollbackAsync(cancellationToken);
+            var latest = await db.MovieCharacterProductionSheets.AsNoTracking().FirstAsync(item => item.Id == sheetId, cancellationToken);
+            if (latest.Status != MovieCharacterProductionSheetStatuses.Locked)
+                return MovieCharacterProductionSheetMapper.ToDto(await Query().FirstAsync(item => item.Id == sheetId, cancellationToken));
+            throw new MovieCharacterProductionSheetValidationException("SHEET_STATE_CHANGED", "The production sheet changed while the unlock was being written. Retry the unlock.");
+        }
+        await transaction.CommitAsync(cancellationToken);
+        return MovieCharacterProductionSheetMapper.ToDto(await Query().FirstAsync(item => item.Id == sheetId, cancellationToken));
     }
 
     private IQueryable<MovieCharacterProductionSheet> Query() => db.MovieCharacterProductionSheets.AsNoTracking().AsSplitQuery()
