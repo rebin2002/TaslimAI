@@ -84,8 +84,9 @@ public sealed class MubertMusicGenerationProviderTests
         // The create was accepted (track-3 exists on Mubert's side) and the bounded polling window ran
         // out while it still reported processing. Billing state is unknown, so this is NOT the retryable
         // timeout class: RetryAsync re-runs CreateAsync, which would POST a second paid track. The job
-        // stops on the terminal retrieval class instead, having sent exactly one billable POST. No audio
-        // is fabricated either way.
+        // stops on the unconfirmed-submission class instead - the track id proves the submission was
+        // accepted, but no customer copy may claim a finished track, because polling never observed one.
+        // Exactly one billable POST was sent and no audio is fabricated either way.
         var handler = new MubertHandler(
             (_, requestNumber) => requestNumber switch
             {
@@ -94,7 +95,7 @@ public sealed class MubertMusicGenerationProviderTests
             });
         var provider = CreateProvider(handler, maxPollAttempts: 2, pollIntervalMilliseconds: 100);
 
-        var failure = await Assert.ThrowsAsync<MusicOutputRetrievalFailedException>(() => provider.GenerateAsync(Input()));
+        var failure = await Assert.ThrowsAsync<MusicProviderSubmissionUnconfirmedException>(() => provider.GenerateAsync(Input()));
 
         Assert.IsAssignableFrom<MusicProviderUnavailableException>(failure);
         Assert.Equal(3, handler.Requests.Count);
@@ -245,9 +246,9 @@ public sealed class MubertMusicGenerationProviderTests
         // The create POST was answered with a track id, so Mubert has accepted a paid generation; the
         // status GET then never completes. Billing is unknown at that point, which is exactly why the
         // retryable class is unsafe: RetryAsync would re-run CreateAsync and POST a second track while
-        // the accepted one may still be running. The job therefore stops on the terminal retrieval
-        // class, with exactly one billable POST sent and the accepted id logged for reconciliation
-        // (see the provider's providerSubmissionAccepted branch).
+        // the accepted one may still be running. The job therefore stops on the unconfirmed-submission
+        // class - acceptance is proven, completion is not - with exactly one billable POST sent and the
+        // accepted id logged for reconciliation (see the provider's providerSubmissionAccepted branch).
         var handler = new MubertHandler((_, requestNumber) => requestNumber switch
         {
             1 => Json(HttpStatusCode.OK, "{\"data\":{\"id\":\"track-pre-timeout\",\"session_id\":\"session\"}}"),
@@ -258,7 +259,7 @@ public sealed class MubertMusicGenerationProviderTests
         });
         var provider = CreateProvider(handler, providerTimeoutSeconds: 1);
 
-        var failure = await Assert.ThrowsAsync<MusicOutputRetrievalFailedException>(() => provider.GenerateAsync(Input()));
+        var failure = await Assert.ThrowsAsync<MusicProviderSubmissionUnconfirmedException>(() => provider.GenerateAsync(Input()));
 
         Assert.IsAssignableFrom<MusicProviderUnavailableException>(failure);
         Assert.Single(handler.Requests, request => request.Method == HttpMethod.Post);
@@ -277,6 +278,100 @@ public sealed class MubertMusicGenerationProviderTests
         var provider = CreateProvider(handler, providerTimeoutSeconds: 1);
 
         await Assert.ThrowsAsync<MusicProviderTimeoutException>(() => provider.GenerateAsync(Input()));
+        Assert.Single(handler.Requests, request => request.Method == HttpMethod.Post);
+    }
+
+    [Fact]
+    public async Task Repeated_transient_status_failures_after_an_accepted_track_are_unconfirmed_not_a_retryable_outage()
+    {
+        // Mubert accepted the track (the create POST returned an id) and the status endpoint then keeps
+        // answering 503 until the bounded GET retries run out. The helper's exhaustion is a
+        // MusicProviderUnavailableException, which the job layer reports as MUSIC_PROVIDER_UNAVAILABLE -
+        // a retryable code whose replay would POST a second paid track while the accepted one may still
+        // be running and billing. The accepted-stage guard must catch it, and the reported message must
+        // not claim a finished track, because polling never saw one.
+        var handler = new MubertHandler(
+            (_, requestNumber) => requestNumber switch
+            {
+                1 => Json(HttpStatusCode.OK, "{\"data\":{\"id\":\"track-503\",\"session_id\":\"session-503\"}}"),
+                _ => new HttpResponseMessage(HttpStatusCode.ServiceUnavailable)
+                {
+                    Content = new StringContent("{\"error\":\"private provider payload\"}"),
+                },
+            });
+        var provider = CreateProvider(handler, maxPollAttempts: 2, pollIntervalMilliseconds: 100, retryAttempts: 1);
+
+        var failure = await Assert.ThrowsAsync<MusicProviderSubmissionUnconfirmedException>(() => provider.GenerateAsync(Input()));
+
+        Assert.IsAssignableFrom<MusicProviderUnavailableException>(failure);
+        Assert.IsNotType<MusicProviderTimeoutException>(failure);
+        Assert.DoesNotContain("generated", failure.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("completed", failure.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("private provider payload", failure.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Single(handler.Requests, request => request.Method == HttpMethod.Post);
+        // Retries were spent on the idempotent status GET only; the billable POST was never repeated.
+        Assert.True(handler.Requests.Count > 2, $"expected retried status polling, saw {handler.Requests.Count} requests");
+    }
+
+    [Fact]
+    public async Task Non_transient_status_failure_after_an_accepted_track_is_unconfirmed_not_a_generic_fault()
+    {
+        // A status answer the helper classifies as a plain provider failure falls through to the generic
+        // MUSIC_GENERATION_FAILED code, which is equally retryable and would also replay the paid POST.
+        // After acceptance the outcome is unknown, not proven absent.
+        var handler = new MubertHandler(
+            (_, requestNumber) => requestNumber switch
+            {
+                1 => Json(HttpStatusCode.OK, "{\"data\":{\"id\":\"track-400\",\"session_id\":\"session-400\"}}"),
+                _ => Json(HttpStatusCode.BadRequest, "{\"error\":\"private provider payload\"}"),
+            });
+        var provider = CreateProvider(handler, maxPollAttempts: 2, pollIntervalMilliseconds: 100, retryAttempts: 1);
+
+        var failure = await Assert.ThrowsAsync<MusicProviderSubmissionUnconfirmedException>(() => provider.GenerateAsync(Input()));
+
+        Assert.IsAssignableFrom<MusicProviderUnavailableException>(failure);
+        Assert.DoesNotContain("private provider payload", failure.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Single(handler.Requests, request => request.Method == HttpMethod.Post);
+    }
+
+    [Fact]
+    public async Task Status_envelope_without_track_data_after_an_accepted_track_is_unconfirmed_not_a_generic_fault()
+    {
+        // A control for the sibling shape: the status body parses as the documented envelope but carries
+        // no data, so the accepted track's outcome is still unknown. Left as the generic provider failure
+        // this would fall through to MUSIC_GENERATION_FAILED, another retryable code that replays the
+        // paid POST.
+        var handler = new MubertHandler(
+            (_, requestNumber) => requestNumber switch
+            {
+                1 => Json(HttpStatusCode.OK, "{\"data\":{\"id\":\"track-empty\",\"session_id\":\"session-empty\"}}"),
+                _ => Json(HttpStatusCode.OK, "{\"data\":null}"),
+            });
+        var provider = CreateProvider(handler, maxPollAttempts: 2, pollIntervalMilliseconds: 100);
+
+        var failure = await Assert.ThrowsAsync<MusicProviderSubmissionUnconfirmedException>(() => provider.GenerateAsync(Input()));
+
+        Assert.IsAssignableFrom<MusicProviderUnavailableException>(failure);
+        Assert.DoesNotContain("generated", failure.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Single(handler.Requests, request => request.Method == HttpMethod.Post);
+    }
+
+    [Fact]
+    public async Task Unreadable_status_payload_after_an_accepted_track_is_unconfirmed_not_a_generic_fault()
+    {
+        // The status call succeeded but its body is not the documented envelope, so nothing is known
+        // about the accepted track: unconfirmed posture rather than a retryable generic fault.
+        var handler = new MubertHandler(
+            (_, requestNumber) => requestNumber switch
+            {
+                1 => Json(HttpStatusCode.OK, "{\"data\":{\"id\":\"track-garbage\",\"session_id\":\"session-garbage\"}}"),
+                _ => Json(HttpStatusCode.OK, "this is not json"),
+            });
+        var provider = CreateProvider(handler, maxPollAttempts: 2, pollIntervalMilliseconds: 100);
+
+        var failure = await Assert.ThrowsAsync<MusicProviderSubmissionUnconfirmedException>(() => provider.GenerateAsync(Input()));
+
+        Assert.IsAssignableFrom<MusicProviderUnavailableException>(failure);
         Assert.Single(handler.Requests, request => request.Method == HttpMethod.Post);
     }
 

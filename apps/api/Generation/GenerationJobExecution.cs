@@ -2405,6 +2405,12 @@ var qualityFailure = exception as GenerationQualityControlException ?? exception
                 // deliberately a subclass so that existing unavailable guards still catch it, while
                 // the code mapping keeps it out of the "please try again" class.
                 MusicOutputRetrievalFailedException => GenerationJobErrorCodes.MusicOutputRetrievalFailed,
+                // Also before the generic unavailable arm. The provider accepted a billable
+                // generation and its outcome was never observed, so it must not read as the retryable
+                // outage class - a replay would post a second paid track. This reuses the code the
+                // expired-lease terminal already reports for that identical unknown, whose copy
+                // states the outcome instead of asserting that a finished track exists.
+                MusicProviderSubmissionUnconfirmedException => GenerationJobErrorCodes.MusicProviderSubmissionUnconfirmed,
                 MusicProviderUnavailableException => GenerationJobErrorCodes.MusicProviderUnavailable,
                 MusicProviderTimeoutException => GenerationJobErrorCodes.MusicProviderTimeout,
                 MusicProviderRateLimitException => GenerationJobErrorCodes.MusicProviderRateLimited,
