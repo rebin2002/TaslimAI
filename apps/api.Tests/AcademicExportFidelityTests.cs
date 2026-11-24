@@ -765,4 +765,262 @@ public sealed class AcademicExportFidelityTests : IClassFixture<TaslimApiFactory
             AcademicSavedReportReader.ComputeHash(job, new[] { honest }),
             AcademicSavedReportReader.ComputeHash(job, new[] { Row("metadata_only", contentAccessed: false) }));
     }
+
+    // ── a running page number must not be able to refuse a correct export ─────────────────
+
+    /// <summary>
+    /// The payload shape the export audit named: list items whose last saved token is a punctuated
+    /// year ("…founded in 1912.") and an untitled-section paragraph long enough to be split by a page
+    /// break while it quotes bare numerals ("Of the 4 sampled volumes 12 folios…"). Both classes reach
+    /// a PDF gate, and a gate that has to guess which dump of the page to read will guess wrong: the
+    /// folio printed outside the margin band splices the numeral-bearing paragraph, while deleting
+    /// every standalone numeral deletes the numbers the same paragraph is quoting.
+    /// </summary>
+    private static string ChronologyResultJson(string foundationYear = "1912") => JsonSerializer.Serialize(new
+    {
+        researchType = "research",
+        title = "Chronology of a Statistical Bureau",
+        subtitle = (string?)null,
+        language = "en",
+        executiveSummary = "Four bindings of the bureau's returns survive, numbered independently [S1].",
+        keyFindings = new List<ResearchReportBlock>
+        {
+            new()
+            {
+                Type = ResearchBlockTypes.Bullets,
+                Items =
+                [
+                    "The earliest returns were tabulated by hand.",
+                    "The index was compiled after the reorganisation.",
+                ],
+                CitationIds = ["S1"],
+            },
+        },
+        sections = new List<ResearchSection>
+        {
+            new()
+            {
+                Heading = "Provenance",
+                Blocks =
+                [
+                    new()
+                    {
+                        Type = ResearchBlockTypes.Paragraph,
+                        Text = "The ledger reaches the present reading room through 3 transfers, the first of which "
+                            + "moved 7 crates of assay sheets into a bonded store during the war years, and the last of "
+                            + "which was a 1971 reboxing that did not disturb the original sequence but did add a new "
+                            + "stamp to every cover. Where a leaf was left blank at the binding the transcriber wrote "
+                            + "vacat in the margin rather than leave the count to the reader, and where a leaf was "
+                            + "already missing before the transfer the count simply jumps, so a reader who trusts the "
+                            + "printed sequence alone will take a gap for a loss. The 4 volumes in this sample were "
+                            + "compared against the index entry by entry, and the divergences recorded below are the "
+                            + "ones that survive both hand-checks.",
+                        CitationIds = ["S1"],
+                    },
+                ],
+            },
+            new()
+            {
+                // Gated content carrying bare numerals and a sentence-final year, in an untitled section.
+                Heading = "",
+                Blocks =
+                [
+                    new()
+                    {
+                        Type = ResearchBlockTypes.Paragraph,
+                        // Long on purpose: a paragraph of this size is split by a page break, and it quotes
+                        // bare numerals, which is the combination a reading chosen by rule cannot survive.
+                        Text = $"Of the 4 sampled volumes 12 folios were rebound after the survey closed in {foundationYear}. "
+                            + "Three leaves sit in the wrong sequence, 7 are numbered in a hand later than the returns they "
+                            + "introduce, and 2 carry a total that no surviving worksheet supports. The flyleaf additions "
+                            + "were entered after the binding, which is why the totals of the second series disagree with "
+                            + "the totals of the register by 6 entries, and why a citation of the printed table has to name "
+                            + "the volume as well as the page. A reboxing note of 1952 lists the same 3 leaves a second "
+                            + "time, apparently from a different pass over the same shelf, and the 2 unsupported totals "
+                            + "appear in its appendix without comment, so the inventory cannot be treated as an "
+                            + "independent check on the register. Where the index gives a month the register gives only a "
+                            + "quarter, and where the register gives a quarter the returns give nothing at all, which "
+                            + "leaves 9 of the 41 entries in the second series undatable by any source in this sample. "
+                            + "No folio in this sample was photographed in sequence, and the transcriptions used here "
+                            + "follow the printed register rather than the manuscript where the two disagree, a choice "
+                            + "that matters for the totals but not for the sequence of the returns themselves.",
+                        CitationIds = ["S3"],
+                    },
+                ],
+            },
+            new()
+            {
+                Heading = "Series",
+                Blocks =
+                [
+                    new()
+                    {
+                        Type = ResearchBlockTypes.Bullets,
+                        Items =
+                        [
+                            $"The register of births opens with a foundation charter, founded in {foundationYear}.",
+                            "The second series was catalogued in 1948.",
+                            "The third series closes in 1971.",
+                        ],
+                        CitationIds = ["S1"],
+                    },
+                    new()
+                    {
+                        Type = ResearchBlockTypes.NumberedList,
+                        Items =
+                        [
+                            "Vital returns begin in 1883.",
+                            "The first industrial census follows in 1895.",
+                            "Local abstracts stop in 1939.",
+                            "The wartime supplement ends in 1946.",
+                        ],
+                        CitationIds = ["S2"],
+                    },
+                ],
+            },
+        },
+        conclusion = "A sequence printed after a reboxing is an argument, not a fact.",
+        sourceCount = 3,
+        sources = Array.Empty<object>(),
+    });
+
+    private Guid SeedChronologyJob(Guid workspaceId, Guid userId)
+    {
+        using var scope = _factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        var jobId = Guid.NewGuid();
+        var now = new DateTime(2026, 11, 21, 9, 30, 0, DateTimeKind.Utc);
+        db.GenerationJobs.Add(new GenerationJob
+        {
+            Id = jobId,
+            WorkspaceId = workspaceId,
+            CreatedByUserId = userId,
+            JobType = "research.generate",
+            Status = GenerationJobStatus.Succeeded,
+            Title = "Chronology of a Statistical Bureau",
+            InputJson = "{}",
+            ResultJson = ChronologyResultJson(),
+            CreatedAt = now,
+            CompletedAt = now,
+        });
+        db.ResearchSources.AddRange(
+            new ResearchSource
+            {
+                Id = Guid.NewGuid(), WorkspaceId = workspaceId, GenerationJobId = jobId,
+                CitationId = "S1", SourceType = "web", Rank = 1, RetrievedAt = now, IsSelected = true,
+                Title = "Bureau returns, 1883 to 1971", Domain = "archives.example", Publisher = "Example Archive",
+                Url = "https://archives.example/bureau-returns", Snippet = "Transfers and reboxing.",
+            },
+            new ResearchSource
+            {
+                Id = Guid.NewGuid(), WorkspaceId = workspaceId, GenerationJobId = jobId,
+                CitationId = "S2", SourceType = "web", Rank = 2, RetrievedAt = now, IsSelected = true,
+                Title = "Censuses of the interwar years", Domain = "catalog.example", Publisher = "University Catalogue",
+                Url = "https://catalog.example/censuses", Snippet = null, ExtractedText = null,
+            },
+            new ResearchSource
+            {
+                Id = Guid.NewGuid(), WorkspaceId = workspaceId, GenerationJobId = jobId,
+                CitationId = "S3", SourceType = "uploaded", Rank = 3, RetrievedAt = now, IsSelected = true,
+                Title = "Reboxing inventory", Domain = "uploaded file", Snippet = "Inventory excerpt.",
+            });
+        db.SaveChanges();
+        return jobId;
+    }
+
+    private static AcademicSavedReport ChronologyReport(string foundationYear = "1912")
+    {
+        var job = new GenerationJob
+        {
+            Id = Guid.NewGuid(), JobType = "research.generate", Title = "Chronology of a Statistical Bureau",
+            InputJson = "{}", ResultJson = ChronologyResultJson(foundationYear),
+            Status = GenerationJobStatus.Succeeded, CreatedAt = DateTime.UtcNow, CompletedAt = DateTime.UtcNow,
+        };
+        var sources = new List<ResearchSource>
+        {
+            new() { Id = Guid.NewGuid(), CitationId = "S1", SourceType = "web", Rank = 1, Title = "Bureau returns, 1883 to 1971", Snippet = "s" },
+            new() { Id = Guid.NewGuid(), CitationId = "S2", SourceType = "web", Rank = 2, Title = "Censuses of the interwar years" },
+            new() { Id = Guid.NewGuid(), CitationId = "S3", SourceType = "uploaded", Rank = 3, Title = "Reboxing inventory", Snippet = "e" },
+        };
+        return AcademicSavedReportReader.Read(job, sources);
+    }
+
+    private static AcademicDesignSpec MonographSpec(int index = 0) => AcademicTemplateRegistry.Configurations
+        .Where(configuration => configuration.ConfigurationId.StartsWith("chicago-humanities-monograph", StringComparison.Ordinal))
+        .ToList()[index].Spec;
+
+    [Fact]
+    public void Folio_of_a_monograph_prints_outside_the_band_the_margin_filter_could_use()
+    {
+        // Why the gates cannot rely on a position band alone: this template draws its running number
+        // about 110pt from the foot, beyond the 100pt (12%) band, so a numeral-bearing sentence that
+        // wraps the break keeps the folio glued to it in a band-filtered dump. Measured here instead
+        // of asserted in prose, because the reading design depends on it.
+        var report = ChronologyReport();
+        var bytes = AcademicReportPdfRenderer.Render(MonographSpec(), report,
+            "A generative assistant was used for literature search only.");
+        using var document = UglyToad.PdfPig.PdfDocument.Open(bytes);
+        var height = (double)document.GetPage(1).Height;
+        var band = Math.Min(100d, height * 0.12d);
+        var folios = document.GetPages().SelectMany(page => page.GetWords()
+                .Select(word => (pageNumber: page.Number, text: word.Text, top: (double)word.BoundingBox.Top)))
+            .Where(entry => entry.text.All(char.IsDigit) && entry.top > band && entry.top < height - band)
+            .GroupBy(entry => entry.pageNumber)
+            .ToList();
+        Assert.True(document.NumberOfPages >= 3, $"{document.NumberOfPages} pages");
+        Assert.NotEmpty(folios);
+        Assert.Contains(folios, group => group.Any(entry =>
+            string.Equals(entry.text, entry.pageNumber.ToString(), StringComparison.Ordinal)));
+    }
+
+    [Fact]
+    public void Split_numerals_and_year_final_items_pass_and_a_changed_year_still_fails()
+    {
+        // The two directions of the same gate. Accepting any reading means a student's sentence cannot
+        // be refused because of where the template put a page number or how the extractor split
+        // "1912."; it also means nothing is invented, because every reading is built from the page by
+        // deleting tokens, so a report that misquotes a number that is on the page is still refused.
+        var disclosure = "A generative assistant was used for literature search only.";
+        var report = ChronologyReport();
+        foreach (var index in new[] { 0, 4 })
+        {
+            var spec = MonographSpec(index);
+            var bytes = AcademicReportPdfRenderer.Render(spec, report, disclosure);
+            var honest = AcademicExportFileValidator.ValidatePdf(bytes, report);
+            Assert.True(honest.Passed, $"{spec.H1Uppercase}: {string.Join(", ", honest.Violations)}");
+
+            var wrong = AcademicExportFileValidator.ValidatePdf(bytes, ChronologyReport("1913"));
+            Assert.False(wrong.Passed, "a substituted year must not validate");
+            Assert.Contains(wrong.Violations, violation => violation.StartsWith("pdf-list-item-missing", StringComparison.Ordinal));
+            // The refusal stays specific: the substituted report differs only in quoted numbers, so no
+            // other gate may start reporting a problem, and nothing about the artifact itself changes.
+            Assert.All(wrong.Violations, violation => Assert.True(
+                violation.StartsWith("pdf-list-item-missing", StringComparison.Ordinal)
+                    || violation.StartsWith("pdf-untitled-section-content-missing", StringComparison.Ordinal),
+                violation));
+        }
+    }
+
+    [Fact]
+    public async Task Chronology_export_reaches_every_monograph_configuration_as_a_pdf()
+    {
+        // End-to-end: the same payload through the real controller, so a refusal anywhere in the
+        // pipeline shows up as a non-200 rather than as an assertion about a helper.
+        var configurations = AcademicTemplateRegistry.Configurations
+            .Where(configuration => configuration.ConfigurationId.StartsWith("chicago-humanities-monograph", StringComparison.Ordinal))
+            .Select(configuration => configuration.ConfigurationId)
+            .ToList();
+        Assert.NotEmpty(configurations);
+        var (userId, workspaceId, client) = await RegisterAsync("Chronology Pdf Owner");
+        var jobId = SeedChronologyJob(workspaceId, Guid.Parse(userId));
+        foreach (var configurationId in configurations)
+        {
+            var bytes = await ExportAsync(client, jobId, configurationId, "pdf",
+                disclosure: "A generative assistant was used for literature search only.");
+            var flat = Collapse(PdfText(bytes));
+            Assert.Contains("vacat in the margin", flat, StringComparison.Ordinal);
+            Assert.Contains("The third series closes in 1971.", flat, StringComparison.Ordinal);
+            Assert.Contains("The wartime supplement ends in 1946.", flat, StringComparison.Ordinal);
+        }
+    }
 }

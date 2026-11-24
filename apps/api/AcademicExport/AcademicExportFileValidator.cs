@@ -1,3 +1,4 @@
+using System.Text;
 using DocumentFormat.OpenXml.Packaging;
 using DocumentFormat.OpenXml.Wordprocessing;
 using DocumentFormat.OpenXml.Validation;
@@ -89,24 +90,16 @@ public static class AcademicExportFileValidator
             if (document.NumberOfPages < 1) violations.Add("pdf-zero-pages");
             var firstPageText = document.GetPage(1).Text ?? string.Empty;
             var pages = Enumerable.Range(1, document.NumberOfPages).Select(number => document.GetPage(number)).ToList();
-            // Two readings of the same artifact. `banded` keeps body numerals and only drops the
-            // running number where it sits in the margin band; `unnumbered` drops every standalone
-            // numeral. A sentence that wraps across a page break is split by the folio in between:
-            // the chicago-humanities-monograph rows print their page number about 103pt from the
-            // foot — outside the 100pt band, and it is the position QuestPDF chooses for a
-            // bottom-aligned footer on that geometry — so "…was not accessed in this / workspace."
-            // read back as "…inthis4workspace." and the gate reported pdf-access-note-missing on
-            // an export that printed the note correctly. Presence of prose must not depend on where
-            // the template happens to put a page number, so a wanted string that quotes no bare
-            // numeral is matched against the unnumbered reading; one that does quote a number (say
-            // "founded in 1912") keeps the banded reading so a dropped numeral cannot fake a match.
-            // Inter-word spacing is not guaranteed by the extractor, so both sides are whitespace-free.
-            var banded = Collapse(string.Concat(pages.Select(PageText)));
-            var unnumbered = Collapse(string.Concat(pages.Select(page => string.Concat(page.GetWords()
-                .Where(word => !word.Text.All(char.IsDigit))
-                .Select(word => word.Text + " ")))));
+            // A gate is satisfied when the saved string is visible in ANY reading of the artifact
+            // (see Readings). Presence of prose must not depend on where a template happens to print
+            // a page number: the chicago-humanities-monograph rows place their folio about 103pt from
+            // the foot — outside the 100pt band, which is where QuestPDF puts a bottom-aligned footer
+            // on that geometry — so a sentence that wrapped the break read back as
+            // "…was not accessed in this4 workspace." and the gate reported
+            // pdf-access-note-missing on an export that printed the note correctly.
+            var readings = Readings(pages);
 
-            bool Holds(string raw) => HoldsInText(raw, banded, unnumbered, StringComparison.Ordinal);
+            bool Holds(string raw) => HoldsInText(raw, readings, StringComparison.Ordinal);
 
             // Case-insensitive, because the PDF draws the transform rather than storing it. A
             // design with H1Uppercase (the chicago-humanities-monograph registry rows, including
@@ -118,7 +111,7 @@ public static class AcademicExportFileValidator
             // refused. The DOCX side stays ordinal on purpose: it emits w:caps over the original
             // text, so the stored characters are the report's own and an exact comparison is the
             // honest one there. This gate asserts presence, not letter case.
-            if (!HoldsInText(report.Title, banded, unnumbered, StringComparison.OrdinalIgnoreCase))
+            if (!HoldsInText(report.Title, readings, StringComparison.OrdinalIgnoreCase))
                 violations.Add("pdf-title-missing");
             // The cover must render: if the first page has zero extractable characters, layout failed.
             if (string.IsNullOrWhiteSpace(firstPageText) && document.NumberOfPages == 1) violations.Add("pdf-empty");
@@ -151,42 +144,73 @@ public static class AcademicExportFileValidator
     private static string Collapse(string value) => new(value.Where(character => !char.IsWhiteSpace(character)).ToArray());
 
     /// <summary>
-    /// A page's prose with the running page number removed. The number is drawn in the margin, so it
-    /// is not part of any sentence; but when a paragraph flows across a page break, a naive text dump
-    /// splices it into the middle of that paragraph — "in none of those cases" became "in3none" and
-    /// the integrity note looked absent from a document that printed it correctly. Only numerals that
-    /// sit inside the header/footer band are dropped, so a number in the body stays visible to checks.
+    /// The texts a PDF gate may witness a saved string in. A running page number can be drawn inside
+    /// the margin band, outside it, or on a header/footer line it shares with other text, and each
+    /// placement splices digits into the middle of a sentence that wraps across the page break — so
+    /// one dump of the words is not enough, and no rule can pick the right dump from the SAVED text
+    /// ("is there a bare number in it?" is a question about how the extractor tokenised "1912.",
+    /// which a student's sentence cannot be held to answer). Every reading below is produced from the
+    /// page by DELETING tokens and nothing else: no insertion, no reordering, no case folding. A
+    /// string that matches is therefore present in the artifact character for character, and a
+    /// heading, citation marker, access note or number that was really dropped is absent from all of
+    /// them, because the only deletions are of numerals the page did print.
+    /// <list type="number">
+    /// <item><description>plain: every word, as printed;</description></item>
+    /// <item><description>banded: numerals dropped where they sit in the header/footer band;</description></item>
+    /// <item><description>folioless: a line holding nothing but numerals is the running number,
+    /// dropped wherever it sits, while numerals inside prose and table cells survive;</description></item>
+    /// <item><description>unnumbered: every standalone numeral dropped, which covers a folio printed on
+    /// a line shared with other footer text.</description></item>
+    /// </list>
     /// </summary>
-    private static string PageText(Page page)
+    private static IReadOnlyList<string> Readings(IReadOnlyList<Page> pages)
     {
-        var height = page.Height;
-        // PdfPig reports word boxes in PDF coordinates: y grows upward from the bottom of the page, so
-        // the running number sits at a SMALL top value even when it prints at the foot of the page.
-        var band = Math.Min(100d, height * 0.12d);
-        return string.Concat(page.GetWords()
-            .Where(word =>
+        var plain = new StringBuilder();
+        var banded = new StringBuilder();
+        var folioless = new StringBuilder();
+        var unnumbered = new StringBuilder();
+        foreach (var page in pages)
+        {
+            var words = page.GetWords().ToList();
+            var height = (double)page.Height;
+            var band = Math.Min(100d, height * 0.12d);
+            // Words sharing a baseline share a rounded bottom edge: a two-point bucket is finer than
+            // any inter-line leading a template uses, and coarse enough to survive glyph jitter.
+            var numericLines = words
+                .GroupBy(word => (long)Math.Round((double)word.BoundingBox.Bottom / 2d))
+                .Where(group => group.All(word => IsNumericToken(word.Text)))
+                .Select(group => group.Key)
+                .ToHashSet();
+            foreach (var word in words)
             {
+                var text = word.Text;
                 var top = (double)word.BoundingBox.Top;
+                var numeric = IsNumericToken(text);
                 var inBand = top < band || top > height - band;
-                return !(inBand && word.Text.All(character => char.IsDigit(character)));
-            })
-            .Select(word => word.Text + " "));
+                plain.Append(text).Append(' ');
+                if (!numeric || !inBand) banded.Append(text).Append(' ');
+                if (!numeric || !numericLines.Contains((long)Math.Round((double)word.BoundingBox.Bottom / 2d)))
+                    folioless.Append(text).Append(' ');
+                if (!numeric) unnumbered.Append(text).Append(' ');
+            }
+        }
+        return new[]
+        {
+            Collapse(plain.ToString()), Collapse(banded.ToString()),
+            Collapse(folioless.ToString()), Collapse(unnumbered.ToString()),
+        };
     }
 
-    /// <summary>
-    /// True when the saved text quotes a number as its own word ("in 1912", "over 4 weeks"). Such a
-    /// claim has to be looked for in a reading of the document that still contains its numerals,
-    /// otherwise deleting every digit would turn "in" into a match for "in 1912".
-    /// </summary>
-    private static bool QuotesBareNumber(string raw) => raw
-        .Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries)
-        .Any(token => token.All(char.IsDigit));
+    private static bool IsNumericToken(string text) => text.Length > 0 && text.All(char.IsDigit);
 
-    private static bool HoldsInText(string raw, string banded, string unnumbered, StringComparison comparison)
+    /// <summary>
+    /// True when the whitespace-free wanted string appears in one of the readings of the rendered
+    /// pages. Inter-word spacing is not guaranteed by the extractor, so both sides are whitespace-free.
+    /// </summary>
+    private static bool HoldsInText(string raw, IReadOnlyList<string> readings, StringComparison comparison)
     {
         var wanted = Collapse(raw);
-        var haystack = QuotesBareNumber(raw) ? banded : unnumbered;
-        return haystack.Contains(wanted, comparison);
+        return readings.Any(reading => reading.Contains(wanted, comparison));
     }
 
 }
