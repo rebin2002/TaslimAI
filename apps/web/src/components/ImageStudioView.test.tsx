@@ -4,7 +4,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { api, ApiError } from "../lib/api";
 import { localizedImageErrorMessage } from "../lib/imageStudioErrors";
 import { translate, type Locale } from "../lib/i18n";
-import { ImageFailureCanvas, ImageStudioView } from "./ImageStudioView";
+import { ImageFailureCanvas, ImageGeneratingCanvas, ImageStudioView, type ImageGeneratingCanvasLabels } from "./ImageStudioView";
 
 vi.mock("next/navigation", () => ({
   useSearchParams: () => new URLSearchParams(),
@@ -98,5 +98,96 @@ describe("Image Studio upload failure retry accessibility", () => {
     const html = renderToStaticMarkup(<ImageStudioView />);
     expect(html).toContain("image-result-canvas");
     expect(html).toContain('aria-live="polite"');
+  });
+});
+
+/** Builds the same labels the studio renders while a generation is in progress. */
+function generatingLabels(locale: Locale = "en"): ImageGeneratingCanvasLabels {
+  return {
+    eyebrow: translate(locale, "image.progressEyebrow"),
+    title: translate(locale, "jobs.statusRunning"),
+    message: translate(locale, "image.progressText"),
+    progress: translate(locale, "jobs.progress"),
+    cancel: translate(locale, "image.cancel"),
+  };
+}
+
+describe("Image Studio cancellation busy state", () => {
+  it("keeps the cancel control focusable while the cancellation request is in flight", () => {
+    const html = renderToStaticMarkup(
+      <ImageGeneratingCanvas labels={generatingLabels()} percent={40} canCancel working onCancel={() => {}} />,
+    );
+    expect(html).toMatch(/<button[^>]*class="image-cancel-button"[^>]*>/);
+    // A `disabled` button removes itself from the a11y tree and the focused element loses focus.
+    expect(html).not.toMatch(/<button[^>]*\sdisabled(?:=|\s|>)/);
+    expect(html).toContain('aria-disabled="true"');
+    expect(html).toContain('aria-busy="true"');
+    // The control keeps its name: a cancellation must never be announced as a new start.
+    expect(html).toContain(translate("en", "image.cancel"));
+    expect(html).not.toContain(translate("en", "image.working"));
+  });
+
+  it("restores the idle cancel semantics once the request settles", () => {
+    const html = renderToStaticMarkup(
+      <ImageGeneratingCanvas labels={generatingLabels()} percent={40} canCancel working={false} onCancel={() => {}} />,
+    );
+    expect(html).toContain('aria-busy="false"');
+    expect(html).not.toContain("aria-disabled");
+    expect(html).toContain(translate("en", "image.cancel"));
+  });
+
+  it("removes the cancel affordance for a job that can no longer be cancelled", () => {
+    const html = renderToStaticMarkup(
+      <ImageGeneratingCanvas labels={generatingLabels()} percent={90} canCancel={false} working={false} onCancel={() => {}} />,
+    );
+    expect(html).not.toContain("image-cancel-button");
+    expect(html).toContain("image-progress-track");
+  });
+
+  it("localizes the cancelling state in Arabic and Kurdish Sorani", () => {
+    for (const locale of ["ar", "ku"] as const) {
+      const html = renderToStaticMarkup(
+        <ImageGeneratingCanvas labels={generatingLabels(locale)} percent={40} canCancel working onCancel={() => {}} />,
+      );
+      expect(html, locale).toContain(translate(locale, "image.cancel"));
+      expect(html, locale).toContain(translate(locale, "image.progressEyebrow"));
+    }
+  });
+});
+
+describe("Image Studio active job state reconciliation", () => {
+  it("merges every job read instead of overwriting with the latest response", () => {
+    expect(studioSource).toContain("mergeImageJobUpdate");
+    // An unconditional write lets a late poll undo a cancellation or drop a settled result.
+    expect(studioSource).not.toMatch(/setCurrent\(next\)/);
+    expect(studioSource).not.toMatch(/setCurrent\(job\)/);
+    expect(studioSource).toMatch(/setCurrent\(\(previous\) => mergeImageJobUpdate\(previous, (next|job)\)\)/);
+  });
+
+  it("keeps polling after a frame that changed nothing", () => {
+    // A rejected stale frame leaves the stored job identical, so a loop rescheduled only by that
+    // state change would stop polling a generation that is still running.
+    expect(studioSource).toContain("setPollTick((tick) => tick + 1);");
+    expect(studioSource).toMatch(/\[current, pollRetry, pollTick, t, user\?\.id, workspace\?\.id\]/);
+  });
+
+  it("retries a failed restore within a bounded budget and says why when it gives up", () => {
+    const restoreBody = /const readStoredJob = \(attempt: number\) => \{([\s\S]*?)\n    \};/.exec(studioSource)?.[1] ?? "";
+    expect(restoreBody, "the restore must read through a bounded retry budget").toContain("shouldRetryImageRestore(status, attempt)");
+    expect(restoreBody).toContain("readStoredJob(attempt + 1)");
+    expect(restoreBody).toContain("nextImageRestoreDelay(attempt)");
+    // An exhausted budget explains the missing progress through the panel's alert region.
+    expect(restoreBody).toMatch(/if \(!shouldRetryImageRestore\(status, attempt\)\) \{\s*\n\s*setError\(localizedImageErrorMessage\(code, t, "image\.pollError"\)\);/);
+    // A transport failure keeps the pointer: the generation it names may still finish server-side,
+    // and only an inaccessible job is allowed to drop it.
+    const orphanBranch = /if \(shouldClearImageJobAfterPollError\(status\)\) \{([\s\S]*?)\n          return;/.exec(restoreBody)?.[1] ?? "";
+    expect(orphanBranch).toContain("clearImageActiveJobId(user.id, workspace.id)");
+    expect(restoreBody.slice(restoreBody.indexOf("shouldRetryImageRestore")).indexOf("clearImageActiveJobId")).toBe(-1);
+  });
+
+  it("blocks a duplicate cancellation request for a job that cannot be cancelled again", () => {
+    const cancelBody = /async function cancel\(\) \{([\s\S]*?)\n  \}/.exec(studioSource)?.[1] ?? "";
+    expect(cancelBody).toContain("if (working) return;");
+    expect(cancelBody).toContain("canCancelImageJob(job)");
   });
 });

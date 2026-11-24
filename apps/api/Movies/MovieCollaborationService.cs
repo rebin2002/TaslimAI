@@ -68,8 +68,11 @@ public sealed class MovieCollaborationService(TaslimDbContext db, WorkspaceAcces
             .Where(item => item.MovieProjectId == movieProjectId).OrderByDescending(item => item.IsProjectOwner).ThenBy(item => item.CreatedAt).ToListAsync(cancellationToken);
         var comments = await db.MovieComments.AsNoTracking().Include(item => item.AuthorUser).Include(item => item.Mentions).ThenInclude(item => item.MentionedUser)
             .Where(item => item.MovieProjectId == movieProjectId).OrderBy(item => item.CreatedAt).ToListAsync(cancellationToken);
+        // The review feed is the team-review audit trail: newest first, with equal
+        // timestamps ranked by descending id - the same tie rule the operations
+        // dashboard audit feed pins - so repeated reads never reorder tied rows.
         var reviews = await db.MovieReviews.AsNoTracking().Include(item => item.RequestedByUser).Include(item => item.ReviewerUser)
-            .Where(item => item.MovieProjectId == movieProjectId).OrderByDescending(item => item.CreatedAt).ToListAsync(cancellationToken);
+            .Where(item => item.MovieProjectId == movieProjectId).OrderByDescending(item => item.CreatedAt).ThenByDescending(item => item.Id).ToListAsync(cancellationToken);
         var assignments = await db.MovieProductionAssignments.AsNoTracking().Include(item => item.AssigneeUser).Include(item => item.AssignedByUser)
             .Where(item => item.MovieProjectId == movieProjectId).OrderBy(item => item.Status).ThenBy(item => item.DueAt).ToListAsync(cancellationToken);
         var credits = await db.MovieProductionCredits.AsNoTracking().Include(item => item.User).Where(item => item.MovieProjectId == movieProjectId)
@@ -182,10 +185,21 @@ public sealed class MovieCollaborationService(TaslimDbContext db, WorkspaceAcces
         await authorization.RequireAsync(userId, movieProjectId, review.IsFinal ? MovieOperationalActions.FinalReviewDecision : MovieOperationalActions.ReviewsDecision, cancellationToken);
         if (!MovieReviewStatuses.Decisions.Contains(request.Status)) throw new MovieCollaborationValidationException("Choose Approved, ChangesRequested, or Rejected.");
         if (!string.IsNullOrWhiteSpace(request.DecisionNote) && request.DecisionNote.Trim().Length > 4000) throw new MovieCollaborationValidationException("Decision note cannot exceed 4,000 characters.");
-        review.Status = request.Status.Trim();
-        review.DecisionNote = MovieStudioHelpers.Clean(request.DecisionNote);
-        review.ReviewedAt = DateTime.UtcNow;
-        await db.SaveChangesAsync(cancellationToken);
+        var decision = MovieReviewStatuses.Decisions.First(item => string.Equals(item, request.Status.Trim(), StringComparison.OrdinalIgnoreCase));
+        var note = MovieStudioHelpers.Clean(request.DecisionNote);
+        var now = DateTime.UtcNow;
+        // The decision is the recorded audit event for this review and it is written once.
+        // Deciding atomically from Pending means a replayed or delayed request can neither
+        // overwrite the recorded decision nor silently lose a concurrent decision through
+        // last-write-wins; the stale attempt is refused and the audit trail stays intact.
+        // A genuinely different cut earns a freshly requested review instead.
+        var updated = await db.MovieReviews
+            .Where(item => item.Id == reviewId && item.Status == MovieReviewStatuses.Pending)
+            .ExecuteUpdateAsync(setters => setters
+                .SetProperty(item => item.Status, decision)
+                .SetProperty(item => item.DecisionNote, note)
+                .SetProperty(item => item.ReviewedAt, now), cancellationToken);
+        if (updated == 0) throw new MovieCollaborationValidationException("This review already carries a recorded decision. Request a new review instead of overwriting the audit trail.");
         return await LoadReviewDtoAsync(review.Id, cancellationToken);
     }
 
