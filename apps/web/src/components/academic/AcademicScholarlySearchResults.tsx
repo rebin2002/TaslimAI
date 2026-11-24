@@ -20,10 +20,7 @@ import { doiUrl, isSafeHttpUrl } from "./academicSourceLibrary";
 import { asKey, type AcademicLabelers, type AcademicTranslate } from "./academicStrings";
 import type { AcademicSourceSearchResponse } from "@/lib/api";
 import {
-  maxScholarlySearchPage,
   scholarlyDoiCheckKey,
-  scholarlySearchMaxDepth,
-  scholarlySearchPageSize,
   type ScholarlySearchPageInfo,
   type ScholarlySearchRow,
 } from "./academicScholarlySearch";
@@ -60,9 +57,10 @@ export function AcademicScholarlySearchResults({ result, rows, page, isKnown, bu
         <>
           <p className={styles.filterNote}>{t("sources.findMatches", { count: String(result.totalMatched), shown: String(rows.length) })}</p>
           {page.hasMore ? (
-            <p className={styles.filterNote}>
-              {t("sources.findMore", { limit: String(Math.min(scholarlySearchMaxDepth, scholarlySearchPageSize * maxScholarlySearchPage())) })}
-            </p>
+            // No number is quoted here on purpose. The server's truncation flag covers three
+            // different ceilings — the combined pool, one catalog's own ceiling, or the whole
+            // request budget — and only the first of them is a constant this component could know.
+            <p className={styles.filterNote}>{t("sources.findMore")}</p>
           ) : null}
         </>
       )}

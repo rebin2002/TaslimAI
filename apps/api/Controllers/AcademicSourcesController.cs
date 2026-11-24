@@ -50,6 +50,9 @@ public sealed class AcademicSourcesController(
     private const int MaxPageSize = 25;
     private const int MaxListParameters = 10;
     private const int MaxSingleIdentifierLength = 256;
+    /// <summary>Page size applied when the caller does not ask for one. Validation uses the same
+    /// value, so the depth that is checked is exactly the depth that is served.</summary>
+    private const int DefaultPageSize = 10;
     private AcademicSourceDiscoveryOptions Options { get; } = optionsAccessor.Value.Normalize();
 
     [HttpGet("api/workspaces/{workspaceId:guid}/academic-sources/search")]
@@ -65,15 +68,18 @@ public sealed class AcademicSourcesController(
         if (!Options.Enabled)
             return ApiResults.Error(this, StatusCodes.Status503ServiceUnavailable, "ACADEMIC_SEARCH_UNAVAILABLE", "Scholarly source search is not available right now.");
 
-        var pageSize = Math.Clamp(request.PageSize ?? 10, 1, Math.Min(MaxPageSize, Options.MaxResultsPerProvider));
+        var pageSize = EffectivePageSize(request.PageSize);
         var page = Math.Max(1, request.Page ?? 1);
         // The bounded pool is fetched whole, once per request, and the page is a slice of it.
         // Asking the providers for exactly `page * pageSize` instead made the reported universe a
         // function of which page the caller happened to request: page 1 at size 10 could only ever
         // see 10 records, so it reported "10 matched" while `hasMore` said otherwise, and a client
         // that derived its page count from `totalMatched` had no reachable page 2. A page-
-        // independent pool also makes the pages themselves consistent, so moving forward neither
-        // duplicates a record nor drops one that the previous page had shown.
+        // independent pool also keeps the windows of one search consistent with each other: moving
+        // forward neither duplicates a record nor drops one that the previous page had shown. That
+        // consistency is a property of ONE search, not of the catalogs — asking again later fetches
+        // a fresh pool, and a catalog that had changed between the two requests can change the pool
+        // with it. Paging state therefore belongs to the search that returned it.
         var batch = await discovery.DiscoverAsync(new AcademicDiscoveryQuery
         {
             SearchTerm = string.IsNullOrWhiteSpace(request.Q) ? null : request.Q.Trim(),
@@ -90,22 +96,39 @@ public sealed class AcademicSourcesController(
             MaxResults = Options.MaxResultsPerProvider,
         }, cancellationToken);
 
+        // Enabled master switch, nothing behind it: every catalog switched off or incomplete (a key
+        // missing is the usual case). This is not "no records matched", and it must not be served as
+        // an empty page 200 — the studio would tell a student their topic found nothing when in fact
+        // this deployment cannot look anything up. Same contract as the switched-off path above.
+        if (batch.NoProvidersConfigured)
+            return ApiResults.Error(this, StatusCodes.Status503ServiceUnavailable, "ACADEMIC_SEARCH_UNAVAILABLE", "Scholarly source search is not available right now.");
+
         // `totalMatched` is what the bounded search actually surfaced: the number of distinct
         // records in the pool, before the window was taken. Pages above the first therefore exist
         // exactly when the pool has records past the current window.
         var pool = batch.Sources;
         var totalMatched = pool.Count;
-        // `hasMore` is a statement about the search bound, not about the current page: it is true
-        // only when the pool filled MaxCombinedResults, i.e. the catalogs were cut off at the
-        // browse bound and further matches may exist that this search will never surface. A
-        // smaller pool means the whole bounded search is already in hand, even when more pages of
-        // it remain to be read.
-        var hasMore = totalMatched >= Options.MaxCombinedResults;
-        // Long arithmetic: validation has already proved page * pageSize stays within
-        // MaxCombinedResults, so this offset cannot overflow and cannot outrun the pool.
-        var window = pool.Skip((page - 1) * pageSize).Take(pageSize)
-            .Select(AcademicSourcePresentation.ToDto)
-            .ToArray();
+        // `hasMore` is a statement about the search, not about the current page, and it is the
+        // search's own answer rather than something inferred here from one number: it is true when
+        // this search stopped at one of its ceilings — the combined pool filled MaxCombinedResults,
+        // a catalog came back with exactly its per-provider ceiling, or the whole-request budget ran
+        // out. Any of those means more matched than this search was permitted to surface. A false
+        // here means the bounded search completed and this really is everything it could find.
+        // Reading it as "there is a next page" strands a caller on page 1; that is answered by
+        // `totalMatched` against `pageSize`.
+        // A pool that filled the combined bound is truncation the controller can see for itself, so
+        // it is OR-ed in rather than trusted to the reporter: a discovery implementation that says
+        // nothing about its ceilings must not be able to make this endpoint claim completeness.
+        var hasMore = batch.ResultCapped || totalMatched >= Options.MaxCombinedResults;
+        // Long arithmetic in every case, and validation has already proved the depth fits
+        // MaxCombinedResults. The offset is still computed wider than the multiplication needs, so
+        // a page past the end of the pool is an empty window rather than a wrapped-around one.
+        var offset = (long)(page - 1) * pageSize;
+        var window = offset >= pool.Count
+            ? []
+            : pool.Skip((int)offset).Take(pageSize)
+                .Select(AcademicSourcePresentation.ToDto)
+                .ToArray();
 
         return Ok(new AcademicSourceSearchResponse(
             workspaceId,
@@ -118,6 +141,15 @@ public sealed class AcademicSourcesController(
             window,
             batch.DoiValidations.Select(AcademicSourcePresentation.ToDoiDto).ToArray()));
     }
+
+    /// <summary>
+    /// The page size this request will actually be served at: the caller's, if given and in range,
+    /// otherwise the default, and never more than a single provider is asked for. Validation applies
+    /// the same rule, which is the point — checking a depth that is not the depth served is how the
+    /// oversized page survived.
+    /// </summary>
+    private int EffectivePageSize(int? requested) =>
+        Math.Clamp(requested ?? DefaultPageSize, 1, Math.Min(MaxPageSize, Options.MaxResultsPerProvider));
 
     private Dictionary<string, string[]> Validate(AcademicSourceSearchRequest request)
     {
@@ -143,8 +175,18 @@ public sealed class AcademicSourcesController(
 
         if (request.Page is < 1) failures["page"] = ["Page must be 1 or greater."];
         if (request.PageSize is (< 1 or > MaxPageSize)) failures["pageSize"] = [$"Page size must be between 1 and {MaxPageSize}."];
-        if (request.Page is { } page && request.PageSize is { } size && (long)page * size > Options.MaxCombinedResults)
-            failures["page"] = [$"Results can be browsed up to {Options.MaxCombinedResults / Math.Max(1, size)} pages at this page size."];
+        // Depth is checked against the page size the request will actually be served at, which is
+        // the DEFAULT when the caller left it out. Requiring both parameters to be present before
+        // checking meant `?q=x&page=2147483647` — no pageSize — arrived at the slicer untouched,
+        // where `(page - 1) * pageSize` was computed as a 32-bit product, wrapped negative, and
+        // made a page from the far side of the integer range look legal. The product is formed in
+        // the wider type here, so no value of either parameter can reach that arithmetic.
+        if (request.Page is { } page && page >= 1)
+        {
+            var effectivePageSize = EffectivePageSize(request.PageSize);
+            if ((long)page * effectivePageSize > Options.MaxCombinedResults)
+                failures["page"] = [$"Results can be browsed up to {Options.MaxCombinedResults / effectivePageSize} pages at this page size."];
+        }
 
         if (request.YearFrom is { } yearFrom && (yearFrom < 1000 || yearFrom > 9999))
             failures["yearFrom"] = ["Use a four-digit year."];

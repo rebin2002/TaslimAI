@@ -139,20 +139,35 @@ describe("customer-facing copy rules", () => {
   });
 
   // Scholarly record search is off in the shipped configuration default
-  // (`AcademicSourceDiscovery.Enabled = false`), and the endpoint answers 503 while it is. Only
-  // the variant shown after the server actually answered a search may claim the capability is
-  // live; the pre-flight text describes what the feature does, and the refusal text states that
-  // this deployment has not turned it on.
+  // (`AcademicSourceDiscovery.Enabled = false`), and the endpoint answers 503 while it is — and it
+  // now answers 503 the same way when the switch is on but no catalog behind it can answer, because
+  // both are the deployment's inability rather than an empty result. Only the variant shown after
+  // the server actually answered a search may claim the capability is live; the pre-flight text
+  // describes what the feature does, and the refusal text states that nothing is switched on.
   it("keeps each discovery notice honest about whether search is switched on", () => {
     expect(en("sources.discoveryBody")).not.toMatch(/is live|is enabled|for your workspace/i);
     expect(en("sources.discoveryBody")).toMatch(/scholarly record search returns/i);
     expect(en("sources.discoveryBodyLive")).toMatch(/is live for your workspace/i);
     expect(en("sources.discoveryOffTitle")).toMatch(/not turned on/i);
-    expect(en("sources.discoveryOffBody")).toMatch(/has not enabled scholarly record search/i);
+    // Phrased for the catalog layer, not only the master switch: "no catalog is switched on for it
+    // yet" is true whether the operator left the master off or enabled a row without its key, and it
+    // is never phrased as a result about the student's topic.
+    expect(en("sources.discoveryOffBody")).toMatch(/no catalog is switched on for it yet/i);
+    expect(en("sources.discoveryOffBody")).not.toMatch(/no records matched|nothing matched/i);
     // Whatever the deployment status, no notice may imply the works themselves were read or checked.
     for (const key of ["sources.discoveryBody", "sources.discoveryBodyLive", "sources.discoveryOffBody"] as const) {
       expect(en(key), key).not.toMatch(/we read the works|retraction checked|checks retractions for you/i);
     }
+  });
+
+  // The count line reports one bounded search, not the size of the literature, and the truncation
+  // line must not quote a number: the ceiling that stopped a search may be the combined pool, one
+  // catalog's own ceiling, or the whole-request budget, and only the first is known in the browser.
+  it("describes counts and truncation as properties of this search", () => {
+    expect(en("sources.findMatches")).toContain("surfaced by this search");
+    expect(en("sources.findMatches")).not.toMatch(/available records|every record/i);
+    expect(en("sources.findMore")).toMatch(/stopped at one of its own limits/i);
+    expect(en("sources.findMore")).not.toMatch(/\d|bound is/i);
   });
 });
 

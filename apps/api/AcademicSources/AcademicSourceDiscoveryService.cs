@@ -30,30 +30,83 @@ public sealed class AcademicSourceDiscoveryService(
         var validations = new List<AcademicDoiValidationResult>();
         var validator = doiValidators.FirstOrDefault(candidate => candidate.IsConfigured);
 
+        IEnumerable<string> AllKeys()
+            => workSearchProviders.Select(provider => provider.ProviderKey)
+                .Concat(bookCatalogProviders.Select(provider => provider.ProviderKey))
+                .Concat(doiValidators.Select(provider => provider.ProviderKey))
+                .Distinct(StringComparer.Ordinal);
+
         if (!options.Enabled)
         {
-            foreach (var key in EnumerateKeys())
+            foreach (var key in AllKeys())
                 outcomes.Add(new AcademicProviderOutcome { ProviderKey = key, Status = AcademicProviderOutcomeStatus.Disabled });
             return new AcademicDiscoveryBatch { Sources = [], ProviderOutcomes = outcomes, DoiValidations = validations };
-
-            IEnumerable<string> EnumerateKeys()
-                => workSearchProviders.Select(provider => provider.ProviderKey)
-                    .Concat(bookCatalogProviders.Select(provider => provider.ProviderKey))
-                    .Concat(doiValidators.Select(provider => provider.ProviderKey))
-                    .Distinct(StringComparer.Ordinal);
         }
 
-        if (!string.IsNullOrWhiteSpace(normalized.SearchTerm))
+        // An enabled master switch is not an enabled search. If every catalog is switched off, or is
+        // switched on without what it needs (Google Books without its key), nothing here can answer
+        // this query at all, and an ordinary empty batch would let the studio say "no records
+        // matched" about a deployment that has no records to match against. Say what is true: there
+        // is no capable source, and the caller turns that into an unavailable response.
+        var canAnswerTerm = normalized.SearchTerm is not null
+            && (workSearchProviders.Any(provider => provider.IsConfigured) || bookCatalogProviders.Any(provider => provider.IsConfigured));
+        var canAnswerIsbn = normalized.Isbns.Count > 0 && bookCatalogProviders.Any(provider => provider.IsConfigured);
+        var canAnswerDoi = normalized.Dois.Count > 0 && validator is not null;
+        if (!canAnswerTerm && !canAnswerIsbn && !canAnswerDoi)
+        {
+            foreach (var key in AllKeys())
+                outcomes.Add(new AcademicProviderOutcome { ProviderKey = key, Status = AcademicProviderOutcomeStatus.Disabled });
+            logger.LogWarning("Academic discovery is enabled but no configured catalog can serve this query; answering unavailable.");
+            return new AcademicDiscoveryBatch { Sources = [], ProviderOutcomes = outcomes, DoiValidations = validations, NoProvidersConfigured = true };
+        }
+
+        // One budget for the whole request, not one per participant. Participation is sequential, so
+        // a search's wall-clock cost is the SUM of its participants: four catalogs and ten DOI checks
+        // could each spend a full operation timeout, and a single request would hold a shared search
+        // slot for minutes while every individual call stayed inside "its" timeout. The deadline is
+        // tracked separately from the caller's token, because a caller who navigated away must still
+        // see cancellation propagate as cancellation, not as a partial result.
+        using var deadline = new CancellationTokenSource();
+        deadline.CancelAfter(TimeSpan.FromSeconds(options.DiscoveryBudgetSeconds));
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, deadline.Token);
+        var participantToken = linked.Token;
+        var deadlineReached = false;
+
+        // Past the deadline no further call is started; that is what bounds the request. The
+        // participant is then recorded as a timeout rather than dropped in silence, so the partial
+        // result says exactly which part of the pool did not answer.
+        bool BudgetGone(string providerKey)
+        {
+            if (!deadline.IsCancellationRequested) return false;
+            deadlineReached = true;
+            logger.LogWarning("Academic provider skipped by the whole-request discovery budget. ProviderKey={Provider}", providerKey);
+            outcomes.Add(new AcademicProviderOutcome { ProviderKey = providerKey, Status = AcademicProviderOutcomeStatus.Failed, FailureCategory = AcademicSourceFailureCategories.Timeout });
+            return true;
+        }
+
+        // The catalogs' own open-access filter exists only on the text-search endpoints, so an ISBN
+        // lookup or a DOI-resolved record asked for with "records with an open location only" would
+        // otherwise return rows the student explicitly excluded. The same evidence rule the search
+        // adapters apply is applied to those rows here: keep a record only if a catalog actually
+        // pointed at an open location for it.
+        IEnumerable<AcademicSourceRecord> RequireOpenLocation(IReadOnlyList<AcademicSourceRecord> candidates)
+            => normalized.OpenAccessOnly
+                ? candidates.Where(record => record.AccessLevel >= AcademicAccessLevel.FullTextIndicated || !string.IsNullOrWhiteSpace(record.FullTextUrl))
+                : candidates;
+
+        if (normalized.SearchTerm is not null)
         {
             foreach (var provider in workSearchProviders.Where(provider => provider.IsConfigured))
             {
-                var batch = await RunAsync(provider.ProviderKey, () => provider.SearchWorksAsync(normalized, cancellationToken));
+                if (BudgetGone(provider.ProviderKey)) continue;
+                var batch = await RunAsync(provider.ProviderKey, () => provider.SearchWorksAsync(normalized, participantToken), cancellationToken);
                 records.AddRange(batch.sources);
                 outcomes.Add(batch.outcome);
             }
             foreach (var provider in bookCatalogProviders.Where(provider => provider.IsConfigured))
             {
-                var batch = await RunAsync(provider.ProviderKey, () => provider.SearchBooksAsync(normalized, cancellationToken));
+                if (BudgetGone(provider.ProviderKey)) continue;
+                var batch = await RunAsync(provider.ProviderKey, () => provider.SearchBooksAsync(normalized, participantToken), cancellationToken);
                 records.AddRange(batch.sources);
                 outcomes.Add(batch.outcome);
             }
@@ -62,8 +115,9 @@ public sealed class AcademicSourceDiscoveryService(
         foreach (var provider in bookCatalogProviders.Where(provider => provider.IsConfigured))
         {
             if (normalized.Isbns.Count == 0) continue;
-            var batch = await RunAsync(provider.ProviderKey, () => provider.LookupByIsbnAsync(normalized.Isbns, cancellationToken));
-            records.AddRange(batch.sources);
+            if (BudgetGone(provider.ProviderKey)) continue;
+            var batch = await RunAsync(provider.ProviderKey, () => provider.LookupByIsbnAsync(normalized.Isbns, participantToken), cancellationToken);
+            records.AddRange(RequireOpenLocation(batch.sources));
             outcomes.Add(batch.outcome);
         }
 
@@ -74,16 +128,29 @@ public sealed class AcademicSourceDiscoveryService(
                 validations.Add(new AcademicDoiValidationResult { SubmittedDoi = doi, ResolvedDoi = null, IsRegistered = false, FailureCategory = AcademicSourceFailureCategories.Configuration });
                 continue;
             }
+            if (deadline.IsCancellationRequested)
+            {
+                // A check the budget cut off is not a check that found nothing: say which it was.
+                deadlineReached = true;
+                validations.Add(new AcademicDoiValidationResult { SubmittedDoi = doi, ResolvedDoi = null, IsRegistered = false, FailureCategory = AcademicSourceFailureCategories.Timeout });
+                continue;
+            }
             try
             {
-                var result = await validator.ValidateAsync(doi, cancellationToken);
+                var result = await validator.ValidateAsync(doi, participantToken);
                 validations.Add(result with { SubmittedDoi = result.SubmittedDoi ?? doi });
-                if (result.IsRegistered && result.Source is { } source) records.Add(source);
+                if (result.IsRegistered && result.Source is { } source) records.AddRange(RequireOpenLocation([source]));
             }
             catch (AcademicSourceException exception)
             {
                 logger.LogWarning("DOI validation attempt failed safely. Category={FailureCategory}", CategoryOf(exception));
                 validations.Add(new AcademicDoiValidationResult { SubmittedDoi = doi, IsRegistered = false, FailureCategory = CategoryOf(exception) });
+            }
+            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+            {
+                logger.LogWarning("DOI validation stopped by the whole-request discovery budget.");
+                deadlineReached = true;
+                validations.Add(new AcademicDoiValidationResult { SubmittedDoi = doi, IsRegistered = false, FailureCategory = AcademicSourceFailureCategories.Timeout });
             }
         }
         if (validator is null && normalized.Dois.Count > 0 && !outcomes.Any(outcome => outcome.ProviderKey == "doi-validator"))
@@ -96,14 +163,31 @@ public sealed class AcademicSourceDiscoveryService(
             if (truncated && outcome.Status == AcademicProviderOutcomeStatus.Ok) outcomes[outcomes.IndexOf(outcome)] = outcome with { Truncated = true, Status = AcademicProviderOutcomeStatus.Partial };
         }
 
+        // Whether this list is complete is something the search can answer about itself, and the
+        // combined bound is not the only way it fails to be. A deployment with one catalog configured
+        // asks that catalog for at most MaxResultsPerProvider records; if it came back with exactly
+        // that many, it was cut off whatever the combined pool size was — and in a small deployment
+        // the combined bound is never reached, so the combined bound alone proves nothing either way.
+        // A budget that expired is the third way the answer is "not everything".
+        var capped = merged.Count >= options.MaxCombinedResults
+            || deadlineReached
+            || outcomes.Any(outcome => outcome.Status == AcademicProviderOutcomeStatus.Ok && outcome.SourceCount >= normalized.MaxResults);
+
         if (outcomes.Count == 0)
             logger.LogWarning("Academic discovery requested but no provider is configured.");
-        return new AcademicDiscoveryBatch { Sources = merged, ProviderOutcomes = outcomes, DoiValidations = validations };
+        return new AcademicDiscoveryBatch
+        {
+            Sources = merged,
+            ProviderOutcomes = outcomes,
+            DoiValidations = validations,
+            ResultCapped = capped,
+        };
     }
 
     private async Task<(IReadOnlyList<AcademicSourceRecord> sources, AcademicProviderOutcome outcome)> RunAsync(
         string providerKey,
-        Func<Task<IReadOnlyList<AcademicSourceRecord>>> action)
+        Func<Task<IReadOnlyList<AcademicSourceRecord>>> action,
+        CancellationToken callerToken)
     {
         try
         {
@@ -117,9 +201,18 @@ public sealed class AcademicSourceDiscoveryService(
             logger.LogWarning("Academic provider participation failed safely. ProviderKey={Provider}; Category={FailureCategory}", providerKey, category);
             return ([], new AcademicProviderOutcome { ProviderKey = providerKey, Status = AcademicProviderOutcomeStatus.Failed, FailureCategory = category });
         }
-        catch (OperationCanceledException)
+        // Two different cancellations reach this line and must not be confused. The caller walking
+        // away is not a result: it propagates, so the request is abandoned as an abandoned request.
+        // The discovery budget running out while the caller is still waiting IS a result: this
+        // catalog did not answer in time, which is exactly what a partial result is for.
+        catch (OperationCanceledException) when (callerToken.IsCancellationRequested)
         {
             throw;
+        }
+        catch (OperationCanceledException)
+        {
+            logger.LogWarning("Academic provider stopped by the whole-request discovery budget. ProviderKey={Provider}", providerKey);
+            return ([], new AcademicProviderOutcome { ProviderKey = providerKey, Status = AcademicProviderOutcomeStatus.Failed, FailureCategory = AcademicSourceFailureCategories.Timeout });
         }
         catch (Exception exception)
         {

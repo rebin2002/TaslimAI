@@ -119,8 +119,23 @@ describe("no service, model or cost detail reaches the page", () => {
 describe("search result accounting", () => {
   it("counts what matched and what this page shows", () => {
     const { text } = render(discoveredPage({ totalMatched: 150, hasMore: true, page: 4 }));
-    expect(text).toContain("150 record(s) matched; 1 on this page");
-    expect(text).toContain("More records matched than one search returns (the bound is 150).");
+    expect(text).toContain("150 record(s) surfaced by this search; 1 on this page");
+    expect(text).toContain("This search stopped at one of its own limits");
+    // The old sentence quoted the combined bound as if it were the reason. It was only ever one of
+    // three ceilings, and quoting it taught students to read "150" as the size of the literature.
+    expect(text).not.toContain("the bound is");
+  });
+
+  // The case the bound-based inference got wrong: a deployment whose one catalog came back with
+  // exactly its per-catalog ceiling, far below the combined pool. The server's flag is what makes
+  // the list honest here, because nothing about `totalMatched` alone could tell either way.
+  it("says a search was cut off when a single catalog hit its own ceiling", () => {
+    const pool = Array.from({ length: 50 }, (_, index) => discoveredRecord({ title: `Synthetic record ${index + 1}`, doi: `10.5555/synth.${index + 1}` }));
+    const { text } = render(
+      discoveredPage({ page: 1, totalMatched: 50, hasMore: true, sources: pool.slice(0, scholarlySearchPageSize) }),
+    );
+    expect(text).toContain("50 record(s) surfaced by this search; 10 on this page");
+    expect(text).toContain("This search stopped at one of its own limits, so more records may match than are listed here.");
   });
 
   it("announces a partial result instead of implying completeness", () => {
@@ -131,7 +146,7 @@ describe("search result accounting", () => {
   it("explains an empty search as an empty search", () => {
     const { text } = render(discoveredPage({ sources: [], totalMatched: 0 }));
     expect(text).toContain("No scholarly record matched that search.");
-    expect(text).not.toContain("record(s) matched");
+    expect(text).not.toContain("surfaced by this search");
   });
 
   // A zero-row page used to bail out of rendering before the identifier checks, so an unregistered
@@ -174,8 +189,8 @@ describe("paging and adding controls", () => {
     );
     expect(disabledLabels(html)).toContain("Previous page");
     expect(disabledLabels(html)).not.toContain("Next page");
-    expect(text).toContain("24 record(s) matched; 10 on this page");
-    expect(text).not.toContain("More records matched than one search returns");
+    expect(text).toContain("24 record(s) surfaced by this search; 10 on this page");
+    expect(text).not.toContain("This search stopped at one of its own limits");
   });
 
   it("starts with no previous page", () => {

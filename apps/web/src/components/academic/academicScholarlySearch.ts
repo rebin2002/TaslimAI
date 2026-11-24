@@ -332,7 +332,12 @@ export type ScholarlySearchPageInfo = {
   totalMatched: number;
   /** Pages this search can show, capped by the server-side browse bound. */
   pageCount: number;
-  /** Server flag: the search hit its browse bound, so matches exist beyond what was surfaced. */
+  /**
+   * Server flag: this search stopped at one of its own ceilings — the combined pool, a single
+   * catalog's per-catalog ceiling, or the whole-request budget — so it cannot claim to have
+   * surfaced everything that matched. A false means the bounded search completed; it still does not
+   * mean there is no next page.
+   */
   hasMore: boolean;
   canPrev: boolean;
   canNext: boolean;
@@ -342,11 +347,12 @@ export type ScholarlySearchPageInfo = {
  * Paging facts for the control bar.
  *
  * Whether another page exists is decided by `totalMatched` against the page size, and *only* that:
- * the server reports the size of the bounded pool, which is identical on every page of one search.
- * `hasMore` is a different statement — it says the pool filled the server's browse bound, so the
- * catalog list was cut off — and using it as the next-page gate strands page 1 of any search that
- * returned more records than one page but fewer than the bound, because such a search honestly
- * reports `hasMore: false` while still having a page 2 to show.
+ * the server reports the size of the bounded pool, which is the same on every page of ONE search
+ * (asking again later is a new search with a new pool, so page state is kept per search).
+ * `hasMore` is a different statement — the search was cut off by one of its ceilings, so more may
+ * have matched than it surfaced — and using it as the next-page gate strands page 1 of any search
+ * that returned more records than one page but stayed under the bound, because such a search
+ * honestly reports `hasMore: false` while still having a page 2 to show.
  *
  * `pageCount` stays capped by `maxScholarlySearchPage`, so the control can never offer a page the
  * API would reject as too deep.

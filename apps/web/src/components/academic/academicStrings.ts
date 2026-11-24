@@ -223,7 +223,10 @@ const enCopy = {
   "sources.discoveryBody": "Scholarly record search returns bibliographic records — title, authors, identifiers and at most a catalogue abstract — that you can add to your library. It does not read the works, screen them, or check retraction status, and those steps still belong to you. Add any source you verified yourself at any time.",
   "sources.discoveryBodyLive": "Scholarly record search is live for your workspace: it returns bibliographic records — title, authors, identifiers and at most a catalogue abstract — that you can add to your library. It does not read the works, screen them, or check retraction status, and those steps still belong to you. Add any source you verified yourself at any time.",
   "sources.discoveryOffTitle": "Record search is not turned on here",
-  "sources.discoveryOffBody": "This deployment has not enabled scholarly record search, so searching returns no records until an administrator turns it on. Everything else here works: add any source you verified yourself, at any time.",
+  // Both ways this deployment can refuse say the same thing now: the feature answers that it is not
+  // available, whether the master switch is off or the switch is on with no catalog behind it (an
+  // enabled Google Books row without its key is the common case). Neither is "nothing matched".
+  "sources.discoveryOffBody": "Scholarly record search is not turned on for this deployment: no catalog is switched on for it yet, so a search here cannot find anything. Everything else works as usual — add any source you verified yourself, at any time.",
   "sources.findTitle": "Find scholarly sources",
   "sources.findIntro": "Search the scholarly records available to this workspace. A result is a lead: read the work yourself before you cite it.",
   "sources.findLabel": "Search scholarly records",
@@ -242,8 +245,12 @@ const enCopy = {
   "sources.findPage": "Page {page} of {pages}",
   "sources.findPrevious": "Previous page",
   "sources.findNext": "Next page",
-  "sources.findMatches": "{count} record(s) matched; {shown} on this page",
-  "sources.findMore": "More records matched than one search returns (the bound is {limit}). Narrow the search to reach the rest.",
+  // Two different facts, kept apart on purpose. How many records THIS bounded search surfaced is not
+  // how many works match the topic; and when the server says the search was cut off, no single
+  // number is honest to quote — the ceiling that stopped it may be the combined pool, one catalog's
+  // own ceiling, or the whole-request budget, and only the first of those is a client-side constant.
+  "sources.findMatches": "{count} record(s) surfaced by this search; {shown} on this page",
+  "sources.findMore": "This search stopped at one of its own limits, so more records may match than are listed here. Narrow the search to reach the rest.",
   "sources.findEmpty": "No scholarly record matched that search.",
   "sources.findProblemTitle": "Search not completed",
   "sources.findCancelled": "Search stopped.",

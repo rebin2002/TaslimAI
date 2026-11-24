@@ -73,6 +73,24 @@ public sealed class AcademicSourcesControllerTests
     }
 
     [Fact]
+    public async Task Switch_on_with_nothing_behind_it_is_unavailable_not_an_empty_page()
+    {
+        await using var db = await CreateDbAsync();
+        // The master switch is on, so this reaches discovery — and discovery answers that no catalog
+        // behind the switch can serve the query at all (every row switched off, or the one enabled
+        // row missing its key). Serving that as an empty page 200 would tell a student their topic
+        // matched nothing. It is the same 503 contract as the switched-off path above.
+        var fake = new RecordingDiscovery((_, _) => Task.FromResult(Batch([], noProvidersConfigured: true)));
+        var controller = CreateController(db, fake, enabled: true);
+
+        var result = await controller.Search(await MemberWorkspaceIdAsync(db), new AcademicSourceSearchRequest { Q = "pharmacy market access" }, CancellationToken.None);
+
+        var error = Assert.IsType<ObjectResult>(result);
+        Assert.Equal(StatusCodes.Status503ServiceUnavailable, error.StatusCode);
+        Assert.Single(fake.Queries);
+    }
+
+    [Fact]
     public async Task Search_without_any_query_condition_is_rejected()
     {
         await using var db = await CreateDbAsync();
@@ -136,6 +154,43 @@ public sealed class AcademicSourcesControllerTests
 
         AssertBadRequest(result);
         Assert.Equal(0, fake.CallCount);
+    }
+
+    [Fact]
+    public async Task Oversized_page_without_a_page_size_is_rejected_too()
+    {
+        await using var db = await CreateDbAsync();
+        var fake = new CountingDiscovery();
+        var controller = CreateController(db, fake, enabled: true);
+
+        // The exact shape that survived the first repair: `?q=test&page=2147483647` with the page
+        // size left out. Depth was checked only when BOTH paging parameters were present, so this
+        // request passed validation and the slicer computed (page - 1) * pageSize as a 32-bit
+        // product — int.MaxValue - 1 times the default 10 — which wrapped to a negative offset.
+        // The default size is now part of the check, in the wider type, so this URL is a clean 400.
+        var result = await controller.Search(await MemberWorkspaceIdAsync(db), new AcademicSourceSearchRequest { Q = "test", Page = int.MaxValue }, CancellationToken.None);
+
+        AssertBadRequest(result);
+        Assert.Equal(0, fake.CallCount);
+    }
+
+    [Fact]
+    public async Task Page_past_the_end_of_the_pool_is_an_empty_window()
+    {
+        await using var db = await CreateDbAsync();
+        var fake = new RecordingDiscovery((_, _) => Task.FromResult(Batch(Records(50))));
+        var controller = CreateController(db, fake, enabled: true);
+        var workspaceId = await MemberWorkspaceIdAsync(db);
+
+        // 6 * 25 is exactly at the browse bound, so this is a legal request; the pool simply has
+        // fewer records than the window asks for. The offset is formed in long arithmetic and
+        // compared against the pool before slicing, so a past-the-end page is empty rather than
+        // wrapping around to records the caller already saw.
+        var result = await controller.Search(workspaceId, new AcademicSourceSearchRequest { Q = "market access", Page = 6, PageSize = 25 }, CancellationToken.None);
+
+        var body = Assert.IsType<AcademicSourceSearchResponse>(Assert.IsType<OkObjectResult>(result).Value);
+        Assert.Empty(body.Sources);
+        Assert.Equal(50, body.TotalMatched);
     }
 
     [Fact]
@@ -205,6 +260,24 @@ public sealed class AcademicSourcesControllerTests
         Assert.Equal(150, body.TotalMatched);
         Assert.True(body.HasMore);
         Assert.Equal(10, body.Sources.Count);
+    }
+
+    [Fact]
+    public async Task Catalog_ceiling_reported_by_discovery_survives_as_has_more()
+    {
+        await using var db = await CreateDbAsync();
+        // The combined bound is not the only ceiling a search stops at. Here the pool is 50 records
+        // — one catalog's own per-provider ceiling, far below MaxCombinedResults — and discovery says
+        // so. Inferring "more exists" from `totalMatched >= 150` alone would report this list as
+        // complete, which is the claim the reviewer found false.
+        var fake = new RecordingDiscovery((_, _) => Task.FromResult(Batch(Records(50), capped: true)));
+        var controller = CreateController(db, fake, enabled: true);
+
+        var body = Assert.IsType<AcademicSourceSearchResponse>(Assert.IsType<OkObjectResult>(
+            await controller.Search(await MemberWorkspaceIdAsync(db), new AcademicSourceSearchRequest { Q = "market access", Page = 1, PageSize = 10 }, CancellationToken.None)).Value);
+
+        Assert.Equal(50, body.TotalMatched);
+        Assert.True(body.HasMore);
     }
 
     [Fact]
@@ -339,6 +412,40 @@ public sealed class AcademicSourcesControllerTests
     }
 
     [Fact]
+    public async Task Identifier_checks_survive_a_search_that_matched_no_record()
+    {
+        await using var db = await CreateDbAsync();
+        // The other half of the same promise, from the server side: an unregistered DOI is an answer
+        // the caller asked for, so the response must still carry it when the record pool came back
+        // empty — a client that rendered nothing for an empty list used to lose the one fact this
+        // search had established. Empty is also not truncation and not refusal, so neither flag may
+        // be set here.
+        var batch = new AcademicDiscoveryBatch
+        {
+            Sources = [],
+            ProviderOutcomes = [],
+            DoiValidations =
+            [
+                new AcademicDoiValidationResult { SubmittedDoi = "10.9999/gone.2024", IsRegistered = false, FailureCategory = AcademicSourceFailureCategories.NotFound },
+            ],
+        };
+        var fake = new RecordingDiscovery((_, _) => Task.FromResult(batch));
+        var controller = CreateController(db, fake, enabled: true);
+
+        var body = Assert.IsType<AcademicSourceSearchResponse>(Assert.IsType<OkObjectResult>(
+            await controller.Search(await MemberWorkspaceIdAsync(db), new AcademicSourceSearchRequest { Doi = ["10.9999/gone.2024"] }, CancellationToken.None)).Value);
+
+        Assert.Empty(body.Sources);
+        Assert.Equal(0, body.TotalMatched);
+        var check = Assert.Single(body.DoiChecks);
+        Assert.Equal("10.9999/gone.2024", check.SubmittedDoi);
+        Assert.False(check.IsRegistered);
+        Assert.Equal("not_registered", check.FailureCode);
+        Assert.False(body.HasMore);
+        Assert.False(body.Partial);
+    }
+
+    [Fact]
     public async Task Aborting_mid_search_cancels_the_in_flight_discovery_call()
     {
         // A student who changes page or leaves the tab must not leave provider work running
@@ -448,9 +555,11 @@ public sealed class AcademicSourcesControllerTests
     private static AcademicSourceRecord[] Records(int count) =>
         Enumerable.Range(0, count).Select(index => Record($"Record {index}", doi: $"10.5555/synth.{index:D4}")).ToArray();
 
-    private static AcademicDiscoveryBatch Batch(IReadOnlyList<AcademicSourceRecord> sources) => new()
+    private static AcademicDiscoveryBatch Batch(IReadOnlyList<AcademicSourceRecord> sources, bool capped = false, bool noProvidersConfigured = false) => new()
     {
         Sources = sources,
+        ResultCapped = capped,
+        NoProvidersConfigured = noProvidersConfigured,
         ProviderOutcomes = sources.Count > 0
             ? [new AcademicProviderOutcome { ProviderKey = "openalex", Status = AcademicProviderOutcomeStatus.Ok, SourceCount = sources.Count }]
             : [],

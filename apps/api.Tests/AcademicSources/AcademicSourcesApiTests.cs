@@ -151,6 +151,24 @@ public sealed class AcademicSourcesApiTests : IClassFixture<AcademicSourcesApiFa
     }
 
     [Fact]
+    public async Task Oversized_page_in_a_url_without_a_page_size_is_rejected()
+    {
+        // The shape a browser hand-types, and the exact one the review named: the depth guard used
+        // to fire only when BOTH paging parameters arrived, so this URL — an int.MaxValue page with
+        // the page size left at its default — was never measured and reached the slicer, where the
+        // offset was a 32-bit product that wrapped. Over HTTP that is a clean 400 naming `page`.
+        factory.Discovery.Reset();
+
+        var response = await factory.Client.GetAsync($"/api/workspaces/{factory.WorkspaceId}/academic-sources/search?q=test&page=2147483647");
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        var body = await response.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal("VALIDATION_ERROR", body.GetProperty("error").GetProperty("code").GetString());
+        Assert.True(body.GetProperty("error").GetProperty("fields").TryGetProperty("page", out _));
+        Assert.Equal(0, factory.Discovery.CallCount);
+    }
+
+    [Fact]
     public async Task Discovery_is_handed_the_pipeline_cancellation_token()
     {
         // The endpoint must not pass CancellationToken.None: a client that goes away has to be

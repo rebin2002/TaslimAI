@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using Microsoft.Extensions.Logging.Abstractions;
 using Taslim.Api.AcademicSources;
 using Xunit;
@@ -42,7 +43,42 @@ public sealed class AcademicSourceDiscoveryServiceTests
     {
         public string ProviderKey => "crossref";
         public bool IsConfigured { get; } = true;
-        public Task<AcademicDoiValidationResult> ValidateAsync(string doi, CancellationToken cancellationToken = default) => behavior(doi);
+        public int CallCount { get; private set; }
+        public Task<AcademicDoiValidationResult> ValidateAsync(string doi, CancellationToken cancellationToken = default)
+        {
+            CallCount++;
+            return behavior(doi);
+        }
+    }
+
+    /// <summary>A catalog that never answers, honouring the token it was given, so the wall clock a
+    /// search actually spends is measured rather than reasoned about.</summary>
+    private sealed class SlowWorkProvider(string key, TimeSpan delay) : IAcademicWorkSearchProvider
+    {
+        public string ProviderKey => key;
+        public bool IsConfigured { get; } = true;
+        public int CallCount { get; private set; }
+
+        public async Task<IReadOnlyList<AcademicSourceRecord>> SearchWorksAsync(AcademicDiscoveryQuery query, CancellationToken cancellationToken = default)
+        {
+            CallCount++;
+            await Task.Delay(delay, cancellationToken);
+            return [];
+        }
+    }
+
+    private sealed class SlowValidator(TimeSpan delay) : IAcademicDoiValidator
+    {
+        public string ProviderKey => "crossref";
+        public bool IsConfigured { get; } = true;
+        public int CallCount { get; private set; }
+
+        public async Task<AcademicDoiValidationResult> ValidateAsync(string doi, CancellationToken cancellationToken = default)
+        {
+            CallCount++;
+            await Task.Delay(delay, cancellationToken);
+            return new AcademicDoiValidationResult { ResolvedDoi = doi, IsRegistered = true };
+        }
     }
 
     private static AcademicSourceRecord Record(string provider, string id, string title, string? doi = null, string? isbn13 = null) => new()
@@ -54,6 +90,20 @@ public sealed class AcademicSourceDiscoveryServiceTests
         Isbn13 = isbn13,
         SourceType = AcademicSourceTypes.JournalArticle,
         AccessLevel = AcademicAccessLevel.Metadata,
+    };
+
+    /// <summary>The same row carrying the access evidence a catalog would have to show for it to
+    /// count as "an open location", used by the open-access filter tests.</summary>
+    private static AcademicSourceRecord OpenRecord(string provider, string id, string title, string? doi = null, string? isbn13 = null) => new()
+    {
+        ProviderKey = provider,
+        ProviderWorkId = id,
+        Title = title,
+        Doi = doi,
+        Isbn13 = isbn13,
+        SourceType = AcademicSourceTypes.JournalArticle,
+        AccessLevel = AcademicAccessLevel.FullTextIndicated,
+        FullTextUrl = "https://example.org/open-access-copy",
     };
 
     private static AcademicSourceDiscoveryService Create(
@@ -233,5 +283,214 @@ public sealed class AcademicSourceDiscoveryServiceTests
             options => options.MaxSearchTermCharacters = 20);
         await service.DiscoverAsync(new AcademicDiscoveryQuery { SearchTerm = new string('q', 500) });
         Assert.Equal(20, observed!.Length);
+    }
+
+    [Fact]
+    public async Task Catalog_ceiling_is_reported_as_truncation_even_when_the_combined_pool_is_far_away()
+    {
+        // One catalog asked for at most five records hands back exactly five: it was cut off, whatever
+        // the combined pool bound says. In a single- or two-catalog deployment that bound is never
+        // reachable, so the old inference from `pool >= MaxCombinedResults` alone reported this list as
+        // everything there was.
+        var hits = Enumerable.Range(0, 5).Select(index => Record("openalex", $"W{index}", $"Title {index}", doi: $"10.5555/ceil.{index}")).ToList();
+        var service = Create(
+            [new FakeWorkProvider("openalex", true, _ => Task.FromResult<IReadOnlyList<AcademicSourceRecord>>(hits))],
+            [],
+            [],
+            options => options.MaxResultsPerProvider = 5);
+
+        var batch = await service.DiscoverAsync(new AcademicDiscoveryQuery { SearchTerm = "flood" });
+
+        Assert.Equal(5, batch.Sources.Count);
+        Assert.True(batch.ResultCapped);
+        // A ceiling is not a failure: nothing went wrong, the search simply was not permitted to go on.
+        Assert.False(batch.PartialResult);
+    }
+
+    [Fact]
+    public async Task A_completed_search_below_every_ceiling_is_not_reported_as_truncated()
+    {
+        var hits = Enumerable.Range(0, 3).Select(index => Record("openalex", $"W{index}", $"Title {index}", doi: $"10.5555/short.{index}")).ToList();
+        var service = Create(
+            [new FakeWorkProvider("openalex", true, _ => Task.FromResult<IReadOnlyList<AcademicSourceRecord>>(hits))],
+            [],
+            [],
+            options => options.MaxResultsPerProvider = 5);
+
+        var batch = await service.DiscoverAsync(new AcademicDiscoveryQuery { SearchTerm = "flood" });
+
+        Assert.Equal(3, batch.Sources.Count);
+        Assert.False(batch.ResultCapped);
+    }
+
+    [Fact]
+    public async Task Open_access_request_drops_identifier_rows_that_show_no_open_location()
+    {
+        // The catalogs' open-access parameter exists only on their text-search endpoints. An ISBN
+        // lookup and a DOI resolution cannot be filtered upstream, so without a merged-result rule the
+        // checkbox would silently be ignored for identifier-only searches.
+        var bookProvider = new FakeBookProvider("openlibrary", true, isbnBehavior: _ => Task.FromResult<IReadOnlyList<AcademicSourceRecord>>(
+            [
+                OpenRecord("openlibrary", "B1", "Open book", isbn13: "9781234567897"),
+                Record("openlibrary", "B2", "Closed book", isbn13: "9789290000006"),
+            ]));
+        var validator = new FakeValidator(doi => Task.FromResult(new AcademicDoiValidationResult
+        {
+            ResolvedDoi = doi,
+            IsRegistered = true,
+            Source = Record("crossref", doi, "Closed article", doi: doi),
+        }));
+        var service = Create([], [bookProvider], [validator]);
+
+        var batch = await service.DiscoverAsync(new AcademicDiscoveryQuery
+        {
+            Isbns = ["9781234567897", "9789290000006"],
+            Dois = ["10.5555/closed"],
+            OpenAccessOnly = true,
+        });
+
+        var surfaced = Assert.Single(batch.Sources);
+        Assert.Equal("Open book", surfaced.Title);
+        // Dropping the row is not dropping the check: the DOI was registered, and that stays visible.
+        var validation = Assert.Single(batch.DoiValidations);
+        Assert.True(validation.IsRegistered);
+    }
+
+    [Fact]
+    public async Task Mixed_query_filters_identifier_rows_without_touching_text_search_rows()
+    {
+        // A text-search row already passed the catalog's own open-access filter; re-applying a local
+        // evidence rule to it would throw away results the catalog knowingly marked open, so the
+        // filter's reach is exactly the two identifier paths.
+        var service = Create(
+            [new FakeWorkProvider("openalex", true, _ => Task.FromResult<IReadOnlyList<AcademicSourceRecord>>(
+                [Record("openalex", "W1", "Catalog-marked open text row", doi: "10.5555/text.1")]))],
+            [new FakeBookProvider("openlibrary", true, isbnBehavior: _ => Task.FromResult<IReadOnlyList<AcademicSourceRecord>>(
+                [Record("openlibrary", "B1", "Closed book", isbn13: "9781234567897")]))],
+            [new FakeValidator(doi => Task.FromResult(new AcademicDoiValidationResult
+            {
+                ResolvedDoi = doi,
+                IsRegistered = true,
+                Source = OpenRecord("crossref", doi, "Open article", doi: doi),
+            }))]);
+
+        var batch = await service.DiscoverAsync(new AcademicDiscoveryQuery
+        {
+            SearchTerm = "market access",
+            Isbns = ["9781234567897"],
+            Dois = ["10.5555/open"],
+            OpenAccessOnly = true,
+        });
+
+        Assert.Contains(batch.Sources, record => record.Title == "Catalog-marked open text row");
+        Assert.Contains(batch.Sources, record => record.Title == "Open article");
+        Assert.DoesNotContain(batch.Sources, record => record.Title == "Closed book");
+    }
+
+    [Fact]
+    public async Task Enabled_switch_with_no_capable_catalog_answers_that_it_cannot_answer()
+    {
+        // The master switch is on, but every catalog behind it is switched off or incomplete, so
+        // nothing here can answer at all. That is not "nothing matched".
+        var works = new FakeWorkProvider("openalex", false);
+        var books = new FakeBookProvider("openlibrary", false);
+        var service = Create([works], [books], []);
+
+        var batch = await service.DiscoverAsync(new AcademicDiscoveryQuery { SearchTerm = "x", Isbns = ["9781234567897"] });
+
+        Assert.True(batch.NoProvidersConfigured);
+        Assert.Empty(batch.Sources);
+        Assert.Equal(0, works.CallCount);
+        Assert.Equal(0, books.SearchCallCount);
+        Assert.Equal(0, books.IsbnCallCount);
+        Assert.Equal(2, batch.ProviderOutcomes.Count);
+        Assert.All(batch.ProviderOutcomes, outcome => Assert.Equal("disabled", outcome.Status));
+    }
+
+    [Fact]
+    public async Task Whole_request_budget_bounds_the_sum_of_participant_timeouts()
+    {
+        // Participation is sequential, so before this budget the worst case of ONE search was the sum
+        // of every participant's own timeout: two catalogs that never answer would each spend a full
+        // operation budget inside the same request, holding a shared search slot the whole time.
+        // Measured here, not reasoned about: with a 3-second budget the pair cannot take the 60 that
+        // two 30-second hangs would have cost.
+        var first = new SlowWorkProvider("openalex", TimeSpan.FromSeconds(30));
+        var second = new SlowWorkProvider("googlebooks", TimeSpan.FromSeconds(30));
+        var service = Create([first, second], [], [], options =>
+        {
+            options.RequestTimeoutSeconds = 2;
+            options.DiscoveryBudgetSeconds = 3;
+        });
+
+        var started = Stopwatch.GetTimestamp();
+        var batch = await service.DiscoverAsync(new AcademicDiscoveryQuery { SearchTerm = "x" });
+        var elapsed = Stopwatch.GetElapsedTime(started);
+
+        Assert.True(elapsed < TimeSpan.FromSeconds(15), $"the request budget did not bound the search: it took {elapsed.TotalSeconds:0.0}s");
+        Assert.Empty(batch.Sources);
+        Assert.True(batch.PartialResult);
+        Assert.True(batch.ResultCapped);
+        Assert.Equal(2, batch.ProviderOutcomes.Count);
+        Assert.All(batch.ProviderOutcomes, outcome =>
+        {
+            Assert.Equal("failed", outcome.Status);
+            Assert.Equal("timeout", outcome.FailureCategory);
+        });
+        // And the bound costs no extra egress: the participant the budget had no room for was never
+        // asked, rather than being fired off and discarded.
+        Assert.Equal(1, first.CallCount);
+        Assert.Equal(0, second.CallCount);
+    }
+
+    [Fact]
+    public async Task Budget_running_out_labels_each_cut_off_doi_check()
+    {
+        // The DOI loop was the widest part of that sum: the controller accepts ten DOIs and each check
+        // ran after the last. A check the budget stopped is reported as stopped, not as unregistered.
+        var validator = new SlowValidator(TimeSpan.FromSeconds(30));
+        var service = Create(
+            [new FakeWorkProvider("openalex", true, _ => Task.FromResult<IReadOnlyList<AcademicSourceRecord>>([]))],
+            [],
+            [validator],
+            options =>
+            {
+                options.RequestTimeoutSeconds = 2;
+                options.DiscoveryBudgetSeconds = 3;
+            });
+
+        var started = Stopwatch.GetTimestamp();
+        var batch = await service.DiscoverAsync(new AcademicDiscoveryQuery { Dois = ["10.5555/a", "10.5555/b", "10.5555/c"] });
+        var elapsed = Stopwatch.GetElapsedTime(started);
+
+        Assert.True(elapsed < TimeSpan.FromSeconds(15), $"the DOI loop ignored the request budget: it took {elapsed.TotalSeconds:0.0}s");
+        Assert.Equal(3, batch.DoiValidations.Count);
+        Assert.All(batch.DoiValidations, validation =>
+        {
+            Assert.False(validation.IsRegistered);
+            Assert.Equal("timeout", validation.FailureCategory);
+        });
+        Assert.True(batch.ResultCapped);
+        // Two of the three were never attempted, and the answer says so instead of leaving them out.
+        Assert.Equal(1, validator.CallCount);
+    }
+
+    [Fact]
+    public async Task A_caller_who_walks_away_is_still_a_cancellation()
+    {
+        // The budget must not swallow the caller's own cancellation: a student who navigated away is
+        // an abandoned request, not a partial result served to nobody.
+        var slow = new SlowWorkProvider("openalex", TimeSpan.FromSeconds(30));
+        var service = Create([slow], [], [], options =>
+        {
+            options.RequestTimeoutSeconds = 2;
+            options.DiscoveryBudgetSeconds = 60;
+        });
+        using var caller = new CancellationTokenSource(TimeSpan.FromMilliseconds(200));
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+            service.DiscoverAsync(new AcademicDiscoveryQuery { SearchTerm = "x" }, caller.Token));
+
+        Assert.Equal(1, slow.CallCount);
     }
 }

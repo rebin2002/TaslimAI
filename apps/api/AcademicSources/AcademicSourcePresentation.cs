@@ -67,17 +67,23 @@ public sealed record AcademicSourceSearchResponse(
     int Page,
     int PageSize,
     /// <summary>
-    /// Distinct records the bounded search surfaced, counted across the whole pool, so the number is
-    /// the same on every page of one search. A client derives its page count from this: a next page
-    /// exists exactly when the pool still has records past the current window.
+    /// Distinct records this bounded search surfaced, counted across the whole pool it fetched. The
+    /// number is stable across the pages of ONE search, because those pages are slices of one pool;
+    /// it is not a promise about the next search, which fetches a fresh pool and can see a catalog
+    /// that has since changed. A client derives its page count from this: a next page exists exactly
+    /// when the pool still has records past the current window.
     /// </summary>
     int TotalMatched,
     /// <summary>
-    /// True when the search filled its own browse bound (<c>TotalMatched == MaxCombinedResults</c>),
-    /// i.e. the catalogs were cut off and further matches may exist that this search will never
-    /// surface. This is NOT a "there is a next page" flag: that is answered by
-    /// <see cref="TotalMatched"/> against <see cref="PageSize"/>. Treating it as the next-page
-    /// signal strands a caller on page 1 of any search shorter than the bound.
+    /// True when this search stopped at one of its own ceilings and therefore cannot claim to have
+    /// surfaced everything that matched: the combined pool filled <c>MaxCombinedResults</c>, some
+    /// catalog came back with exactly its <c>MaxResultsPerProvider</c> ceiling, or the whole-request
+    /// discovery budget ran out before every catalog had answered. False means the bounded search
+    /// completed, and <see cref="TotalMatched"/> is the whole of what it was allowed to find — which
+    /// is NOT the same as the number of works in the world that match, and is not a "there is no
+    /// next page" flag either: that is answered by <see cref="TotalMatched"/> against
+    /// <see cref="PageSize"/>. Treating this flag as the next-page signal strands a caller on page 1
+    /// of any search whose pool is shorter than the bound.
     /// </summary>
     bool HasMore,
     /// <summary>True when part of the catalog pool did not answer; the result is not exhaustive.</summary>
