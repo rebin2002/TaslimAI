@@ -58,7 +58,17 @@ internal static class ResearchSourceLifecycle
             }
             catch
             {
-                await transaction.RollbackAsync(cancellationToken);
+                // A cancelled operation token must not mask the original failure: rollback runs on
+                // a dedicated token so cleanup completes even when cancellation triggered this
+                // path. If the connection itself is dead, PostgreSQL aborts the transaction when
+                // the disposed connection returns to the pool, so no partial state can persist.
+                try
+                {
+                    await transaction.RollbackAsync(CancellationToken.None);
+                }
+                catch (Exception)
+                {
+                }
                 throw;
             }
         });

@@ -640,6 +640,131 @@ public sealed class ResearchSourceLifecycleTests
         }
     }
 
+    [Fact]
+    public async Task Staging_cancellation_rolls_back_cleanup_under_claim_sqlite()
+    {
+        var databasePath = Path.Combine(Path.GetTempPath(), $"taslim-research-cancel-{Guid.NewGuid():N}.db");
+        var connectionString = new SqliteConnectionStringBuilder
+        {
+            DataSource = databasePath,
+            Mode = SqliteOpenMode.ReadWriteCreate,
+            Cache = SqliteCacheMode.Shared,
+        }.ToString();
+        var workspaceId = Guid.NewGuid();
+        var userId = Guid.NewGuid();
+        var jobId = Guid.NewGuid();
+        var claim = Guid.NewGuid();
+        var now = DateTime.UtcNow;
+        try
+        {
+            await using (var seedConnection = new SqliteConnection(connectionString))
+            {
+                await seedConnection.OpenAsync();
+                await using var seedDb = CreateDb(seedConnection);
+                await seedDb.Database.EnsureCreatedAsync();
+                seedDb.Users.Add(new ApplicationUser
+                {
+                    Id = userId,
+                    UserName = $"research-sqlite-cancel-{userId:N}@example.com",
+                    NormalizedUserName = $"RESEARCH-SQLITE-CANCEL-{userId:N}@EXAMPLE.COM",
+                    DisplayName = "Research SQLite Cancel Tester",
+                    CreatedAt = now,
+                    UpdatedAt = now,
+                });
+                seedDb.Workspaces.Add(new Workspace { Id = workspaceId, Name = "Research SQLite Cancel Workspace", Slug = $"research-sqlite-cancel-{userId:N}", Type = WorkspaceType.Personal, CreatedAt = now, UpdatedAt = now });
+                seedDb.GenerationJobs.Add(new GenerationJob
+                {
+                    Id = jobId,
+                    WorkspaceId = workspaceId,
+                    CreatedByUserId = userId,
+                    JobType = GenerationJobTypes.ResearchGenerate,
+                    Status = GenerationJobStatus.Running,
+                    InputJson = "{}",
+                    ConcurrencyToken = claim,
+                    CreatedAt = now,
+                    StartedAt = now,
+                    ClaimExpiresAt = now.AddMinutes(5),
+                });
+                var source = new ResearchSource
+                {
+                    Id = Guid.NewGuid(),
+                    WorkspaceId = workspaceId,
+                    GenerationJobId = jobId,
+                    CitationId = "S1",
+                    Url = "https://example.gov/old",
+                    CanonicalUrl = "https://example.gov/old",
+                    Title = "Existing source",
+                    Domain = "example.gov",
+                    RetrievedAt = now,
+                    SourceType = "web",
+                    Rank = 1,
+                    IsSelected = true,
+                };
+                seedDb.ResearchSources.Add(source);
+                seedDb.ResearchEvidence.Add(new ResearchEvidence
+                {
+                    Id = Guid.NewGuid(),
+                    WorkspaceId = workspaceId,
+                    GenerationJobId = jobId,
+                    ResearchSourceId = source.Id,
+                    Topic = "old",
+                    Excerpt = "old evidence",
+                    CreatedAt = now,
+                });
+                await seedDb.SaveChangesAsync();
+            }
+
+            await using var workerConnection = new SqliteConnection(connectionString);
+            await workerConnection.OpenAsync();
+            await using var workerDb = CreateDb(workerConnection);
+            var ownedJob = await workerDb.GenerationJobs.AsNoTracking().SingleAsync(item => item.Id == jobId);
+            using var cancel = new CancellationTokenSource();
+
+            // The operation token itself is cancelled mid-staging, so the fenced rollback path
+            // runs with an already-cancelled token. Cleanup deletes must still roll back, the
+            // half-staged row must never persist, and the original cancellation must propagate.
+            await Assert.ThrowsAsync<OperationCanceledException>(() => ResearchSourceLifecycle.TryPersistUnderClaimAsync(workerDb, ownedJob, ct =>
+            {
+                workerDb.ResearchSources.Add(new ResearchSource
+                {
+                    Id = Guid.NewGuid(),
+                    WorkspaceId = workspaceId,
+                    GenerationJobId = jobId,
+                    CitationId = "PARTIAL",
+                    CanonicalUrl = "https://example.gov/partial",
+                    Title = "Partial staging source",
+                    Domain = "example.gov",
+                    RetrievedAt = now,
+                    SourceType = "web",
+                    Rank = 1,
+                    IsSelected = true,
+                });
+                cancel.Cancel();
+                ct.ThrowIfCancellationRequested();
+                throw new InvalidOperationException("staging unexpectedly continued after cancellation");
+            }, cancel.Token));
+
+            await using var verifyConnection = new SqliteConnection(connectionString);
+            await verifyConnection.OpenAsync();
+            await using var verifyDb = CreateDb(verifyConnection);
+            Assert.True(await verifyDb.ResearchSources.AsNoTracking().AnyAsync(item => item.CitationId == "S1"));
+            Assert.True(await verifyDb.ResearchEvidence.AsNoTracking().AnyAsync(item => item.GenerationJobId == jobId));
+            Assert.False(await verifyDb.ResearchSources.AsNoTracking().AnyAsync(item => item.CitationId == "PARTIAL"));
+            var token = await verifyDb.GenerationJobs.AsNoTracking()
+                .Where(item => item.Id == jobId)
+                .Select(item => item.ConcurrencyToken)
+                .SingleAsync();
+            Assert.Equal(claim, token);
+        }
+        finally
+        {
+            SqliteConnection.ClearAllPools();
+            if (File.Exists(databasePath)) File.Delete(databasePath);
+            if (File.Exists(databasePath + "-wal")) File.Delete(databasePath + "-wal");
+            if (File.Exists(databasePath + "-shm")) File.Delete(databasePath + "-shm");
+        }
+    }
+
     [DisposablePostgresFact]
     public async Task Claim_takeover_serializes_behind_open_fence_and_stale_worker_cannot_stage_postgres()
     {
@@ -727,22 +852,21 @@ public sealed class ResearchSourceLifecycleTests
                 }
 
                 // Second connection attempts a claim takeover while the owner's fenced transaction
-                // still holds the job row lock mid-staging.
-                var takeoverTask = Task.Run(async () =>
-                {
-                    await using var takeoverDb = new TaslimDbContext(options);
-                    return await takeoverDb.GenerationJobs
-                        .Where(item => item.Id == jobId && item.Status == GenerationJobStatus.Running)
-                        .ExecuteUpdateAsync(setters => setters.SetProperty(item => item.ConcurrencyToken, recoveredClaim));
-                });
+                // still holds the job row lock mid-staging. A bounded lock_timeout turns "waiting
+                // for the row" into a database-observable error (55P03 lock_not_available), which
+                // deterministically proves the UPDATE actually reached the row lock instead of
+                // merely being unscheduled or still connecting.
+                var blockedAttempt = await Record.ExceptionAsync(() =>
+                    AttemptTakeoverAsync(options, jobId, recoveredClaim, lockTimeoutMs: 1000, cancellationToken: CancellationToken.None));
+                var blockedPostgres = UnwrapPostgresException(blockedAttempt);
+                Assert.NotNull(blockedPostgres);
+                Assert.Equal("55P03", blockedPostgres!.SqlState);
 
-                // The takeover UPDATE queues behind the fence's row lock: ownership cannot
-                // transfer while cleanup and staging are in flight.
-                await Task.Delay(TimeSpan.FromSeconds(2));
-                Assert.False(takeoverTask.IsCompleted);
+                // Ownership cannot transfer while cleanup and staging are in flight.
                 proceed.Release();
                 stagedOwner = await workerTask;
-                takeoverAffected = await takeoverTask;
+                // After the owner's commit the same takeover runs to completion unblocked.
+                takeoverAffected = await AttemptTakeoverAsync(options, jobId, recoveredClaim, lockTimeoutMs: null, cancellationToken: CancellationToken.None);
             }
 
             Assert.True(stagedOwner);
@@ -885,8 +1009,11 @@ public sealed class ResearchSourceLifecycleTests
             var ownedJob = await workerDb.GenerationJobs.AsNoTracking().SingleAsync(item => item.Id == jobId);
             using var cancel = new CancellationTokenSource();
 
-            // Cancellation during staging must roll the fenced transaction back completely:
-            // the cleanup deletes are undone and the half-staged row never persists.
+            // Real operation-token cancellation: the token handed to TryPersistUnderClaimAsync is
+            // cancelled while staging is in flight, so the fenced rollback path receives an
+            // already-cancelled operation token exactly as a production shutdown would. The helper
+            // must still roll the fenced transaction back completely (cleanup deletes undone, no
+            // half-staged row) and propagate the original OperationCanceledException.
             await Assert.ThrowsAsync<OperationCanceledException>(() => ResearchSourceLifecycle.TryPersistUnderClaimAsync(workerDb, ownedJob, ct =>
             {
                 workerDb.ResearchSources.Add(new ResearchSource
@@ -904,8 +1031,9 @@ public sealed class ResearchSourceLifecycleTests
                     IsSelected = true,
                 });
                 cancel.Cancel();
-                throw new OperationCanceledException(cancel.Token);
-            }, CancellationToken.None));
+                ct.ThrowIfCancellationRequested();
+                throw new InvalidOperationException("staging unexpectedly continued after cancellation");
+            }, cancel.Token));
 
             await using var verify = new TaslimDbContext(options);
             Assert.True(await verify.ResearchSources.AsNoTracking().AnyAsync(item => item.CitationId == "S1"));
@@ -926,6 +1054,43 @@ public sealed class ResearchSourceLifecycleTests
             drop.CommandText = $"DROP SCHEMA IF EXISTS \"{schema}\" CASCADE";
             await drop.ExecuteNonQueryAsync();
         }
+    }
+
+    private static async Task<int> AttemptTakeoverAsync(
+        DbContextOptions<TaslimDbContext> options,
+        Guid jobId,
+        Guid recoveredClaim,
+        int? lockTimeoutMs,
+        CancellationToken cancellationToken)
+    {
+        await using var takeoverDb = new TaslimDbContext(options);
+        if (lockTimeoutMs is null)
+        {
+            return await takeoverDb.GenerationJobs
+                .Where(item => item.Id == jobId && item.Status == GenerationJobStatus.Running)
+                .ExecuteUpdateAsync(setters => setters.SetProperty(item => item.ConcurrencyToken, recoveredClaim), cancellationToken);
+        }
+
+        // SET LOCAL bounds how long PostgreSQL is willing to queue for the row lock. Reaching
+        // the lock queue is therefore observable as SQLSTATE 55P03 instead of an open-ended wait.
+        await using var transaction = await takeoverDb.Database.BeginTransactionAsync(cancellationToken);
+        await takeoverDb.Database.ExecuteSqlRawAsync($"SET LOCAL lock_timeout = '{lockTimeoutMs.Value}ms'", cancellationToken);
+        return await takeoverDb.GenerationJobs
+            .Where(item => item.Id == jobId && item.Status == GenerationJobStatus.Running)
+            .ExecuteUpdateAsync(setters => setters.SetProperty(item => item.ConcurrencyToken, recoveredClaim), cancellationToken);
+    }
+
+    private static PostgresException? UnwrapPostgresException(Exception? exception)
+    {
+        for (var current = exception; current is not null; current = current.InnerException)
+        {
+            if (current is PostgresException postgresException)
+            {
+                return postgresException;
+            }
+        }
+
+        return null;
     }
 
     private sealed class ClaimRolloverBeforeCleanupInterceptor(
