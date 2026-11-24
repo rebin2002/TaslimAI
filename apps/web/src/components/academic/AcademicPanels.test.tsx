@@ -243,8 +243,15 @@ describe("AcademicPlanPanel", () => {
       <AcademicPlanPanel brief={brief} issues={validateAcademicBrief(brief)} sourceCount={12} fullTextCount={5} peerReviewedCount={10} t={t} labels={labels} onJumpToField={vi.fn()} />,
     );
     expect(html).toContain("Nothing is blocking this plan");
-    // #1267 slice 1 made the discovery stage real: plan and discovery run today.
-    expect(html).toContain("2 of 8 stages run today");
+    // #1267 slice 1 ships scholarly discovery as a standalone capability, but the
+    // discovery *stage* of the staged job has no wired runner: only the plan stage
+    // executes today. The count must not rise until the academic job slice lands.
+    expect(html).toContain("1 of 8 stages run today");
+    // Integrity regression: exactly one stage (the plan li and its badge) renders
+    // as available; the newly available discovery capability must not leak a
+    // second runnable stage into the workflow surface.
+    expect((html.match(/data-status="available"/g) ?? []).length).toBe(2);
+    expect(html).toContain('data-status="planned"');
     expect(html).toContain("40,000");
     expect(html).toContain("you have recorded 12");
     expect(html).toContain("5 of 12 sources are marked as fully read");

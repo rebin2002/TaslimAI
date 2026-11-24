@@ -81,13 +81,56 @@ describe("workflow stages", () => {
     ]);
   });
 
-  it("shows the plan and discovery stages as running today, and nothing past discovery", () => {
+  it("shows only the plan stage as running today, because no job runner is wired for the others", () => {
     const views = academicWorkflowViews();
-    expect(views.filter((stage) => stage.status === "available").map((stage) => stage.id)).toEqual(["plan", "discovery"]);
-    expect(availableWorkflowStageCount(views)).toBe(2);
+    expect(views.filter((stage) => stage.status === "available").map((stage) => stage.id)).toEqual(["plan"]);
+    expect(availableWorkflowStageCount(views)).toBe(1);
     expect(views.every((stage) => stage.status === "planned" || stage.status === "available")).toBe(true);
-    // Screening onward is still a promise, never a control.
-    expect(views.filter((stage) => stage.status === "planned").map((stage) => stage.id)).toEqual(["screen", "extract", "compare", "gaps", "chapters", "verify"]);
+    // Everything the staged job would run — discovery onward — is still a
+    // promise, never a control, until the job pipeline itself ships.
+    expect(views.filter((stage) => stage.status === "planned").map((stage) => stage.id)).toEqual(["discovery", "screen", "extract", "compare", "gaps", "chapters", "verify"]);
+  });
+
+  it("does not let the available discovery capability make its unconnected job stage runnable", () => {
+    // Combined-tree integrity guard (#1267 slice 1 review): the workspace-scoped
+    // read-only search endpoint genuinely ships scholarlyDiscovery as a
+    // standalone capability, but nothing registers the AcademicWorkflow engine,
+    // its stage handlers or its state store. A capability flip alone must never
+    // turn an unconnected workflow stage into one that appears runnable.
+    expect(isCapabilityAvailable("scholarlyDiscovery")).toBe(true);
+    expect(isCapabilityPlanned("academicJob")).toBe(true);
+    const discovery = academicWorkflowViews().find((stage) => stage.id === "discovery");
+    expect(discovery).toBeDefined();
+    expect(discovery!.executor).toBe("job");
+    expect(discovery!.status).toBe("planned");
+    // The downgraded stage reports the phase in which its runner arrives, not
+    // the phase in which the underlying capability shipped.
+    expect(discovery!.phase).toBe(academicCapabilities.academicJob.phase);
+    // General invariant: nothing shows as running unless the surface itself
+    // executes it or the job engine is wired.
+    for (const stage of academicWorkflowViews()) {
+      if (stage.status === "available") {
+        expect(stage.executor === "ui" || isCapabilityAvailable("academicJob"), stage.id).toBe(true);
+      }
+    }
+  });
+
+  it("applies the runner rule to any stage list, not only the shipped one", () => {
+    // Same available capability, two executors: only the surface-executed stage
+    // is runnable while the job pipeline is planned.
+    const views = academicWorkflowViews([
+      { id: "synthetic-ui", capability: "scholarlyDiscovery", executor: "ui", labelKey: "stage.discovery.label", descriptionKey: "stage.discovery.detail" },
+      { id: "synthetic-job", capability: "scholarlyDiscovery", executor: "job", labelKey: "stage.discovery.label", descriptionKey: "stage.discovery.detail" },
+    ]);
+    expect(views.find((stage) => stage.id === "synthetic-ui")!.status).toBe("available");
+    expect(views.find((stage) => stage.id === "synthetic-job")!.status).toBe("planned");
+  });
+
+  it("keeps every job-executed stage non-runnable while the job capability is planned", () => {
+    const jobStages = academicWorkflowStages.filter((stage) => stage.executor === "job");
+    expect(jobStages.map((stage) => stage.id)).toEqual(["discovery", "screen", "extract", "compare", "gaps", "chapters", "verify"]);
+    const runnableJobStages = academicWorkflowViews().filter((stage) => stage.executor === "job" && stage.status === "available");
+    expect(runnableJobStages.map((stage) => stage.id)).toEqual([]);
   });
 
   it("has customer-facing copy for each stage label and description", () => {

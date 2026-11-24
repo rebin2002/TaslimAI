@@ -15,6 +15,15 @@
  * - `unavailable` the behaviour is explicitly out of scope for academic
  *                 research and must be explained rather than offered.
  *
+ * Capability status and workflow-stage runnability are deliberately separate
+ * judgements (combined-tree integrity rule, #1267 slice 1 review): a stage of
+ * the staged academic workflow may only show as running when the surface that
+ * executes it actually exists. Wiring a *capability* (e.g. the standalone,
+ * read-only scholarly search) never makes an unconnected *job stage* runnable,
+ * because the engine that would run that stage has no registration, no state
+ * store and no endpoint until the academic job slice ships. See
+ * `AcademicWorkflowStageExecutor` and `academicWorkflowViews`.
+ *
  * Vendor, provider and model names must never reach this file: customer-facing
  * copy describes capabilities by function only (issue #1259, "integrity,
  * privacy and safety"). Cost figures are likewise internal and never surfaced.
@@ -114,22 +123,39 @@ export function isCapabilityPlanned(id: AcademicCapabilityId): boolean {
  * capability that would make it real, so the Plan tab can state precisely
  * which stages run on this slice and which are pending backend work.
  */
+/**
+ * What executes a workflow stage.
+ * - `"ui"`  the academic surface in this app ships the stage's behaviour
+ *           itself (the plan panel *is* the plan stage); its status follows
+ *           the capability directly.
+ * - `"job"` the stage runs inside the staged academic job — the orchestrator
+ *           engine, its durable state and its endpoints. That pipeline is
+ *           shipped and registered by the `academicJob` capability slice, so a
+ *           `"job"` stage is only runnable while `academicJob` is available,
+ *           no matter how real its underlying capability is on its own.
+ */
+export type AcademicWorkflowStageExecutor = "ui" | "job";
+
 export type AcademicWorkflowStage = {
   id: string;
   capability: AcademicCapabilityId;
+  executor: AcademicWorkflowStageExecutor;
   labelKey: string;
   descriptionKey: string;
 };
 
 export const academicWorkflowStages: readonly AcademicWorkflowStage[] = [
-  { id: "plan", capability: "briefSetup", labelKey: "stage.plan.label", descriptionKey: "stage.plan.detail" },
-  { id: "discovery", capability: "scholarlyDiscovery", labelKey: "stage.discovery.label", descriptionKey: "stage.discovery.detail" },
-  { id: "screen", capability: "automatedScreening", labelKey: "stage.screen.label", descriptionKey: "stage.screen.detail" },
-  { id: "extract", capability: "evidenceExtraction", labelKey: "stage.extract.label", descriptionKey: "stage.extract.detail" },
-  { id: "compare", capability: "contradictionDetection", labelKey: "stage.compare.label", descriptionKey: "stage.compare.detail" },
-  { id: "gaps", capability: "gapAnalysis", labelKey: "stage.gaps.label", descriptionKey: "stage.gaps.detail" },
-  { id: "chapters", capability: "chapterDrafting", labelKey: "stage.chapters.label", descriptionKey: "stage.chapters.detail" },
-  { id: "verify", capability: "documentExport", labelKey: "stage.verify.label", descriptionKey: "stage.verify.detail" },
+  { id: "plan", capability: "briefSetup", executor: "ui", labelKey: "stage.plan.label", descriptionKey: "stage.plan.detail" },
+  // The discovery capability is real today (standalone read-only search in the
+  // Sources tab), but this entry describes the discovery *stage* of the staged
+  // job. No job runner is wired, so the stage stays non-runnable by executor.
+  { id: "discovery", capability: "scholarlyDiscovery", executor: "job", labelKey: "stage.discovery.label", descriptionKey: "stage.discovery.detail" },
+  { id: "screen", capability: "automatedScreening", executor: "job", labelKey: "stage.screen.label", descriptionKey: "stage.screen.detail" },
+  { id: "extract", capability: "evidenceExtraction", executor: "job", labelKey: "stage.extract.label", descriptionKey: "stage.extract.detail" },
+  { id: "compare", capability: "contradictionDetection", executor: "job", labelKey: "stage.compare.label", descriptionKey: "stage.compare.detail" },
+  { id: "gaps", capability: "gapAnalysis", executor: "job", labelKey: "stage.gaps.label", descriptionKey: "stage.gaps.detail" },
+  { id: "chapters", capability: "chapterDrafting", executor: "job", labelKey: "stage.chapters.label", descriptionKey: "stage.chapters.detail" },
+  { id: "verify", capability: "documentExport", executor: "job", labelKey: "stage.verify.label", descriptionKey: "stage.verify.detail" },
 ];
 
 /** Stages paired with their resolved status, ready for rendering. */
@@ -141,8 +167,20 @@ export type AcademicWorkflowStageView = AcademicWorkflowStage & {
 export function academicWorkflowViews(
   stages: readonly AcademicWorkflowStage[] = academicWorkflowStages,
 ): AcademicWorkflowStageView[] {
+  // Single source of truth for job execution: the staged job ships as a
+  // capability of its own. While it is `planned`, no job-executed stage may
+  // borrow runnability from an available underlying capability.
+  const jobEngineAvailable = academicCapabilities.academicJob.status === "available";
   return stages.map((stage) => {
     const capability = capabilityOf(stage.capability);
+    const runnable = capability.status === "available" && (stage.executor === "ui" || jobEngineAvailable);
+    if (runnable) return { ...stage, status: "available" as const, phase: capability.phase };
+    // An available capability whose job runner does not exist yet is downgraded
+    // to a status label, never an executable stage; its phase is the delivery
+    // phase in which the job pipeline itself arrives.
+    if (capability.status === "available") {
+      return { ...stage, status: "planned" as const, phase: academicCapabilities.academicJob.phase };
+    }
     return { ...stage, status: capability.status, phase: capability.phase };
   });
 }
