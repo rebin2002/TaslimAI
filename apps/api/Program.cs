@@ -15,6 +15,8 @@ using Taslim.Api.Activity;
 using Taslim.Api.Assets;
 using Taslim.Api.Autopilot;
 using Taslim.Api.Authorization;
+using Taslim.Api.AcademicEvidence;
+using Taslim.Api.AcademicIntegration;
 using Taslim.Api.Billing;
 using Taslim.Api.Benchmarking;
 using Taslim.Api.Domain;
@@ -240,6 +242,12 @@ builder.Services.AddScoped<IProviderResilienceOrchestrator, ProviderResilienceOr
 builder.Services.AddScoped<IProviderBenchmarkService, ProviderBenchmarkService>();
 builder.Services.AddSingleton<IProviderCostGuard, AllowAllProviderCostGuard>();
 builder.Services.AddSingleton(TimeProvider.System);
+// Academic Research Studio integration lane: Phase B evidence services + persistence and
+// the Phase C workflow engine over the shared context. Stage handlers (scholarly
+// discovery, screening, extraction, synthesis, drafting, verification) are registered by
+// their provider lanes through AddAcademicStageHandler; until then run/resume reports the
+// exact unconnected stage instead of executing stub work.
+builder.Services.AddAcademicProjects(builder.Configuration);
 builder.Services.Configure<AutopilotOptions>(builder.Configuration.GetSection("Autopilot"));
 builder.Services.PostConfigure<AutopilotOptions>(options => options.Normalize());
 builder.Services.AddSingleton(services => services.GetRequiredService<Microsoft.Extensions.Options.IOptions<AutopilotOptions>>().Value);

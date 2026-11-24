@@ -1,0 +1,681 @@
+using System.Security.Claims;
+using System.Text.Json;
+using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.Mvc;
+using Microsoft.EntityFrameworkCore;
+using Taslim.Api.AcademicEvidence.Persistence;
+using Taslim.Api.AcademicIntegration.Persistence;
+using Taslim.Api.AcademicWorkflow;
+using Taslim.Api.Authorization;
+using Taslim.Api.Infrastructure;
+
+namespace Taslim.Api.AcademicIntegration;
+
+// ── request/response shapes ────────────────────────────────────────────────────────────
+// Shape rule shared with the template lane: nothing on the customer-facing surface names
+// a backend service, model or billing rail. Usage is expressed only as the project's own
+// ceiling and spent amounts; stage errors pass through the token sanitizer below.
+
+public sealed record AcademicProjectCreateRequest(
+    string? RequestKey,
+    string? ResearchQuestion,
+    string? Discipline,
+    string? Level,
+    string? Method,
+    string? CitationStyle,
+    string? Language,
+    int? MaxDiscoverySources,
+    int? MaxEvidencePerSource,
+    IReadOnlyList<string>? TargetChapterHeadings,
+    IReadOnlyList<string>? RequiredApprovals,
+    int? MaxStageAttempts,
+    AcademicBudgetRequestDto? Budget);
+
+public sealed record AcademicBudgetRequestDto(
+    decimal? MaxTotalUsd,
+    decimal? MaxStageUsd,
+    int? MaxTotalCalls,
+    int? MaxStageCalls);
+
+public sealed record AcademicApprovalRequest(
+    string? Decision,
+    string? Notes);
+
+public sealed record AcademicStageDto(
+    string Stage,
+    string State,
+    int AttemptCount,
+    long? OutputCheckpointRevision,
+    string? LastErrorCode,
+    string? LastErrorDetail,
+    DateTime? StartedAtUtc,
+    DateTime? CompletedAtUtc);
+
+public sealed record AcademicApprovalDto(
+    string Kind,
+    long CheckpointRevision,
+    string Decision,
+    string? Notes,
+    DateTime DecidedAtUtc);
+
+public sealed record AcademicPendingApprovalDto(
+    string Kind,
+    long CheckpointRevision,
+    DateTime RequestedAtUtc,
+    IReadOnlyList<string> ReviewerPrompts);
+
+public sealed record AcademicUsageDto(
+    decimal SpentUsd,
+    decimal CeilingUsd,
+    decimal RemainingUsd,
+    int CallsUsed,
+    int CallCeiling,
+    int CallsRemaining);
+
+public sealed record AcademicProjectSummaryDto(
+    Guid ProjectId,
+    Guid WorkspaceId,
+    string RequestKey,
+    string ResearchQuestion,
+    string Discipline,
+    string Level,
+    string State,
+    string? StateCode,
+    long Revision,
+    DateTime CreatedAtUtc,
+    DateTime UpdatedAtUtc);
+
+public sealed record AcademicProjectDto(
+    AcademicProjectSummaryDto Project,
+    IReadOnlyList<AcademicStageDto> Stages,
+    AcademicPendingApprovalDto? PendingApproval,
+    IReadOnlyList<AcademicApprovalDto> Approvals,
+    AcademicUsageDto Usage,
+    IReadOnlyList<string> ConnectedStages,
+    IReadOnlyList<string> MissingStages,
+    bool EvidenceCurrent,
+    int PlanVersion,
+    int SourceCount,
+    int IncludedCount,
+    int ExcludedCount,
+    int UndeterminedCount,
+    int EvidenceCount,
+    int ThemeCount,
+    int ChapterCount,
+    AcademicVerificationDto? Verification,
+    // Machine-readable outcome of the action that produced this snapshot (APPLIED,
+    // ALREADY_APPLIED, BUDGET_RAISED, BUDGET_UNCHANGED, ...). Null on plain reads.
+    string? Code);
+
+public sealed record AcademicVerificationDto(
+    bool? ReportPassed,
+    IReadOnlyList<string> ChecksRequired,
+    IReadOnlyList<string> ChecksRun,
+    IReadOnlyList<AcademicIntegrityIssueDto> Findings,
+    string Boundary);
+
+public sealed record AcademicIntegrityIssueDto(
+    string Code,
+    string Detail,
+    string Severity,
+    string Stage);
+
+public sealed record AcademicMatrixCellViewDto(
+    string QuestionKey,
+    Guid SourceId,
+    string Stance,
+    bool HasVerifiableLocator,
+    string AccessLevel,
+    string Provenance,
+    string Quality,
+    string Screening,
+    IReadOnlyList<Guid> EvidenceIds);
+
+public sealed record AcademicMatrixFindingViewDto(
+    string FindingType,
+    string QuestionKey,
+    string Code,
+    string Severity,
+    string Explanation,
+    string? SuggestedStep,
+    Guid? LeftSourceId,
+    Guid? RightSourceId);
+
+public sealed record AcademicMatrixViewDto(
+    Guid ProjectId,
+    string ProtocolId,
+    bool Projected,
+    IReadOnlyList<AcademicMatrixCellViewDto> Cells,
+    IReadOnlyList<AcademicMatrixFindingViewDto> Findings);
+
+public sealed record AcademicCheckpointDto(
+    long Revision,
+    string CheckpointKey,
+    DateTime CommittedAtUtc);
+
+/// <summary>
+/// Authenticated, workspace-scoped surface for academic research projects.
+///
+/// Every route resolves the owning workspace from stored state and requires membership;
+/// unknown projects and projects in foreign workspaces both answer the identical 404
+/// envelope so project ids cannot be enumerated across tenants. Mutations run behind
+/// CSRF like the rest of the API. None of these routes reaches a scholarly catalog or an
+/// export renderer: until those lanes register stage handlers, <c>run</c> reports the
+/// exact missing stage instead of pretending, and reads return whatever the committed
+/// checkpoints actually hold.
+/// </summary>
+[ApiController]
+[Authorize]
+public sealed class AcademicProjectsController(
+    AcademicProjectsService service,
+    DbContext db,
+    WorkspaceAccessService access) : ControllerBase
+{
+    [HttpGet("api/workspaces/{workspaceId:guid}/academic-projects")]
+    public async Task<IActionResult> List(
+        Guid workspaceId,
+        [FromQuery] int page = 1,
+        [FromQuery] int pageSize = 20,
+        CancellationToken cancellationToken = default)
+    {
+        if (!await access.IsMemberAsync(GetUserId(), workspaceId, cancellationToken)) return Forbid();
+        var rows = await service.ListAsync(workspaceId, page, pageSize, cancellationToken);
+        var total = await service.CountAsync(workspaceId, cancellationToken);
+        Response.Headers["X-Page"] = Math.Clamp(page, 1, 10_000).ToString();
+        Response.Headers["X-Page-Size"] = Math.Clamp(pageSize, 1, 100).ToString();
+        Response.Headers["X-Total-Count"] = total.ToString();
+        return Ok(rows.Select(Summary).ToArray());
+    }
+
+    [HttpPost("api/workspaces/{workspaceId:guid}/academic-projects")]
+    [ValidateAntiForgeryToken]
+    public async Task<IActionResult> Create(
+        Guid workspaceId,
+        AcademicProjectCreateRequest request,
+        [FromHeader(Name = "Idempotency-Key")] string? idempotencyKey,
+        CancellationToken cancellationToken)
+    {
+        if (!await access.IsMemberAsync(GetUserId(), workspaceId, cancellationToken)) return Forbid();
+
+        var (input, parseError) = ParseCreateInput(request, idempotencyKey);
+        if (input is null) return ApiResults.Validation(this, parseError!);
+
+        var outcome = await service.CreateAsync(workspaceId, input, cancellationToken);
+        return outcome.Status switch
+        {
+            AcademicProjectServiceStatus.Validation => ApiResults.Error(this, 400, outcome.Code, outcome.Detail),
+            AcademicProjectServiceStatus.Conflict => ApiResults.Error(this, 409, outcome.Code, outcome.Detail),
+            _ when outcome.Created => Created($"/api/academic-projects/{outcome.Snapshot!.ProjectId}", await BuildDtoAsync(outcome, cancellationToken)),
+            _ => Ok(await BuildDtoAsync(outcome, cancellationToken)),
+        };
+    }
+
+    [HttpGet("api/academic-projects/{projectId:guid}")]
+    public async Task<IActionResult> Get(Guid projectId, CancellationToken cancellationToken)
+    {
+        var (snapshot, failure) = await FencedLoadAsync(projectId, cancellationToken);
+        if (failure is not null) return failure;
+        return Ok(await BuildDtoAsync(
+            new AcademicProjectServiceResult
+            {
+                Status = AcademicProjectServiceStatus.Ok,
+                Snapshot = snapshot,
+            },
+            cancellationToken));
+    }
+
+    [HttpPost("api/academic-projects/{projectId:guid}/run")]
+    [ValidateAntiForgeryToken]
+    public async Task<IActionResult> Run(Guid projectId, CancellationToken cancellationToken)
+    {
+        var (snapshot, failure) = await FencedLoadAsync(projectId, cancellationToken);
+        if (failure is not null) return failure;
+
+        var outcome = await service.RunAsync(snapshot!.WorkspaceId, projectId, cancellationToken);
+        return outcome.Status switch
+        {
+            AcademicProjectServiceStatus.NotFound => ApiResults.Error(this, 404, "PROJECT_NOT_FOUND", "Project not found."),
+            AcademicProjectServiceStatus.NotConnected => StatusCode(
+                StatusCodes.Status501NotImplemented,
+                new
+                {
+                    error = new
+                    {
+                        code = outcome.Code,
+                        message = $"The {outcome.MissingStage} stage is not wired in this build yet.",
+                        missingStage = outcome.MissingStage?.ToString(),
+                        connectedStages = service.ConnectedStages
+                            .OrderBy(stage => (int)stage)
+                            .Select(stage => stage.ToString())
+                            .ToArray(),
+                        resumableAtRevision = outcome.Snapshot?.Revision,
+                    },
+                }),
+            AcademicProjectServiceStatus.Conflict => ApiResults.Error(this, 409, outcome.Code, outcome.Detail),
+            _ => Ok(await BuildDtoAsync(outcome, cancellationToken)),
+        };
+    }
+
+    [HttpPost("api/academic-projects/{projectId:guid}/approvals/{kind}")]
+    [ValidateAntiForgeryToken]
+    public async Task<IActionResult> Approve(
+        Guid projectId,
+        string kind,
+        AcademicApprovalRequest request,
+        CancellationToken cancellationToken)
+    {
+        var (snapshot, failure) = await FencedLoadAsync(projectId, cancellationToken);
+        if (failure is not null) return failure;
+
+        if (!Enum.TryParse<AcademicApprovalKind>(kind, ignoreCase: true, out var approvalKind))
+            return ApiResults.Validation(this, "Unknown approval checkpoint.");
+        if (!Enum.TryParse<AcademicApprovalDecision>(request.Decision, ignoreCase: true, out var decision))
+            return ApiResults.Validation(this, "Decision must be Approved, RequestRevision, or Rejected.");
+
+        var outcome = await service.SubmitApprovalAsync(
+            snapshot!.WorkspaceId, projectId, approvalKind, decision, request.Notes, GetUserId(), cancellationToken);
+
+        return outcome.Status switch
+        {
+            AcademicProjectServiceStatus.NotFound => ApiResults.Error(this, 404, "PROJECT_NOT_FOUND", "Project not found."),
+            AcademicProjectServiceStatus.Conflict => ApiResults.Error(this, 409, outcome.Code, outcome.Detail),
+            _ => Ok(await BuildDtoAsync(outcome, cancellationToken)),
+        };
+    }
+
+    [HttpPost("api/academic-projects/{projectId:guid}/budget")]
+    [ValidateAntiForgeryToken]
+    public async Task<IActionResult> RaiseBudget(
+        Guid projectId,
+        AcademicBudgetRequestDto request,
+        CancellationToken cancellationToken)
+    {
+        var (snapshot, failure) = await FencedLoadAsync(projectId, cancellationToken);
+        if (failure is not null) return failure;
+
+        var outcome = await service.RaiseBudgetAsync(
+            snapshot!.WorkspaceId,
+            projectId,
+            new AcademicBudgetRaiseInput
+            {
+                MaxTotalUsd = request.MaxTotalUsd,
+                MaxStageUsd = request.MaxStageUsd,
+                MaxTotalCalls = request.MaxTotalCalls,
+                MaxStageCalls = request.MaxStageCalls,
+            },
+            cancellationToken);
+
+        return outcome.Status switch
+        {
+            AcademicProjectServiceStatus.NotFound => ApiResults.Error(this, 404, "PROJECT_NOT_FOUND", "Project not found."),
+            AcademicProjectServiceStatus.Validation => ApiResults.Error(this, 400, outcome.Code, outcome.Detail),
+            AcademicProjectServiceStatus.Conflict => ApiResults.Error(this, 409, outcome.Code, outcome.Detail),
+            _ => Ok(await BuildDtoAsync(outcome, cancellationToken)),
+        };
+    }
+
+    [HttpGet("api/academic-projects/{projectId:guid}/evidence-matrix")]
+    public async Task<IActionResult> Matrix(Guid projectId, CancellationToken cancellationToken)
+    {
+        var (snapshot, failure) = await FencedLoadAsync(projectId, cancellationToken);
+        if (failure is not null) return failure;
+
+        var cells = await db.Set<AcademicMatrixCellEntity>()
+            .AsNoTracking()
+            .Where(c => c.WorkspaceId == snapshot!.WorkspaceId && c.ProjectId == projectId)
+            .OrderBy(c => c.QuestionKey)
+            .ThenBy(c => c.SourceId)
+            .ToListAsync(cancellationToken);
+
+        var findings = await db.Set<AcademicMatrixFindingEntity>()
+            .AsNoTracking()
+            .Where(f => f.WorkspaceId == snapshot!.WorkspaceId && f.ProjectId == projectId)
+            .OrderBy(f => f.FindingType)
+            .ThenBy(f => f.QuestionKey)
+            .ThenBy(f => f.Id)
+            .ToListAsync(cancellationToken);
+
+        return Ok(new AcademicMatrixViewDto(
+            projectId,
+            AcademicEvidenceProjector.ProtocolIdFor(projectId),
+            Projected: cells.Count > 0 || findings.Count > 0,
+            [.. cells.Select(cell => new AcademicMatrixCellViewDto(
+                cell.QuestionKey,
+                cell.SourceId,
+                cell.Stance,
+                cell.HasVerifiableLocator,
+                cell.AccessLevel,
+                cell.Provenance,
+                cell.Quality,
+                cell.Screening,
+                ParseGuids(cell.EvidenceIdsJson)))],
+            [.. findings.Select(finding => new AcademicMatrixFindingViewDto(
+                finding.FindingType,
+                finding.QuestionKey,
+                finding.Code,
+                finding.Severity,
+                AcademicProjectTextPolicy.Sanitize(finding.Explanation),
+                finding.SuggestedStep is null ? null : AcademicProjectTextPolicy.Sanitize(finding.SuggestedStep),
+                finding.LeftSourceId,
+                finding.RightSourceId))]));
+    }
+
+    [HttpGet("api/academic-projects/{projectId:guid}/verification")]
+    public async Task<IActionResult> Verification(Guid projectId, CancellationToken cancellationToken)
+    {
+        var (snapshot, failure) = await FencedLoadAsync(projectId, cancellationToken);
+        if (failure is not null) return failure;
+
+        var findings = AcademicIntegrityGuard.Validate(snapshot!)
+            .Select(ToIntegrityDto)
+            .ToArray();
+
+        var report = snapshot!.Verification;
+        return Ok(new AcademicVerificationDto(
+            report?.Passed,
+            [.. AcademicIntegrityGuard.RequiredVerificationChecks],
+            report is null ? [] : [.. report.ChecksRun],
+            findings,
+            "Citations may reference only sources inside the approved library, quotations only words actually read at "
+            + "the recorded access level, and page pinpoints only locators anchored to a retrieved copy. Findings here "
+            + "recompute from the committed checkpoint; nothing is asserted beyond what the lanes stored."));
+    }
+
+    [HttpGet("api/academic-projects/{projectId:guid}/checkpoints")]
+    public async Task<IActionResult> Checkpoints(
+        Guid projectId,
+        [FromQuery] int take = 50,
+        CancellationToken cancellationToken = default)
+    {
+        var (snapshot, failure) = await FencedLoadAsync(projectId, cancellationToken);
+        if (failure is not null) return failure;
+
+        var rows = await service.CheckpointsAsync(snapshot!.WorkspaceId, projectId, take, cancellationToken);
+        return Ok(rows
+            .Select(row => new AcademicCheckpointDto(row.Revision, row.CheckpointKey, row.CommittedAtUtc))
+            .ToArray());
+    }
+
+    // --- plumbing ----------------------------------------------------------------------------
+
+    /// <summary>
+    /// Fence keyed on stored scope: the workspace that owns the row decides membership, and a
+    /// project id that is unknown or foreign answers the identical 404. Only after the fence
+    /// does the snapshot get deserialized for a member.
+    /// </summary>
+    private async Task<(AcademicWorkflowSnapshot? Snapshot, IActionResult? Failure)> FencedLoadAsync(
+        Guid projectId,
+        CancellationToken cancellationToken)
+    {
+        var ownerWorkspace = await service.ResolveWorkspaceAsync(projectId, cancellationToken);
+        if (ownerWorkspace is null)
+            return (null, ApiResults.Error(this, 404, "PROJECT_NOT_FOUND", "Project not found."));
+        if (!await access.IsMemberAsync(GetUserId(), ownerWorkspace.Value, cancellationToken))
+            return (null, Forbid());
+
+        var snapshot = await service.LoadFencedAsync(ownerWorkspace.Value, projectId, cancellationToken);
+        if (snapshot is null)
+            return (null, ApiResults.Error(this, 404, "PROJECT_NOT_FOUND", "Project not found."));
+        return (snapshot, null);
+    }
+
+    private async Task<AcademicProjectDto> BuildDtoAsync(AcademicProjectServiceResult outcome, CancellationToken cancellationToken)
+    {
+        var snapshot = outcome.Snapshot!;
+        var included = snapshot.IncludedSourceIds.Count;
+        var excluded = snapshot.Screening.Count(s => s.Decision == AcademicScreeningDecision.Excluded);
+        var undetermined = snapshot.Screening.Count(s => s.Decision == AcademicScreeningDecision.Uncertain);
+        var stale = await service.IsProjectionStaleAsync(snapshot.ProjectId, cancellationToken);
+
+        return new AcademicProjectDto(
+            Summary(snapshot),
+            [.. snapshot.Stages.Select(stage => new AcademicStageDto(
+                stage.Stage.ToString(),
+                stage.State.ToString(),
+                stage.AttemptCount,
+                stage.OutputCheckpointRevision,
+                stage.LastErrorCode,
+                stage.LastErrorDetail is null ? null : AcademicProjectTextPolicy.Sanitize(stage.LastErrorDetail),
+                stage.StartedAtUtc,
+                stage.CompletedAtUtc))],
+            snapshot.PendingApproval is null ? null : new AcademicPendingApprovalDto(
+                snapshot.PendingApproval.Kind.ToString(),
+                snapshot.PendingApproval.CheckpointRevision,
+                snapshot.PendingApproval.RequestedAtUtc,
+                [.. snapshot.PendingApproval.ReviewerPrompts.Select(AcademicProjectTextPolicy.Sanitize)]),
+            [.. snapshot.Approvals.Select(approval => new AcademicApprovalDto(
+                approval.Kind.ToString(),
+                approval.CheckpointRevision,
+                approval.Decision.ToString(),
+                approval.Notes is null ? null : AcademicProjectTextPolicy.Sanitize(approval.Notes),
+                approval.DecidedAtUtc))],
+            new AcademicUsageDto(
+                AcademicBudgetLedger.ChargedUsd(snapshot),
+                snapshot.Request.Budget.MaxTotalUsd,
+                AcademicBudgetLedger.RemainingUsd(snapshot),
+                AcademicBudgetLedger.ChargedProviderCalls(snapshot),
+                snapshot.Request.Budget.MaxTotalProviderCalls,
+                AcademicBudgetLedger.RemainingProviderCalls(snapshot)),
+            [.. AcademicStageOrder.Stages.Where(service.ConnectedStages.Contains).Select(s => s.ToString())],
+            [.. AcademicStageOrder.Stages.Where(s => !service.ConnectedStages.Contains(s)).Select(s => s.ToString())],
+            EvidenceCurrent: !stale,
+            snapshot.Plan?.PlanVersion ?? 0,
+            snapshot.Sources.Count,
+            included,
+            excluded,
+            undetermined,
+            snapshot.Evidence.Count,
+            snapshot.Themes.Count,
+            snapshot.Chapters.Count,
+            snapshot.Verification is null ? null : ToVerification(snapshot),
+            outcome.Code is { Length: > 0 } ? outcome.Code : null);
+    }
+
+    private static AcademicVerificationDto ToVerification(AcademicWorkflowSnapshot snapshot) => new(
+        snapshot.Verification!.Passed,
+        [.. AcademicIntegrityGuard.RequiredVerificationChecks],
+        [.. snapshot.Verification.ChecksRun],
+        [.. snapshot.Verification.Issues.Select(ToIntegrityDto)],
+        "Stored verification report recomputed against the committed checkpoint. Blocking findings prevent completion.");
+
+    private static AcademicIntegrityIssueDto ToIntegrityDto(AcademicIntegrityIssue issue) => new(
+        issue.Code,
+        AcademicProjectTextPolicy.Sanitize(issue.Detail),
+        issue.Severity.ToString(),
+        issue.Stage.ToString());
+
+    private static AcademicProjectSummaryDto Summary(AcademicWorkflowProjectEntity row)
+    {
+        var snapshot = SafeDeserialize(row.SnapshotJson);
+        return new AcademicProjectSummaryDto(
+            row.ProjectId,
+            row.WorkspaceId,
+            row.RequestKey,
+            snapshot?.Request.ResearchQuestion ?? string.Empty,
+            snapshot?.Request.Discipline ?? string.Empty,
+            snapshot?.Request.Level.ToString() ?? "Masters",
+            row.State,
+            row.StateCode,
+            row.Revision,
+            row.CreatedAtUtc,
+            row.UpdatedAtUtc);
+    }
+
+    private static AcademicProjectSummaryDto Summary(AcademicWorkflowSnapshot snapshot) => new(
+        snapshot.ProjectId,
+        snapshot.WorkspaceId,
+        snapshot.RequestKey,
+        snapshot.Request.ResearchQuestion,
+        snapshot.Request.Discipline,
+        snapshot.Request.Level.ToString(),
+        snapshot.State.ToString(),
+        snapshot.StateCode,
+        snapshot.Revision,
+        snapshot.CreatedAtUtc,
+        snapshot.UpdatedAtUtc);
+
+    private static AcademicWorkflowSnapshot? SafeDeserialize(string json)
+    {
+        try
+        {
+            return AcademicWorkflowSerialization.Deserialize(json);
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
+
+    private static IReadOnlyList<Guid> ParseGuids(string json)
+    {
+        if (string.IsNullOrWhiteSpace(json)) return [];
+        try
+        {
+            using var document = JsonDocument.Parse(json);
+            if (document.RootElement.ValueKind != JsonValueKind.Array) return [];
+            var ids = new List<Guid>();
+            foreach (var element in document.RootElement.EnumerateArray())
+            {
+                var text = element.ValueKind == JsonValueKind.String ? element.GetString() : element.ToString();
+                if (Guid.TryParse(text, out var guid)) ids.Add(guid);
+            }
+
+            return ids;
+        }
+        catch (JsonException)
+        {
+            return [];
+        }
+    }
+
+    private Guid GetUserId() => Guid.Parse(
+        User.FindFirst(ClaimTypes.NameIdentifier)?.Value ?? throw new InvalidOperationException("Authenticated user identifier is missing."));
+
+    private static (AcademicProjectCreateInput? Input, string? Error) ParseCreateInput(
+        AcademicProjectCreateRequest request,
+        string? idempotencyKey)
+    {
+        var requestKey = !string.IsNullOrWhiteSpace(idempotencyKey)
+            ? idempotencyKey.Trim()
+            : (request.RequestKey ?? string.Empty).Trim();
+        if (string.IsNullOrEmpty(requestKey) || requestKey.Length > 200)
+            return (null, "A request key of 1 to 200 characters (or an Idempotency-Key header) is required.");
+        if (string.IsNullOrWhiteSpace(request.ResearchQuestion))
+            return (null, "The research question is required.");
+        if (string.IsNullOrWhiteSpace(request.Discipline))
+            return (null, "The discipline is required.");
+
+        var level = ParseEnum<AcademicResearchLevel>(request.Level, AcademicResearchLevel.Masters);
+        var method = ParseEnum<AcademicMethod>(request.Method, AcademicMethod.SystematicReview);
+        var style = ParseEnum<AcademicCitationStyle>(request.CitationStyle, AcademicCitationStyle.Apa7);
+
+        List<AcademicApprovalKind>? approvals = null;
+        if (request.RequiredApprovals is { Count: > 0 })
+        {
+            approvals = [];
+            foreach (var item in request.RequiredApprovals)
+            {
+                if (!Enum.TryParse<AcademicApprovalKind>(item, ignoreCase: true, out var parsed))
+                    return (null, $"Unknown approval checkpoint: {item}");
+                if (!approvals.Contains(parsed)) approvals.Add(parsed);
+            }
+        }
+
+        var budget = new AcademicBudgetPolicy();
+        if (request.Budget is not null)
+        {
+            budget = budget with
+            {
+                MaxTotalUsd = request.Budget.MaxTotalUsd ?? budget.MaxTotalUsd,
+                MaxStageUsd = request.Budget.MaxStageUsd ?? budget.MaxStageUsd,
+                MaxTotalProviderCalls = request.Budget.MaxTotalCalls ?? budget.MaxTotalProviderCalls,
+                MaxStageProviderCalls = request.Budget.MaxStageCalls ?? budget.MaxStageProviderCalls,
+            };
+        }
+
+        return (new AcademicProjectCreateInput
+        {
+            RequestKey = requestKey,
+            ResearchQuestion = request.ResearchQuestion,
+            Discipline = request.Discipline,
+            Level = level,
+            Method = method,
+            CitationStyle = style,
+            Language = string.IsNullOrWhiteSpace(request.Language) ? "en" : request.Language.Trim(),
+            MaxDiscoverySources = Math.Clamp(request.MaxDiscoverySources ?? 120, 1, AcademicProjectsService.AbsoluteMaxDiscoverySources),
+            MaxEvidencePerSource = Math.Clamp(request.MaxEvidencePerSource ?? 6, 1, AcademicProjectsService.AbsoluteMaxEvidencePerSource),
+            TargetChapterHeadings = (request.TargetChapterHeadings ?? [])
+                .Where(h => !string.IsNullOrWhiteSpace(h))
+                .Select(h => h.Trim())
+                .Take(24)
+                .ToArray(),
+            RequiredApprovals = approvals ??
+            [
+                AcademicApprovalKind.Plan,
+                AcademicApprovalKind.SourceLibrary,
+                AcademicApprovalKind.Synthesis,
+                AcademicApprovalKind.FinalVerification,
+            ],
+            MaxStageAttempts = Math.Clamp(request.MaxStageAttempts ?? 3, 1, 10),
+            Budget = budget,
+        }, null);
+    }
+
+    private static T ParseEnum<T>(string? value, T fallback) where T : struct =>
+        Enum.TryParse<T>(value, ignoreCase: true, out var parsed) ? parsed : fallback;
+}
+
+/// <summary>
+/// Customer-facing text policy for stage output and stored details: backend service nouns
+/// that leaked into an error string (a catalog failure detail, a budget sentence) are
+/// rewritten to the platform-neutral wording the UI is allowed to show. The machine code
+/// beside the text keeps the precision for support.
+/// </summary>
+public static class AcademicProjectTextPolicy
+{
+    private static readonly (string From, string To)[] Replacements =
+    [
+        ("provider-call", "call"),
+        ("provider calls", "calls"),
+        ("provider call", "call"),
+        ("providers", "services"),
+        ("provider", "service"),
+        ("OpenAlex", "the scholarly catalog"),
+        ("Crossref", "the registry"),
+        ("OpenLibrary", "the book catalog"),
+        ("GoogleBooks", "the book catalog"),
+    ];
+
+    public static string Sanitize(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return string.Empty;
+        var text = value;
+        foreach (var (from, to) in Replacements)
+        {
+            text = ReplaceOrdinal(text, from, to);
+        }
+
+        return text.Length > 600 ? text[..600] : text;
+    }
+
+    private static string ReplaceOrdinal(string text, string from, string to)
+    {
+        var builder = new System.Text.StringBuilder(text.Length);
+        var index = 0;
+        while (index < text.Length)
+        {
+            var found = text.IndexOf(from, index, StringComparison.OrdinalIgnoreCase);
+            if (found < 0)
+            {
+                builder.Append(text, index, text.Length - index);
+                break;
+            }
+
+            builder.Append(text, index, found - index);
+            builder.Append(to);
+            index = found + from.Length;
+        }
+
+        return builder.ToString();
+    }
+}
