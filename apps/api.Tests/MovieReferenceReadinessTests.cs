@@ -32,6 +32,102 @@ public sealed class MovieReferenceReadinessTests
         Assert.Equal(propId, result.SourceId);
     }
 
+    [Theory]
+    [InlineData("A monkey crosses the room.", "key")]
+    [InlineData("The keyboard player tunes between takes.", "key")]
+    [InlineData("She showed genuine compassion to the courier.", "compass")]
+    public void An_unrelated_substring_cannot_falsely_satisfy_a_canonical_prop_reference(string shotText, string propName)
+    {
+        var result = MovieReferenceReadinessPolicy.EvaluatePropReference(shotText, [Prop(propName)], important: true);
+
+        Assert.Equal(MovieReferenceReadinessItemStates.Complete, result.State);
+        Assert.False(result.BlocksGeneration);
+        Assert.Null(result.SourceId);
+    }
+
+    [Fact]
+    public void A_multiword_prop_name_requires_its_contiguous_token_sequence()
+    {
+        var propId = Guid.NewGuid();
+        var contiguous = MovieReferenceReadinessPolicy.EvaluatePropReference(
+            "Mara hides the brass compass under the coat.",
+            [Prop("Brass Compass", propId)],
+            important: true);
+        Assert.Equal(MovieReferenceReadinessItemStates.Complete, contiguous.State);
+        Assert.Equal(propId, contiguous.SourceId);
+
+        var separated = MovieReferenceReadinessPolicy.EvaluatePropReference(
+            "The compass is brass.",
+            [Prop("Brass Compass", propId)],
+            important: true);
+        Assert.Equal(MovieReferenceReadinessItemStates.Missing, separated.State);
+        Assert.True(separated.BlocksGeneration);
+    }
+
+    [Fact]
+    public void A_non_latin_prop_name_matches_only_at_word_boundaries()
+    {
+        var propId = Guid.NewGuid();
+        var matched = MovieReferenceReadinessPolicy.EvaluatePropReference(
+            "Mara lifts the کۆشک from the crate.",
+            [Prop("کۆشک", propId)],
+            important: true);
+        Assert.Equal(MovieReferenceReadinessItemStates.Complete, matched.State);
+        Assert.Equal(propId, matched.SourceId);
+
+        var unrelated = MovieReferenceReadinessPolicy.EvaluatePropReference(
+            "Mara sketches the landscape from the hilltop.",
+            [Prop("کۆشک", propId)],
+            important: true);
+        Assert.Equal(MovieReferenceReadinessItemStates.Complete, unrelated.State);
+        Assert.Null(unrelated.SourceId);
+    }
+
+    [Fact]
+    public void The_director_empty_prop_requirement_header_is_not_a_real_prop_requirement()
+    {
+        var result = MovieReferenceReadinessPolicy.EvaluatePropReference(
+            "Important props: . VFX: none. Production notes: none",
+            [Prop("notebook")],
+            important: true);
+
+        Assert.Equal(MovieReferenceReadinessItemStates.Complete, result.State);
+        Assert.False(result.BlocksGeneration);
+        Assert.True(result.OverrideAllowed);
+        Assert.Null(result.SourceId);
+    }
+
+    [Fact]
+    public void The_director_prop_requirement_header_still_counts_when_props_are_listed()
+    {
+        var propId = Guid.NewGuid();
+        var satisfied = MovieReferenceReadinessPolicy.EvaluatePropReference(
+            "Important props: notebook. VFX: none. Production notes: none",
+            [Prop("notebook", propId)],
+            important: true);
+        Assert.Equal(MovieReferenceReadinessItemStates.Complete, satisfied.State);
+        Assert.Equal(propId, satisfied.SourceId);
+
+        var unsatisfied = MovieReferenceReadinessPolicy.EvaluatePropReference(
+            "Important props: notebook. VFX: none. Production notes: none",
+            [Prop("brass compass", propId)],
+            important: true);
+        Assert.Equal(MovieReferenceReadinessItemStates.Missing, unsatisfied.State);
+        Assert.True(unsatisfied.BlocksGeneration);
+    }
+
+    [Fact]
+    public void A_genuine_plural_prop_mention_still_blocks_a_shot_without_a_canonical_match()
+    {
+        var result = MovieReferenceReadinessPolicy.EvaluatePropReference(
+            "The crew arranges props on the table between takes.",
+            [Prop("notebook")],
+            important: true);
+
+        Assert.Equal(MovieReferenceReadinessItemStates.Missing, result.State);
+        Assert.True(result.BlocksGeneration);
+    }
+
     [Fact]
     public void Ten_reference_dimensions_are_aggregated_into_an_explainable_blocked_result()
     {

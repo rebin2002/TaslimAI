@@ -1,6 +1,7 @@
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using Microsoft.EntityFrameworkCore;
 using Taslim.Api.Authorization;
 using Taslim.Api.Persistence;
@@ -94,7 +95,7 @@ public static class MovieReferenceReadinessPolicy
     {
         var text = shotText ?? string.Empty;
         var matched = props.FirstOrDefault(prop => ContainsWord(text, prop.Name));
-        var propMentioned = ContainsAny(text, "prop", "object", "notebook", "compass", "key", "seed", "weapon");
+        var propMentioned = ContainsAny(SignalText(text), "prop", "props", "object", "notebook", "compass", "key", "seed", "weapon");
 
         if (!propMentioned && matched is null)
             return new("props", "Prop references", MovieReferenceReadinessItemStates.Complete, false, false, true, "No prop reference is applicable to this shot.");
@@ -103,10 +104,68 @@ public static class MovieReferenceReadinessPolicy
         return new("props", "Prop references", MovieReferenceReadinessItemStates.Missing, important, important, !important, "The shot calls for a prop, but no named canonical World prop reference matches the shot.", "world_prop");
     }
 
-    private static bool ContainsWord(string? text, string? value) =>
-        !string.IsNullOrWhiteSpace(text) && !string.IsNullOrWhiteSpace(value) && text.Contains(value.Trim(), StringComparison.OrdinalIgnoreCase);
+    // The Director shot-plan apply executor always emits an "Important props: ." header
+    // even when the approved plan carries no canonical props, so the empty placeholder
+    // must not count as a genuine prop requirement. Headers that list real props keep
+    // the signal and remain effective.
+    private static readonly Regex EmptyPropRequirementHeader = new(
+        @"\bImportant\s+props:\s*\.(?=\s|$)",
+        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+
+    private static string SignalText(string text) =>
+        text.Length == 0 ? text : EmptyPropRequirementHeader.Replace(text, " ");
+
+    // Prop names and requirement signals match whole tokens inside Unicode words only,
+    // so unrelated substrings such as "key" inside "monkey" or "compass" inside
+    // "compassion" cannot falsely satisfy a prop reference. A multi-word prop name
+    // matches when its token sequence appears contiguously in the shot text.
+    private static bool ContainsWord(string? text, string? value)
+    {
+        if (string.IsNullOrWhiteSpace(text) || string.IsNullOrWhiteSpace(value)) return false;
+        var phrase = Tokenize(value.Trim());
+        if (phrase.Count == 0) return false;
+        var tokens = Tokenize(text);
+        for (var start = 0; start + phrase.Count <= tokens.Count; start++)
+        {
+            var matches = true;
+            for (var index = 0; index < phrase.Count; index++)
+            {
+                if (!string.Equals(tokens[start + index], phrase[index], StringComparison.OrdinalIgnoreCase))
+                {
+                    matches = false;
+                    break;
+                }
+            }
+            if (matches) return true;
+        }
+        return false;
+    }
 
     private static bool ContainsAny(string? text, params string[] terms) => terms.Any(term => ContainsWord(text, term));
+
+    private static List<string> Tokenize(string value)
+    {
+        var tokens = new List<string>();
+        var runStart = -1;
+        for (var index = 0; index <= value.Length; index++)
+        {
+            if (index < value.Length && IsWordCharacter(value[index]))
+            {
+                if (runStart < 0) runStart = index;
+            }
+            else if (runStart >= 0)
+            {
+                tokens.Add(value.Substring(runStart, index - runStart));
+                runStart = -1;
+            }
+        }
+        return tokens;
+    }
+
+    // Intra-word Unicode marks (apostrophe, curly apostrophe, zero-width non-joiner)
+    // stay inside a token so names like "Mara's notebook" match as written.
+    private static bool IsWordCharacter(char value) =>
+        char.IsLetterOrDigit(value) || value is '\'' or '\u2019' or '\u200C';
 }
 
 public sealed class MovieReferenceReadinessOverrideRequest
