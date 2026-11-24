@@ -658,6 +658,47 @@ describe("project revision fence - successful saves and session hygiene", () => 
     expect(patches(store)[0]!.ifMatch).toBe(token);
   });
 
+  it("keeps the baseline of a write whose ETag was stripped, and re-captures cleanly", async () => {
+    // Fail-closed does not mean forgetting what the member just saved. When an
+    // intermediate strips the write answer's `ETag`, the token is withheld - the
+    // next save must re-capture before it may declare anything - but the row
+    // demonstrably holds the content THIS draft wrote. Leaving the older baseline
+    // behind would make the next capture compare the row against a copy that no
+    // longer exists anywhere and report a conflict that never happened.
+    const store = server([row()]);
+    const { ProjectRevisionSession, isRevisionDiverged } = await loadClient(store.fetchMock);
+    const handler = store.handler;
+    const session = new ProjectRevisionSession("project-1", "context");
+    session.noteDraft(displayed(store));
+    await session.begin();
+
+    // A write whose answer arrives without the header - a proxy that strips it.
+    // Only the PATCH answer is altered; the reads around it stay honest, and the
+    // CSRF prefetch a write issues is untouched.
+    store.fetchMock.mockImplementation(async (input: string, init?: RequestInit) => {
+      const answer = await handler(input, init);
+      if ((init?.method ?? "GET").toUpperCase() !== "PATCH") return answer;
+      const headers = new Headers(answer.headers);
+      headers.delete("ETag");
+      return new Response(await answer.text(), { status: answer.status, headers });
+    });
+    const saved = await session.save({ name: "Saved without a published header" });
+    expect(saved.revision).toBeNull();
+    store.fetchMock.mockImplementation((input: string, init?: RequestInit) => handler(input, init));
+    // Nothing is held to declare, so the fence stays shut until a real read lands.
+    expect(session.heldRevision).toBeNull();
+    expect(session.heldBase).toBeNull();
+    // The baseline moved with the write.
+    expect(session.heldDraft?.name).toBe("Saved without a published header");
+
+    // The following read publishes a real token for exactly that content, so the
+    // next edit saves instead of conflicting with its own previous save.
+    const second = await session.save({ name: "Second edit" });
+    expect(isRevisionDiverged(second)).toBe(false);
+    expect(second.project.name).toBe("Second edit");
+    expect(patches(store).map((call) => call.ifMatch)).toEqual([stampFrom(0), stampFrom(1)]);
+  });
+
   it("sends no If-Match from the legacy call, which is why the fence was missing", async () => {
     const store = server([row()]);
     const { api } = await loadClient(store.fetchMock);

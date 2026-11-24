@@ -360,22 +360,33 @@ export class ProjectRevisionSession {
   /**
    * Binds the answer to this session's own fenced write. The row now holds the
    * content the draft submitted, so the published stamp certifies it directly and
-   * editing continues without another read. An answer with no token (a stripped
-   * header) leaves nothing to bind, so the binding is dropped and the next save
-   * re-captures rather than declaring a stale value.
+   * editing continues without another read.
+   *
+   * The baseline moves on EVERY successful write, including the one case that must
+   * stay fail-closed: an answer whose `ETag` was stripped in transit. There the
+   * TOKEN is withheld - nothing is declared, and the next save has to re-capture
+   * before it may write - but the content the member is looking at really is the
+   * content the row took, because this session put it there. Keeping the older
+   * baseline while the caller's form holds the saved copy would make the next
+   * capture compare the row against a draft that no longer exists anywhere, and
+   * report a divergence that never happened.
    */
   private bindOwnWrite(answer: RevisionSaveResult): void {
+    const committed = draftBaseOf(answer.project);
+    // Invalidation first: a read that was still running describes the row before
+    // this write and must not commit over it.
+    this.epoch += 1;
+    this.draft = committed;
+    this.diverged = null;
     if (!answer.revision) {
-      this.clear();
+      // Fail closed on the declaration only: no token, so the next save re-captures
+      // (and refuses outright if the row still publishes nothing).
+      this.revision = null;
+      this.base = null;
       return;
     }
-    this.diverged = null;
     this.revision = answer.revision;
-    this.base = draftBaseOf(answer.project);
-    // The submitted content is what is on screen now, so the draft's own base moves
-    // with it. This session wrote it, which is the one case allowed to do that.
-    this.draft = this.base;
-    this.epoch += 1;
+    this.base = committed;
   }
 
   /**

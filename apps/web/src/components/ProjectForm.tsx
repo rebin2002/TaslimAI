@@ -49,6 +49,11 @@ export function ProjectForm({ project, onClose, onSubmit, revision, onSaved }: R
   const seedRef = useRef<ProjectDraftBase | null>(project ? draftBaseOf(project) : null);
   const seededFrom = useRef(project?.id);
   const projectId = project?.id;
+  // Which row (and which session) this form is speaking for right now, so a capture
+  // issued for a previous one cannot report its verdict on the row in front of the
+  // member after the parent switches the form to it.
+  const activeProjectRef = useRef(project?.id);
+  const activeSessionRef = useRef(revision);
 
   useEffect(() => {
     if (seededFrom.current !== projectId) {
@@ -68,6 +73,8 @@ export function ProjectForm({ project, onClose, onSubmit, revision, onSaved }: R
     // Report the copy on screen once per draft, never once per parent render: a
     // newer prop arriving from elsewhere must not re-certify these older fields.
     if (revision && seedRef.current) revision.noteDraft(seedRef.current);
+    activeProjectRef.current = projectId;
+    activeSessionRef.current = revision;
     // The row's identity, not its content, bounds the draft: `project` changing
     // underneath an open form is another writer's answer, not a re-seed.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -80,10 +87,13 @@ export function ProjectForm({ project, onClose, onSubmit, revision, onSaved }: R
   // retried here: the save re-captures rather than sending an unfenced write.
   function beginEditing() {
     if (!revision || !project || revision.isBound || conflict) return;
+    const startedForProject = project.id;
+    const startedForSession = revision;
     // Bound to the content being edited, never to whatever stamp the row happens
     // to carry now: an out-of-date form reports a conflict instead of stamping
     // its stale draft with a revision it did not edit from.
     void revision.begin().catch((caught) => {
+      if (activeProjectRef.current !== startedForProject || activeSessionRef.current !== startedForSession) return;
       if (isRevisionConflict(caught)) {
         setDiverged(isRevisionDiverged(caught));
         setConflict(true);

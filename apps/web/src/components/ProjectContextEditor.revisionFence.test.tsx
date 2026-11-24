@@ -573,6 +573,50 @@ describe("ProjectContextEditor revision fence", () => {
     expect(server.row("project-a").project.instructions).toBe("Saved in tab B");
   });
 
+  it("keeps a late capture failure from the previous project off the project now shown", async () => {
+    // A capture issued for A is answered after the member navigated to B. Its
+    // verdict - conflict or load error - belongs to the row that was left behind;
+    // painting it onto B would show the member a state their screen does not have.
+    await mount("project-a", "A instructions", "A notes");
+    const handler = server.handler;
+    let release: ((answer: Response) => void) | undefined;
+    fetchMock.mockImplementation((input: string, init?: RequestInit) => {
+      if ((init?.method ?? "GET").toUpperCase() === "GET" && String(input).endsWith("/api/projects/project-a")) {
+        return new Promise<Response>((resolve) => { release = resolve; });
+      }
+      return Promise.resolve(handler(input, init));
+    });
+
+    await typeInstructions("Draft typed in A");
+    await switchTo("project-b", "B instructions", "B notes");
+
+    // A answers late, with content its page never displayed: a divergence FOR A.
+    release!(new Response(JSON.stringify(makeProject("project-a", "Changed in another tab", "A notes")), {
+      status: 200,
+      headers: { "Content-Type": "application/json", ETag: '"2026-11-16T09:00:00.0000009Z"' },
+    }));
+    await act(async () => {
+      await drain();
+      await drain();
+    });
+
+    expect(conflictBlock()).toHaveLength(0);
+    expect(findByClass(testContainer, "form-error")).toHaveLength(0);
+    expect(contextValues()).toEqual(["B instructions", "B notes"]);
+    // Nothing of A's draft reached either row.
+    expect(patchCalls()).toHaveLength(0);
+    expect(server.row("project-a").project.instructions).toBe("A instructions");
+
+    // B is untouched and still fences on its own revision.
+    await typeInstructions("Draft typed in B");
+    await submit();
+    const last = patchCalls().slice(-1)[0]!;
+    expect(last.path).toBe("/api/projects/project-b");
+    expect(last.ifMatch).toBe('"2026-11-16T09:00:00.0000002Z"');
+    expect(server.row("project-b").project.instructions).toBe("Draft typed in B");
+    expect(server.row("project-a").project.instructions).toBe("A instructions");
+  });
+
   it("keeps a draft savable across a status write that changed nothing it displays", async () => {
     // The other side of the same rule, so the fix does not over-refuse: archiving
     // moves the revision but not the content, and a draft showing that content

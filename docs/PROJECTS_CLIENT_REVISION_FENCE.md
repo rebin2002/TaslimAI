@@ -59,7 +59,19 @@ certifies. The pairing is the whole point.
    committed together with the row it left behind, so the session re-binds to that pair
    without a follow-up read. That avoids both an extra round trip and a race in which a
    third writer slips between the write and the re-read.
-4. **A binding is kept until the copy on screen changes.** The comparison belongs to the
+   When the answer arrives WITHOUT a header (an intermediate that strips it), the two halves
+   of that pair are treated differently and deliberately: the **token** is withheld, so the
+   next save must re-capture before it may declare anything and refuses if the row still
+   publishes nothing, while the **baseline** moves to the content this draft just wrote —
+   the member is looking at it, and this session put it there. Holding on to the older
+   baseline would make the next capture compare the row against a copy that no longer exists
+   anywhere and report a conflict that never happened.
+4. **A late answer speaks for the draft that asked for it.** A capture that is still running
+   when the member navigates to another project (or the view hands the draft a new session)
+   may not set conflict or error state on what is now on screen: the component compares the
+   originating project id and session identity before it reports anything, and drops the
+   verdict otherwise.
+5. **A binding is kept until the copy on screen changes.** The comparison belongs to the
    moment the token is taken, not to every later save: a draft that reloaded the row, or
    that saved while its parent has not yet re-rendered with the answer, is still editing
    exactly the content its token certifies, and a token the row has moved past is caught by
@@ -67,7 +79,7 @@ certifies. The pairing is the whole point.
    being re-based (`noteDraft` with different content) or a folded-in write that contradicts
    it — and a read that was still in flight when either happened is abandoned rather than
    committed, because its answer describes the moment before the change.
-5. **One session per draft, never one per page.** `ProjectDetailView` renders two editable
+6. **One session per draft, never one per page.** `ProjectDetailView` renders two editable
    drafts of the same row (details and context) and each submits the whole row, so it owns
    two sessions (`"details"` and `"context"`). A token earned by one draft's write must not
    certify the other draft's independently populated fields.
@@ -196,7 +208,8 @@ retry never converts a conditional write into a wildcard.
   adoption refused for a draft that reported no content, adoption allowed where the reported
   seed still matches, a status write that landed on content an untouched draft never saw, a
   capture abandoned because the row moved while it was in flight, and a seed reported for some
-  other row,
+  other row, the baseline a write keeps when its answer arrives without a header, and the
+  re-capture that follows it,
   no re-read per save, no unfenced write, cross-project token isolation, verbatim
   100-nanosecond precision, legacy call silence.
 * `src/lib/projectRevisionFenceFixtures.ts` — the stub of the fenced endpoint (including
@@ -214,7 +227,8 @@ retry never converts a conditional write into a wildcard.
   a parent that replaced its copy after a sibling write, a bare Save after that replacement,
   an archive that landed on content the draft never displayed, and — the other side of the
   rule, so it does not over-refuse — a status write over unchanged content leaving the draft
-  savable on its new token.
+  savable on its new token, plus a capture from the previous project that answers after a
+  route switch and must leave the new page clean.
 * `src/app/api/[...path]/route.test.ts` — the proxy forwards `If-Match` upstream and returns
   the `ETag` on both the `200` and the `409`.
 * `apps/api.Tests/ProjectPatchRevisionConflictTests.cs` —
