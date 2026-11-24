@@ -184,6 +184,13 @@ builder.Services.AddCors(options => options.AddPolicy("Frontend", policy =>
     policy.WithOrigins(allowedOrigins)
         .AllowAnyHeader()
         .AllowAnyMethod()
+        // The project revision fence is only usable from a browser if the revision
+        // the API publishes can be read back. ETag is not a CORS-safelisted
+        // response header, so an origin-separated frontend would receive a fenced
+        // answer without being able to see its token; exposing it lets that client
+        // declare the revision it edited instead of degrading to an unfenced write.
+        // The served topology is same-origin through the web proxy and unaffected.
+        .WithExposedHeaders("ETag")
         .AllowCredentials()));
 builder.Services.AddScoped<WorkspaceAccessService>();
 builder.Services.AddScoped<MovieCollaborationAccess>();
