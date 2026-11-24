@@ -37,11 +37,11 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
-import { BookOpenCheck, FileText, ShieldCheck } from "lucide-react";
+import { BookOpenCheck, FileDown, FileText, ShieldCheck } from "lucide-react";
 import { useAuth } from "@/components/AuthProvider";
 import { useLocale } from "@/components/LocaleProvider";
 import { createAcademicLabels, createAcademicTranslator } from "./academicStrings";
-import { academicAssetsRoute, academicStandardRoute } from "./academicRoutes";
+import { academicAssetsRoute, academicExportRoute, academicStandardRoute, academicTemplatesRoute } from "./academicRoutes";
 import {
   applyDisciplineDefaults,
   countAccessLevels,
@@ -429,6 +429,12 @@ export function AcademicWorkspace({ principal, initialState }: AcademicWorkspace
         <p>{ta("footer.note")}</p>
         <Link href={academicAssetsRoute} className={styles.textLink}>
           <FileText size={14} aria-hidden="true" /> {ta("footer.assets")}
+        </Link>
+        <Link href={academicTemplatesRoute} className={styles.textLink}>
+          <BookOpenCheck size={14} aria-hidden="true" /> {ta("footer.templates")}
+        </Link>
+        <Link href={academicExportRoute} className={styles.textLink}>
+          <FileDown size={14} aria-hidden="true" /> {ta("footer.export")}
         </Link>
       </footer>
     </div>
