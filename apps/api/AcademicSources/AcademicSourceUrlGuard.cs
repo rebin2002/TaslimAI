@@ -119,6 +119,17 @@ public static class AcademicSourceUrlGuard
     /// IPv4-mapped spellings of those ranges. DNS-level rebinding of an allow-listed hostname is
     /// closed by <see cref="AcademicSourceConnectionPolicy"/>, which resolves the host and dials
     /// only an address that passes this classifier; a URL allow list alone is not sufficient.
+    /// Native v6 special-use space is refused as its own set of rules rather than by hostname:
+    /// fc00::/6 (unique local, the unicast link-local remainder and multicast/reserved),
+    /// 2001::/23 (IETF Protocol Assignments, RFC 2928, which contains the PCP/TURN/DNS-SD anycast
+    /// addresses, benchmarking, the deprecated ORCHID block and ORCHIDv2), 2001:db8::/32
+    /// (documentation, RFC 3849), 3fff::/20 (the current documentation prefix, RFC 9637),
+    /// 100::/64 (discard-only, RFC 6666), 2002::/16 (6to4, RFC 3056), 3ffe::/16 (legacy 6bone) and
+    /// 5f00::/16 (SRv6 SIDs, RFC 9602, not globally reachable). The local-use IPv4-translatable
+    /// prefix 64:ff9b:1::/48 (RFC 8215) is refused outright; the well-known NAT64 prefix
+    /// 64:ff9b::/96 (RFC 6052) is the DNS64 spelling of an IPv4 destination and inherits the IPv4
+    /// rules on its embedded address, so metadata and private space stay refused while public
+    /// provider space stays reachable on IPv6-only networks.
     /// </summary>
     public static bool IsPubliclyRoutable(IPAddress address)
     {
@@ -149,10 +160,43 @@ public static class AcademicSourceUrlGuard
             // provider space either. 6to4 (2002::/16) embeds a v4 address and is refused outright
             // rather than inheriting whatever the embedded v4 looks like.
             if (bytes[0] >= 0xfc) return false;
+            // RFC 8215 reserves 64:ff9b:1::/48 for local use inside a single domain: a destination
+            // written there only names something that domain's own translator can resolve, so it is
+            // refused outright, like 6to4. The well-known prefix 64:ff9b::/96 (RFC 6052) is a
+            // different case. On the IPv6-only networks that deploy DNS64 (RFC 6147) a lookup of a
+            // public provider hostname legitimately answers 64:ff9b::<public v4>, so refusing the
+            // whole /96 would break the guard's own purpose: the address is only reachable through
+            // a translator, but the destination it names is ordinary IPv4 space. It therefore
+            // inherits the IPv4 rules on its embedded last 32 bits, exactly as ::ffff:0:0/96 and
+            // ::/96 do above: 64:ff9b::a9fe:a9fe is 169.254.169.254 and stays refused as the
+            // metadata address, 64:ff9b::a00:1 stays refused as 10.0.0.1, while 64:ff9b::808:808
+            // stays reachable as 8.8.8.8. The socket is still pinned to the original v6 address
+            // that was classified, so the reduction cannot swap the destination mid-connection.
+            if (IsNat64LocalUse(bytes)) return false;
+            if (IsNat64WellKnown(bytes))
+            {
+                var translated = new byte[] { bytes[12], bytes[13], bytes[14], bytes[15] };
+                return IsPubliclyRoutable(new IPAddress(translated));
+            }
+            // 2001::/23 is the IETF Protocol Assignments block (RFC 2928): PCP anycast 2001:1::1,
+            // TURN 2001:1::2, DNS-SD 2001:1::3, benchmarking 2001:2::/48, AMT 2001:3::/32,
+            // AS112-v6 2001:4:112::/48, ORCHID 2001:10::/28, ORCHIDv2 2001:20::/28 and the
+            // Drone Remote ID 2001:30::/28 all live inside it, and Teredo 2001:0::/32 is already
+            // refused above. The registry marks the /23 not globally reachable unless a more
+            // specific allocation says otherwise, and no more specific allocation inside it names
+            // an academic content provider, so the block is refused conservatively as a whole.
+            // The /23 stops short of the documentation row below and of real provider space such
+            // as 2001:448::/32 or 2001:4860::/32, whose second byte is above 0x01.
+            if (bytes[0] == 0x20 && bytes[1] == 0x01 && bytes[2] <= 0x01) return false;
             if (bytes[0] == 0x20 && bytes[1] == 0x01 && bytes[2] == 0x0d && bytes[3] == 0xb8) return false;
             if (bytes[0] == 0x01 && bytes[1] == 0x00 && bytes[2] == 0 && bytes[3] == 0) return false;
             if (bytes[0] == 0x20 && bytes[1] == 0x02) return false;
             if (bytes[0] == 0x3f && bytes[1] == 0xfe) return false;                      // v6-only loopback range
+            if (bytes[0] == 0x3f && bytes[1] == 0xff && (bytes[2] & 0xf0) == 0) return false; // 3fff::/20 docs
+            // 5f00::/16 is the Segment Routing over IPv6 (SRv6) SID space (RFC 9602). It sits
+            // inside globally routed 2000::/3 but the registry marks it not globally reachable, so
+            // it is assignment space rather than provider space. 5f01::/16 and above stay public.
+            if (bytes[0] == 0x5f && bytes[1] == 0x00) return false;
             return true;
         }
 
@@ -196,5 +240,26 @@ public static class AcademicSourceUrlGuard
         for (var i = 0; i < 12; i++) if (bytes[i] != 0) return false;
         return true;
     }
+
+    /// <summary>
+    /// True for the well-known NAT64 prefix 64:ff9b::/96 (RFC 6052, section 3.2.2). The first 96
+    /// bits are the prefix and the remaining 32 bits carry the embedded IPv4 destination that a
+    /// DNS64 deployment (RFC 6147) synthesises, which the caller classifies with the IPv4 rules
+    /// instead of refusing the whole block.
+    /// </summary>
+    private static bool IsNat64WellKnown(byte[] bytes)
+    {
+        if (bytes[0] != 0x00 || bytes[1] != 0x64 || bytes[2] != 0xff || bytes[3] != 0x9b) return false;
+        for (var i = 4; i < 12; i++) if (bytes[i] != 0) return false;
+        return true;
+    }
+
+    /// <summary>
+    /// True for 64:ff9b:1::/48, the local-use IPv4-translatable prefix (RFC 8215). Its third group
+    /// is 0001, so it is disjoint from the well-known /96 above, where bytes 4..11 are zero.
+    /// </summary>
+    private static bool IsNat64LocalUse(byte[] bytes)
+        => bytes[0] == 0x00 && bytes[1] == 0x64 && bytes[2] == 0xff && bytes[3] == 0x9b
+            && bytes[4] == 0x00 && bytes[5] == 0x01;
 
 }

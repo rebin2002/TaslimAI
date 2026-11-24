@@ -59,6 +59,24 @@ public sealed class AcademicSourceConnectionPolicyTests
     [InlineData("::a00:1")]
     [InlineData("::c000:201")]
     [InlineData("::")]
+    // Translator and IETF/RFC-9602/RFC-9637 assignment space: a hostname that rebinds into one of
+    // these is dialled at a non-public destination even though the address is not flagged by
+    // IsIPv6LinkLocal/SiteLocal/Teredo and is not in the fc00::/6 tail. The NAT64 rows are the
+    // metadata, loopback, RFC1918 and v4-documentation destinations reached through the well-known
+    // 64:ff9b::/96 prefix (RFC 6052), whose embedded v4 is not reduced by the ::/96 rule, plus the
+    // local-use 64:ff9b:1::/48 (RFC 8215), which is refused outright.
+    [InlineData("64:ff9b::a9fe:a9fe")]
+    [InlineData("64:ff9b::7f00:1")]
+    [InlineData("64:ff9b::a00:1")]
+    [InlineData("64:ff9b::c000:201")]
+    [InlineData("64:ff9b:1::8.8.8.8")]
+    [InlineData("64:ff9b:1::a9fe:a9fe")]
+    [InlineData("2001:1::1")]
+    [InlineData("2001:2::1")]
+    [InlineData("2001:10::1")]
+    [InlineData("2001:20::1")]
+    [InlineData("5f00::1")]
+    [InlineData("3fff::1")]
     public async Task Allow_listed_hostname_that_rebinds_to_non_public_space_is_refused_before_connect(string answer)
     {
         var resolver = new AcademicFixture.StubResolver(answer);
@@ -88,6 +106,18 @@ public sealed class AcademicSourceConnectionPolicyTests
     [InlineData("2001:448:1234::5")]                          // academic IPv6 must not be false-blocked
     [InlineData("::10a0:1")]                                   // ::/96 spelling of public 16.160.0.1
     [InlineData("::d5c6:d6d7")]                                // ::/96 spelling of public 213.198.214.215
+    // Real v6 provider space adjacent to the newly refused assignments must stay pinned: these are
+    // the addresses an over-broad fix would false-block.
+    [InlineData("2001:200::1")]                                // first /20 above 2001::/23
+    [InlineData("2001:4860:4860::8888")]                       // public recursive DNS in v6 space
+    [InlineData("2620:4f7f:ffff::1")]                          // ARIN provider space
+    [InlineData("2620:4f80::1")]                               // no special-purpose row: must stay pinned
+    [InlineData("2620:4f81::1")]                               // neighbouring /32
+    [InlineData("5f01::1")]                                    // first /16 above the SRv6 block
+    // A DNS64 (RFC 6147) answer for a public IPv4 provider: the embedded v4 is what makes it
+    // public, and the pinned dial target must remain the original v6 address, not the reduction.
+    [InlineData("64:ff9b::808:808")]                           // DNS64 of public 8.8.8.8
+    [InlineData("64:ff9b::d5c6:d6d7")]                         // DNS64 of public 213.198.214.215
     public async Task Public_answers_are_pinned_to_the_address_that_was_validated(string answer)
     {
         var resolver = new AcademicFixture.StubResolver(answer);
@@ -144,6 +174,14 @@ public sealed class AcademicSourceConnectionPolicyTests
     [InlineData("[ff02::1]")]
     [InlineData("[fe00::1]")]
     [InlineData("[::a9fe:a9fe]")]
+    [InlineData("[64:ff9b::a9fe:a9fe]")]
+    [InlineData("[64:ff9b:1::a9fe:a9fe]")]
+    [InlineData("[2001:1::1]")]
+    [InlineData("[2001:2::1]")]
+    [InlineData("[2001:10::1]")]
+    [InlineData("[2001:20::1]")]
+    [InlineData("[5f00::1]")]
+    [InlineData("[3fff::1]")]
     public async Task Ip_literals_are_classified_without_consulting_dns(string literal)
     {
         var resolver = new AcademicFixture.StubResolver("8.8.8.8");
