@@ -105,20 +105,27 @@ public sealed class MovieSoundService(
     {
         var track = await QueryTracks(tracking: true).FirstOrDefaultAsync(item => item.Id == trackId, cancellationToken);
         if (track is null || !await collaboration.HasPermissionAsync(userId, track.MovieProjectId, MoviePermissions.Approve, cancellationToken)) return null;
+        if (!string.Equals(track.Status, MovieSoundStatuses.ReadyForReview, StringComparison.OrdinalIgnoreCase))
+            throw new MovieSoundValidationException("MOVIE_SOUND_REVIEW_NOT_PENDING", "Only sound tracks ready for review can be reviewed.");
         var asset = track.Asset ?? track.GenerationJob?.Assets.OrderByDescending(item => item.CreatedAt).FirstOrDefault();
         if (request.Approve && asset is null)
             throw new MovieSoundValidationException(GenerationJobErrorCodes.MovieSoundNotReady, "Only a sound track with a completed audio asset can be approved.");
         if (request.Approve && !IsEligibleAudioAsset(asset!, track.MovieProject))
             throw new MovieSoundValidationException(GenerationJobErrorCodes.MovieSoundNotReady, "The sound track asset must still be active, project-scoped, and backed by a ready private audio file.");
-        if (request.Approve && (track.Status is MovieSoundStatuses.Archived or MovieSoundStatuses.Draft))
-            throw new MovieSoundValidationException(GenerationJobErrorCodes.MovieSoundNotReady, "The sound track is not ready for approval.");
         var decision = request.Approve ? MovieSoundStatuses.Approved : MovieSoundStatuses.Rejected;
         var now = DateTime.UtcNow;
-        track.Status = decision;
-        track.AssetId = asset?.Id ?? track.AssetId;
-        track.ApprovedByUserId = request.Approve ? userId : null;
-        track.ApprovedAt = request.Approve ? now : null;
-        track.UpdatedAt = now;
+        await using var transaction = await db.Database.BeginTransactionAsync(cancellationToken);
+        var updated = await db.MovieSoundTracks
+            .Where(item => item.Id == track.Id && item.Status == MovieSoundStatuses.ReadyForReview)
+            .ExecuteUpdateAsync(setters => setters
+                .SetProperty(item => item.Status, decision)
+                .SetProperty(item => item.AssetId, item => asset == null ? item.AssetId : asset.Id)
+                .SetProperty(item => item.ApprovedByUserId, request.Approve ? userId : (Guid?)null)
+                .SetProperty(item => item.ApprovedAt, request.Approve ? now : (DateTime?)null)
+                .SetProperty(item => item.UpdatedAt, now), cancellationToken);
+        if (updated == 0)
+            throw new MovieSoundValidationException("MOVIE_SOUND_REVIEW_CONFLICT", "This sound track changed while it was being reviewed. Reload it and review the current state.");
+
         db.MovieSoundApprovals.Add(new MovieSoundApproval
         {
             Id = Guid.NewGuid(),
@@ -129,7 +136,10 @@ public sealed class MovieSoundService(
             CreatedAt = now,
         });
         await db.SaveChangesAsync(cancellationToken);
-        return MovieSoundTrackProjection.ToDto(track);
+        await transaction.CommitAsync(cancellationToken);
+        db.ChangeTracker.Clear();
+        var reviewed = await QueryTracks().FirstOrDefaultAsync(item => item.Id == track.Id, cancellationToken);
+        return reviewed is null ? null : MovieSoundTrackProjection.ToDto(reviewed);
     }
 
     private async Task<MovieSoundTrackDto?> CreateAsync(Guid userId, Guid? sceneId, Guid? shotId, MovieSoundTrackRequest request, CancellationToken cancellationToken)
