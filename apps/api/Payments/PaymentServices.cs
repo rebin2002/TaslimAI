@@ -210,6 +210,11 @@ public sealed class PaymentLifecycleService(TaslimDbContext db, ICreditLedgerSer
 
     public async Task<Subscription> ActivateSubscriptionAsync(Guid workspaceId, Guid subscriptionId, Guid planId, string provider, string providerSubscriptionReference, DateTime periodStart, DateTime periodEnd, string reason, CancellationToken cancellationToken = default)
     {
+        // Both boundaries are normalised at the entry, before anything reads them, so the identity, the
+        // ordering check, the persisted columns and the expiry all describe one instant. Existing UTC
+        // whole-second input - every caller in the shipped code today - is unaffected.
+        periodStart = ToStoreInstant(periodStart);
+        periodEnd = ToStoreInstant(periodEnd);
         ValidatePeriod(periodStart, periodEnd);
         ValidateReason(reason, nameof(reason));
         var ownsTransaction = db.Database.CurrentTransaction is null;
@@ -237,6 +242,10 @@ public sealed class PaymentLifecycleService(TaslimDbContext db, ICreditLedgerSer
 
     public async Task<Subscription> RenewSubscriptionAsync(Guid workspaceId, Guid subscriptionId, DateTime periodStart, DateTime periodEnd, string idempotencyKey, string reason, CancellationToken cancellationToken = default)
     {
+        // As in ActivateSubscriptionAsync: one instant, one representation, taken before the ordering
+        // check and before the row is written.
+        periodStart = ToStoreInstant(periodStart);
+        periodEnd = ToStoreInstant(periodEnd);
         ValidatePeriod(periodStart, periodEnd);
         ValidateReason(idempotencyKey, nameof(idempotencyKey));
         ValidateReason(reason, nameof(reason));
@@ -471,18 +480,38 @@ public sealed class PaymentLifecycleService(TaslimDbContext db, ICreditLedgerSer
     private const long TicksPerMicrosecond = 10;
     internal static long StoreResolutionTicks(DateTime value)
     {
-        // Normalise the spelling before quantising, so the name is over one instant rather than over
-        // whichever representation of it arrived: a local value is converted, and a value that names
-        // no offset is read as UTC, the same way the provider reads it when writing this column.
-        // Without this, a payload parsed into a local representation and a redelivery read back as
-        // UTC would name two different renewals of one period.
+        return ToStoreInstant(value).Ticks;
+    }
+
+    // One instant, one representation of it, at the resolution the billing row can hold.
+    //
+    // A local value is converted to UTC and a value that names no offset is read as UTC. This is not
+    // the provider doing the work for us - it does the opposite. Measured on this stack with the
+    // shipped renewal path on a host at UTC-5: writing a boundary whose Kind is Local or Unspecified
+    // is refused outright ("Cannot write DateTime with Kind=Local to PostgreSQL type 'timestamp with
+    // time zone', only UTC is supported"), and an offset-bearing webhook timestamp parsed by
+    // System.Text.Json arrives as Kind=Local. Normalising at the entry is therefore what lets such a
+    // renewal persist on a non-UTC host at all, and what keeps the identity, the ordering check, the
+    // stored row and the entitlement expiry on one instant instead of on two spellings of it.
+    //
+    // The ticks are then floored to whole microseconds, because that is what the column keeps:
+    // measured through this same path, a start at base+7 ticks is stored as base and base+15 as
+    // base+10. A boundary that reached the identity still holding those digits named a value no
+    // stored row could reproduce, which is the half of the finding the quantising closes.
+    //
+    // Nothing that works today moves. Whole-second UTC boundaries - what an activation or a renewal
+    // computes, and what every existing row holds - are already multiples of ten ticks, so existing
+    // ids, the grant keys derived from them and the golden value pinned by
+    // BillingRenewalPeriodIdentityTests are byte-identical before and after this.
+    internal static DateTime ToStoreInstant(DateTime value)
+    {
         var instant = value.Kind switch
         {
             DateTimeKind.Utc => value,
             DateTimeKind.Local => value.ToUniversalTime(),
             _ => DateTime.SpecifyKind(value, DateTimeKind.Utc),
         };
-        return instant.Ticks / TicksPerMicrosecond * TicksPerMicrosecond;
+        return new DateTime(instant.Ticks / TicksPerMicrosecond * TicksPerMicrosecond, DateTimeKind.Utc);
     }
 
     private async Task<PaymentAttempt> GetAttemptAsync(Guid workspaceId, Guid id, CancellationToken cancellationToken) =>

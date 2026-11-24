@@ -148,6 +148,122 @@ public sealed class BillingRenewalPeriodStorePrecisionTests : IAsyncLifetime
     }
 
     [Fact]
+    public void Every_arrival_representation_normalises_to_one_utc_instant_at_store_resolution()
+    {
+        // The name is not the whole fix: the value also has to reach the column. Pinning the shape of
+        // the normalised instant - Kind Utc, sub-microsecond digits gone, instant preserved - is what
+        // makes the write-path claim in the F-27 note testable rather than aspirational.
+        foreach (var spelling in new[]
+                 {
+                     PeriodStart,
+                     PeriodStart.ToLocalTime(),
+                     DateTime.SpecifyKind(PeriodStart, DateTimeKind.Unspecified),
+                     PeriodStart.AddTicks(7),
+                     PeriodStart.AddTicks(7).ToLocalTime(),
+                     DateTimeOffset.Parse("2026-02-28T21:00:00-03:00", CultureInfo.InvariantCulture).UtcDateTime,
+                 })
+        {
+            var normalised = PaymentLifecycleService.ToStoreInstant(spelling);
+            Assert.Equal(DateTimeKind.Utc, normalised.Kind);
+            Assert.Equal(PeriodStart.Ticks, normalised.Ticks);
+            Assert.Equal(0, normalised.Ticks % TicksPerMicrosecond);
+        }
+        // And it is not a way to erase a real period: one microsecond the store keeps stays separate.
+        Assert.NotEqual(
+            PaymentLifecycleService.ToStoreInstant(PeriodStart),
+            PaymentLifecycleService.ToStoreInstant(PeriodStart.AddTicks(TicksPerMicrosecond)));
+    }
+
+    [DisposablePostgresFact]
+    public async Task A_renewal_that_arrives_without_a_utc_representation_is_written_at_the_instant_it_names()
+    {
+        // The reviewer's lifecycle demand, run against the engine: a boundary whose Kind is Local or
+        // Unspecified does not merely hash oddly on the way in, it cannot be written at all. Npgsql
+        // refuses any non-UTC DateTime for a `timestamp with time zone` column, so before the
+        // entry-point normalisation such a renewal threw out of SaveChangesAsync and the billing
+        // period, the grant and the subscription's new boundaries were never persisted. An
+        // offset-bearing webhook timestamp parsed by System.Text.Json arrives as Kind=Local, which is
+        // how a renewal on a non-UTC host used to fail outright.
+        var workspace = NewWorkspace("store-kind");
+        var plan = NewPlan("store-kind");
+        var subscription = NewSubscription(workspace.Id, plan.Id);
+        await SeedAsync(workspace, plan, subscription);
+        var localStart = PeriodStart.ToLocalTime();
+        var localEnd = PeriodEnd.ToLocalTime();
+        Assert.Equal(DateTimeKind.Local, localStart.Kind);
+        Assert.Equal(PeriodStart, localStart.ToUniversalTime());
+        // Premise, asserted on this stack instead of stated in a comment: the same value handed to the
+        // column unnormalised is refused, so the renewal below really is exercising the normalisation.
+        var refusal = await RawWriteRefusalAsync(subscription.Id, localStart);
+        Assert.NotNull(refusal);
+        Assert.Contains("only UTC is supported", refusal, StringComparison.Ordinal);
+        await using (var db = new TaslimDbContext(options))
+            await NewLifecycle(db).RenewSubscriptionAsync(workspace.Id, subscription.Id, localStart, localEnd, "webhook:kind-1", "Provider renewal succeeded.");
+        await using var probe = new TaslimDbContext(options);
+        var period = await probe.BillingPeriods.AsNoTracking().SingleAsync(item => item.SubscriptionId == subscription.Id);
+        // The row holds the instant the payload named, in the representation the column can hold.
+        Assert.Equal(PeriodStart, period.StartsAt);
+        Assert.Equal(DateTimeKind.Utc, period.StartsAt.Kind);
+        Assert.Equal(PaymentLifecycleService.RenewalPeriodIdentity(subscription.Id, period.StartsAt), period.Id);
+        Assert.Equal(MonthlyAllowance, period.IncludedCredits);
+        Assert.Equal($"included:{subscription.Id}:{period.Id}", await SingleGrantKeyAsync(workspace.Id));
+        // The subscription boundaries moved on the same instant, so a later reader cannot disagree with
+        // the period row about which renewal this was.
+        var stored = await probe.Subscriptions.AsNoTracking().SingleAsync(item => item.Id == subscription.Id);
+        Assert.Equal(PeriodStart, stored.CurrentPeriodStart);
+        Assert.Equal(PeriodEnd, stored.CurrentPeriodEnd);
+        // A redelivery of the same event carrying the UTC spelling of the same instant is the same
+        // renewal, so it replays instead of minting a second period and a second grant.
+        await using (var db = new TaslimDbContext(options))
+            await NewLifecycle(db).RenewSubscriptionAsync(workspace.Id, subscription.Id, PeriodStart, PeriodEnd, "webhook:kind-2", "Provider renewal succeeded.");
+        Assert.Equal(1, await probe.BillingPeriods.AsNoTracking().CountAsync(item => item.SubscriptionId == subscription.Id));
+        Assert.Equal(MonthlyAllowance, await probe.CreditLedgerEntries.AsNoTracking()
+            .Where(item => item.WorkspaceId == workspace.Id && item.Type == CreditLedgerEntryType.Grant)
+            .SumAsync(item => (long?)item.Amount) ?? 0);
+        // An Unspecified representation of the same wall-clock instant is written the same way, because
+        // a value that names no offset is read as UTC. A separate workspace and subscription, since a
+        // workspace is only meant to hold one subscription at a time.
+        var secondWorkspace = NewWorkspace("store-kind-unspecified");
+        var secondPlan = NewPlan("store-kind-unspecified");
+        var secondSubscription = NewSubscription(secondWorkspace.Id, secondPlan.Id);
+        await SeedAsync(secondWorkspace, secondPlan, secondSubscription);
+        await using (var db = new TaslimDbContext(options))
+            await NewLifecycle(db).RenewSubscriptionAsync(
+                secondWorkspace.Id, secondSubscription.Id,
+                DateTime.SpecifyKind(PeriodStart, DateTimeKind.Unspecified),
+                DateTime.SpecifyKind(PeriodEnd, DateTimeKind.Unspecified),
+                "webhook:kind-3", "Provider renewal succeeded.");
+        var second = await probe.BillingPeriods.AsNoTracking().SingleAsync(item => item.SubscriptionId == secondSubscription.Id);
+        Assert.Equal(PeriodStart, second.StartsAt);
+        Assert.Equal(PaymentLifecycleService.RenewalPeriodIdentity(secondSubscription.Id, second.StartsAt), second.Id);
+    }
+
+    /// <summary>
+    /// Writes one BillingPeriod straight through the shipped entity mapping with the supplied
+    /// DateTime, bypassing the lifecycle service, and returns the provider's message when the write is
+    /// refused. Returns null if the engine accepted the value, which is the fact the renewal test above
+    /// depends on.
+    /// </summary>
+    private async Task<string?> RawWriteRefusalAsync(Guid subscriptionId, DateTime startsAt)
+    {
+        try
+        {
+            await using var db = new TaslimDbContext(options);
+            db.BillingPeriods.Add(new BillingPeriod
+            {
+                Id = Guid.NewGuid(), SubscriptionId = subscriptionId, Status = BillingPeriodStatus.Open,
+                StartsAt = startsAt, EndsAt = PeriodEnd, IncludedCredits = MonthlyAllowance, CreatedAt = SeededAt,
+            });
+            await db.SaveChangesAsync();
+            return null;
+        }
+        catch (Exception exception)
+        {
+            return exception.ToString();
+        }
+    }
+
+    [Fact]
     public void Whole_second_boundaries_hash_over_the_bytes_they_hashed_over_before_the_fix()
     {
         // C. Wire compatibility with every id already in the table. Rather than trusting the new
