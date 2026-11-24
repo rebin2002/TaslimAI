@@ -182,21 +182,45 @@ public sealed class AutopilotOrchestrator(
 
         // A wave whose tasks are all terminal but whose run never advanced means the
         // completion event was lost. Re-drive the run state machine from evidence.
+        // The pass is bounded twice over: a run is only re-driven until the documented
+        // watchdog budget is spent, and the pending-event test is evaluated against a
+        // materialized status list, because membership of a set-shaped constant cannot
+        // be translated to SQL, and an untranslatable predicate aborts this whole cycle.
+        var terminalEventStatuses = AutopilotEventStatuses.Terminal.ToArray();
+        var maxRunReconciliations = Math.Max(1, settings.MaxWatchdogReconciliations);
         var stalledRuns = await db.AutopilotRuns
             .Where(item => item.State == AutopilotRunStates.AwaitingEvents || item.State == AutopilotRunStates.InProgress)
             .Where(item => item.LastEventAt != null && item.LastEventAt < staleBefore)
+            .Where(item => item.ReconciliationCount < maxRunReconciliations)
             .OrderBy(item => item.UpdatedAt)
             .Take(100)
             .ToListAsync(cancellationToken);
 
         foreach (var run in stalledRuns)
         {
+            // Persisted statuses are only ever written from these same constants, so the
+            // translated membership test matches the set it is derived from.
             var hasPendingEvent = await db.AutopilotEvents.AsNoTracking()
                 .AnyAsync(item => item.WaveKey == run.WaveKey
-                    && !AutopilotEventStatuses.Terminal.Contains(item.Status), cancellationToken);
+                    && !terminalEventStatuses.Contains(item.Status), cancellationToken);
             if (hasPendingEvent) continue;
 
             await AdvanceRunAsync(run, context, recovered: true, cancellationToken);
+            if (run.ReconciliationCount >= maxRunReconciliations)
+            {
+                // Budget spent: the run stays where a human can see it, and the stop is
+                // surfaced once instead of the watchdog re-driving it on every pass.
+                Record(context, AutopilotAuditFactory.Create(
+                    AutopilotAuditActions.WatchdogReconciled,
+                    AutopilotAuditOutcomes.Failed,
+                    reason: "watchdog_reconciliation_exhausted",
+                    statusDetail: $"run_reconciliations:{run.ReconciliationCount}",
+                    waveKey: run.WaveKey,
+                    runState: run.State,
+                    targetId: run.Id,
+                    dryRun: settings.DryRun));
+            }
+
             await FlushAsync(context, cancellationToken);
         }
 
@@ -580,6 +604,10 @@ public sealed class AutopilotOrchestrator(
         intakeEvent.WaveTaskRecordId = task.Id;
 
         run.LastEventAt = now;
+        // Real evidence ends the stall episode, so the watchdog budget is spent per
+        // episode rather than per run lifetime. Only a fresh event re-arms it: the
+        // calendar never does.
+        run.ReconciliationCount = 0;
         run.UpdatedAt = now;
         if (run.Branch.Length == 0 && !string.IsNullOrWhiteSpace(signal.Branch)) run.Branch = signal.Branch!;
         if (run.BaseSha.Length == 0 && !string.IsNullOrWhiteSpace(signal.BaseSha)) run.BaseSha = signal.BaseSha!;
