@@ -48,6 +48,11 @@ public sealed class MubertMusicGenerationProvider(
         timeout.CancelAfter(TimeSpan.FromSeconds(Math.Clamp(settings.ProviderTimeoutSeconds, 1, 900)));
         var stopwatch = Stopwatch.StartNew();
         var pollAttempts = 0;
+        // Set the moment the provider reports a finished track URL. From that point the customer has
+        // been billed for a generation that exists on the provider side, so any later failure - including
+        // the internal timeout cancelling underneath a download - is a retrieval failure and must not
+        // surface as the retryable timeout code, because a retry would POST a second paid track.
+        var billableOutputReceived = false;
 
         try
         {
@@ -83,7 +88,11 @@ public sealed class MubertMusicGenerationProvider(
 
                 if (generation is not null && IsFailureStatus(generation.Status))
                     throw new MusicProviderFailureException();
-                if (!string.IsNullOrWhiteSpace(generation?.Url)) break;
+                if (!string.IsNullOrWhiteSpace(generation?.Url))
+                {
+                    billableOutputReceived = true;
+                    break;
+                }
 
                 await Task.Delay(
                     TimeSpan.FromMilliseconds(Math.Clamp(settings.MubertPollIntervalMilliseconds, 100, 30_000)),
@@ -120,8 +129,20 @@ public sealed class MubertMusicGenerationProvider(
                 pollAttempts);
             return new MusicProviderResult(download.Content, contentType, format, request.DurationSeconds, usage);
         }
-        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        catch (OperationCanceledException exception) when (!cancellationToken.IsCancellationRequested)
         {
+            if (billableOutputReceived)
+            {
+                // The track is finished and billed; the timeout only stopped us reading it. Reported as
+                // the terminal retrieval failure so the job cannot be retried into a second paid track.
+                logger.LogWarning(
+                    exception,
+                    "Mubert music provider timed out while retrieving an already-completed track. ProviderKey={ProviderKey}; ModelKey={ModelKey}",
+                    Key,
+                    settings.Model);
+                throw new MusicOutputRetrievalFailedException();
+            }
+
             logger.LogWarning("Mubert music provider timed out. ProviderKey={ProviderKey}; ModelKey={ModelKey}", Key, settings.Model);
             throw new MusicProviderTimeoutException();
         }

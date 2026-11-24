@@ -43,6 +43,11 @@ public sealed class StableAudioMusicGenerationProvider(
         }
 
         var pollAttempts = 0;
+        // Set once the result endpoint answers 2xx, i.e. once Stability has produced and billed the
+        // generation. Any timeout after that point only stopped us from reading a track that exists,
+        // so it must not be reported as the retryable timeout code: a retry would POST a second
+        // billable generation and orphan the first.
+        var billableResultReceived = false;
 
         try
         {
@@ -85,6 +90,8 @@ public sealed class StableAudioMusicGenerationProvider(
                 if (!result.IsSuccessStatusCode)
                     throw await MapFailureAsync(result);
 
+                billableResultReceived = true;
+
                 try
                 {
                     (output, contentType) = await ReadBoundedAudioAsync(result, timeout.Token);
@@ -126,7 +133,11 @@ public sealed class StableAudioMusicGenerationProvider(
             }
 
             if (output is null || string.IsNullOrWhiteSpace(contentType))
-                throw new MusicProviderTimeoutException();
+                throw billableResultReceived
+                    // A 2xx result that yielded no usable body is post-billing: the generation exists
+                    // and was charged, so this is a retrieval failure, not a retryable timeout.
+                    ? new MusicOutputRetrievalFailedException()
+                    : new MusicProviderTimeoutException();
 
             var normalizedContentType = NormalizeContentType(contentType, format);
             if (!MusicOutputInspector.HasValidAudioSignature(output, format))
@@ -157,8 +168,17 @@ public sealed class StableAudioMusicGenerationProvider(
                 pollAttempts);
             return new MusicProviderResult(output, normalizedContentType, format, request.DurationSeconds, usage);
         }
-        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        catch (OperationCanceledException exception) when (!cancellationToken.IsCancellationRequested)
         {
+            if (billableResultReceived)
+            {
+                logger.LogWarning(
+                    exception,
+                    "Stable Audio music provider timed out while retrieving an already-completed generation. ProviderKey={ProviderKey}",
+                    Key);
+                throw new MusicOutputRetrievalFailedException();
+            }
+
             logger.LogWarning("Stable Audio music provider timed out. ProviderKey={ProviderKey}", Key);
             throw new MusicProviderTimeoutException();
         }
