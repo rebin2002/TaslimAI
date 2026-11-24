@@ -4,6 +4,7 @@ using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Taslim.Api.Contracts;
+using Taslim.Api.Domain;
 using Taslim.Api.Movies;
 using Taslim.Api.Persistence;
 using Xunit;
@@ -82,6 +83,35 @@ public sealed class MovieWorldTests : IClassFixture<TaslimApiFactory>
         Assert.Equal(HttpStatusCode.BadRequest, invalidUsage.StatusCode);
         var error = await invalidUsage.Content.ReadFromJsonAsync<JsonElement>();
         Assert.Equal("MOVIE_WORLD_USAGE_INVALID", error.GetProperty("error").GetProperty("code").GetString());
+    }
+
+    [Fact]
+    public async Task Workspace_member_without_movie_view_cannot_read_world_continuity()
+    {
+        using var owner = factory.CreateClient();
+        var ownerAuth = await Register(owner, "World View Owner");
+        var movie = await CreateMovie(owner, ownerAuth.PersonalWorkspace.Id, "Private World View Movie");
+        await SendJson<MovieLocationDto>(owner, HttpMethod.Post, $"/api/movie-studio/projects/{movie.Project.Id}/locations", new { name = "Private Pier", description = "A private continuity location." });
+
+        using var workspaceMember = factory.CreateClient();
+        var memberAuth = await Register(workspaceMember, "Workspace-Only World Reader");
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            db.WorkspaceMembers.Add(new WorkspaceMember
+            {
+                Id = Guid.NewGuid(),
+                WorkspaceId = ownerAuth.PersonalWorkspace.Id,
+                UserId = memberAuth.User.Id,
+                Role = WorkspaceRole.Member,
+                JoinedAt = DateTime.UtcNow,
+            });
+            await db.SaveChangesAsync();
+        }
+
+        var world = await workspaceMember.GetAsync($"/api/movie-studio/projects/{movie.Project.Id}/world-continuity");
+
+        Assert.Equal(HttpStatusCode.NotFound, world.StatusCode);
     }
 
     [Fact]
