@@ -166,6 +166,9 @@ export function useDialogAccessibility<T extends HTMLElement>(open: boolean, onC
     const dialog = dialogRef.current;
     const handle: DialogHandle = { token: Symbol("taslim-dialog") };
     openDialog(handle);
+    // True between a keydown the trap consumed (boundary wrap/rescue) and the
+    // matching Tab keyup, whose browser default must be suppressed too.
+    let trapConsumedTab = false;
     const activeElement = document.activeElement;
     const candidateOpener = restoreFocusRef?.current
       ?? (activeElement instanceof HTMLElement && activeElement !== document.body ? activeElement : null);
@@ -201,6 +204,9 @@ export function useDialogAccessibility<T extends HTMLElement>(open: boolean, onC
     }
 
     function handleKeyDown(event: KeyboardEvent) {
+      // A fresh Tab keydown begins a new press; any pending consumed-press
+      // guard from keyup repeats must not leak into it.
+      if (event.key === "Tab") trapConsumedTab = false;
       if (event.key === "Escape") {
         if (!shouldHandleDialogKey(handle, "Escape")) return;
         event.preventDefault();
@@ -208,11 +214,17 @@ export function useDialogAccessibility<T extends HTMLElement>(open: boolean, onC
         onCloseRef.current();
         return;
       }
-      if (!shouldHandleDialogKey(handle, "Tab")) return;
+      // Gate on the ACTUAL key: a Shift+Tab chord first delivers a bare
+      // keydown(Shift), and hardcoding "Tab" here let that modifier press run
+      // the boundary logic, wrapping focus on its own so the later Tab keydown
+      // walked backward from the wrap anchor one step short (hosted Browser
+      // E2E: Cancel focused instead of Create at the backward wrap).
+      if (!shouldHandleDialogKey(handle, event.key)) return;
 
       const focusable = focusableElements(dialog);
       if (!focusable.length) {
         event.preventDefault();
+        trapConsumedTab = true;
         dialog.focus();
         return;
       }
@@ -223,22 +235,41 @@ export function useDialogAccessibility<T extends HTMLElement>(open: boolean, onC
       const activeIndex = focusable.indexOf(active instanceof HTMLElement ? active : dialog);
       if (!dialog.contains(active)) {
         event.preventDefault();
+        trapConsumedTab = true;
         (event.shiftKey ? last : first).focus();
       } else if (event.shiftKey && activeIndex <= 0) {
         event.preventDefault();
+        trapConsumedTab = true;
         last.focus();
       } else if (!event.shiftKey && (activeIndex === -1 || activeIndex === focusable.length - 1)) {
         event.preventDefault();
+        trapConsumedTab = true;
         first.focus();
       }
     }
 
+    // Belt-and-braces containment of a press whose keydown the trap consumed
+    // (boundary wrap, stray-focus rescue, empty-dialog guard). Chromium
+    // resolves sequential focus navigation in the keydown default action, so
+    // the preventDefault calls above already contain every observed walk;
+    // this guard suppresses a second default movement in engines that act on
+    // keyup instead. It is armed ONLY by consumed keydowns: a normal
+    // mid-cycle backward step is not consumed and its native movement must
+    // stay intact.
+    function handleKeyUp(event: KeyboardEvent) {
+      if (event.key !== "Tab" || !trapConsumedTab) return;
+      trapConsumedTab = false;
+      event.preventDefault();
+    }
+
     document.addEventListener("focusin", handleFocusIn, true);
     document.addEventListener("keydown", handleKeyDown, true);
+    document.addEventListener("keyup", handleKeyUp, true);
     return () => {
       window.clearTimeout(focusInitial);
       document.removeEventListener("focusin", handleFocusIn, true);
       document.removeEventListener("keydown", handleKeyDown, true);
+      document.removeEventListener("keyup", handleKeyUp, true);
       closeDialog(handle);
       const opener = openerRef.current;
       const openerDescriptor = openerDescriptorRef.current;
