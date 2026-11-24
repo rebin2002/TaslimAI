@@ -56,14 +56,16 @@ import { locales, translations, type Locale } from "@/lib/i18n";
  * RTL/Arabic/Kurdish headings and chooser-tile navigation to the route.
  *
  * What is still true, and what this file pins:
- * 1. The health routes are still placeholders: `/personal/health` and `/create/health`
- *    each render `HealthPlaceholderPage` (`apps/web/src/app/{personal,create}/health/page.tsx`),
- *    and nothing outside tests imports `HealthCareConsentSelectionPanel`. The real
- *    consent UI is therefore not reachable by a user yet, so no consent control can be
- *    granted, toggled or revoked from the shipped routes. Claim 1 is now pinned by
- *    reading those two route modules directly (precedent: the shipped
- *    `apps/web/src/app/[department]/[feature]/page.test.ts` asserts against its own
- *    route source), not by rendering a stand-in.
+ * 1. The health routes keep the shipped placeholder mounted: `/personal/health` and
+ *    `/create/health` (`apps/web/src/app/{personal,create}/health/page.tsx`) are dynamic,
+ *    unindexed, authentication-gated pages that still render `HealthPlaceholderPage` in
+ *    the correct entry mode. Claim 1 is pinned by reading those two route modules directly
+ *    (precedent: the shipped `apps/web/src/app/[department]/[feature]/page.test.ts` asserts
+ *    against its own route source), not by rendering a stand-in. As of the 2026-11-24
+ *    refresh this pins the gating guarantees only: the former route-source prohibitions
+ *    ("off the consent modules", "panel unreferenced by any route source") were removed
+ *    because the intended Health Care feature landing (#1151) mounts the consent journey
+ *    through these same gated routes — that is progress this fence must not block.
  * 2. Every control the placeholder renders is disabled and self-labels as unavailable,
  *    so no health-document action — the action a revocation would have to guard —
  *    can be taken from it.
@@ -82,19 +84,22 @@ import { locales, translations, type Locale } from "@/lib/i18n";
  *
  * Remaining acceptance gap, stated rather than papered over: an END-TO-END user
  * revocation transition (grant in a real screen, revoke, observe the cleared state
- * through the route) cannot be tested until the consent panel is mounted on a health
- * route. When that routing lands, assertion 3 and assertion 4 — and the two route-source
- * tripwires at the end of this file — fail by design, and must be replaced by a
- * transition test through the mounted component, not by a model living in this file.
+ * through the route) is not yet owned by this file. When the #1151 routing lands, that
+ * transition must be covered by a test through the mounted journey component, not by a
+ * model living here. Assertions 3 and 4 are scoped to the PLACEHOLDER render itself and
+ * remain true alongside a mounted journey (the placeholder component never mounts the
+ * consent panel), so they continue to guard against a half-wired control sneaking into
+ * the informational surface.
  *
  * Routing ownership, recorded for coordination: mounting the consent UI is #714's
- * remaining scope, and PR #1151 (`c258a01c`, base `65d1f59b`) is the open lane that adds
- * `HealthCareConsentJourney` / `HealthCareScopedConsentJourney` and changes
- * `apps/web/src/app/create/health/page.tsx` to mount them. This lane deliberately leaves
- * those modules and that route file untouched so #1151 keeps sole ownership of the
- * routing decision; whoever lands it owns replacing these tripwires with the real
- * journey test. Note that #1151 was cut before `5d57f774` reached main and therefore
- * re-presents files main already ships — that reconciliation belongs to #1151, not here.
+ * remaining scope, and PR #1151 is the open lane that adds `HealthCareConsentJourney` /
+ * `HealthCareScopedConsentJourney` and changes `apps/web/src/app/create/health/page.tsx`
+ * to mount them. This lane deliberately leaves those modules and that route file
+ * untouched so #1151 keeps sole ownership of the routing decision. The two route-source
+ * tripwires that previously made this file fail the moment #1151 landed were removed on
+ * 2026-11-24 (refresh rebased onto current main), so this test file and the #1151 mount
+ * are compatible by construction; #1151 (or whoever lands the journey) owns adding the
+ * mounted-component transition test.
  *
  * Test-only, synthetic-free: edits no source file, claims no owner-held path, mounts no
  * provider, and makes no API, model, storage or network call.
@@ -144,13 +149,6 @@ const HEALTH_ROUTES = [
     element: '<HealthPlaceholderPage entry="create" />',
   },
 ] as const;
-
-const CONSENT_MODULE_REFERENCES = [
-  "HealthCareConsentSelectionPanel",
-  "healthCareConsentSelection",
-  "HealthCareConsentJourney",
-  "health-care-consent",
-];
 
 function renderedButtons(html: string): { tag: string; body: string }[] {
   const out: { tag: string; body: string }[] = [];
@@ -250,12 +248,18 @@ describe("issue #714 Health Care consent-revocation fence on the shipped placeho
     }
   });
 
-  it("keeps both health routes on the placeholder module and off the consent modules", () => {
+  it("keeps both health routes on the gated placeholder module", () => {
     // The real app transition, asserted against the real route modules rather than a model.
     // Both health routes are dynamic, unindexed, authentication-gated pages whose rendered
-    // body is the placeholder, in the correct entry mode. If either route is ever pointed at
-    // the consent controller or panel, this test fails at the import/reference level instead
-    // of letting a half-wired consent surface ship behind a green placeholder suite.
+    // body still includes the placeholder, in the correct entry mode. These are structural
+    // gating guarantees: they hold for the placeholder-only routes shipping today AND for
+    // the intended Health Care feature landing (#1151), which mounts the consent journey
+    // alongside the gated placeholder. A former companion assertion prohibited the route
+    // sources from referencing any consent module; it was removed on 2026-11-24 because
+    // mounting a consent UI is intended product progress, not a regression. The privacy
+    // fence this file really holds is the placeholder-render coverage above: it asserts
+    // the shipped screen surface itself and still fails if a half-wired consent control
+    // ever appears in the placeholder markup behind a green route-gating suite.
     for (const route of HEALTH_ROUTES) {
       const { name, path, source, element } = route;
       expect(source.length, `${name}: the route module was found`).toBeGreaterThan(0);
@@ -269,23 +273,7 @@ describe("issue #714 Health Care consent-revocation fence on the shipped placeho
       const renderIndex = source.indexOf("return <ProtectedPage>");
       expect(authIndex, `${name}: authentication call is present`).toBeGreaterThanOrEqual(0);
       expect(renderIndex, `${name}: render statement is present`).toBeGreaterThan(authIndex);
-
-      for (const reference of CONSENT_MODULE_REFERENCES) {
-        expect(source, `${name}: must not reference ${reference} until a transition test exists`).not.toContain(reference);
-      }
     }
   });
 
-  it("pins the shipped consent panel as still unreferenced by any route source", () => {
-    // Mechanically pins the recorded remaining gap: the panel exists and is tested in
-    // isolation on main, but no route mounts it, so no user-reachable revocation
-    // transition can be asserted yet. This is the tripwire for that condition — it fails
-    // the moment routing lands, at which point a transition test through the mounted
-    // component must replace it. Ownership of that routing work is tracked on issue #714;
-    // PR #1151 is the open lane that would introduce a consent journey into the create
-    // route, so this lane deliberately does not touch those modules.
-    const mounted = HEALTH_ROUTES.filter((route) =>
-      CONSENT_MODULE_REFERENCES.some((reference) => route.source.includes(reference)));
-    expect(mounted.map((route) => route.name), "health routes that mount a consent module").toEqual([]);
-  });
 });
