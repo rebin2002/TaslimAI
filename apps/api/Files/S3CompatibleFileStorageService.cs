@@ -52,10 +52,17 @@ public sealed class S3CompatibleFileStorageService : IFileStorageService, IDispo
             await client.PutAsync(settings.S3Bucket, storageKey, content, cancellationToken);
         }
         // Preserve a real caller abort; an SDK-initiated timeout with an active
-        // caller token is a storage failure, not a client cancellation.
+        // caller token is a storage failure, not a client cancellation. The SDK
+        // can also report the abort behind a client or transport wrapper with
+        // the cancellation as an inner exception, so the whole chain is checked
+        // and the unwrapped cancellation is what propagates.
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
             throw;
+        }
+        catch (Exception exception) when (cancellationToken.IsCancellationRequested && StorageReadbackFaults.IsCancellation(exception))
+        {
+            throw StorageReadbackFaults.FindCancellation(exception)!;
         }
         catch (Exception exception)
         {
@@ -71,10 +78,17 @@ public sealed class S3CompatibleFileStorageService : IFileStorageService, IDispo
             return await client.GetAsync(settings.S3Bucket, storageKey, cancellationToken);
         }
         // Preserve a real caller abort; an SDK-initiated timeout with an active
-        // caller token is a storage failure, not a client cancellation.
+        // caller token is a storage failure, not a client cancellation. The SDK
+        // can also report the abort behind a client or transport wrapper with
+        // the cancellation as an inner exception, so the whole chain is checked
+        // and the unwrapped cancellation is what propagates.
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
             throw;
+        }
+        catch (Exception exception) when (cancellationToken.IsCancellationRequested && StorageReadbackFaults.IsCancellation(exception))
+        {
+            throw StorageReadbackFaults.FindCancellation(exception)!;
         }
         catch (Exception exception)
         {
@@ -90,10 +104,17 @@ public sealed class S3CompatibleFileStorageService : IFileStorageService, IDispo
             await client.DeleteAsync(settings.S3Bucket, storageKey, cancellationToken);
         }
         // Preserve a real caller abort; an SDK-initiated timeout with an active
-        // caller token is a storage failure, not a client cancellation.
+        // caller token is a storage failure, not a client cancellation. The SDK
+        // can also report the abort behind a client or transport wrapper with
+        // the cancellation as an inner exception, so the whole chain is checked
+        // and the unwrapped cancellation is what propagates.
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
             throw;
+        }
+        catch (Exception exception) when (cancellationToken.IsCancellationRequested && StorageReadbackFaults.IsCancellation(exception))
+        {
+            throw StorageReadbackFaults.FindCancellation(exception)!;
         }
         catch (Exception exception)
         {
@@ -109,10 +130,17 @@ public sealed class S3CompatibleFileStorageService : IFileStorageService, IDispo
             return await client.ExistsAsync(settings.S3Bucket, storageKey, cancellationToken);
         }
         // Preserve a real caller abort; an SDK-initiated timeout with an active
-        // caller token is a storage failure, not a client cancellation.
+        // caller token is a storage failure, not a client cancellation. The SDK
+        // can also report the abort behind a client or transport wrapper with
+        // the cancellation as an inner exception, so the whole chain is checked
+        // and the unwrapped cancellation is what propagates.
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
             throw;
+        }
+        catch (Exception exception) when (cancellationToken.IsCancellationRequested && StorageReadbackFaults.IsCancellation(exception))
+        {
+            throw StorageReadbackFaults.FindCancellation(exception)!;
         }
         catch (Exception exception)
         {

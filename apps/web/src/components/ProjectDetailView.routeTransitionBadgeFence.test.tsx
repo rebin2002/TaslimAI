@@ -132,12 +132,25 @@ const h = vi.hoisted(() => {
     active: null as { locale: string; t: (key: string, variables?: Record<string, string>) => string } | null,
     // The route parameter. This is the whole point of the file: it changes mid-session.
     projectId: "project-synthetic-a",
-    api: {
-      getProjectOverview: vi.fn(),
-      archiveProject: vi.fn(),
-      restoreProject: vi.fn(),
-      updateProject: vi.fn(),
-    },
+    api: (() => {
+      // The page writes through the revision fence. Each wrapper delegates to
+      // the mock beneath it, so the scenarios below keep driving and asserting
+      // on exactly the call they were written against, and a mutation's answer
+      // simply carries the revision the server committed with it.
+      const base = {
+        getProjectOverview: vi.fn(),
+        archiveProject: vi.fn(),
+        restoreProject: vi.fn(),
+        updateProject: vi.fn(),
+      };
+      return {
+        ...base,
+        archiveProjectWithRevision: async (projectId: string) => ({ project: await base.archiveProject(projectId), revision: null }),
+        restoreProjectWithRevision: async (projectId: string) => ({ project: await base.restoreProject(projectId), revision: null }),
+        getProjectWithRevision: async (projectId: string) => ({ project: await base.getProjectOverview(projectId), revision: null }),
+        updateProjectWithRevision: async (projectId: string, input: unknown) => ({ project: await base.updateProject(projectId, input), revision: null }),
+      };
+    })(),
     router: { push: vi.fn() },
     confirm: true,
   };
