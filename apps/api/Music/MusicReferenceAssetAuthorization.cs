@@ -29,6 +29,11 @@ namespace Taslim.Api.Music;
 /// never registers itself anywhere. Fail-closed invariants: an identifier is an address, not an
 /// access grant — anything this path cannot confirm on server state denies, and a returned record
 /// contains only facts the server itself stored about the asset.
+/// Lifecycle is read from the whole stored-file row, not from its status field alone: a recorded
+/// deletion or an elapsed retention deadline (<c>StoredFile.DeletedAt</c> /
+/// <c>StoredFile.RetainUntil</c>, #708 criterion 3 as exercised by #1152) denies the reference at
+/// this layer even while status still says <c>Ready</c>, while a field that is simply not on
+/// record denies nothing.
 /// </summary>
 public static class MusicReferenceAssetAuthorizationCodes
 {
@@ -49,6 +54,8 @@ public static class MusicReferenceAssetAuthorizationCodes
     public const string WorkspaceMismatch = "MUSIC_REFERENCE_AUTH_WORKSPACE_MISMATCH";
     public const string AssetArchived = "MUSIC_REFERENCE_AUTH_ASSET_ARCHIVED";
     public const string FileUnavailable = "MUSIC_REFERENCE_AUTH_FILE_UNAVAILABLE";
+    public const string FileRetentionExpired = "MUSIC_REFERENCE_AUTH_FILE_EXPIRED";
+    public const string FileDeletionRecorded = "MUSIC_REFERENCE_AUTH_FILE_DELETED";
     public const string FileLineageMismatch = "MUSIC_REFERENCE_AUTH_FILE_LINEAGE_MISMATCH";
     public const string MediaKindMismatch = "MUSIC_REFERENCE_AUTH_MEDIA_KIND_MISMATCH";
 
@@ -213,6 +220,36 @@ public sealed class MusicReferenceAssetAuthorizer(IAssetService assets) : IMusic
             {
                 denials.Add(Deny(MusicReferenceAssetAuthorizationCodes.FileUnavailable,
                     "A reference asset file is not ready for use."));
+                continue;
+            }
+
+            // Issue #708 fail-closed reference posture, resolved at the access layer (#1152 QA).
+            // The status field alone is not the whole server record: StoredFile also carries the
+            // retention deadline (RetainUntil) and the recorded deletion (DeletedAt), and both are
+            // server facts written by file processing/purge, never claimed by a client. A row whose
+            // deletion is already recorded, or whose retention window has elapsed, is not a usable
+            // reference even while Status still says Ready - #1116 covers the post-purge row
+            // (Status = Deleted), which this block deliberately leaves to the check above so its
+            // existing MUSIC_REFERENCE_AUTH_FILE_UNAVAILABLE contract is unchanged.
+            // null means "not on record", never "expired": upload-time rows carry no deadline, and
+            // treating absence as expiry would refuse the entire reference library instead of the
+            // expired rows in it. Expiry therefore denies only on a recorded deadline that has
+            // arrived (<= now, inclusive), on the server clock; a contradiction between the fields
+            // denies rather than picks a side. These denials name no identifier, timestamp, storage
+            // key or file name, so the access layer cannot become a probe of another workspace's
+            // retention state - the ownership fence above still answers strangers with the uniform
+            // "not available" code first.
+            if (file.DeletedAt is not null)
+            {
+                denials.Add(Deny(MusicReferenceAssetAuthorizationCodes.FileDeletionRecorded,
+                    "A reference asset file has a recorded deletion and cannot be used."));
+                continue;
+            }
+
+            if (file.RetainUntil is { } retainUntil && retainUntil <= DateTime.UtcNow)
+            {
+                denials.Add(Deny(MusicReferenceAssetAuthorizationCodes.FileRetentionExpired,
+                    "A reference asset file is past its recorded retention window."));
                 continue;
             }
 

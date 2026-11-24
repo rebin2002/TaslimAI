@@ -4,6 +4,17 @@ if (process.env.NODE_ENV === "production" && (!configuredApiUrl || !configuredAp
 const apiOrigin = (configuredApiUrl ?? "http://localhost:5000").replace(/\/$/, "");
 const MAX_PROXY_BODY_BYTES = 25 * 1024 * 1024;
 const UPSTREAM_TIMEOUT_MS = 30_000;
+// Remove the entire client-controlled forwarding namespace, not just today's
+// commonly recognized names (e.g. X-Forwarded-Client-Cert and future variants).
+// The upstream HTTPS/cookie trust boundary must never depend on client metadata.
+function stripUntrustedForwardingHeaders(headers: Headers): void {
+  // Snapshot names: deleting during a live Headers iterator can skip the next key.
+  for (const name of [...headers.keys()]) {
+    if (name === "forwarded" || name === "via" || name === "x-real-ip" || name.startsWith("x-forwarded-")) {
+      headers.delete(name);
+    }
+  }
+}
 
 type RouteContext = { params: Promise<{ path: string[] }> };
 
@@ -60,6 +71,10 @@ async function forward(request: Request, context: RouteContext): Promise<Respons
   headers.delete("content-length");
   headers.delete("accept-encoding");
   headers.delete("connection");
+  // The API trusts one hosting-proxy hop for the original HTTPS scheme so it
+  // can issue Secure cookies. Never let a browser manufacture that metadata
+  // through this same-origin proxy.
+  stripUntrustedForwardingHeaders(headers);
 
   const init: RequestInit & { duplex?: "half" } = {
     method: request.method,
