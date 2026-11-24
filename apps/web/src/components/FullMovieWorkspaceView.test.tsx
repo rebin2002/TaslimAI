@@ -237,4 +237,12 @@ describe("Full Movie workspace foundation", () => {
     expect(workspaceSource).toContain("no provider call or media mutation");
   });
 
+  it("keeps Edit review grounded in the persisted scene output", () => {
+    expect(workspaceSource).toContain("selectedScene.clipAssetId");
+    expect(workspaceSource).toContain("assetFileUrl(selectedScene.clipAssetId, true)");
+    expect(workspaceSource).toContain('controls preload="metadata"');
+    expect(workspaceSource).toContain("Download scene output");
+    expect(workspaceSource).toContain("No private scene output recorded yet.");
+  });
+
 });

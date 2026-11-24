@@ -95,6 +95,7 @@ export const movieDeliveryKeys = [
   "downloadMaster",
   "failedOutput",
   "stillProducing",
+  "cancelledOutput",
   "exportFootnote",
   "exportTerminalStep",
   "assemblyQueued",
@@ -228,6 +229,8 @@ const catalogs: Record<Locale, Catalog> = {
       "This attempt did not publish an output. Re-run the export after correcting the sources.",
     stillProducing:
       "The master is still being produced. Download unlocks when the asset is published.",
+    cancelledOutput:
+      "This export was cancelled before the master was published. There is nothing to download; queue a new export to produce one.",
     exportFootnote: "Export is the terminal step.",
     exportTerminalStep:
       "A master is only marked Ready after the encoded output passes the deterministic quality gate and the private asset is durably published.",
@@ -339,6 +342,8 @@ const catalogs: Record<Locale, Catalog> = {
       "لم تنشر هذه المحاولة إخراجًا. أعد التصدير بعد تصحيح المصادر.",
     stillProducing:
       "لا تزال النسخة النهائية قيد الإنتاج. يتاح التنزيل عند نشر الأصل.",
+    cancelledOutput:
+      "أُلغي هذا التصدير قبل نشر النسخة النهائية. لا شيء متاح للتنزيل؛ ضع تصديرًا جديدًا في قائمة الانتظار لإنتاج نسخة.",
     exportFootnote: "التصدير هو الخطوة النهائية.",
     exportTerminalStep:
       "لا تُعلّم النسخة النهائية بأنها جاهزة إلا بعد اجتياز الإخراج المشفر بوابة الجودة الحتمية ونشر الأصل الخاص بشكل دائم.",
@@ -453,6 +458,8 @@ const catalogs: Record<Locale, Catalog> = {
       "ئەم هەوڵە دەرچوونێکی بڵاونەکردەوە. دوای چاککردنی سەرچاوەکان هەناردەکە دووبارە بکە.",
     stillProducing:
       "وەشانی سەرەکی هێشتا دروست دەکرێت. کاتێک سامانەکە بڵاوکرایەوە داگرتن دەکرێت.",
+    cancelledOutput:
+      "ئەم هەناردەیە پێش بڵاوکردنەوەی وەشانی سەرەکی هەڵوەشێندرایەوە. هیچ شتێک بۆ داگرتن بەردەست نییە؛ هەناردەیەکی نوێ بخە ڕیزەوە بۆ دروستکردنی وەشانێک.",
     exportFootnote: "هەناردە هەنگاوی کۆتایییە.",
     exportTerminalStep:
       "وەشانی سەرەکی تەنها کاتێک ئامادە دادەنرێت کە دەرچوونی کۆدکراو دەروازەی کوالێتیی دیاریکراو تێپەڕێنێت و سامانە تایبەتەکە بەردەوام بڵاوکرابێتەوە.",

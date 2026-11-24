@@ -2,21 +2,25 @@ using System.Security.Claims;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.RateLimiting;
+using Microsoft.EntityFrameworkCore;
 using Taslim.Api.Contracts;
 using Taslim.Api.Infrastructure;
 using Taslim.Api.Movies;
+using Taslim.Api.Persistence;
 
 namespace Taslim.Api.Controllers;
 
 [ApiController]
 [Authorize]
 [Route("api/movie-director")]
-public sealed class MovieDirectorController(IMovieDirectorService director, IMovieSalvageDirector salvage, MovieAuthorizationService authorization) : ControllerBase
+public sealed class MovieDirectorController(IMovieDirectorService director, IMovieSalvageDirector salvage, MovieAuthorizationService authorization, TaslimDbContext db) : ControllerBase
 {
     [HttpPost("salvage-plan")]
     [ValidateAntiForgeryToken]
+    [EnableRateLimiting(RateLimiting.Generation)]
     public IActionResult CreateSalvagePlan(MovieSalvageDirectorRequest request)
     {
+        if (!TryGetUserId(out _)) return Unauthorized();
         try { return Ok(salvage.Plan(request)); }
         catch (ArgumentNullException exception) { return ApiResults.Error(this, 400, "MOVIE_SALVAGE_REQUEST_INVALID", exception.Message); }
         catch (ArgumentException exception) { return ApiResults.Error(this, 400, "MOVIE_SALVAGE_REQUEST_INVALID", exception.Message); }
@@ -27,9 +31,10 @@ public sealed class MovieDirectorController(IMovieDirectorService director, IMov
     [EnableRateLimiting(RateLimiting.Generation)]
     public async Task<IActionResult> CreateProposal(Guid movieProjectId, DirectorProposalRequest request, CancellationToken cancellationToken)
     {
+        if (!TryGetUserId(out var userId)) return Unauthorized();
         try
         {
-            var result = await director.CreateProposalAsync(GetUserId(), movieProjectId, request, cancellationToken);
+            var result = await director.CreateProposalAsync(userId, movieProjectId, request, cancellationToken);
             return result is null ? ApiResults.Error(this, 404, "DIRECTOR_PROJECT_NOT_FOUND", "Movie project not found.") : Ok(result);
         }
         catch (DirectorValidationException exception) { return ApiResults.Error(this, 400, "DIRECTOR_REQUEST_INVALID", exception.Message); }
@@ -44,30 +49,132 @@ public sealed class MovieDirectorController(IMovieDirectorService director, IMov
 
     [HttpPost("projects/{movieProjectId:guid}/intercut-proposals")]
     [ValidateAntiForgeryToken]
+    [EnableRateLimiting(RateLimiting.Generation)]
     public async Task<IActionResult> CreateIntercutProposal(Guid movieProjectId, MovieIntercutPlanRequest request, CancellationToken cancellationToken)
     {
-        if (!await authorization.CanAsync(GetUserId(), movieProjectId, MovieOperationalActions.DirectorProposalCreate, cancellationToken))
+        // The authentication middleware establishes identity, but an authenticated claim
+        // can still be absent or malformed; do not let Guid.Parse turn it into HTTP 500.
+        if (!TryGetUserId(out var userId)) return Unauthorized();
+        if (!await authorization.CanAsync(userId, movieProjectId, MovieOperationalActions.DirectorProposalCreate, cancellationToken))
             return Forbid();
         try
         {
-            // Intercut planning is deliberately a pure proposal seam. It does not create a
-            // timeline revision, enqueue a job, publish media, or charge usage.
-            return Ok(MovieIntercutPlanner.Build(movieProjectId, request));
+            if (request is null)
+                throw new MovieIntercutPlanningException(MovieIntercutPlanCodes.ClipRequired, "Intercut coverage candidates are required.");
+            if (request.TimelineId is Guid requestedTimelineId && requestedTimelineId != Guid.Empty)
+            {
+                var timeline = await db.MovieTimelines.AsNoTracking()
+                    .Where(item => item.Id == requestedTimelineId)
+                    .Select(item => new { item.MovieProjectId, item.CurrentRevisionNumber })
+                    .SingleOrDefaultAsync(cancellationToken);
+                if (timeline is null || timeline.MovieProjectId != movieProjectId)
+                    throw new MovieIntercutPlanningException(MovieIntercutPlanCodes.TimelineProjectMismatch, "The intercut timeline must belong to the requested movie project.");
+                // A proposal based on an older canonical revision must be rebuilt before review.
+                // This check is read-only and does not persist a timeline or start generation.
+                if (timeline.CurrentRevisionNumber != request.BaseTimelineVersion)
+                    throw new MovieIntercutPlanningException(MovieIntercutPlanCodes.TimelineVersionMismatch, "The intercut timeline revision has changed; refresh the timeline before planning.");
+            }
+
+            // Omitted timeline IDs must resolve the project's persisted canonical timeline,
+            // which may have a non-deterministic ID. Checking only the generated fallback ID
+            // would miss an existing revision and permit a stale review proposal.
+            if (request.TimelineId.GetValueOrDefault() == Guid.Empty)
+            {
+                var canonicalTimeline = await db.MovieTimelines.AsNoTracking()
+                    .Where(item => item.MovieProjectId == movieProjectId)
+                    .Select(item => new { item.Id, item.CurrentRevisionNumber })
+                    .SingleOrDefaultAsync(cancellationToken);
+                if (canonicalTimeline is not null)
+                {
+                    if (canonicalTimeline.CurrentRevisionNumber != request.BaseTimelineVersion)
+                        throw new MovieIntercutPlanningException(MovieIntercutPlanCodes.TimelineVersionMismatch, "The intercut timeline revision has changed; refresh the timeline before planning.");
+                    // Keep the caller's request unchanged; only the review planner receives
+                    // the resolved canonical timeline identity.
+                    request = new MovieIntercutPlanRequest
+                    {
+                        TimelineId = canonicalTimeline.Id,
+                        BaseTimelineVersion = request.BaseTimelineVersion,
+                        Clips = request.Clips,
+                        RequestedClipOrder = request.RequestedClipOrder,
+                    };
+                }
+            }
+
+            // Pure validation bounds the request before any database lookup; this is still
+            // review-only and never enqueues, persists, publishes media, or reserves usage.
+            var proposal = MovieIntercutPlanner.Build(movieProjectId, request);
+            // If this project has no persisted timeline, the planner uses a deterministic
+            // fallback ID. Fail closed if that identity somehow resolves to another project.
+            if (request.TimelineId.GetValueOrDefault() == Guid.Empty)
+            {
+                var existingDefault = await db.MovieTimelines.AsNoTracking()
+                    .Where(item => item.Id == proposal.TimelineId)
+                    .Select(item => new { item.MovieProjectId, item.CurrentRevisionNumber })
+                    .SingleOrDefaultAsync(cancellationToken);
+                if (existingDefault is not null)
+                {
+                    if (existingDefault.MovieProjectId != movieProjectId)
+                        throw new MovieIntercutPlanningException(MovieIntercutPlanCodes.TimelineProjectMismatch, "The intercut timeline must belong to the requested movie project.");
+                    if (existingDefault.CurrentRevisionNumber != request.BaseTimelineVersion)
+                        throw new MovieIntercutPlanningException(MovieIntercutPlanCodes.TimelineVersionMismatch, "The intercut timeline revision has changed; refresh the timeline before planning.");
+                }
+            }
+
+            var requestedClipIds = request.Clips.Select(item => item.ClipId).ToArray();
+            var canonicalClips = await db.MovieClips.AsNoTracking()
+                .Where(clip => requestedClipIds.Contains(clip.Id))
+                .Select(clip => new
+                {
+                    clip.Id,
+                    clip.MovieProjectId,
+                    clip.MovieSceneId,
+                    clip.MovieShotId,
+                    clip.DurationSeconds,
+                    SceneProjectId = clip.MovieScene != null ? (Guid?)clip.MovieScene.MovieProjectId : null,
+                    SceneSequence = clip.MovieScene != null ? (int?)clip.MovieScene.Sequence : null,
+                    ShotSceneId = clip.MovieShot != null ? (Guid?)clip.MovieShot.MovieSceneId : null,
+                    ShotSequence = clip.MovieShot != null ? (int?)clip.MovieShot.Sequence : null,
+                })
+                .ToDictionaryAsync(clip => clip.Id, cancellationToken);
+            if (canonicalClips.Count != request.Clips.Count ||
+                request.Clips.Any(item =>
+                    !canonicalClips.TryGetValue(item.ClipId, out var clip)
+                    || clip.MovieProjectId != movieProjectId
+                    || clip.MovieSceneId != item.MovieSceneId
+                    || clip.MovieShotId != item.MovieShotId
+                    || clip.SceneProjectId != movieProjectId
+                    || clip.ShotSceneId != item.MovieSceneId
+                    // A proposed cut cannot use more seconds than the known source clip.
+                    // Shorter editorial trims are permitted; unknown source durations
+                    // remain review-only and must not be represented as verified.
+                    || (clip.DurationSeconds is int sourceSeconds && item.DurationSeconds > sourceSeconds)
+                    || clip.SceneSequence != item.SceneSequence
+                    || clip.ShotSequence != item.ShotSequence))
+                throw new MovieIntercutPlanningException(MovieIntercutPlanCodes.ClipOwnershipMismatch, "Intercut coverage must reference canonical clips, shots, and scenes in the requested movie project.");
+
+            // The pure planner cannot check database ownership; the controller has now verified it.
+            var verifiedFindings = proposal.Findings
+                .Where(item => item != "canonical_clip_and_shot_ownership_not_verified_in_review_only_proposal")
+                .Append("canonical_clip_shot_scene_ownership_verified")
+                .ToArray();
+            return Ok(proposal with { Findings = verifiedFindings });
         }
-        catch (MovieIntercutPlanningException exception) { return ApiResults.Error(this, 400, exception.Code, exception.Message); }
+        catch (MovieIntercutPlanningException exception) { return ApiResults.Error(this, exception.Code == MovieIntercutPlanCodes.TimelineVersionMismatch ? 409 : 400, exception.Code, exception.Message); }
     }
 
     [HttpGet("proposals/{proposalId:guid}")]
     public async Task<IActionResult> GetProposal(Guid proposalId, CancellationToken cancellationToken)
     {
-        var result = await director.GetProposalAsync(GetUserId(), proposalId, cancellationToken);
+        if (!TryGetUserId(out var userId)) return Unauthorized();
+        var result = await director.GetProposalAsync(userId, proposalId, cancellationToken);
         return result is null ? ApiResults.Error(this, 404, "DIRECTOR_PROPOSAL_NOT_FOUND", "Director proposal not found.") : Ok(result);
     }
 
     [HttpGet("projects/{movieProjectId:guid}/history")]
     public async Task<IActionResult> History(Guid movieProjectId, CancellationToken cancellationToken)
     {
-        var result = await director.GetHistoryAsync(GetUserId(), movieProjectId, cancellationToken);
+        if (!TryGetUserId(out var userId)) return Unauthorized();
+        var result = await director.GetHistoryAsync(userId, movieProjectId, cancellationToken);
         return result is null ? ApiResults.Error(this, 404, "DIRECTOR_PROJECT_NOT_FOUND", "Movie project not found.") : Ok(result);
     }
 
@@ -75,9 +182,10 @@ public sealed class MovieDirectorController(IMovieDirectorService director, IMov
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> Approve(Guid proposalId, CancellationToken cancellationToken)
     {
+        if (!TryGetUserId(out var userId)) return Unauthorized();
         try
         {
-            var result = await director.ApproveProposalAsync(GetUserId(), proposalId, cancellationToken);
+            var result = await director.ApproveProposalAsync(userId, proposalId, cancellationToken);
             return result is null ? ApiResults.Error(this, 404, "DIRECTOR_PROPOSAL_NOT_FOUND", "Director proposal not found.") : Ok(result);
         }
         catch (DirectorValidationException exception) { return ApiResults.Error(this, 409, "DIRECTOR_PROPOSAL_NOT_PENDING", exception.Message); }
@@ -88,9 +196,10 @@ public sealed class MovieDirectorController(IMovieDirectorService director, IMov
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> Reject(Guid proposalId, CancellationToken cancellationToken)
     {
+        if (!TryGetUserId(out var userId)) return Unauthorized();
         try
         {
-            var result = await director.RejectProposalAsync(GetUserId(), proposalId, cancellationToken);
+            var result = await director.RejectProposalAsync(userId, proposalId, cancellationToken);
             return result is null ? ApiResults.Error(this, 404, "DIRECTOR_PROPOSAL_NOT_FOUND", "Director proposal not found.") : Ok(result);
         }
         catch (DirectorValidationException exception) { return ApiResults.Error(this, 409, "DIRECTOR_PROPOSAL_NOT_PENDING", exception.Message); }
@@ -100,9 +209,10 @@ public sealed class MovieDirectorController(IMovieDirectorService director, IMov
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> Execute(Guid actionId, CancellationToken cancellationToken)
     {
+        if (!TryGetUserId(out var userId)) return Unauthorized();
         try
         {
-            var result = await director.ExecuteActionAsync(GetUserId(), actionId, cancellationToken);
+            var result = await director.ExecuteActionAsync(userId, actionId, cancellationToken);
             return result is null ? ApiResults.Error(this, 404, "DIRECTOR_ACTION_NOT_FOUND", "Director action not found.") : Ok(result);
         }
         catch (DirectorActionNotApprovedException exception) { return ApiResults.Error(this, 409, "DIRECTOR_APPROVAL_REQUIRED", exception.Message); }
@@ -110,5 +220,6 @@ public sealed class MovieDirectorController(IMovieDirectorService director, IMov
         catch (DirectorActionExecutionException exception) { return ApiResults.Error(this, 409, exception.Code, exception.Message); }
     }
 
-    private Guid GetUserId() => Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier) ?? throw new InvalidOperationException("Authenticated user identifier is missing."));
+    private bool TryGetUserId(out Guid userId) =>
+        Guid.TryParse(User.FindFirstValue(ClaimTypes.NameIdentifier), out userId) && userId != Guid.Empty;
 }
