@@ -23,6 +23,61 @@ public sealed class VoiceGenerationUnitTests
     }
 
     [Fact]
+    public void Malformed_persisted_input_is_rejected_before_nullable_validation()
+    {
+        var json = JsonSerializer.Serialize(new { workspaceId = Guid.NewGuid() });
+
+        Assert.False(VoiceGenerationContractMapper.TryDeserializeInput(json, out var input));
+        Assert.Null(input);
+    }
+
+    [Theory]
+    [InlineData("null")]
+    [InlineData("{}")]
+    [InlineData("{\"workspaceId\":\"00000000-0000-0000-0000-000000000000\"}")]
+    [InlineData("not-json")]
+    [InlineData("[]")]
+    public void Persisted_input_that_is_incomplete_or_not_the_contract_shape_is_rejected(string json)
+    {
+        Assert.False(VoiceGenerationContractMapper.TryDeserializeInput(json, out var input));
+        Assert.Null(input);
+    }
+
+    [Fact]
+    public void Well_formed_persisted_input_still_round_trips()
+    {
+        var original = Input();
+
+        var accepted = VoiceGenerationContractMapper.TryDeserializeInput(
+            VoiceGenerationContractMapper.SerializeInput(original), out var restored);
+
+        Assert.True(accepted);
+        Assert.Equal(original, restored);
+    }
+
+    [Fact]
+    public async Task Handler_fails_closed_on_malformed_persisted_input_without_calling_a_provider()
+    {
+        var provider = new CountingVoiceProvider();
+        var handler = new VoiceGenerationJobHandler(
+            [provider],
+            Options.Create(new VoiceGenerationOptions { Enabled = true, ProviderKey = "fake" }),
+            NullLogger<VoiceGenerationJobHandler>.Instance);
+        var job = new GenerationJob
+        {
+            Id = Guid.NewGuid(),
+            JobType = GenerationJobTypes.VoiceGenerate,
+            InputJson = JsonSerializer.Serialize(new { workspaceId = Guid.NewGuid() }),
+        };
+
+        var exception = await Assert.ThrowsAsync<VoiceRequestValidationException>(
+            () => handler.ExecuteAsync(job, new Progress<int>(), CancellationToken.None));
+
+        Assert.Equal(GenerationJobErrorCodes.VoiceRequestInvalid, exception.Code);
+        Assert.Equal(0, provider.Calls);
+    }
+
+    [Fact]
     public async Task Disabled_voice_generation_fails_with_safe_unavailable_exception_without_fabricating_audio()
     {
         var handler = new VoiceGenerationJobHandler(
@@ -91,5 +146,23 @@ public sealed class VoiceGenerationUnitTests
                 1800,
                 44100,
                 new VoiceProviderUsage("fake-voice-model", request.Text.Length, 320, 0m, 12)));
+    }
+
+    private sealed class CountingVoiceProvider : IVoiceGenerationProvider
+    {
+        public int Calls { get; private set; }
+        public string Key => "fake";
+
+        public Task<VoiceProviderResult> GenerateAsync(VoiceGenerationInput request, CancellationToken cancellationToken = default)
+        {
+            Calls++;
+            return Task.FromResult(new VoiceProviderResult(
+                new byte[320],
+                "audio/mpeg",
+                "mp3",
+                1800,
+                44100,
+                new VoiceProviderUsage("fake-voice-model", request.Text.Length, 320, 0m, 12)));
+        }
     }
 }
