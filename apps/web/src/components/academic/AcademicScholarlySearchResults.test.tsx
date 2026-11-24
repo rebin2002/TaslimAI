@@ -243,3 +243,76 @@ describe("paging and adding controls", () => {
     expect(text).not.toMatch(/same records on every page|stable (list|result|snapshot)|identical across pages/i);
   });
 });
+
+describe("machine-local catalog addresses never become clickable", () => {
+  // Issue #1267 slice 3, round 9. The payloads behind these DTOs are the ones the API tests feed
+  // through the real OpenAlex and Google Books adapters; what `AcademicSourcePresentation.ToDto`
+  // returns for them is the contract the studio consumes, and this group pins both halves of it: an
+  // address into somebody's own machine never reaches a reader as a link, and losing that address
+  // costs the reader none of the scholarship.
+  it("renders no open-link at all for a record whose advertised address was refused", () => {
+    // Emitted for the OpenAlex work whose primary_location.landing_page_url was
+    // http://openalex-mirror.test/W10000000001 and whose best_oa_location.pdf_url was
+    // http://nas.local:9200/elastic.pdf: both fields null, indication gone with the link.
+    const refused = discoveredRecord({
+      title: "Pricing and reimbursement in the Kurdistan Region",
+      containerTitle: "Kurdish Health Policy Review",
+      doi: "10.5555/synth.2024.0001",
+      landingUrl: null,
+      fullTextUrl: null,
+      fullTextIndicated: false,
+    });
+    const { html, text } = render(discoveredPage({ sources: [refused] }));
+    expect(html).not.toContain("Open the record");
+    expect(html).not.toContain("openalex-mirror.test");
+    expect(html).not.toContain("nas.local");
+    expect(html).not.toMatch(/href="https?:\/\/(127\.|0\.0\.0\.0|localhost|169\.254\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|\[::1\])/i);
+    // The DOI resolver link is built from the identifier, not from provider text, so it stays.
+    expect(html).toContain('href="https://doi.org/10.5555/synth.2024.0001"');
+    expect(text).toContain("Pricing and reimbursement in the Kurdistan Region");
+    expect(text).toContain("Kurdish Health Policy Review");
+    expect(text).toMatch(/Bibliographic record/i);
+    expect(text).not.toMatch(/full-text location/i);
+  });
+
+  it("renders the public journal address the record did advertise", () => {
+    const publicRecord = discoveredRecord({
+      title: "Essential medicines lists in fragile regulatory systems",
+      doi: "10.1007/s13347-020-00405-x",
+      landingUrl: "https://journal.example.org/articles/45",
+      fullTextUrl: "https://journal.example.org/articles/45.pdf",
+      fullTextIndicated: true,
+    });
+    const { html } = render(discoveredPage({ sources: [publicRecord] }));
+    expect(html).toContain('href="https://journal.example.org/articles/45"');
+    expect(html).toContain("Open the record");
+    expect(html).toContain('rel="noopener noreferrer"');
+    expect(html).toContain('target="_blank"');
+  });
+
+  it("still refuses a local address that reached the page without passing the server gate", () => {
+    // Defense in depth for a contract violation rather than the normal path: the DTO is supposed to
+    // carry null here. Even a stale or hand-built response cannot put these behind a button.
+    ["http://db.internal/report", "http://127.0.0.1:8080/stolen", "http://localhost:9200/elastic", "http://[::1]/", "http://nas/admin", "http://2130706433/", "http://staging.intranet/docs"].forEach(url => {
+      const { html } = render(discoveredPage({ sources: [discoveredRecord({ landingUrl: url, fullTextUrl: url })] }));
+      expect(html).not.toContain("Open the record");
+      expect(html).not.toContain(`href="${url}"`);
+    });
+  });
+
+  it("keeps the bibliographic content when the link is refused", () => {
+    const refused = discoveredRecord({
+      title: "Reimbursement policy in emerging jurisdictions",
+      containerTitle: "Health Policy and Planning",
+      publicationYear: 2022,
+      citationCount: 3,
+      landingUrl: "http://router.home/setup",
+      fullTextUrl: null,
+    });
+    const { text } = render(discoveredPage({ sources: [refused] }));
+    expect(text).not.toContain("router.home");
+    expect(text).toContain("Reimbursement policy in emerging jurisdictions");
+    expect(text).toContain("Health Policy and Planning");
+    expect(text).toContain("2022");
+  });
+});

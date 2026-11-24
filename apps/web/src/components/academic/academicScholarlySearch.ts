@@ -255,6 +255,64 @@ export function scholarlyAccessNoteKey(access: "metadata" | "abstract", fullText
   return access === "abstract" ? "sources.accessNoteAbstract" : "sources.accessNoteMetadata";
 }
 
+/**
+ * Hostnames that never identify a publisher: the RFC 6761/6762 special-use names, mDNS, and the
+ * home/intranet spellings a reader's own network resolves. Mirrors the host half of the server's
+ * `AcademicProviderLinkPolicy`; kept as a subset on purpose, because the browser has no address
+ * classifier here and the server is what actually decides (see below).
+ */
+const localOnlyHostSuffixes = ["localhost", "local", "localdomain", "internal", "intranet", "lan", "home", "test", "invalid"];
+
+/**
+ * Dotted-quad spellings that name a machine rather than a publisher: loopback, the "this host" and
+ * RFC 1918 ranges, link-local (cloud identity metadata lives here), CGNAT and the reserved top of the
+ * space. The WHATWG parser has already folded decimal, octal, hex and short-form IPv4 into four
+ * numbers by the time this runs, so an obfuscated spelling is judged in the form the browser dials.
+ */
+function isNonPublicIpv4(host: string): boolean {
+  const octets = host.split(".");
+  if (octets.length !== 4) return false;
+  const numbers = octets.map(part => (/^\d{1,3}$/.test(part) ? Number(part) : -1));
+  if (numbers.some(value => value < 0 || value > 255)) return false;
+  const [a, b] = numbers;
+  if (a === 0 || a === 10 || a === 127) return true;
+  if (a === 169 && b === 254) return true;
+  if (a === 172 && b >= 16 && b <= 31) return true;
+  if (a === 192 && b === 168) return true;
+  if (a === 100 && b >= 64 && b <= 127) return true;
+  return a >= 224; // multicast and reserved
+}
+
+/**
+ * Second pair of eyes on a catalog-advertised address, for the case this surface cannot rule out:
+ * a response that did not come through the scholarly-search DTO path. The server refuses machine-local
+ * and non-public targets where the DTO is built (`AcademicSourcePresentation.ToDto`), which is the
+ * authoritative gate; this filter repeats only the rules that hold without an address classifier, so
+ * it can never admit MORE than the server did, and a public publisher link is untouched either way.
+ * A hostname that rebinds later is not caught by either — no check on a string pins what the browser
+ * resolves when the reader clicks.
+ */
+export function displayableProviderUrl(value: string | null | undefined): string | null {
+  const trimmed = value?.trim();
+  if (!trimmed) return null;
+  let parsed: URL;
+  try {
+    parsed = new URL(trimmed);
+  } catch {
+    return null;
+  }
+  if (parsed.protocol !== "https:" && parsed.protocol !== "http:") return null;
+  if (parsed.username.length > 0 || parsed.password.length > 0) return null;
+  // `URL.hostname` already folds decimal/octal/hex IPv4 spellings into dotted-quad or bracketed IPv6
+  // form, so an obfuscated literal is compared here in the shape the browser would dial.
+  const host = parsed.hostname.toLowerCase().replace(/\.$/, "");
+  if (host.length === 0) return null;
+  if (host.startsWith("[")) return null; // IPv6 literal: the server decides, this surface cannot classify
+  if (isNonPublicIpv4(host)) return null;
+  if (!host.includes(".")) return null; // single label: NetBIOS / private search domain, never a publisher
+  return localOnlyHostSuffixes.some(suffix => host === suffix || host.endsWith(`.${suffix}`)) ? null : trimmed;
+}
+
 export function toScholarlySearchRows(sources: readonly AcademicSearchSource[]): ScholarlySearchRow[] {
   return sources.map((source, index) => {
     const identifier = source.doi ?? source.isbn13 ?? source.isbn10 ?? null;
@@ -273,7 +331,7 @@ export function toScholarlySearchRows(sources: readonly AcademicSearchSource[]):
       language: source.language,
       doi: source.doi,
       isbn: source.isbn13 ?? source.isbn10,
-      url: source.landingUrl ?? source.fullTextUrl,
+      url: displayableProviderUrl(source.landingUrl ?? source.fullTextUrl),
       abstract: access === "abstract" ? source.abstract : null,
       access,
       fullTextIndicated: source.fullTextIndicated,

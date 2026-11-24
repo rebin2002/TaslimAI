@@ -108,6 +108,17 @@ public static class AcademicSourcePresentation
     {
         var fullTextIndicated = record.AccessLevel >= AcademicAccessLevel.FullTextIndicated;
         var hasAbstract = !string.IsNullOrWhiteSpace(record.Abstract);
+        // Catalog-advertised addresses are admitted for display here rather than inside an adapter, so
+        // one choke point governs every link a reader can click — including a merged record, where the
+        // surviving address came from whichever catalog answered.
+        var landingUrl = AcademicProviderLinkPolicy.Project(record.LandingUrl);
+        var fullTextUrl = AcademicProviderLinkPolicy.Project(record.FullTextUrl);
+        // A full-text claim resting solely on an address this service refuses to link is no longer a
+        // claim about a public location, so the flag leaves with the link instead of advertising a
+        // reading the studio will not open. A record that carries only an access level, with no
+        // advertised address at all, keeps its indication: that is what the catalog asserted.
+        var advertisedFullText = !string.IsNullOrWhiteSpace(record.FullTextUrl);
+        fullTextIndicated = fullTextIndicated && (!advertisedFullText || fullTextUrl is not null);
         return new AcademicSearchSourceDto(
             record.Title,
             record.Authors,
@@ -126,8 +137,8 @@ public static class AcademicSourcePresentation
             record.Isbn10,
             record.Abstract,
             record.PublisherDescription,
-            record.LandingUrl,
-            record.FullTextUrl,
+            landingUrl,
+            fullTextUrl,
             hasAbstract ? "abstract" : "metadata",
             fullTextIndicated,
             new AcademicSourceProvenanceDto(

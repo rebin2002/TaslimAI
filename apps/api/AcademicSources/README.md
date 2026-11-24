@@ -3,7 +3,9 @@
 Backend scholarly discovery adapters for the Academic Research Studio upgrade
 (issue #1259, Phase A). This folder is deliberately self-contained and
 file-disjoint from the standard Research Studio pipeline: nothing here imports
-`ResearchGenerationJobHandler`, and `Program.cs` is untouched.
+`ResearchGenerationJobHandler`. `Program.cs` is no longer untouched — this slice
+registers the feature (see Wiring below) — but registration is not activation:
+every switch still defaults to off.
 
 ## What is here
 
@@ -119,7 +121,7 @@ header auth. That makes a redirect a credential-leak path, so:
 - Same-authority hops (normal provider behaviour such as
   `/works` → `/works-v2`) are left exactly as the provider specified.
 
-## Wiring (integration step, deliberately not part of this PR)
+## Wiring (performed by this slice)
 
 ```csharp
 // Program.cs, alongside the other feature registrations:
@@ -152,6 +154,17 @@ non-public address fails at options resolution instead of at request time;
 the same applies to an `EndpointHostExceptions` entry with a single label, which
 would otherwise admit every domain under it.
 
+The call above is in `apps/api/Program.cs` and `Controllers/AcademicSourcesController.cs`
+is mapped, so the endpoint exists in the build and the studio can reach it.
+Nothing is fetched until an operator writes the section: with the shipped
+configuration the endpoint answers `503 ACADEMIC_SEARCH_UNAVAILABLE` and zero
+catalog requests leave the process. Because the pinned-dial transport is now
+reachable in production, `UseProxy = false` in
+`AcademicSourceConnectionPolicy.CreatePinnedHandler` is load-bearing: the .NET
+default (`true`) would let an ambient `HTTP_PROXY`/`HTTPS_PROXY` become the dial
+endpoint, and the guard would then classify the proxy hostname rather than the
+provider's.
+
 Google Books participates only when both `GoogleBooksEnabled` is true and a key
 is configured through environment/secret settings — never committed.
 
@@ -169,9 +182,16 @@ is configured through environment/secret settings — never committed.
   `Isbn13`, `Isbn10`, ...). A second record shape in another phase should be an
   adapter over this one, not a parallel model, so DOI/ISBN dedup keys stay
   comparable across providers.
-- Nothing in this PR calls `AddAcademicSourceDiscovery`; that call, the
-  `AcademicSourceDiscovery` config section and the research-studio consumer all
-  belong to the wiring PR. Until then the feature is present but dormant.
+- Provider-issued addresses are admitted twice over, for two different
+  questions. Persistence uses the shared research predicate (unchanged by this
+  slice); display uses `AcademicProviderLinkPolicy`, applied where the DTO is
+  built, which additionally refuses machine-local hostnames (`.local`,
+  `.internal`, `.test`, `.lan`, `.home`, `.intranet`, `.invalid`,
+  `.localdomain`, `localhost` and `.localhost`), single-label names, userinfo,
+  and IP literals the guard does not classify as publicly routable — including
+  decimal/octal/hex IPv4 and NAT64/6to4/v4-mapped spellings. Neither layer
+  claims to stop a hostname that rebinds after the check: server-side DNS
+  validation does not pin what the browser resolves when the reader clicks.
 
 ## Tests
 

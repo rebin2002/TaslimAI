@@ -12,6 +12,7 @@ import { discoveredPage, discoveredRecord } from "./academicTestHelpers";
 import {
   classifyScholarlySearchFailure,
   createScholarlySearchController,
+  displayableProviderUrl,
   maxScholarlySearchPage,
   narrowSourceType,
   scholarlyAccessNoteKey,
@@ -426,5 +427,87 @@ describe("search controller lifecycle", () => {
     controller.search(1, { workspaceId, term: "ethics" });
     await vi.waitFor(() => expect(controller.read().state).toBe("done"));
     expect(search.mock.calls[0][1].pageSize).toBe(5);
+  });
+});
+
+describe("provider link admission at the display edge", () => {
+  // Round 9 of #1267 slice 3: the server refuses machine-local and non-public catalog addresses where
+  // it builds the DTO, so the studio normally receives null in those fields. This filter is the second
+  // gate over the same data: it can only drop more, never admit more, and it never rewrites an address
+  // it keeps. What it does NOT claim: pinning a hostname that resolves differently when clicked — no
+  // check on a string controls what the browser dials later.
+  const kept = [
+    "https://openalex.org/W2741770304",
+    "https://books.google.com/books?id=_lYfBgAAQBAJ",
+    "https://doi.org/10.1016/j.knr.2021.02.003",
+    "https://journal.example.org/articles/45.pdf",
+    "http://arxiv.org/pdf/1234",
+    "https://synth.example/records/1",
+    "https://arxiv1.example.org/x",
+    "https://en.m.wikipedia.org/wiki/Kurdistan_Region",
+    "https://142.250.80.46/x",
+    "  https://journal.example.org/articles/45  ",
+  ];
+  kept.forEach(url => {
+    it(`keeps the public address exactly as it was, trimmed: ${url.trim()}`, () => {
+      expect(displayableProviderUrl(url)).toBe(url.trim());
+    });
+  });
+
+  const refused = [
+    // Machine-local names, in the spellings a reader's own network resolves.
+    "http://localhost:9200/elastic",
+    "http://api.localhost/health",
+    "http://host.test/x",
+    "http://db.internal/x",
+    "http://nas.local:5001/x",
+    "http://printer.lan/job",
+    "http://router.home/setup",
+    "http://staging.intranet/docs",
+    "http://x.invalid/",
+    "http://box.localdomain/x",
+    "http://nas/admin",
+    // Non-public addresses, including the obfuscated spellings a browser still dials locally.
+    "http://127.0.0.1:8080/stolen",
+    "http://[::1]/",
+    "http://[::ffff:127.0.0.1]/",
+    "http://[64:ff9b::7f00:1]/",
+    "http://2130706433/",
+    "http://0177.0.0.1/",
+    "http://0x7f.0.0.1/",
+    "http://127.1/",
+    "http://0.0.0.0/",
+    "http://169.254.169.254/latest/meta-data/",
+    "http://10.20.30.40/report",
+    "http://172.16.0.9/x",
+    "http://192.168.1.10/router/admin",
+    "http://100.64.0.1/x",
+    // Not a link this surface should ever make clickable.
+    "http://user:pass@openalex.org/W2741770304",
+    "javascript:alert(1)",
+    "data:text/html;base64,PHNjcmlwdD4=",
+    "file:///etc/passwd",
+    "not a url",
+    "",
+    "   ",
+  ];
+  refused.forEach(url => {
+    it(`refuses ${url || "(empty)"}`, () => {
+      expect(displayableProviderUrl(url)).toBeNull();
+    });
+  });
+
+  it("carries the refusal into the row, so no downstream consumer sees the dropped address", () => {
+    const [row] = toScholarlySearchRows([source({ landingUrl: "http://db.internal/report", fullTextUrl: null })]);
+    expect(row.url).toBeNull();
+    const [merged] = toScholarlySearchRows([source({ landingUrl: null, fullTextUrl: "http://nas.local:9200/elastic.pdf" })]);
+    expect(merged.url).toBeNull();
+    const record = scholarlyRowToSource(merged, { id: "src-refuse-1", addedAt: "2026-11-24T07:05:00Z", accessNote: "Metadata only." });
+    expect(record.url).toBeNull();
+  });
+
+  it("keeps a public landing page while a local full-text address disappears from the same record", () => {
+    const [row] = toScholarlySearchRows([source({ landingUrl: "https://journal.example.org/articles/45", fullTextUrl: "http://nas.local:9200/elastic.pdf" })]);
+    expect(row.url).toBe("https://journal.example.org/articles/45");
   });
 });
