@@ -145,6 +145,14 @@ export function ResearchStudioView() {
     });
     return () => { active = false; };
   }, [workspace, current]);
+  // Keep an in-view completed report readable, but never restore terminal jobs
+  // when Research Studio is opened again from Create. Saved assets live in Assets.
+  useEffect(() => {
+    if (current && !shouldPollResearchJob(current) && isCurrentResearchJob(current, workspace?.id ?? "")) {
+      clearResearchActiveJobId(current.workspaceId);
+      restoreJobId.current = null;
+    }
+  }, [current, workspace?.id]);
   useEffect(() => {
     if (!current || !shouldPollResearchJob(current)) return;
     const jobId = current.id;
@@ -423,7 +431,7 @@ export function ResearchStudioView() {
       ) : state === "succeeded" && result?.assetId ? (
         <ResearchResultView result={result} downloadability={representationDownloadability} sourcesLoadStatus={sourcesLoadStatus} onRetrySources={() => void retrySources()} working={working} downloadError={downloadError} onDownload={(id, name) => void downloadRepresentation(id, name)} onExport={() => void downloadSourceManifest()} onCreateAnother={createAnother} t={t} />
       ) : state === "completed-unavailable" ? (
-        <section className="account-card research-generation-state research-terminal-state"><RefreshCw size={28} /><p className="section-eyebrow">{t("jobs.statusSucceeded")}</p><h2>{t("research.completedLoadError")}</h2><p>{t("research.completedLoadHint")}</p><div className="research-result-actions"><button className="primary-button" onClick={() => void retryCompleted()} disabled={retryingCompleted}>{retryingCompleted ? t("research.working") : t("research.retry")}</button><Link className="secondary-button" href="/assets">{t("research.openAssets")}</Link></div></section>
+        <section className="account-card research-generation-state research-terminal-state"><RefreshCw size={28} /><p className="section-eyebrow">{t("jobs.statusSucceeded")}</p><h2>{t("research.completedLoadError")}</h2><p>{t("research.completedLoadHint")}</p><div className="research-result-actions"><button className="primary-button" onClick={() => void retryCompleted()} disabled={retryingCompleted}>{retryingCompleted ? t("research.working") : t("research.retry")}</button><Link className="secondary-button" href="/assets">{t("research.openAssets")}</Link><button className="secondary-button" onClick={createAnother}><RefreshCw size={15} /> {t("research.createAnother")}</button></div></section>
       ) : (
         <ResearchProgressView current={current} statusKey={statusKey} progress={progress} error={error} working={working} onCancel={() => void cancel()} t={t} />
       )}
