@@ -23,12 +23,24 @@ namespace Taslim.Api.Activity;
 /// <c>CreatorPrivateFenceEquivalenceTests</c> proves this predicate is equivalent to the canonical
 /// one, and the <c>Activity*CreatorPrivacyHttpTests</c> / <c>ProjectOverviewCreatorPrivacyHttpTests</c>
 /// families pin the observable behaviour of every surface that uses it.
+///
+/// GATE-PRIV-05 (independent review of the round-17 head): the comparison folds the stored
+/// <c>JobType</c> with <see cref="string.ToLower()"/> because the canonical in-memory rule compares
+/// <c>OrdinalIgnoreCase</c>, while a bare SQL <c>&lt;&gt;</c> is case-sensitive on the providers that
+/// run this product. Without the fold, a mixed-case row persisted outside the normalising enqueue
+/// path (an external or legacy writer) was hidden by direct job access yet stayed visible here -
+/// fail open. The fold makes the translatable rule accept exactly the rows the canonical rule
+/// hides; see <c>CreatorPrivacyFenceMixedCaseHttpTests</c> for the database-backed proof.
 /// </summary>
 public static class CreatorPrivacyFence
 {
     public static IQueryable<GenerationJob> VisibleToMember(IQueryable<GenerationJob> jobs, Guid userId) =>
         jobs.Where(job => job.CreatedByUserId == userId
-            || (job.JobType != GenerationJobTypes.ResearchGenerate
-                && (job.JobType != GenerationJobTypes.PresentationGenerate || job.ProjectId != null)
-                && (job.JobType != GenerationJobTypes.SocialGenerate || job.ProjectId != null)));
+            // The constants are pinned canonical lowercase by the equivalence suite, so
+            // lower(JobType) != constant is the SQL translation of the ignore-case comparison
+            // over this domain, and any case variant of a private class fails closed to its
+            // creator instead of slipping through on casing.
+            || (job.JobType.ToLower() != GenerationJobTypes.ResearchGenerate
+                && (job.JobType.ToLower() != GenerationJobTypes.PresentationGenerate || job.ProjectId != null)
+                && (job.JobType.ToLower() != GenerationJobTypes.SocialGenerate || job.ProjectId != null)));
 }

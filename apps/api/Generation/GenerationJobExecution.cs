@@ -855,11 +855,16 @@ public sealed class GenerationJobService(
         // workspace members cannot read, and unscoped social records carry creator-private posts
         // in their result JSON (#349). Expressed as a translatable predicate so paging and the
         // total count stay consistent with the hidden records.
+        // GATE-PRIV-05 (independent review of the round-17 head): JobType is folded with ToLower()
+        // before each comparison so this mirror accepts exactly the rows the in-memory
+        // IsPrivateExecutionRecord (OrdinalIgnoreCase) hides; a case-variant row written outside
+        // the normalising enqueue path fails closed to its creator on the job list too. Pinned by
+        // CreatorPrivacyFenceMixedCaseHttpTests and CreatorPrivateFenceEquivalenceTests.
         var query = db.GenerationJobs.AsNoTracking().Where(job => job.WorkspaceId == filter.WorkspaceId &&
             (job.CreatedByUserId == userId
-                || (job.JobType != GenerationJobTypes.ResearchGenerate
-                    && (job.JobType != GenerationJobTypes.PresentationGenerate || job.ProjectId != null)
-                    && (job.JobType != GenerationJobTypes.SocialGenerate || job.ProjectId != null))));
+                || (job.JobType.ToLower() != GenerationJobTypes.ResearchGenerate
+                    && (job.JobType.ToLower() != GenerationJobTypes.PresentationGenerate || job.ProjectId != null)
+                    && (job.JobType.ToLower() != GenerationJobTypes.SocialGenerate || job.ProjectId != null))));
         if (filter.Status.HasValue) query = query.Where(job => job.Status == filter.Status.Value);
         if (filter.ProjectId.HasValue) query = query.Where(job => job.ProjectId == filter.ProjectId.Value);
         if (!string.IsNullOrWhiteSpace(filter.JobType)) query = query.Where(job => job.JobType == filter.JobType);

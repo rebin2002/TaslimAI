@@ -46,6 +46,30 @@ public sealed class CreatorPrivateFenceEquivalenceTests
         AssertSameVisibility(jobs, CreatorId);
     }
 
+    [Theory]
+    [InlineData("Research.Generate")]
+    [InlineData("RESEARCH.GENERATE")]
+    [InlineData("Presentation.Generate")]
+    [InlineData("SOCIAL.GENERATE")]
+    public void Activity_fence_and_job_read_model_fence_agree_on_mixed_case_job_type_variants(string variant)
+    {
+        // GATE-PRIV-05 (independent review finding on the round-17 head): the canonical in-memory
+        // rule compares JobType OrdinalIgnoreCase, but the translatable SQL fences compared it
+        // ordinal-case-sensitive, so a row persisted with a case variant - the only way that
+        // happens is an external or legacy writer bypassing the enqueue normalisation - was hidden
+        // by direct job access yet stayed visible on the translatable surfaces. The fences must
+        // accept the same records for every casing of the private classes, on both viewpoints.
+        var jobs = new[]
+        {
+            NewJob(variant, owner: CreatorId, scoped: false),
+            NewJob(variant, owner: CreatorId, scoped: true),
+            NewJob(variant, owner: MemberId, scoped: false),
+        }.ToList();
+
+        AssertSameVisibility(jobs, MemberId);
+        AssertSameVisibility(jobs, CreatorId);
+    }
+
     [Fact]
     public void Unscoped_social_presentation_and_research_records_are_creator_private_on_both_surfaces()
     {
@@ -84,16 +108,18 @@ public sealed class CreatorPrivateFenceEquivalenceTests
     [Fact]
     public void Both_translatable_fences_rely_on_job_types_being_stored_in_canonical_form()
     {
-        // The two queryable fences (ActivityCenterService.VisibleToMember and the job read model's
-        // mirrored predicate) compare JobType with ordinal != so that EF can translate them to SQL,
-        // while the in-memory IsPrivateExecutionRecord they must agree with compares
-        // OrdinalIgnoreCase. Those only accept the same records while every persisted JobType is a
-        // canonical GenerationJobTypes.Supported value; a mixed-case or padded row would make the
-        // SQL side stop matching and the creator-private record would reappear in a co-member's
-        // Activity Center - fail open. The enqueue path guarantees it by resolving the request
-        // through Supported.First(...) before persisting, so the guarantee is pinned here rather
-        // than left implicit: if a canonical constant is ever declared in a form that is not its
-        // own trimmed lower-case value, this fails and the fences must be revisited together.
+        // Since GATE-PRIV-05 the two queryable fences (CreatorPrivacyFence.VisibleToMember, which
+        // ActivityCenterService.VisibleToMember delegates to, and the job read model's mirrored
+        // predicate in GenerationJobExecution.ListAsync) fold the stored JobType with ToLower()
+        // before comparing it to the canonical lowercase constants, so they accept exactly the
+        // mixed-case rows the in-memory IsPrivateExecutionRecord (OrdinalIgnoreCase) already hid.
+        // That equivalence is now the primary guarantee and is pinned by the mixed-case theory
+        // above; this fact stays as the second line of defence: the fold is only semantically
+        // equivalent to OrdinalIgnoreCase while the constants themselves are declared in canonical
+        // lowercase form, so if a canonical constant is ever declared in a form that is not its
+        // own trimmed lower-case value, this fails and the fences must be revisited together. The
+        // enqueue path additionally guarantees every normally-created row is persisted canonical by
+        // resolving the request through Supported.First(...) before saving.
         foreach (var jobType in GenerationJobTypes.Supported)
         {
             Assert.Equal(jobType, jobType.Trim());
