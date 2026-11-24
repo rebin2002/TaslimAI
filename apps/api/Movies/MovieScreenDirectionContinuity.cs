@@ -112,7 +112,9 @@ public static class MovieScreenDirectionPlanCodec
         try
         {
             var plan = JsonSerializer.Deserialize<MovieScreenDirectionPlan>(json, Options);
-            return MovieScreenDirectionPlanValidator.Normalize(plan);
+            return plan is null || MovieScreenDirectionPlanValidator.Validate(plan) is not null
+                ? null
+                : MovieScreenDirectionPlanValidator.Normalize(plan);
         }
         catch (JsonException)
         {
