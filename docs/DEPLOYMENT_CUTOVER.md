@@ -80,6 +80,27 @@ defect introduced by #1245. It is that promotion to the new revision is not gate
 on the revision actually serving, so in-flight requests can reach a container that
 has no listener. The migration chain is an amplifier, not the cause.
 
+**Independent corroboration from hosted CI.** The window is not an artefact of this
+sandbox. The pre-existing `Production container smoke` workflow
+(`.github/workflows/container-health-smoke.yml`) builds the real production image and
+polls `/health/live` every 2 s via `probe_production_liveness`
+(`scripts/container-health-smoke.sh:40-65`). For head `6b6897b9` of PR #1277
+(run 45454549235, job 138660373543) that step logged:
+
+```text
+18:03:22.504Z  ##[group]Run bash scripts/container-health-smoke.sh taslim-api:release-smoke 8080 120
+18:03:42.041Z  Production startup smoke passed on attempt 7
+18:03:46.536Z  [api-health-smoke] /health/live passed on attempt 3
+```
+
+i.e. **~19.5 s between the smoke container starting and the first 200**, on GitHub's
+runner against a real `postgres:15` service, plus a further attempt-3 wait in the same
+job. This matters for three reasons: it confirms the pre-bind window on infrastructure
+this lane does not control; it shows CI already *expects* that window and absorbs it
+with retries, which is precisely the tolerance production traffic does not get; and it
+places the measured worst case (~20-24 s) comfortably inside the 300 s healthcheck
+timeout proposed in §3.2 rather than near it.
+
 ### 1.3 Unresolved, and how to settle it
 
 This lane cannot see the Railway service settings, so the following stays open
@@ -308,3 +329,18 @@ was touched.
 Not done, and why: the container smoke scripts require the Docker CLI, absent from
 this sandbox, and Railway project access would be a production mutation. Both are
 recorded as preconditions in section 3.3 rather than assumed green.
+
+Hosted CI on the PR head `6b6897b9` (single workflow run 45454549093 plus
+45454549235), as of this writing - **6 of 7 checks completed `success`, none failed**:
+`Deployment smoke helper contracts` (step log confirms the new gate contract suite
+`18 passed, 0 failed` on the runner), `Release evidence and safety contract`,
+`Frontend checks`, `API integration tests`, `Autopilot next-wave gate`, and
+`Build production images and smoke-test API`. That last one is the Docker-backed
+suite, so it *was* executed - on GitHub's runner, not in this sandbox - and
+`container-health-smoke` plus `web-container-smoke` both passed against the real
+production images. `Browser E2E` was still `in_progress`; it exercises no path added
+here, and the `api-health-smoke` step inside it had already logged `PASS`.
+
+Still not done by this lane, deliberately: any `railway config plan` / `apply`, and
+applying the section 3.2 settings to any environment. Those are live changes and are
+the release owner's call, gated on section 3.3.
