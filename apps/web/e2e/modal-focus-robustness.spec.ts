@@ -101,7 +101,17 @@ async function injectUnfocusableProbes(page: Page) {
   await page.evaluate((probeIds) => {
     const dialog = document.querySelector<HTMLElement>(".project-form.modal-card");
     if (!dialog) throw new Error("project dialog is not mounted");
-    const anchor = dialog.querySelector<HTMLElement>("[data-dialog-autofocus]") ?? dialog;
+    // Append the probes after the real controls (end of the form), never
+    // inside a wrapping <label>: visible probe text inside the name label
+    // would join its accessible name and break label-based locators. The
+    // trailing position reproduces the reviewed defect exactly: the old
+    // element-only filter listed every probe after the last real control,
+    // so native tabbing walked into the aria-hidden button (Chromium still
+    // sequential-focuses aria-hidden nodes) and the backward boundary
+    // focused the negative-tabindex link — nodes a correct cycle must never
+    // visit — instead of wrapping close <-> create.
+    const anchor =
+      dialog.querySelector<HTMLElement>(".modal-actions") ?? dialog.lastElementChild ?? dialog;
     const invisible = document.createElement("button");
     invisible.type = "button";
     invisible.id = probeIds[0];
@@ -208,23 +218,39 @@ test("project dialog keyboard cycle skips every non-focusable node the review fl
   expect(expected.length, "the create dialog must expose a real keyboard cycle").toBeGreaterThanOrEqual(4);
 
   await nameField.focus();
-  const seen = new Set<string>([expected[0]]);
-  for (let press = 1; press < expected.length; press += 1) {
+  // The ground-truth list runs in DOM order from the dialog's first control
+  // (its close button), while the trap starts at the autofocused name field;
+  // rotate the lap assertions onto that start.
+  const startDesc = await activeElementDescriptor(page);
+  expect(startDesc, "the focused autofield must report a control inside the dialog").not.toBeNull();
+  const start = expected.indexOf(startDesc ?? "");
+  expect(start, "the autofocused field must appear in the ground-truth cycle").toBeGreaterThanOrEqual(0);
+  const seen = new Set<string>([startDesc ?? ""]);
+  for (let press = 1; press <= expected.length; press += 1) {
     await page.keyboard.press("Tab");
     const active = await activeElementDescriptor(page);
-    expect(active, `Tab #${press} must follow the browser ground truth`).toBe(expected[press]);
+    expect(active, `Tab #${press} must follow the browser ground truth`).toBe(
+      expected[(start + press) % expected.length],
+    );
     if (active) seen.add(active);
   }
   expect(seen.size, "every real control must receive focus exactly once per lap").toBe(expected.length);
-  // The last of the injected probes sits after the final real control in DOM
-  // order: the old element-only filter resolved the wrap boundary to a node
-  // Chromium refuses to focus, so forward wrap froze there.
-  await page.keyboard.press("Tab");
+  // The full lap passes the forward boundary (after the last real control the
+  // trailing probes sit; the old element-only filter let native navigation
+  // fall onto its aria-hidden probe and the focusin rescue then skipped the
+  // real wrap) and returns to the start field.
   await expect(nameField).toBeFocused();
-  await expect(activeElementDescriptor(page)).resolves.toBe(expected[0]);
-  // Reverse direction wraps to the last real control, not to a probe.
+  // Reverse direction wraps to the last REAL control, not to a probe: with
+  // the old filter, Shift+Tab from the first control called focus() on the
+  // trailing unfocusable probe and froze the cycle.
   await page.keyboard.press("Shift+Tab");
-  await expect(activeElementDescriptor(page)).resolves.toBe(expected[expected.length - 1]);
+  await expect(activeElementDescriptor(page)).resolves.toBe(
+    expected[(start - 1 + expected.length) % expected.length],
+  );
+  await page.keyboard.press("Shift+Tab");
+  await expect(activeElementDescriptor(page)).resolves.toBe(
+    expected[(start - 2 + expected.length) % expected.length],
+  );
   for (let press = 1; press <= 3; press += 1) {
     await page.keyboard.press("Shift+Tab");
     const active = await activeElementDescriptor(page);
