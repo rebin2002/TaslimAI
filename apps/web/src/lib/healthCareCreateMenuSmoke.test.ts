@@ -31,8 +31,9 @@ import { studioCategories } from "@/lib/navigation";
  *   2. that screen must actually await its own server gate on this route, must
  *      render the client gate, and must stay unindexed, because the app has no
  *      Next middleware to fall back on;
- *   3. no other health-named link may appear in the mobile menu without
- *      satisfying the same rules;
+ *   3. no other health-named link may appear in either Create-menu surface
+ *      without satisfying the same rules, and both surfaces must advertise the
+ *      same single destination;
  *   4. every enabled Create-menu card still resolves to a screen on disk.
  *
  * Nothing here asserts which controls, uploads or provider calls a health
@@ -102,10 +103,10 @@ function destinationTruthViolations(href: string, fact: RouteScreenFact): string
   return violations;
 }
 
-/** Render the mobile (compact) Create menu and read the links it exposes. */
-function mobileMenuLinks(): HealthMenuLink[] {
+/** Render one Create-menu surface (compact = mobile launcher, full = Create page) and read its links. */
+function menuLinks(compact: boolean): HealthMenuLink[] {
   const html = renderToStaticMarkup(
-    createElement(LocaleProvider, null, createElement(StudioChooser, { compact: true })),
+    createElement(LocaleProvider, null, createElement(StudioChooser, { compact })),
   );
   const links: HealthMenuLink[] = [];
   for (const anchor of html.matchAll(/<a\b[^>]*>([\s\S]*?)<\/a>/g)) {
@@ -121,9 +122,12 @@ function mobileMenuLinks(): HealthMenuLink[] {
   return links;
 }
 
-const mobileLinks = mobileMenuLinks();
-const healthCardLinks = mobileLinks.filter((link) => link.fromHealthCard);
-const healthNamedLinks = mobileLinks.filter(
+/** The mobile launcher is what issue #714 is about; the full chooser is the same promise on a wider screen. */
+const compactLinks = menuLinks(true);
+const fullLinks = menuLinks(false);
+const healthCardLinks = compactLinks.filter((link) => link.fromHealthCard);
+const fullHealthCardLinks = fullLinks.filter((link) => link.fromHealthCard);
+const healthNamedLinks = [...compactLinks, ...fullLinks].filter(
   (link) => /health/i.test(link.href) || link.fromHealthCard,
 );
 
@@ -131,7 +135,14 @@ describe("issue #714 mobile Create menu Health Care truthfulness", () => {
   it("renders exactly one Health Care card pointing at the canonical destination", () => {
     expect(healthCardLinks.length, "the mobile menu must not duplicate the health promise").toBe(1);
     expect(healthCardLinks[0].href).toBe(healthCareTileHref);
-    expect(healthNamedLinks.map((link) => link.href)).toEqual([healthCareTileHref]);
+    // Across both surfaces the menu must advertise one and only one health destination.
+    expect([...new Set(healthNamedLinks.map((link) => link.href))]).toEqual([healthCareTileHref]);
+  });
+
+  it("advertises the same single health destination on the full Create chooser", () => {
+    expect(fullHealthCardLinks.length, "the Create page must not duplicate the health promise").toBe(1);
+    expect([...new Set([...fullHealthCardLinks, ...healthCardLinks].map((link) => link.href))])
+      .toEqual([healthCareTileHref]);
   });
 
   it("advertises only health destinations that are real, gated and unindexed screens", () => {
