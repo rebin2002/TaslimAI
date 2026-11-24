@@ -494,7 +494,6 @@ public sealed class MoviePropBibleService(
         var now = DateTime.UtcNow;
         bible = new MoviePropBible { Id = Guid.NewGuid(), MovieProjectId = prop.MovieProjectId, MoviePropId = prop.Id, IdentityKey = prop.Name, CreatedAt = now, UpdatedAt = now };
         db.MoviePropBibles.Add(bible);
-        await db.SaveChangesAsync(cancellationToken);
         return bible;
     }
 
