@@ -12,10 +12,21 @@ using Xunit;
 namespace Taslim.Api.Tests;
 
 /// <summary>
-/// Authorization boundary for caption cue deletion. Deletion is the one caption
-/// mutation that enforces permission through the fail-closed collaboration
-/// guard, so an outsider request must surface as a 403 permission denial rather
-/// than an unhandled server error, and it must never mutate the owner's cue.
+/// Authorization and privacy boundary for caption cue deletion.
+///
+/// Deletion is the caption mutation that enforces permission through the fail-closed
+/// collaboration guard, so a denial must surface as a deliberate status code rather
+/// than an unhandled server error. It is also the mutation that could turn the API
+/// into a cue-existence oracle, because the cue identifier is the only locator in the
+/// route: an answer that differs between "there is no such cue" and "there is a cue
+/// you may not touch" lets any authenticated caller confirm that a cue id is real
+/// without ever being granted access to it.
+///
+/// The contract pinned here therefore mirrors <c>UpdateCueAsync</c>, the sibling
+/// mutation of the same resource: a cue outside the caller's visibility and an unknown
+/// cue id collapse into one indistinguishable 404, while a 403 stays reserved for a
+/// cue the caller can already see (that caller can enumerate the track's cues through
+/// the read routes) but is not allowed to edit.
 /// </summary>
 public sealed class MovieCaptionDeleteAuthorizationApiTests : IClassFixture<TaslimApiFactory>
 {
@@ -29,22 +40,24 @@ public sealed class MovieCaptionDeleteAuthorizationApiTests : IClassFixture<Tasl
     }
 
     [Fact]
-    public async Task Outsider_caption_cue_delete_is_forbidden_and_leaves_the_cue_intact()
+    public async Task Outsider_deleting_a_foreign_caption_cue_is_not_found_and_leaves_the_cue_intact()
     {
         using var owner = factory.CreateClient();
-        var ownerAuth = await RegisterAsync(owner, "Caption Delete Owner");
-        var project = await CreateMovieAsync(owner, ownerAuth.PersonalWorkspace.Id, "Caption delete authorization");
+        var ownerAuth = await RegisterAsync(owner, "Caption Delete Foreign Owner");
+        var project = await CreateMovieAsync(owner, ownerAuth.PersonalWorkspace.Id, "Caption delete foreign cue");
         var track = await CreateTrackAsync(owner, project.Project.Id);
         var cue = await CreateCueAsync(owner, track.Id);
 
         using var outsider = factory.CreateClient();
-        await RegisterAsync(outsider, "Caption Delete Outsider");
+        await RegisterAsync(outsider, "Caption Delete Foreign Outsider");
 
         using var response = await SendWithCsrfAsync(outsider, HttpMethod.Delete, $"/api/movie-studio/caption-cues/{cue.Id}", null);
 
-        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+        // A cue the caller cannot see must never be answered differently from a cue
+        // that does not exist: 404 (not 403, and never a 500) is the only safe reply.
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
         var body = await response.Content.ReadFromJsonAsync<JsonElement>();
-        Assert.Equal("MOVIE_PERMISSION_DENIED", body.GetProperty("error").GetProperty("code").GetString());
+        Assert.Equal("MOVIE_CAPTION_CUE_NOT_FOUND", body.GetProperty("error").GetProperty("code").GetString());
 
         using var scope = factory.Services.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
@@ -67,7 +80,11 @@ public sealed class MovieCaptionDeleteAuthorizationApiTests : IClassFixture<Tasl
 
         using var response = await SendWithCsrfAsync(member, HttpMethod.Delete, $"/api/movie-studio/caption-cues/{cue.Id}", null);
 
-        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+        // Sharing a workspace is not the same as being on the movie team: the cue is
+        // outside this caller's visibility, so the answer must be the not-found one.
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+        var body = await response.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal("MOVIE_CAPTION_CUE_NOT_FOUND", body.GetProperty("error").GetProperty("code").GetString());
         using var scope = factory.Services.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
         Assert.NotNull(await db.MovieCaptionCues.AsNoTracking().FirstOrDefaultAsync(item => item.Id == cue.Id));
@@ -90,6 +107,82 @@ public sealed class MovieCaptionDeleteAuthorizationApiTests : IClassFixture<Tasl
         var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
         Assert.Null(await db.MovieCaptionCues.AsNoTracking().FirstOrDefaultAsync(item => item.Id == first.Id));
         Assert.NotNull(await db.MovieCaptionCues.AsNoTracking().FirstOrDefaultAsync(item => item.Id == second.Id));
+    }
+
+    [Fact]
+    public async Task Owner_deleting_an_unknown_caption_cue_id_is_not_found()
+    {
+        using var owner = factory.CreateClient();
+        var ownerAuth = await RegisterAsync(owner, "Caption Delete Owner Unknown Id");
+        await CreateMovieAsync(owner, ownerAuth.PersonalWorkspace.Id, "Caption delete unknown id");
+
+        using var response = await SendWithCsrfAsync(owner, HttpMethod.Delete, $"/api/movie-studio/caption-cues/{Guid.NewGuid()}", null);
+
+        // The not-found answer stays available to permitted callers, so a typo or a cue
+        // deleted in another tab is still reported honestly instead of as 403.
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+        var body = await response.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal("MOVIE_CAPTION_CUE_NOT_FOUND", body.GetProperty("error").GetProperty("code").GetString());
+    }
+
+    [Fact]
+    public async Task Foreign_caption_cue_and_unknown_caption_cue_are_indistinguishable_to_an_outsider()
+    {
+        using var owner = factory.CreateClient();
+        var ownerAuth = await RegisterAsync(owner, "Caption Delete Oracle Owner");
+        var project = await CreateMovieAsync(owner, ownerAuth.PersonalWorkspace.Id, "Caption delete existence oracle");
+        var track = await CreateTrackAsync(owner, project.Project.Id);
+        var cue = await CreateCueAsync(owner, track.Id);
+
+        using var outsider = factory.CreateClient();
+        await RegisterAsync(outsider, "Caption Delete Oracle Outsider");
+
+        using var existing = await SendWithCsrfAsync(outsider, HttpMethod.Delete, $"/api/movie-studio/caption-cues/{cue.Id}", null);
+        var existingBody = await existing.Content.ReadAsStringAsync();
+
+        using var unknown = await SendWithCsrfAsync(outsider, HttpMethod.Delete, $"/api/movie-studio/caption-cues/{Guid.NewGuid()}", null);
+        var unknownBody = await unknown.Content.ReadAsStringAsync();
+
+        // Status, error code and message are identical end to end, so repeated deletes
+        // of candidate ids cannot rank existing cues against absent ones: the delete
+        // route leaks nothing about whether a cue id exists in someone else's project.
+        Assert.Equal(unknown.StatusCode, existing.StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, existing.StatusCode);
+        Assert.Equal(existingBody, unknownBody);
+
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        Assert.NotNull(await db.MovieCaptionCues.AsNoTracking().FirstOrDefaultAsync(item => item.Id == cue.Id));
+    }
+
+    [Fact]
+    public async Task Visible_cue_without_edit_permission_is_forbidden_and_stays_intact()
+    {
+        using var owner = factory.CreateClient();
+        var ownerAuth = await RegisterAsync(owner, "Caption Delete Reviewer Owner");
+        var project = await CreateMovieAsync(owner, ownerAuth.PersonalWorkspace.Id, "Caption delete visible but unpermitted");
+        var track = await CreateTrackAsync(owner, project.Project.Id);
+        var cue = await CreateCueAsync(owner, track.Id);
+
+        using var reviewer = factory.CreateClient();
+        var reviewerAuth = await RegisterAsync(reviewer, "Caption Delete Viewer Reviewer");
+        await AddWorkspaceMemberAsync(ownerAuth.PersonalWorkspace.Id, reviewerAuth.User.Id);
+        // A movie team member who can see the track but whose edit right is denied: the
+        // legitimate permission case, which must stay a deliberate 403 rather than a 500.
+        await AddMovieTeamMemberAsync(project.Project.Id, reviewerAuth.User.Id, denyEdit: true);
+
+        using var visible = await SendWithCsrfAsync(reviewer, HttpMethod.Get, $"/api/movie-studio/projects/{project.Project.Id}/caption-tracks", null);
+        Assert.True(visible.IsSuccessStatusCode, await visible.Content.ReadAsStringAsync());
+
+        using var response = await SendWithCsrfAsync(reviewer, HttpMethod.Delete, $"/api/movie-studio/caption-cues/{cue.Id}", null);
+
+        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+        var body = await response.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal("MOVIE_PERMISSION_DENIED", body.GetProperty("error").GetProperty("code").GetString());
+
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        Assert.NotNull(await db.MovieCaptionCues.AsNoTracking().FirstOrDefaultAsync(item => item.Id == cue.Id));
     }
 
     private async Task<AuthResponse> RegisterAsync(HttpClient client, string displayName)
@@ -156,6 +249,26 @@ public sealed class MovieCaptionDeleteAuthorizationApiTests : IClassFixture<Tasl
         using var scope = factory.Services.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
         db.WorkspaceMembers.Add(new WorkspaceMember { Id = Guid.NewGuid(), WorkspaceId = workspaceId, UserId = userId, Role = WorkspaceRole.Member, JoinedAt = DateTime.UtcNow });
+        await db.SaveChangesAsync();
+    }
+
+    private async Task AddMovieTeamMemberAsync(Guid movieProjectId, Guid userId, bool denyEdit)
+    {
+        var now = DateTime.UtcNow;
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        db.MovieTeamMembers.Add(new MovieTeamMember
+        {
+            Id = Guid.NewGuid(),
+            MovieProjectId = movieProjectId,
+            UserId = userId,
+            Role = MovieTeamRoles.Writer,
+            CreatedAt = now,
+            UpdatedAt = now,
+            PermissionOverrides = denyEdit
+                ? [new MovieTeamMemberPermission { Id = Guid.NewGuid(), Permission = MoviePermissions.Edit, Granted = false }]
+                : [],
+        });
         await db.SaveChangesAsync();
     }
 
