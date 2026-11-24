@@ -584,6 +584,64 @@ public sealed class MubertMusicGenerationProviderTests
         Assert.Single(handler.Requests, request => request.Method == HttpMethod.Post);
     }
 
+    [Fact]
+    public async Task Accepted_track_id_reaches_the_submission_sink_before_the_first_status_request()
+    {
+        // F-36.1 ordering contract. The durable accepted-submission record has to exist BEFORE the
+        // polling window that can lose the process, so the sink must fire between the billable create
+        // POST and the first status GET. Evidence written only on completion would be useless to lease
+        // recovery, which is precisely the path that runs after a worker died mid-generation.
+        var sinkCalls = new List<string?>();
+        var requestsWhenSinkRan = -1;
+        var handler = new MubertHandler((_, requestNumber) => requestNumber switch
+        {
+            1 => Json(HttpStatusCode.OK, "{\"data\":{\"id\":\"track-sink-order\",\"session_id\":\"session\"}}"),
+            2 => Json(HttpStatusCode.OK, "{\"data\":{\"generations\":[{\"status\":\"completed\",\"url\":\"https://download.example/track.mp3\"}]}}"),
+            _ => Binary(HttpStatusCode.OK, "ID3-test-audio", "audio/mpeg"),
+        });
+        var provider = CreateProvider(handler, pollIntervalMilliseconds: 1);
+        var result = await provider.GenerateAsync(
+            Input(),
+            CancellationToken.None,
+            operationId =>
+            {
+                sinkCalls.Add(operationId);
+                requestsWhenSinkRan = handler.Requests.Count;
+                return Task.CompletedTask;
+            });
+        Assert.Equal("audio/mpeg", result.ContentType);
+        // Exactly once, carrying the provider's own accepted operation id, and with only the create
+        // POST behind it: the first status request had not been issued yet.
+        Assert.Equal(new[] { "track-sink-order" }, sinkCalls);
+        Assert.Equal(1, requestsWhenSinkRan);
+        Assert.Single(handler.Requests, request => request.Method == HttpMethod.Post);
+        Assert.True(handler.Requests.Count >= 3, "polling must resume after the evidence was reported");
+    }
+    [Fact]
+    public async Task Unpersistable_submission_evidence_fails_closed_instead_of_looking_unsubmitted()
+    {
+        // The worker's sink raises MusicProviderSubmissionUnconfirmedException when the durable write
+        // cannot land (blank operation id, no current attempt row, or a database fault). That signal has
+        // to leave the provider unchanged: "we could not record the acceptance" is not "nothing was
+        // submitted", and only the unconfirmed class is terminal with automatic re-dispatch suppressed
+        // and the manual retry refused. Swallowing it here would put the job back on a retryable path
+        // and cost the customer a second paid track.
+        var handler = new MubertHandler((_, requestNumber) => requestNumber switch
+        {
+            1 => Json(HttpStatusCode.OK, "{\"data\":{\"id\":\"track-sink-fault\",\"session_id\":\"session\"}}"),
+            _ => Json(HttpStatusCode.OK, "{\"data\":{\"generations\":[{\"status\":\"completed\",\"url\":\"https://download.example/track.mp3\"}]}}"),
+        });
+        var provider = CreateProvider(handler, pollIntervalMilliseconds: 1);
+        var failure = await Record.ExceptionAsync(() => provider.GenerateAsync(
+            Input(),
+            CancellationToken.None,
+            _ => Task.FromException(new MusicProviderSubmissionUnconfirmedException())));
+        Assert.IsType<MusicProviderSubmissionUnconfirmedException>(failure);
+        // Fail closed means fail now: no poll was issued and no second billable track was created.
+        Assert.Single(handler.Requests);
+        Assert.Single(handler.Requests, request => request.Method == HttpMethod.Post);
+    }
+
     private static MubertMusicGenerationProvider CreateProvider(
         HttpMessageHandler handler,
         string customerId = "customer",

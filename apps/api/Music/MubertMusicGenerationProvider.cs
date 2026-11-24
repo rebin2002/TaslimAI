@@ -31,9 +31,15 @@ public sealed class MubertMusicGenerationProvider(
 
     public string Key => "mubert";
 
-    public async Task<MusicProviderResult> GenerateAsync(
+    public Task<MusicProviderResult> GenerateAsync(
         MusicGenerationInput request,
         CancellationToken cancellationToken = default)
+        => GenerateAsync(request, cancellationToken, onSubmissionAccepted: null);
+
+    public async Task<MusicProviderResult> GenerateAsync(
+        MusicGenerationInput request,
+        CancellationToken cancellationToken,
+        Func<string, Task>? onSubmissionAccepted)
     {
         if (!settings.Enabled
             || !string.Equals(settings.ProviderKey, Key, StringComparison.OrdinalIgnoreCase)
@@ -88,6 +94,12 @@ public sealed class MubertMusicGenerationProvider(
             if (string.IsNullOrWhiteSpace(created.Id)) throw new MusicProviderFailureException();
             providerSubmissionAccepted = true;
             providerTrackId = created.Id;
+
+            // F-36.1: make the acceptance durable before the first poll. Anything after this point can
+            // lose the process (crash, OOM kill, a rollout mid-generation), and the only surviving
+            // evidence that a paid generation exists is the provider operation id on the attempt row.
+            // A sink that cannot persist is a fail-closed signal, never a silent success.
+            if (onSubmissionAccepted is not null) await onSubmissionAccepted(created.Id);
 
             MubertGenerationResource? generation = null;
             for (pollAttempts = 1; pollAttempts <= Math.Max(1, settings.MubertMaxPollAttempts); pollAttempts++)
