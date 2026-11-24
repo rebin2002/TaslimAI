@@ -7,6 +7,7 @@ using Taslim.Api.Contracts;
 using Taslim.Api.Domain;
 using Taslim.Api.Infrastructure;
 using Taslim.Api.Persistence;
+using Taslim.Api.Projects;
 
 namespace Taslim.Api.Controllers;
 
@@ -70,6 +71,7 @@ public sealed class ProjectsController(TaslimDbContext db, WorkspaceAccessServic
         var project = await db.Projects.AsNoTracking().FirstOrDefaultAsync(item => item.Id == projectId, cancellationToken);
         if (project is null) return ApiResults.Error(this, 404, "PROJECT_NOT_FOUND", "Project not found.");
         if (!await access.IsMemberAsync(GetUserId(), project.WorkspaceId, cancellationToken)) return Forbid();
+        Response.Headers.ETag = ProjectRevision.FormatETag(project.UpdatedAt);
         return Ok(ToDto(project));
     }
 
@@ -141,19 +143,79 @@ public sealed class ProjectsController(TaslimDbContext db, WorkspaceAccessServic
     public async Task<IActionResult> Update(Guid projectId, UpdateProjectRequest request, CancellationToken cancellationToken)
     {
         if (!ModelState.IsValid) return ApiResults.Validation(this);
-        var project = await db.Projects.FirstOrDefaultAsync(item => item.Id == projectId, cancellationToken);
+        var project = await db.Projects.AsNoTracking().FirstOrDefaultAsync(item => item.Id == projectId, cancellationToken);
         if (project is null) return ApiResults.Error(this, 404, "PROJECT_NOT_FOUND", "Project not found.");
         if (!await access.IsMemberAsync(GetUserId(), project.WorkspaceId, cancellationToken)) return Forbid();
         var type = ResolveType(request.Type);
         if (type is null) return ApiResults.Validation(this, "Choose a valid project type.");
-        project.Name = request.Name.Trim();
-        project.Description = CleanDescription(request.Description);
-        project.Instructions = CleanText(request.Instructions);
-        project.ContextNotes = CleanText(request.ContextNotes);
-        project.Type = type;
-        project.UpdatedAt = DateTime.UtcNow;
-        await db.SaveChangesAsync(cancellationToken);
-        return Ok(ToDto(project));
+
+        // The persisted UpdatedAt is the project's opaque revision stamp. When a client
+        // declares the revision its form was built against with If-Match, a stale base is
+        // refused before anything is touched; otherwise the revision observed a few lines
+        // above still fences the write against a commit that lands mid-request.
+        var baseRevision = project.UpdatedAt;
+        var ifMatch = Request.Headers.TryGetValue("If-Match", out var ifMatchValue) ? ifMatchValue.ToString() : null;
+        var wildcard = string.Equals(ifMatch?.Trim(), ProjectRevision.WildcardETag, StringComparison.Ordinal);
+        // A concrete token means the client owns the base its edit was built on. The wildcard and
+        // the header-less legacy form both mean "apply over whatever is there": that is a promise
+        // about the write, not a licence to publish a stamp taken from the read above.
+        var declaresRevision = false;
+        if (!string.IsNullOrWhiteSpace(ifMatch) && !wildcard)
+        {
+            if (!ProjectRevision.TryParseETag(ifMatch, out var declaredRevision))
+            {
+                return ApiResults.Error(this, StatusCodes.Status400BadRequest, "INVALID_IF_MATCH",
+                    "If-Match must be a revision token from this project's ETag header, or *.");
+            }
+            if (declaredRevision != baseRevision)
+            {
+                Response.Headers.ETag = ProjectRevision.FormatETag(baseRevision);
+                return ApiResults.Error(this, StatusCodes.Status409Conflict, "PROJECT_REVISION_CONFLICT",
+                    "Another edit reached this project first. Re-read it and apply your change again.");
+            }
+            declaresRevision = true;
+        }
+
+        var name = request.Name.Trim();
+        var description = CleanDescription(request.Description);
+        var instructions = CleanText(request.Instructions);
+        var contextNotes = CleanText(request.ContextNotes);
+
+        // One conditional UPDATE per attempt does the whole write, fenced on the revision the stamp
+        // is derived from, so a commit that lands between the read above and this statement can
+        // neither be walked over nor hand back an ETag that was already expired. What a moved row
+        // means is the caller's semantics: a declared base is refused (re-aiming it would merge an
+        // edit into content the client never saw), while an unconditional write — wildcard per
+        // RFC 9110, or a legacy client sending no If-Match at all — re-targets the live revision
+        // instead of failing a request that promised last-write-wins.
+        var write = await ProjectRevision.WriteStampedAsync(
+            db,
+            projectId,
+            baseRevision,
+            declaresRevision ? RevisionFence.Declared : RevisionFence.LiveRow,
+            (target, nextRevision) => target.ExecuteUpdateAsync(setters => setters
+                .SetProperty(item => item.Name, name)
+                .SetProperty(item => item.Description, description)
+                .SetProperty(item => item.Instructions, instructions)
+                .SetProperty(item => item.ContextNotes, contextNotes)
+                .SetProperty(item => item.Type, type)
+                .SetProperty(item => item.UpdatedAt, nextRevision),
+                cancellationToken),
+            cancellationToken);
+        if (write.Outcome == RevisionWriteOutcome.Missing)
+        {
+            return ApiResults.Error(this, 404, "PROJECT_NOT_FOUND", "Project not found.");
+        }
+        if (write.Outcome == RevisionWriteOutcome.Conflict)
+        {
+            Response.Headers.ETag = ProjectRevision.FormatETag(write.Revision);
+            return ApiResults.Error(this, StatusCodes.Status409Conflict, "PROJECT_REVISION_CONFLICT",
+                "Another edit reached this project first. Re-read it and apply your change again.");
+        }
+
+        var updated = await db.Projects.AsNoTracking().FirstAsync(item => item.Id == projectId, cancellationToken);
+        Response.Headers.ETag = ProjectRevision.FormatETag(updated.UpdatedAt);
+        return Ok(ToDto(updated));
     }
 
     [HttpPost("api/projects/{projectId:guid}/archive")]
@@ -162,11 +224,27 @@ public sealed class ProjectsController(TaslimDbContext db, WorkspaceAccessServic
     {
         var project = await FindAuthorizedProject(projectId, cancellationToken);
         if (project is null) return ApiResults.Error(this, 404, "PROJECT_NOT_FOUND", "Project not found.");
-        project.Status = ProjectStatuses.Archived;
-        project.ArchivedAt = DateTime.UtcNow;
-        project.UpdatedAt = DateTime.UtcNow;
-        await db.SaveChangesAsync(cancellationToken);
-        return Ok(ToDto(project));
+        var stamped = await StampStatusAsync(
+            projectId,
+            project.UpdatedAt,
+            ProjectStatuses.Archived,
+            DateTime.UtcNow,
+            cancellationToken);
+        if (stamped.Outcome == RevisionWriteOutcome.Missing) return ApiResults.Error(this, 404, "PROJECT_NOT_FOUND", "Project not found.");
+        if (stamped.Outcome == RevisionWriteOutcome.Conflict)
+        {
+            Response.Headers.ETag = ProjectRevision.FormatETag(stamped.Revision);
+            return ApiResults.Error(this, StatusCodes.Status409Conflict, "PROJECT_REVISION_CONFLICT",
+                "Another edit reached this project first. Re-read it and apply your change again.");
+        }
+        // The stamp published here is the one the row actually carries after the
+        // write, which is what makes it usable as the If-Match base of an open
+        // draft. Success used to answer with the payload only, so a client that
+        // fenced its edits had to re-read the row (or lose its binding) after every
+        // archive, and a status flip looked like a revision it could not name.
+        var committed = await db.Projects.AsNoTracking().FirstAsync(item => item.Id == projectId, cancellationToken);
+        Response.Headers.ETag = ProjectRevision.FormatETag(committed.UpdatedAt);
+        return Ok(ToDto(committed));
     }
 
     [HttpPost("api/projects/{projectId:guid}/restore")]
@@ -175,12 +253,56 @@ public sealed class ProjectsController(TaslimDbContext db, WorkspaceAccessServic
     {
         var project = await FindAuthorizedProject(projectId, cancellationToken);
         if (project is null) return ApiResults.Error(this, 404, "PROJECT_NOT_FOUND", "Project not found.");
-        project.Status = ProjectStatuses.Active;
-        project.ArchivedAt = null;
-        project.UpdatedAt = DateTime.UtcNow;
-        await db.SaveChangesAsync(cancellationToken);
-        return Ok(ToDto(project));
+        var stamped = await StampStatusAsync(
+            projectId,
+            project.UpdatedAt,
+            ProjectStatuses.Active,
+            null,
+            cancellationToken);
+        if (stamped.Outcome == RevisionWriteOutcome.Missing) return ApiResults.Error(this, 404, "PROJECT_NOT_FOUND", "Project not found.");
+        if (stamped.Outcome == RevisionWriteOutcome.Conflict)
+        {
+            Response.Headers.ETag = ProjectRevision.FormatETag(stamped.Revision);
+            return ApiResults.Error(this, StatusCodes.Status409Conflict, "PROJECT_REVISION_CONFLICT",
+                "Another edit reached this project first. Re-read it and apply your change again.");
+        }
+        // The stamp published here is the one the row actually carries after the
+        // write, which is what makes it usable as the If-Match base of an open
+        // draft. Success used to answer with the payload only, so a client that
+        // fenced its edits had to re-read the row (or lose its binding) after every
+        // archive, and a status flip looked like a revision it could not name.
+        var committed = await db.Projects.AsNoTracking().FirstAsync(item => item.Id == projectId, cancellationToken);
+        Response.Headers.ETag = ProjectRevision.FormatETag(committed.UpdatedAt);
+        return Ok(ToDto(committed));
     }
+
+    /// <summary>
+    /// Flips a project's status through the same stamped write the edit paths use. Archive and
+    /// restore publish an ETag too, so they are held to the same rule as a PATCH: the stamp they
+    /// publish must be ahead of whatever the row holds when the write lands, not merely ahead of
+    /// the value read a few statements earlier. Assigning <c>DateTime.UtcNow</c> to the tracked
+    /// entity satisfied neither — a commit that landed after the read was overwritten with a stamp
+    /// that could be older or identical, which revalidated an ETag the API had already expired.
+    /// Status itself keeps its last-write-wins behaviour: the fence only re-targets the revision,
+    /// it never turns an archive into a conflict.
+    /// </summary>
+    private Task<ProjectRevisionWriteResult> StampStatusAsync(
+        Guid projectId,
+        DateTime observedRevision,
+        string status,
+        DateTime? archivedAt,
+        CancellationToken cancellationToken) =>
+        ProjectRevision.WriteStampedAsync(
+            db,
+            projectId,
+            observedRevision,
+            RevisionFence.LiveRow,
+            (target, nextRevision) => target.ExecuteUpdateAsync(setters => setters
+                .SetProperty(item => item.Status, status)
+                .SetProperty(item => item.ArchivedAt, archivedAt)
+                .SetProperty(item => item.UpdatedAt, nextRevision),
+                cancellationToken),
+            cancellationToken);
 
     private async Task<Project?> FindAuthorizedProject(Guid projectId, CancellationToken cancellationToken)
     {
