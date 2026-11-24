@@ -34,12 +34,13 @@ public sealed class MubertMusicGenerationProvider(
     public Task<MusicProviderResult> GenerateAsync(
         MusicGenerationInput request,
         CancellationToken cancellationToken = default)
-        => GenerateAsync(request, cancellationToken, onSubmissionAccepted: null);
+        => GenerateAsync(request, cancellationToken, onSubmissionAccepted: null, onDispatchSubmitting: null);
 
     public async Task<MusicProviderResult> GenerateAsync(
         MusicGenerationInput request,
         CancellationToken cancellationToken,
-        Func<string, Task>? onSubmissionAccepted)
+        Func<string, Task>? onSubmissionAccepted,
+        Func<Task>? onDispatchSubmitting = null)
     {
         if (!settings.Enabled
             || !string.Equals(settings.ProviderKey, Key, StringComparison.OrdinalIgnoreCase)
@@ -76,6 +77,14 @@ public sealed class MubertMusicGenerationProvider(
 
         try
         {
+            // F-36.1b: make the dispatch itself durable before the request leaves this process. The
+            // provider's operation id does not exist yet (neither vendor lets us supply one), so this
+            // marker is the only evidence that a paid submission may have been accepted. A failure to
+            // write it is logged, not fatal: refusing the customer's generation because a telemetry
+            // write hiccuped would be the wrong direction of error, and the acceptance stamp below
+            // still fails closed.
+            if (onDispatchSubmitting is not null) await onDispatchSubmitting();
+
             var createdBody = await SendJsonWithRetryAsync(
                 HttpMethod.Post,
                 new Uri(baseUri, "tracks"),
@@ -533,6 +542,55 @@ public sealed class MubertMusicGenerationProvider(
         return IsTransient(statusCode)
             ? new MusicProviderUnavailableException()
             : new MusicOutputRetrievalFailedException();
+    }
+
+    /// <summary>
+    /// F-36.1b: Mubert publishes GET /tracks/{TRACK_ID} as the way to "check if a track is created",
+    /// and it is not a generation call, so asking costs nothing and can never create a second track.
+    /// A ready url answers Completed; a failure-status generation answers ProviderDeclaredFailure but
+    /// NOT a no-charge statement - Mubert's published contract documents quota as spent per generate
+    /// call and says nothing about refunding a failed one, so the caller must keep the submission
+    /// closed. Anything unreadable, unauthenticated or unanswered is Unknown, never "nothing happened".
+    /// Note the url itself expires (expired_at in the track model), so a Completed answer is an
+    /// outcome classification, not a delivery promise.
+    /// </summary>
+    public async Task<MusicSubmissionReconciliation> ReconcileAcceptedSubmissionAsync(
+        string providerOperationId,
+        CancellationToken cancellationToken = default)
+    {
+        var operationId = (providerOperationId ?? string.Empty).Trim();
+        if (operationId.Length == 0 || operationId.StartsWith("taslim:", StringComparison.Ordinal))
+            return MusicSubmissionReconciliation.Unknown;
+        if (!settings.Enabled
+            || !string.Equals(settings.ProviderKey, Key, StringComparison.OrdinalIgnoreCase)
+            || string.IsNullOrWhiteSpace(settings.MubertCustomerId)
+            || string.IsNullOrWhiteSpace(settings.MubertAccessToken))
+        {
+            return MusicSubmissionReconciliation.Unknown;
+        }
+        try
+        {
+            var baseUri = BuildBaseUri(settings.MubertApiBaseUrl);
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            timeout.CancelAfter(TimeSpan.FromSeconds(Math.Clamp(settings.ProviderTimeoutSeconds, 1, 900)));
+            var body = await SendJsonWithRetryAsync(HttpMethod.Get, new Uri(baseUri, $"tracks/{Uri.EscapeDataString(operationId)}"), null, timeout.Token);
+            var status = ReadEnvelope<MubertTrackStatusResource>(body)?.Data;
+            var generation = status?.Generations?.LastOrDefault(item => !string.IsNullOrWhiteSpace(item.Url))
+                ?? status?.Generations?.LastOrDefault();
+            if (generation is null)
+                return MusicSubmissionReconciliation.Unknown;
+            if (!string.IsNullOrWhiteSpace(generation.Url))
+                return new MusicSubmissionReconciliation(MusicSubmissionOutcome.Completed, false);
+            if (IsFailureStatus(generation.Status))
+                return new MusicSubmissionReconciliation(MusicSubmissionOutcome.ProviderDeclaredFailure, false);
+            return new MusicSubmissionReconciliation(MusicSubmissionOutcome.InProgress, false);
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            // An unanswerable question is not an answer: keep the fail-closed posture.
+            logger.LogWarning(exception, "Mubert accepted-submission reconciliation was inconclusive. OperationId={OperationId}", operationId);
+            return MusicSubmissionReconciliation.Unknown;
+        }
     }
 
     private static bool IsFailureStatus(string? status) => status?.Trim().ToLowerInvariant() is "failed" or "failure" or "error" or "cancelled" or "canceled" or "rejected";

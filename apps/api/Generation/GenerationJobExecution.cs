@@ -1332,7 +1332,7 @@ public sealed class GenerationJobWorker(
                 await TouchWorkerHeartbeatSafelyAsync(db, workerId, workerIndex, null, null, consecutiveFailures, now, stoppingToken);
                 if (schedule.RecoveryDue(now))
                 {
-                    await RecoverExpiredClaimsAsync(db, usage, movieExecutions, notifications, stoppingToken);
+await RecoverExpiredClaimsAsync(db, usage, movieExecutions, notifications, scope.ServiceProvider, stoppingToken);
                     schedule.ScheduleNextRecovery(now);
                 }
                 var job = await ClaimAsync(db, stoppingToken);
@@ -1367,6 +1367,7 @@ public sealed class GenerationJobWorker(
         IGenerationJobUsageService usage,
         MovieVideoExecutionStore movieExecutions,
         INotificationEventWriter notifications,
+        IServiceProvider services,
         CancellationToken cancellationToken)
     {
         var now = DateTime.UtcNow;
@@ -1392,11 +1393,35 @@ public sealed class GenerationJobWorker(
                 // music job cancelled after the provider accepted the paid generation terminalises on
                 // the unconfirmed code that RetryAsync already refuses; without it, a cancellation that
                 // never reached a provider keeps its ordinary code and stays retryable.
-                var acceptedBeforeCancellation = await HasDurableAcceptedSubmissionAsync(db, job, expired.ConcurrencyToken, cancellationToken);
-                var (cancellationCode, cancellationMessage) = acceptedBeforeCancellation
-                    ? (GenerationJobErrorCodes.MusicCancelledUnconfirmedSubmission,
-                       GenerationJobErrorMessages.For(GenerationJobErrorCodes.MusicCancelledUnconfirmedSubmission) ?? "The job was cancelled.")
-                    : (CancellationCode(job), "The job was cancelled.");
+                var evidence = await ReadMusicSubmissionEvidenceAsync(db, job, expired.ConcurrencyToken, cancellationToken);
+                string cancellationCode;
+                if (evidence.DispatchMarkerOnly)
+                {
+                    // F-36.1b: the paid request was handed to the transport but no acceptance was ever
+                    // recorded, so a generation may exist at the provider with nothing on our side to
+                    // reconcile against. That is still a closed outcome: a retry could double-charge.
+                    cancellationCode = GenerationJobErrorCodes.MusicCancelledUnconfirmedSubmission;
+                }
+                else if (evidence.OperationId is not null && evidence.OperationId.Length > 0)
+                {
+                    var reconciliation = await ReconcileMusicSubmissionAsync(
+                        services, db, job, expired.ConcurrencyToken, evidence.OperationId, evidence.Provider, cancellationToken);
+                    cancellationCode = reconciliation.Outcome switch
+                    {
+                        // The paid generation exists at the provider and only delivery was lost.
+                        MusicSubmissionOutcome.Completed => GenerationJobErrorCodes.MusicCancelledUndeliveredOutput,
+                        // Only a vendor that documents "not charged on failure" may release the retry.
+                        MusicSubmissionOutcome.ProviderDeclaredFailure when reconciliation.ProviderDeclaresNoCharge => CancellationCode(job),
+                        _ => GenerationJobErrorCodes.MusicCancelledUnconfirmedSubmission,
+                    };
+                }
+                else
+                {
+                    cancellationCode = CancellationCode(job);
+                }
+                var cancellationMessage = cancellationCode == CancellationCode(job)
+                    ? "The job was cancelled."
+                    : GenerationJobErrorMessages.For(cancellationCode) ?? "The job was cancelled.";
                 var cancellationTerminalToken = Guid.NewGuid();
                 await using var cancellationFinalization = await db.Database.BeginTransactionAsync(cancellationToken);
                 await movieExecutions.MarkCancelledAsync(job.Id, expired.ConcurrencyToken, cancellationToken);
@@ -1655,6 +1680,10 @@ public sealed class GenerationJobWorker(
                 var evidenceClaimToken = providerAttempt.JobConcurrencyToken;
                 evidenceReporter.AcceptedSubmissionSink = providerOperationId =>
                     StampAcceptedSubmissionAsync(db, evidenceAttemptId, evidenceClaimToken, providerOperationId, stoppingToken);
+                // F-36.1b: the pre-dispatch marker shares the same durable home and the same claim
+                // scope, so recovery can tell "never reached a provider" from "paid request sent".
+                evidenceReporter.DispatchingSink = () =>
+                    StampDispatchingSubmissionAsync(db, evidenceAttemptId, evidenceClaimToken, stoppingToken);
             }
             var progress = new SerializedProgress(value => UpdateProgressSafelyAsync(claimedJob.Id, claimedJob.ConcurrencyToken, value, stoppingToken));
             var result = await handler.ExecuteAsync(claimedJob, progress, cancellation.Token);
@@ -2335,6 +2364,13 @@ var qualityFailure = exception as GenerationQualityControlException ?? exception
     /// the worker lost the delivery race rather than the generation itself. Every other job type keeps
     /// its existing per-type code and its existing retry behaviour, because for them a cancellation is
     /// evidence that nothing billable is in flight.
+    /// <summary>
+    /// F-36.1b: sentinel recorded on the attempt row between "the paid request is about to leave this
+    /// process" and "the provider answered with an operation id". Prefixed so it can never collide
+    /// with a vendor id, and refused by both providers' reconciliation paths.
+    /// </summary>
+    private const string MusicDispatchMarker = "taslim:dispatch-pending";
+
     /// </summary>
     private static (string Code, string Message) AcceptedOutputCancellationContract(GenerationJob job) =>
         string.Equals(job.JobType, GenerationJobTypes.MusicGenerate, StringComparison.OrdinalIgnoreCase)
@@ -2346,18 +2382,126 @@ var qualityFailure = exception as GenerationQualityControlException ?? exception
     /// F-36.1: durable acceptance evidence for the claim generation that died. Keyed on the job's
     /// concurrency token, which the worker rotates at every claim, so evidence from a superseded
     /// attempt can never hold this recovery's cancellation closed.
+    /// <summary>
+    /// F-36.1b: the durable submission state of the claim generation that died, read from the
+    /// provider-attempt row. Three states, not two: nothing stamped (a cancellation that never
+    /// reached a provider, still retryable), a dispatch marker with no operation id (a paid request
+    /// may have left this process and cannot be reconciled, closed), and an operation id (closed,
+    /// but reconcilable against the provider's own status endpoint). Keyed on the job's concurrency
+    /// token, which the worker rotates at every claim, so evidence from a superseded attempt can
+    /// never hold this recovery's cancellation closed.
     /// </summary>
-    private static async Task<bool> HasDurableAcceptedSubmissionAsync(
+    private static async Task<(bool DispatchMarkerOnly, string? OperationId, string? Provider)> ReadMusicSubmissionEvidenceAsync(
         TaslimDbContext db,
         GenerationJob job,
         Guid claimConcurrencyToken,
-        CancellationToken cancellationToken) =>
-        string.Equals(job.JobType, GenerationJobTypes.MusicGenerate, StringComparison.OrdinalIgnoreCase)
-        && await db.GenerationProviderAttempts.AsNoTracking().AnyAsync(
-            item => item.GenerationJobId == job.Id
+        CancellationToken cancellationToken)
+    {
+        if (!string.Equals(job.JobType, GenerationJobTypes.MusicGenerate, StringComparison.OrdinalIgnoreCase))
+            return (false, null, null);
+        var stamped = await db.GenerationProviderAttempts.AsNoTracking()
+            .Where(item => item.GenerationJobId == job.Id
                 && item.JobConcurrencyToken == claimConcurrencyToken
-                && item.ProviderExecutionId != null,
-            cancellationToken);
+                && item.ProviderExecutionId != null)
+            .Select(item => new { item.ProviderExecutionId, item.Provider })
+            .FirstOrDefaultAsync(cancellationToken);
+        if (stamped is null || string.IsNullOrWhiteSpace(stamped.ProviderExecutionId))
+            return (false, null, null);
+        return string.Equals(stamped.ProviderExecutionId, MusicDispatchMarker, StringComparison.Ordinal)
+            ? (true, null, stamped.Provider)
+            : (false, stamped.ProviderExecutionId, stamped.Provider);
+    }
+
+    /// <summary>
+    /// F-36.1b: asks the music provider what happened to an accepted submission and records the
+    /// classification on the attempt row. Reconciliation may only ever make the terminal state MORE
+    /// accurate, never less safe: an unmatched provider, an unreachable endpoint, an unreadable
+    /// answer or a thrown fault all return Unknown, which the caller maps to the closed terminal.
+    /// The lookup is a status GET, so it cannot itself create or bill a generation, and no provider
+    /// payload, credential or customer content is stored.
+    /// </summary>
+    private async Task<MusicSubmissionReconciliation> ReconcileMusicSubmissionAsync(
+        IServiceProvider services,
+        TaslimDbContext db,
+        GenerationJob job,
+        Guid claimConcurrencyToken,
+        string providerOperationId,
+        string? providerKey,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            var provider = services.GetServices<IMusicGenerationProvider>()
+                .FirstOrDefault(item => !string.IsNullOrWhiteSpace(providerKey)
+                    && string.Equals(item.Key, providerKey, StringComparison.OrdinalIgnoreCase));
+            if (provider is null)
+                return MusicSubmissionReconciliation.Unknown;
+            var result = await provider.ReconcileAcceptedSubmissionAsync(providerOperationId, cancellationToken);
+            await RecordMusicReconciliationAsync(db, job, claimConcurrencyToken, result, cancellationToken);
+            logger.LogInformation(
+                "Music accepted-submission reconciliation completed. JobId={JobId}; Outcome={Outcome}; ProviderDeclaresNoCharge={ProviderDeclaresNoCharge}",
+                job.Id, result.Outcome, result.ProviderDeclaresNoCharge);
+            return result;
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
+        {
+            logger.LogWarning(exception, "Music accepted-submission reconciliation was inconclusive; keeping the closed terminal. JobId={JobId}", job.Id);
+            return MusicSubmissionReconciliation.Unknown;
+        }
+    }
+
+    /// <summary>
+    /// F-36.1b: durable audit trail for the decision, in the attempt row's existing safe-metadata
+    /// column (no migration). Classification and timestamp only.
+    /// </summary>
+    private static async Task RecordMusicReconciliationAsync(
+        TaslimDbContext db,
+        GenerationJob job,
+        Guid claimConcurrencyToken,
+        MusicSubmissionReconciliation reconciliation,
+        CancellationToken cancellationToken)
+    {
+        var payload = $"{{\"musicSubmissionReconcile\":{{\"outcome\":\"{reconciliation.Outcome}\",\"providerDeclaresNoCharge\":{(reconciliation.ProviderDeclaresNoCharge ? "true" : "false")},\"checkedAtUtc\":\"{DateTime.UtcNow:O}\"}}}}";
+        var bounded = payload.Length <= 8000 ? payload : payload.Substring(0, 8000);
+        await db.GenerationProviderAttempts
+            .Where(item => item.GenerationJobId == job.Id
+                && item.JobConcurrencyToken == claimConcurrencyToken
+                && item.ProviderExecutionId != null)
+            .ExecuteUpdateAsync(setters => setters
+                .SetProperty(item => item.SafeMetadataJson, bounded),
+                cancellationToken);
+    }
+
+    /// <summary>
+    /// F-36.1b: writes the pre-dispatch marker onto the attempt row before the paid request is handed
+    /// to the transport. Never overwrites an accepted operation id, so the two durable facts stay
+    /// distinguishable and a late marker cannot mask a known id. Unlike the acceptance stamp a
+    /// failure here is logged rather than thrown: the marker only narrows the crash window, and
+    /// refusing to run a customer's generation because an evidence write hiccuped is the wrong trade.
+    /// </summary>
+    private async Task StampDispatchingSubmissionAsync(
+        TaslimDbContext db,
+        Guid attemptId,
+        Guid jobConcurrencyToken,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            await db.GenerationProviderAttempts
+                .Where(item => item.Id == attemptId
+                    && item.JobConcurrencyToken == jobConcurrencyToken
+                    && (item.ProviderExecutionId == null || item.ProviderExecutionId == ""))
+                .ExecuteUpdateAsync(setters => setters
+                    .SetProperty(item => item.ProviderExecutionId, MusicDispatchMarker),
+                    cancellationToken);
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
+        {
+            db.ChangeTracker.Clear();
+            logger.LogWarning(exception, "Music dispatch marker could not be persisted; acceptance evidence below still fails closed. AttemptId={AttemptId}", attemptId);
+        }
+    }
+
 
     /// <summary>
     /// F-36.1: writes the accepted provider operation id onto the already-persisted attempt row and

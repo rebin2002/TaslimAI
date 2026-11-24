@@ -792,7 +792,8 @@ internal sealed class AcceptedCancellationMusicProvider : IMusicGenerationProvid
     public async Task<MusicProviderResult> GenerateAsync(
         MusicGenerationInput request,
         CancellationToken cancellationToken,
-        Func<string, Task>? onSubmissionAccepted)
+        Func<string, Task>? onSubmissionAccepted,
+        Func<Task>? onDispatchSubmitting = null)
     {
         Interlocked.Increment(ref submittedGenerations);
         if (Mode is AcceptedCancellationMode.ReportThenHang or AcceptedCancellationMode.ReportThenFinishOnRelease)
