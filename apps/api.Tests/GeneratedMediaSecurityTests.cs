@@ -115,6 +115,57 @@ public sealed class GeneratedMediaSecurityTests
         await Assert.ThrowsAsync<InvalidDataException>(() => policy.EnsureSafeAsync(new Uri(value)));
     }
 
+    // Special-use ranges the provider guard must refuse that a naive loopback/private/multicast
+    // sweep misses. 192.88.99.0/24 is the deprecated 6to4 relay anycast address; 2002::/16 embeds
+    // an attacker-chosen IPv4 in bytes 2-5; 2001::/32 is Teredo; 100::/64 is discard-only and
+    // 3ffe::/16 is legacy 6bone. Kept aligned with AcademicSourceUrlGuard.IsPubliclyRoutable so
+    // the repository has one SSRF address standard rather than two.
+    [Theory]
+    [InlineData("https://192.88.99.1/media.mp3")]
+    [InlineData("https://[2002:7f00:1::]/media.mp3")]
+    [InlineData("https://[2001:0000:0000::1]/media.mp3")]
+    [InlineData("https://[100::1]/media.mp3")]
+    [InlineData("https://[3ffe::1]/media.mp3")]
+    public async Task Provider_url_policy_blocks_special_use_ipv6_and_anycast_targets(string value)
+    {
+        var policy = new ProviderUrlPolicy();
+
+        await Assert.ThrowsAsync<InvalidDataException>(() => policy.EnsureSafeAsync(new Uri(value)));
+    }
+
+    // An IPv4 destination written inside an IPv6 literal must be judged by the IPv4 rules, not by
+    // the IPv6 ones. ::ffff:/96 was already reduced; ::/96 (deprecated IPv4-compatible) was not,
+    // so [::a9fe:a9fe] used to read as a routable v6 endpoint while naming 169.254.169.254.
+    [Theory]
+    [InlineData("https://[::ffff:169.254.169.254]/media.mp3")]
+    [InlineData("https://[::ffff:127.0.0.1]/media.mp3")]
+    [InlineData("https://[::a9fe:a9fe]/media.mp3")]
+    [InlineData("https://[::7f00:1]/media.mp3")]
+    [InlineData("https://[::a00:1]/media.mp3")]
+    [InlineData("https://[::]/media.mp3")]
+    public async Task Provider_url_policy_reduces_embedded_ipv6_literals_to_ipv4_rules(string value)
+    {
+        var policy = new ProviderUrlPolicy();
+
+        await Assert.ThrowsAsync<InvalidDataException>(() => policy.EnsureSafeAsync(new Uri(value)));
+    }
+
+    // Positive control: the guard must stay fail-closed without becoming fail-everything. Real
+    // provider CDN endpoints are plain public addresses, and the widened v6 rules must not swallow
+    // 2001:4860::/32 (Google DNS) or 2606:4700::/32 (Cloudflare) just because they start 20 01.
+    [Theory]
+    [InlineData("https://1.1.1.1/media.mp3")]
+    [InlineData("https://8.8.8.8/media.mp3")]
+    [InlineData("https://[2606:4700:4700::1111]/media.mp3")]
+    [InlineData("https://[2001:4860:8000::68]/media.mp3")]
+    [InlineData("https://[::10a0:1]/media.mp3")]
+    public async Task Provider_url_policy_still_allows_public_targets(string value)
+    {
+        var policy = new ProviderUrlPolicy();
+
+        await policy.EnsureSafeAsync(new Uri(value));
+    }
+
     [Fact]
     public async Task Provider_url_policy_requires_https()
     {
