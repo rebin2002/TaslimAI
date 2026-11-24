@@ -353,7 +353,8 @@ builder.Services.AddSingleton<VideoGenerationAdapterExecutionService>();
 builder.Services.AddScoped<MovieVideoExecutionStore>();
 builder.Services.AddHttpClient<RunwayMovieVideoProvider>()
     .ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler { AllowAutoRedirect = false });
-builder.Services.AddHttpClient<ManusMovieVideoProvider>();
+builder.Services.AddHttpClient<ManusMovieVideoProvider>()
+    .ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler { AllowAutoRedirect = false });
 builder.Services.AddSingleton<RunwayMovieVideoProvider>();
 builder.Services.AddSingleton<ManusMovieVideoProvider>();
 builder.Services.AddSingleton<IMovieVideoProviderRegistry>(services => new MovieVideoProviderRegistry(
@@ -444,7 +445,8 @@ builder.Services.AddSingleton<IProviderUrlPolicy, ProviderUrlPolicy>();
 builder.Services.AddHttpClient<MubertMusicGenerationProvider>()
     .ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler { AllowAutoRedirect = false });
 builder.Services.AddSingleton<IMusicGenerationProvider>(services => services.GetRequiredService<MubertMusicGenerationProvider>());
-builder.Services.AddHttpClient<StableAudioMusicGenerationProvider>();
+builder.Services.AddHttpClient<StableAudioMusicGenerationProvider>()
+    .ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler { AllowAutoRedirect = false });
 builder.Services.AddSingleton<IMusicGenerationProvider>(services => services.GetRequiredService<StableAudioMusicGenerationProvider>());
 builder.Services.AddScoped<IGenerationJobHandler, MusicGenerationJobHandler>();
 builder.Services.AddSingleton<IMovieSoundProvider>(services =>

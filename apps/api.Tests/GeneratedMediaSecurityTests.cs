@@ -1,6 +1,7 @@
 using System.IO.Compression;
 using System.Security.Cryptography;
 using System.Text;
+using Microsoft.Extensions.DependencyInjection;
 using Taslim.Api.Files;
 using Xunit;
 
@@ -186,5 +187,88 @@ public sealed class GeneratedMediaSecurityTests
     {
         using var writer = new StreamWriter(archive.CreateEntry(name).Open(), Encoding.UTF8, 1024, leaveOpen: false);
         writer.Write(content);
+    }
+}
+
+// Composition proof for the provider-download redirect lane (PR #358). The typed clients that
+// fetch provider-controlled URLs must never let the framework follow a 3xx hop on its own: a
+// redirect destination arrives from provider response data and is only safe once
+// IProviderUrlPolicy has classified it. Provider tests inject stub primary handlers, so the
+// real registrations were never exercised in CI; this reads the booted application's named
+// HttpClientFactoryOptions and runs its ConfigurePrimaryHttpMessageHandler actions through a
+// public HttpMessageHandlerBuilder probe. ManusMovieVideoProvider and
+// StableAudioMusicGenerationProvider are the correction; DirectVideoHttpProviderAdapter,
+// RunwayMovieVideoProvider and MubertMusicGenerationProvider are positive controls for the
+// lane convention that already existed.
+public sealed class ProviderDownloadRedirectHardeningTests : IClassFixture<TaslimApiFactory>
+{
+    private readonly TaslimApiFactory factory;
+
+    public ProviderDownloadRedirectHardeningTests(TaslimApiFactory factory) => this.factory = factory;
+
+    public static TheoryData<Type> GuardedClientTypes { get; } = new()
+    {
+        typeof(Taslim.Api.Movies.ManusMovieVideoProvider),
+        typeof(Taslim.Api.Music.StableAudioMusicGenerationProvider),
+        typeof(Taslim.Api.Movies.DirectVideoHttpProviderAdapter),
+        typeof(Taslim.Api.Movies.RunwayMovieVideoProvider),
+        typeof(Taslim.Api.Music.MubertMusicGenerationProvider),
+    };
+
+    [Theory]
+    [MemberData(nameof(GuardedClientTypes))]
+    public void Guarded_provider_client_never_autofollows_unclassified_redirect_hops(Type clientType)
+    {
+        // AddHttpClient<TClient>() keys its named options by the type's simple name on net8.
+        var options = factory.Services
+            .GetRequiredService<Microsoft.Extensions.Options.IOptionsMonitor<Microsoft.Extensions.Http.HttpClientFactoryOptions>>()
+            .Get(clientType.Name);
+
+        var probe = new PrimaryHandlerProbe(clientType.Name, factory.Services);
+        foreach (var action in options.HttpMessageHandlerBuilderActions)
+        {
+            action(probe);
+        }
+
+        var primary = probe.PrimaryHandler;
+        Assert.NotNull(primary);
+        try
+        {
+            // The lane registers a plain HttpClientHandler instance; anything else is a
+            // convention change and must be reviewed as such rather than silently accepted.
+            var handler = Assert.IsType<System.Net.Http.HttpClientHandler>(primary);
+            Assert.False(handler.AllowAutoRedirect,
+                $"{clientType.Name}: AllowAutoRedirect must be false; a redirect destination is provider response data and is only safe once IProviderUrlPolicy has classified it");
+        }
+        finally
+        {
+            primary!.Dispose();
+        }
+    }
+
+    // Public-API stand-in for the factory's internal DefaultHttpMessageHandlerBuilder: the
+    // named options' builder actions capture the ConfigurePrimaryHttpMessageHandler delegate
+    // in PrimaryHandler, which is exactly the registration shipped by Program.cs.
+    private sealed class PrimaryHandlerProbe : Microsoft.Extensions.Http.HttpMessageHandlerBuilder
+    {
+        public PrimaryHandlerProbe(string name, IServiceProvider services)
+        {
+            Name = name;
+            ServicesValue = services;
+        }
+
+        public override string? Name { get; set; }
+
+        public override System.Net.Http.HttpMessageHandler? PrimaryHandler { get; set; }
+
+        public override IList<System.Net.Http.DelegatingHandler> AdditionalHandlers { get; } =
+            new List<System.Net.Http.DelegatingHandler>();
+
+        private IServiceProvider ServicesValue { get; }
+
+        public override IServiceProvider Services => ServicesValue;
+
+        public override System.Net.Http.HttpMessageHandler Build() =>
+            PrimaryHandler ?? throw new InvalidOperationException("probe builders never call Build");
     }
 }
