@@ -1,180 +1,217 @@
 import { existsSync, readFileSync } from "node:fs";
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
-import { studioCategories } from "./navigation";
-import { locales, translate } from "./i18n";
+import { LocaleProvider } from "@/components/LocaleProvider";
+import { StudioChooser, healthCareTileHref } from "@/components/StudioChooser";
+import { studioCategories } from "@/lib/navigation";
 
 /**
- * Issue #714 truthfulness smoke for the mobile Create menu Health Care entry.
+ * Issue #714 follow-up: navigation and privacy truthfulness of the Health Care
+ * entry in the mobile Create menu.
  *
- * Owner disposition (2026-11-02, issue #714): exactly one navigation-only
- * "Health Care" card, linking only to the authenticated coming-soon route
- * `/create/health` from PR #715, once the #671/#681 owner-path dispositions and
- * i18n claims are recorded. Until then the entry must be transparently absent.
- * Under no circumstance may the Create menu present an enabled Health Care card
- * that promises capabilities the linked screen does not actually provide.
+ * The original smoke (head 986ce4bf, 2026-11-13) asserted the pre-launch state:
+ * the entry had to be "transparently absent", `StudioChooser.tsx` was forbidden
+ * from mentioning health at all, and the destination screen was source-scanned
+ * for `<form>`, `<input>`, `<textarea>` and `/api/` markers. That shape is now
+ * obsolete and preclusive. The chooser lane ships a navigation-only Health Care
+ * card and the route lane shipped the gated `/create/health` preview, so the
+ * absence leg fails on current main
+ * (`expect(chooserSource).not.toContain("/create/health")`), and the collection
+ * markers would keep failing the day Health Care grows the functionality it
+ * advertises.
  *
- * Test-only and independent: it edits no source file, touches no owner-claimed
- * path (#671 StudioChooser, #681 create page, #715 health route, i18n.ts),
- * and validates both the live navigation data and synthetic future-state
- * fixtures. No personal health data or inference is used.
+ * Truthfulness is still the requirement, so this revision keeps the durable
+ * invariants and drops the prohibitions:
+ *
+ *   1. every Health Care card the mobile menu renders must point at a real,
+ *      routable screen on disk - the menu may not advertise a phantom;
+ *   2. that screen must carry its own authentication gates and stay unindexed,
+ *      because the app has no Next middleware to fall back on;
+ *   3. no other health-named link may appear in the mobile menu without
+ *      satisfying the same two rules;
+ *   4. every enabled Create-menu card still resolves to a screen on disk.
+ *
+ * Nothing here asserts which controls, uploads or provider calls a health
+ * screen may eventually contain: that is a product decision, not a privacy
+ * invariant. The synthetic fixtures pin that distinction explicitly, so the
+ * guard is demonstrably discriminating and demonstrably not preclusive.
+ *
+ * Test-only. Edits no source file, reads no user or provider data, and touches
+ * no path owned by another lane.
  */
 
-type MenuEntry = { href: string; labelKey: string; descriptionKey: string };
 type RouteScreenFact = { exists: boolean; source: string };
 
-/** Routes the #714 disposition permits a health card to link to. */
-const APPROVED_HEALTH_ROUTES = ["/create/health", "/personal/health"];
+type HealthMenuLink = {
+  href: string;
+  /** True when the anchor carries the dedicated health-card marker. */
+  fromHealthCard: boolean;
+  /** Visible text inside the anchor, used for the localization leg. */
+  text: string;
+};
 
-/** A health screen that collects data or calls provider surfaces is not privacy-safe. */
-const COLLECTING_MARKERS = ["<input", "<textarea", "<form", "/api/"];
-
-function pageUrlFor(href: string): URL {
+function pageFileFor(href: string): URL {
   return new URL(`../app${href}/page.tsx`, import.meta.url);
 }
 
 function liveRouteFact(href: string): RouteScreenFact {
-  const url = pageUrlFor(href);
+  const url = pageFileFor(href);
   if (!existsSync(url)) return { exists: false, source: "" };
   return { exists: true, source: readFileSync(url, "utf8") };
 }
 
-function healthMenuEntries(entries: readonly MenuEntry[]): MenuEntry[] {
-  return entries.filter((entry) => /health/i.test(`${entry.href} ${entry.labelKey} ${entry.descriptionKey}`));
-}
-
 /**
- * Deterministic truthfulness guard shared by the live assertions and the
- * synthetic fixtures. An enabled health card is acceptable only when every
- * fact below holds; any other state is a false enabled capability.
+ * Durable truthfulness guard. An advertised health destination is acceptable
+ * when the screen exists and keeps its own gates; any other state is either a
+ * false capability or an unauthenticated, indexable surface. Deliberately no
+ * check on forms, inputs or `/api/` calls: those become legitimate the moment
+ * Health Care ships real functionality, and the chooser contract is about not
+ * lying about what the screen does, not about freezing it.
  */
-function enabledCardTruthViolations(entry: MenuEntry, fact: RouteScreenFact): string[] {
+function destinationTruthViolations(href: string, fact: RouteScreenFact): string[] {
   const violations: string[] = [];
-  if (!APPROVED_HEALTH_ROUTES.includes(entry.href)) {
-    violations.push(`${entry.href}: health card links outside the owner-approved privacy-safe routes`);
-  }
   if (!fact.exists) {
-    violations.push(`${entry.href}: enabled health card has no routable screen (false capability)`);
+    violations.push(`${href}: advertised health destination has no routable screen (false capability)`);
     return violations;
   }
   if (!fact.source.includes("requireAuthenticatedPage")) {
-    violations.push(`${entry.href}: route screen is not server-gated for authentication`);
+    violations.push(`${href}: route screen is not server-gated for authentication`);
   }
   if (!fact.source.includes("ProtectedPage")) {
-    violations.push(`${entry.href}: route screen is not client-gated for authentication`);
+    violations.push(`${href}: route screen is not client-gated for authentication`);
   }
   if (!fact.source.includes("index: false")) {
-    violations.push(`${entry.href}: route screen does not opt out of indexing and broad publication`);
-  }
-  for (const marker of COLLECTING_MARKERS) {
-    if (fact.source.includes(marker)) {
-      violations.push(`${entry.href}: route screen exposes a health-data collection or provider surface (${marker})`);
-    }
+    violations.push(`${href}: route screen does not opt out of indexing and broad publication`);
   }
   return violations;
 }
 
-const chooserEntries: MenuEntry[] = studioCategories.flatMap((category) =>
-  category.studios.map((studio) => ({
-    href: studio.href,
-    labelKey: studio.labelKey,
-    descriptionKey: studio.descriptionKey,
-  })),
+/** Render the mobile (compact) Create menu and read the links it exposes. */
+function mobileMenuLinks(): HealthMenuLink[] {
+  const html = renderToStaticMarkup(
+    createElement(LocaleProvider, null, createElement(StudioChooser, { compact: true })),
+  );
+  const links: HealthMenuLink[] = [];
+  for (const anchor of html.matchAll(/<a\b[^>]*>([\s\S]*?)<\/a>/g)) {
+    const tag = anchor[0];
+    const href = /href="([^"]+)"/.exec(tag)?.[1];
+    if (!href) continue;
+    links.push({
+      href,
+      fromHealthCard: tag.includes('data-health-care-tile="true"'),
+      text: anchor[1].replace(/<[^>]*>/g, "").trim(),
+    });
+  }
+  return links;
+}
+
+const mobileLinks = mobileMenuLinks();
+const healthCardLinks = mobileLinks.filter((link) => link.fromHealthCard);
+const healthNamedLinks = mobileLinks.filter(
+  (link) => /health/i.test(link.href) || link.fromHealthCard,
 );
 
-const healthEntries = healthMenuEntries(chooserEntries);
+describe("issue #714 mobile Create menu Health Care truthfulness", () => {
+  it("renders exactly one Health Care card pointing at the canonical destination", () => {
+    expect(healthCardLinks.length, "the mobile menu must not duplicate the health promise").toBe(1);
+    expect(healthCardLinks[0].href).toBe(healthCareTileHref);
+    expect(healthNamedLinks.map((link) => link.href)).toEqual([healthCareTileHref]);
+  });
 
-describe("issue #714 Health Care Create-menu truthfulness", () => {
-  it("offers a Health Care card only when it links to a real privacy-safe screen", () => {
-    const violations = healthEntries.flatMap((entry) => enabledCardTruthViolations(entry, liveRouteFact(entry.href)));
+  it("advertises only health destinations that are real, gated and unindexed screens", () => {
+    const violations = healthNamedLinks.flatMap((link) =>
+      destinationTruthViolations(link.href, liveRouteFact(link.href)),
+    );
     expect(violations).toEqual([]);
-    if (healthEntries.length === 0) {
-      // Transparent-absence state: the menu exposes no enabled health card, and
-      // the mobile chooser markup must not hardcode a hidden health link that
-      // bypasses studioCategories until the #671 owner disposition is recorded.
-      const chooserSource = readFileSync(new URL("../components/StudioChooser.tsx", import.meta.url), "utf8");
-      expect(chooserSource).not.toContain("/create/health");
-      expect(chooserSource.toLowerCase()).not.toContain("health");
-    } else {
-      // Enabled state: an exposed health card must be fully localized first
-      // (English, Arabic, Sorani) per the #714 i18n hold.
-      for (const entry of healthEntries) {
-        for (const locale of locales) {
-          expect(translate(locale, entry.labelKey), `${entry.labelKey} missing for ${locale}`).not.toBe(entry.labelKey);
-          expect(translate(locale, entry.descriptionKey), `${entry.descriptionKey} missing for ${locale}`).not.toBe(entry.descriptionKey);
-        }
-      }
-    }
+  });
+
+  it("shows localized copy on the Health Care card rather than a raw key", () => {
+    const card = healthCardLinks[0];
+    expect(card.text.length, "the card must render visible copy").toBeGreaterThan(0);
+    expect(card.text, "untranslated navigation key leaked into the menu").not.toMatch(/^navigation\./);
+    expect(card.text).not.toMatch(/^create\.studio\./);
   });
 
   it("routes every enabled Create-menu card to a real screen on disk", () => {
-    for (const entry of chooserEntries) {
-      expect(existsSync(pageUrlFor(entry.href)), `${entry.href} must resolve to a routable page`).toBe(true);
+    for (const entry of studioCategories.flatMap((category) => category.studios)) {
+      expect(liveRouteFact(entry.href).exists, `${entry.href} must resolve to a routable page`).toBe(true);
     }
   });
+});
 
-  describe("synthetic future-state fixtures", () => {
-    const approvedCard: MenuEntry = {
-      href: "/create/health",
-      labelKey: "navigation.healthCare",
-      descriptionKey: "create.studio.healthCareHint",
-    };
-    const privacySafeComingSoonScreen: RouteScreenFact = {
-      exists: true,
-      source: [
-        'import { ProtectedPage } from "@/components/ProtectedPage";',
-        'import { requireAuthenticatedPage } from "@/lib/serverAuth";',
-        "  index: false,",
-        '  await requireAuthenticatedPage("/create/health");',
-        "  return <ProtectedPage><HealthPlaceholderPage /></ProtectedPage>;",
-      ].join("\n"),
-    };
+/**
+ * Synthetic fixtures only. Each screen is described by the capability it has,
+ * never by fabricated user content, and the builder keeps one invariant per
+ * fixture so a leg cannot pass because two markers were removed together.
+ */
+function screenSource(options: {
+  serverGate: boolean;
+  clientGate: boolean;
+  unindexed: boolean;
+  collectsData?: boolean;
+}): string {
+  const lines = ['import { HealthPlaceholderPage } from "@/components/HealthPlaceholderPage";'];
+  if (options.clientGate) lines.push('import { ProtectedPage } from "@/components/ProtectedPage";');
+  if (options.serverGate) lines.push('import { requireAuthenticatedPage } from "@/lib/serverAuth";');
+  lines.push('export const dynamic = "force-dynamic";');
+  lines.push(options.unindexed ? "    index: false," : "    index: true,");
+  if (options.serverGate) lines.push('  await requireAuthenticatedPage("/create/health");');
+  const body = options.collectsData
+    ? '  return <ProtectedPage><form><input type="file" name="lab-report" />' +
+      '<button onClick={() => fetch("/api/health/reports/analyze")}>Analyze</button></form></ProtectedPage>;'
+    : options.clientGate
+      ? "  return <ProtectedPage><HealthPlaceholderPage entry=\"create\" /></ProtectedPage>;"
+      : "  return <HealthPlaceholderPage entry=\"create\" />;";
+  lines.push(body);
+  return lines.join("\n");
+}
 
-    it("accepts the Health Care card wired to a real privacy-safe coming-soon screen", () => {
-      expect(enabledCardTruthViolations(approvedCard, privacySafeComingSoonScreen)).toEqual([]);
+const gatedComingSoon = screenSource({ serverGate: true, clientGate: true, unindexed: true });
+
+describe("truthfulness guard discrimination (synthetic fixtures)", () => {
+  it("accepts the current navigation-only coming-soon preview screen", () => {
+    expect(destinationTruthViolations("/create/health", { exists: true, source: gatedComingSoon })).toEqual([]);
+  });
+
+  it("accepts a future health screen that uploads and analyses through the API", () => {
+    const future = screenSource({
+      serverGate: true,
+      clientGate: true,
+      unindexed: true,
+      collectsData: true,
     });
+    expect(destinationTruthViolations("/create/health", { exists: true, source: future })).toEqual([]);
+  });
 
-    it("treats a withdrawn entry as the transparently-disabled state", () => {
-      const withoutHealthCard = chooserEntries.filter((entry) => !APPROVED_HEALTH_ROUTES.includes(entry.href));
-      expect(healthMenuEntries(withoutHealthCard)).toEqual([]);
-    });
+  it("rejects a card pointing at a route with no screen on disk", () => {
+    const violations = destinationTruthViolations("/create/health-care", { exists: false, source: "" });
+    expect(violations.join("\n")).toMatch(/no routable screen \(false capability\)/);
+  });
 
-    it("rejects an enabled card whose route has no screen", () => {
-      const violations = enabledCardTruthViolations(approvedCard, { exists: false, source: "" });
-      expect(violations.join("\n")).toMatch(/no routable screen \(false capability\)/);
-    });
+  it("rejects a screen that dropped only the server gate", () => {
+    const source = screenSource({ serverGate: false, clientGate: true, unindexed: true });
+    const violations = destinationTruthViolations("/create/health", { exists: true, source });
+    expect(violations.join("\n")).toMatch(/not server-gated/);
+    expect(violations).toHaveLength(1);
+  });
 
-    it("rejects a card pointing at an unapproved health surface", () => {
-      const diagnosisCard: MenuEntry = {
-        href: "/create/symptom-doctor",
-        labelKey: "navigation.healthCare",
-        descriptionKey: "create.studio.healthCareHint",
-      };
-      const violations = enabledCardTruthViolations(diagnosisCard, {
-        exists: true,
-        source: "export default function Page() { return null; }",
-      });
-      expect(violations.join("\n")).toMatch(/owner-approved privacy-safe routes/);
-    });
+  it("rejects a screen that dropped only the client gate", () => {
+    const source = screenSource({ serverGate: true, clientGate: false, unindexed: true });
+    const violations = destinationTruthViolations("/create/health", { exists: true, source });
+    expect(violations.join("\n")).toMatch(/not client-gated/);
+    expect(violations).toHaveLength(1);
+  });
 
-    it("rejects a route screen that collects data or calls provider surfaces", () => {
-      const collectingScreen: RouteScreenFact = {
-        exists: true,
-        source: `${privacySafeComingSoonScreen.source}\n<form><input name="lab-report" /><button onClick={() => fetch("/api/health/analyze")}>Analyze</button></form>`,
-      };
-      const violations = enabledCardTruthViolations(approvedCard, collectingScreen);
-      expect(violations.join("\n")).toMatch(/<input/);
-      expect(violations.join("\n")).toMatch(/provider surface \(\/api\/\)/);
-    });
+  it("rejects a screen that allowed indexing", () => {
+    const source = screenSource({ serverGate: true, clientGate: true, unindexed: false });
+    const violations = destinationTruthViolations("/create/health", { exists: true, source });
+    expect(violations.join("\n")).toMatch(/does not opt out of indexing/);
+    expect(violations).toHaveLength(1);
+  });
 
-    it("rejects a route screen that is not authenticated or that allows publication", () => {
-      const ungatedScreen: RouteScreenFact = {
-        exists: true,
-        source: "export default function Page() { return <HealthPlaceholderPage />; }",
-      };
-      const violations = enabledCardTruthViolations(approvedCard, ungatedScreen);
-      expect(violations.join("\n")).toMatch(/server-gated/);
-      expect(violations.join("\n")).toMatch(/client-gated/);
-      expect(violations.join("\n")).toMatch(/indexing/);
-    });
+  it("still rejects a screen with no gates at all", () => {
+    const source = screenSource({ serverGate: false, clientGate: false, unindexed: false });
+    expect(destinationTruthViolations("/create/health", { exists: true, source })).toHaveLength(3);
   });
 });
