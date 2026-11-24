@@ -4,6 +4,7 @@ using System.Text;
 using System.Text.Json;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
+using Taslim.Api.Files;
 using Taslim.Api.Movies;
 using Xunit;
 
@@ -338,7 +339,23 @@ public sealed class ManusMovieVideoProviderTests
     }
 
     private static ManusMovieVideoProvider CreateProvider(HttpMessageHandler handler, MovieVideoOptions options) =>
-        new(new HttpClient(handler) { BaseAddress = new Uri("https://api.manus.ai/") }, Options.Create(options), NullLogger<ManusMovieVideoProvider>.Instance);
+        new(
+            new HttpClient(handler) { BaseAddress = new Uri("https://api.manus.ai/") },
+            Options.Create(options),
+            NullLogger<ManusMovieVideoProvider>.Instance,
+            // The *.example.test production bypass is gone (PR #358 review): reserved names now
+            // flow through the resolver exactly like real hostnames, and adapter tests carry this
+            // test-only fake declaring their deterministic hosts public instead.
+            new ProviderUrlPolicy(new PublicTestHostResolver()));
+
+    // Test-only name table: every hostname the fixture uses (assets.example.test,
+    // cdn.example.test) answers with one deterministic public address, so the tests stay
+    // independent of live DNS without production code granting any name a free pass.
+    private sealed class PublicTestHostResolver : IProviderHostResolver
+    {
+        public Task<IReadOnlyList<IPAddress>> ResolveAsync(string host, CancellationToken cancellationToken) =>
+            Task.FromResult<IReadOnlyList<IPAddress>>(new[] { IPAddress.Parse("93.184.216.34") });
+    }
 
     private static MovieVideoOptions EnabledOptions() => new()
     {
