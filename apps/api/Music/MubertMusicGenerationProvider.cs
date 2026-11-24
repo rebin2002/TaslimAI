@@ -198,7 +198,9 @@ public sealed class MubertMusicGenerationProvider(
     /// safe recovery is another artifact GET: creating a second track would bill the generation
     /// again and orphan the first artifact. Auth and quota faults are excluded because they are
     /// not transport recoveries, and integrity faults (MusicOutputInvalidException,
-    /// FileUploadValidationException) never reach this wrapper.
+    /// FileUploadValidationException) never reach this wrapper. A failed artifact <i>status</i>
+    /// reaches it through <see cref="CreateArtifactRetrievalFailure"/>: only a transient status is
+    /// treated as recoverable on the same URL, while a permanent one is already terminal.
     /// </summary>
     private async Task<MubertDownload> DownloadWithTransportRecoveryAsync(Uri artifactUri, CancellationToken cancellationToken)
     {
@@ -212,6 +214,10 @@ public sealed class MubertMusicGenerationProvider(
             catch (MusicProviderUnavailableException exception) when (
                 exception is not MusicProviderAuthenticationException
                 && exception is not MusicProviderQuotaException
+                // Already terminal for a billed track: re-GETting it here would just consume the
+                // transport budget on a status that will not heal, and the wrapper's own budget
+                // exhaustion produces the same type anyway.
+                && exception is not MusicOutputRetrievalFailedException
                 )
             {
                 // The budget is spent on GETs of the same artifact, never on a second track
@@ -266,7 +272,7 @@ public sealed class MubertMusicGenerationProvider(
                         uri = new Uri(uri, response.Headers.Location);
                         continue;
                     }
-                    if (!response.IsSuccessStatusCode) throw new MusicProviderFailureException();
+                    if (!response.IsSuccessStatusCode) throw CreateArtifactRetrievalFailure(response.StatusCode);
                     if (response.Content.Headers.ContentLength > maxBytes) throw new MusicOutputInvalidException();
                     await using var source = await response.Content.ReadAsStreamAsync(cancellationToken);
                     await using var buffer = new MemoryStream(Math.Min((int)(response.Content.Headers.ContentLength ?? 0), maxBytes));
@@ -352,6 +358,26 @@ public sealed class MubertMusicGenerationProvider(
         statusCode == HttpStatusCode.RequestTimeout
         || statusCode == HttpStatusCode.TooManyRequests
         || (int)statusCode >= 500;
+
+    /// <summary>
+    /// Classifies a failed artifact GET that happens after the track was created, completed and
+    /// billed. A transient status (server error, timeout or rate limit) can heal on the same URL, so
+    /// it stays a transport fault and the bounded re-fetch budget is spent on that URL. Any other
+    /// status will not be healed by asking again and is reported as terminal straight away. Neither
+    /// path may surface as <see cref="MusicProviderFailureException"/>, because that type has no
+    /// dedicated public code and falls through to the generic music-generation-failed class, which
+    /// invites a retry: a retry POSTs a second billable track and orphans the completed one. Both
+    /// paths therefore end at the post-billing retrieval terminal.
+    /// </summary>
+    private Exception CreateArtifactRetrievalFailure(HttpStatusCode statusCode)
+    {
+        logger.LogWarning(
+            "Mubert artifact download returned HTTP status after the track was billed; treating it as post-billing retrieval rather than a generic retryable failure. StatusCode={StatusCode}",
+            (int)statusCode);
+        return IsTransient(statusCode)
+            ? new MusicProviderUnavailableException()
+            : new MusicOutputRetrievalFailedException();
+    }
 
     private static bool IsFailureStatus(string? status) => status?.Trim().ToLowerInvariant() is "failed" or "failure" or "error" or "cancelled" or "canceled" or "rejected";
 
