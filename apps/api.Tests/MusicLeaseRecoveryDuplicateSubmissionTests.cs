@@ -644,6 +644,422 @@ public sealed class MusicAcceptedCancellationLeaseRecoveryTests : IClassFixture<
         Assert.Equal(submissionsBefore + 1, provider.SubmittedGenerations);
     }
 
+    [Fact]
+    public async Task Marker_that_cannot_be_recorded_stops_the_paid_request_and_keeps_the_pre_dispatch_posture()
+    {
+        // F-36.1b finance defect, and the reason the marker is not allowed to be a log line: while the
+        // pre-dispatch stamp was swallow-and-continue, a persistence failure reopened the exact window the
+        // marker exists to close - a paid POST with no durable evidence, which recovery could only read as
+        // "nothing was submitted". The guard now refuses to dispatch.
+        var provider = Provider();
+        var submissionsBefore = provider.SubmittedGenerations;
+        provider.Reset(AcceptedCancellationMode.MarkerWriteFails);
+        using var lost = await StartClaimThatWillBeLostAsync(
+            provider, "f361b-marker", supersedeClaim: true, waitAccepted: false);
+        var failed = await WaitForStatusAsync(lost.Client, lost.JobId, "Failed");
+
+        // The proof the reviewer asked for: the create was never issued. This counter is the test-side
+        // stand-in for "a generation was paid for", and a marker that cannot be written must not move it.
+        Assert.Equal(submissionsBefore, provider.SubmittedGenerations);
+        Assert.Equal(1, provider.DispatchSinkCalls);
+        Assert.Equal(1, provider.DispatchSinkFaults);
+        Assert.Equal(0, provider.ReportedAcceptances);
+
+        // Nothing reached the transport, so the honest signal is the retryable outage class - not the
+        // submission-unconfirmed twin, whose copy asserts the request may already have reached the vendor.
+        Assert.Equal(GenerationJobErrorCodes.MusicProviderUnavailable, failed.ErrorCode);
+        Assert.NotNull(failed.ErrorMessage);
+        Assert.DoesNotContain("may already have reached the provider", failed.ErrorMessage, StringComparison.OrdinalIgnoreCase);
+        Assert.NotEqual(
+            GenerationJobErrorMessages.For(GenerationJobErrorCodes.MusicProviderSubmissionUnconfirmed),
+            failed.ErrorMessage);
+
+        // Durable claim fencing: the sentinel never became a fact, so recovery is never later handed a
+        // half-written marker to reason from either.
+        var (markers, marker, _) = await AttemptEvidenceAsync(lost.JobId);
+        Assert.Equal(0, markers);
+        Assert.Null(marker);
+
+        // The reservation keeps the pre-dispatch posture: released, with zero customer charge.
+        using (var scope = factory.Services.CreateScope())
+        {
+            var usage = await scope.ServiceProvider.GetRequiredService<TaslimDbContext>().UsageTransactions
+                .AsNoTracking().SingleAsync(item => item.RequestId == $"generation:{lost.JobId:N}");
+            Assert.Equal(UsageTransactionStatus.Failed, usage.Status);
+            Assert.Equal(0m, usage.ChargedAmount);
+        }
+
+        await lost.StopAsync();
+
+        // And the customer is not stranded by the guard: no money moved, so the retry is accepted and the
+        // provider is reached exactly once - as the FIRST paid submission for the request, not a second.
+        provider.Reset(AcceptedCancellationMode.HangWithoutReporting);
+        var retry = await SendWithCsrf(lost.Client, HttpMethod.Post, $"/api/generation/jobs/{lost.JobId}/retry", null, $"f361b-marker-retry-{Guid.NewGuid():N}");
+        Assert.Equal(HttpStatusCode.Accepted, retry.StatusCode);
+        var child = (await retry.Content.ReadFromJsonAsync<GenerationJobDto>(Json))!;
+        Assert.Equal(lost.JobId, child.RetryOfJobId);
+        var childProcess = new CancellationTokenSource();
+        var childWorker = CreateWorker(cancellationPollMilliseconds: 60_000);
+        await ((IHostedService)childWorker).StartAsync(childProcess.Token);
+        for (var attempt = 0; attempt < 400 && provider.SubmittedGenerations == submissionsBefore; attempt++) await Task.Delay(25);
+        Assert.Equal(submissionsBefore + 1, provider.SubmittedGenerations);
+        childProcess.Cancel();
+        await ((IHostedService)childWorker).StopAsync(CancellationToken.None);
+    }
+
+    [Fact]
+    public async Task Crash_after_the_marker_and_before_the_provider_answer_closes_the_cancellation_without_asking_the_provider()
+    {
+        // The window the marker exists for: the create left the process and the answer never arrived.
+        // Recovery holds a sentinel and no operation id, so it closes the outcome instead of releasing a
+        // retry that could pay twice for a generation that may be running right now.
+        var provider = Provider();
+        var submissionsBefore = provider.SubmittedGenerations;
+        provider.Reset(AcceptedCancellationMode.DispatchThenHang);
+        using var lost = await StartClaimThatWillBeLostAsync(provider, "f361b-sentinel", waitAccepted: false);
+        for (var attempt = 0; attempt < 400 && provider.SubmittedGenerations == submissionsBefore; attempt++) await Task.Delay(25);
+        Assert.Equal(submissionsBefore + 1, provider.SubmittedGenerations);
+        Assert.Equal(0, provider.ReportedAcceptances);
+        Assert.Equal(1, provider.DispatchSinkCalls);
+        Assert.Equal(0, provider.DispatchSinkFaults);
+
+        var cancelled = await TerminaliseThroughRecoveryAsync(lost.Client, lost.JobId);
+        Assert.Equal(GenerationJobErrorCodes.MusicCancelledUnconfirmedSubmission, cancelled.ErrorCode);
+        Assert.Contains("may still finish", cancelled.ErrorMessage, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("try again", cancelled.ErrorMessage, StringComparison.OrdinalIgnoreCase);
+
+        // The sentinel is the only durable fact and it outlives the terminalisation. It is never mistaken
+        // for an operation id: the lookup that would have to phrase a question about "dispatch pending" is
+        // not attempted at all.
+        var (markers, marker, _) = await AttemptEvidenceAsync(lost.JobId);
+        Assert.Equal(1, markers);
+        Assert.Equal("taslim:dispatch-pending", marker);
+        Assert.Equal(0, provider.ReconciliationCalls);
+
+        await AssertRetryRefusedAsync(lost.Client, lost.JobId, GenerationJobErrorCodes.MusicSubmissionRetryBlocked);
+        await AssertReservationCancelledAsync(lost.JobId);
+        Assert.Equal(submissionsBefore + 1, provider.SubmittedGenerations);
+        await lost.StopAsync();
+        Assert.Equal(submissionsBefore + 1, provider.SubmittedGenerations);
+    }
+
+    [Fact]
+    public async Task Reconciled_completed_generation_cancels_as_undelivered_output_and_keeps_the_retrieval_posture()
+    {
+        // A provider status lookup that answers with the audio means the paid generation exists and only
+        // delivery was lost, so the cancellation is the delivered-output twin: the retry it refuses is the
+        // retrieval posture, and the answer is recorded durably next to the operation id it came from.
+        var provider = Provider();
+        var submissionsBefore = provider.SubmittedGenerations;
+        provider.Reset(AcceptedCancellationMode.ReportThenHang);
+        provider.ReconciliationResult = new MusicSubmissionReconciliation(MusicSubmissionOutcome.Completed, ProviderDeclaresNoCharge: false);
+        using var lost = await StartClaimThatWillBeLostAsync(provider, "f361b-completed");
+
+        var cancelled = await TerminaliseThroughRecoveryAsync(lost.Client, lost.JobId);
+        Assert.Equal(GenerationJobErrorCodes.MusicCancelledUndeliveredOutput, cancelled.ErrorCode);
+        Assert.Equal(
+            GenerationJobErrorMessages.For(GenerationJobErrorCodes.MusicCancelledUndeliveredOutput),
+            cancelled.ErrorMessage);
+        Assert.Equal(1, provider.ReconciliationCalls);
+        Assert.Equal(AcceptedCancellationMusicProvider.AcceptedOperationId, provider.ReconciledOperationId);
+        var (_, marker, metadata) = await AttemptEvidenceAsync(lost.JobId);
+        Assert.Equal(AcceptedCancellationMusicProvider.AcceptedOperationId, marker);
+        Assert.NotNull(metadata);
+        Assert.Contains("musicSubmissionReconcile", metadata!, StringComparison.Ordinal);
+        Assert.Contains("Completed", metadata!, StringComparison.Ordinal);
+
+        await AssertRetryRefusedAsync(lost.Client, lost.JobId, GenerationJobErrorCodes.MusicRetrievalRetryBlocked);
+        await AssertReservationCancelledAsync(lost.JobId);
+        Assert.Equal(submissionsBefore + 1, provider.SubmittedGenerations);
+        await lost.StopAsync();
+        Assert.Equal(submissionsBefore + 1, provider.SubmittedGenerations);
+    }
+
+    [Fact]
+    public async Task Reconciled_failure_with_the_vendors_no_charge_promise_releases_the_ordinary_cancellation()
+    {
+        // The only supported release path, and it is contract-driven: Stability documents "you will not be
+        // charged for failed generations", so a terminal declared failure from that vendor leaves nothing
+        // behind to double-charge and the cancellation keeps the ordinary code and its retry. The no-charge
+        // bit travels with the outcome; recovery never infers a refund from a failure alone.
+        var provider = Provider();
+        var submissionsBefore = provider.SubmittedGenerations;
+        provider.Reset(AcceptedCancellationMode.ReportThenHang);
+        provider.ReconciliationResult = new MusicSubmissionReconciliation(MusicSubmissionOutcome.ProviderDeclaredFailure, ProviderDeclaresNoCharge: true);
+        using var lost = await StartClaimThatWillBeLostAsync(provider, "f361b-nocharge");
+
+        var cancelled = await TerminaliseThroughRecoveryAsync(lost.Client, lost.JobId);
+        Assert.Equal(GenerationJobErrorCodes.MusicCancelled, cancelled.ErrorCode);
+        Assert.Equal(GenerationJobErrorMessages.For(GenerationJobErrorCodes.MusicCancelled), cancelled.ErrorMessage);
+        Assert.DoesNotContain("accepted", cancelled.ErrorMessage, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(1, provider.ReconciliationCalls);
+        var (_, _, metadata) = await AttemptEvidenceAsync(lost.JobId);
+        Assert.NotNull(metadata);
+        Assert.Contains("ProviderDeclaredFailure", metadata!, StringComparison.Ordinal);
+        Assert.Equal(submissionsBefore + 1, provider.SubmittedGenerations);
+
+        // Recovery did not re-dispatch anything itself; the release is the customer's decision, taken with
+        // the vendor's no-charge answer in hand.
+        await lost.StopAsync();
+        var retry = await SendWithCsrf(lost.Client, HttpMethod.Post, $"/api/generation/jobs/{lost.JobId}/retry", null, $"f361b-nocharge-retry-{Guid.NewGuid():N}");
+        Assert.Equal(HttpStatusCode.Accepted, retry.StatusCode);
+        var child = (await retry.Content.ReadFromJsonAsync<GenerationJobDto>(Json))!;
+        Assert.Equal(lost.JobId, child.RetryOfJobId);
+        var childProcess = new CancellationTokenSource();
+        var childWorker = CreateWorker(cancellationPollMilliseconds: 60_000);
+        await ((IHostedService)childWorker).StartAsync(childProcess.Token);
+        for (var attempt = 0; attempt < 400 && provider.SubmittedGenerations < submissionsBefore + 2; attempt++) await Task.Delay(25);
+        Assert.Equal(submissionsBefore + 2, provider.SubmittedGenerations);
+        childProcess.Cancel();
+        await ((IHostedService)childWorker).StopAsync(CancellationToken.None);
+    }
+
+    [Fact]
+    public async Task Reconciled_failure_without_a_no_charge_statement_stays_closed()
+    {
+        // Mubert is the case this arm exists for: its documentation confirms a quota-free track lookup but
+        // says nothing about charging for a failed generation, so a declared failure there is not evidence
+        // that no money was spent. Same outcome from the vendor, opposite posture, because the contract
+        // differs - the ladder keys on the promise, never on the word "failed".
+        var provider = Provider();
+        var submissionsBefore = provider.SubmittedGenerations;
+        provider.Reset(AcceptedCancellationMode.ReportThenHang);
+        provider.ReconciliationResult = new MusicSubmissionReconciliation(MusicSubmissionOutcome.ProviderDeclaredFailure, ProviderDeclaresNoCharge: false);
+        using var lost = await StartClaimThatWillBeLostAsync(provider, "f361b-declared");
+
+        var cancelled = await TerminaliseThroughRecoveryAsync(lost.Client, lost.JobId);
+        Assert.Equal(GenerationJobErrorCodes.MusicCancelledUnconfirmedSubmission, cancelled.ErrorCode);
+        Assert.NotEqual(GenerationJobErrorCodes.MusicCancelled, cancelled.ErrorCode);
+        Assert.Equal(1, provider.ReconciliationCalls);
+        await AssertRetryRefusedAsync(lost.Client, lost.JobId, GenerationJobErrorCodes.MusicSubmissionRetryBlocked);
+        await AssertReservationCancelledAsync(lost.JobId);
+        Assert.Equal(submissionsBefore + 1, provider.SubmittedGenerations);
+        await lost.StopAsync();
+        Assert.Equal(submissionsBefore + 1, provider.SubmittedGenerations);
+    }
+
+    [Fact]
+    public async Task Reconciled_generation_that_is_still_running_closes_the_cancellation_and_records_the_answer()
+    {
+        // "In progress" is the most dangerous answer of all: the paid generation is live while the customer
+        // has already cancelled, so the outcome cannot be released and must not be re-dispatched either.
+        var provider = Provider();
+        var submissionsBefore = provider.SubmittedGenerations;
+        provider.Reset(AcceptedCancellationMode.ReportThenHang);
+        provider.ReconciliationResult = new MusicSubmissionReconciliation(MusicSubmissionOutcome.InProgress, ProviderDeclaresNoCharge: false);
+        using var lost = await StartClaimThatWillBeLostAsync(provider, "f361b-running");
+
+        var cancelled = await TerminaliseThroughRecoveryAsync(lost.Client, lost.JobId);
+        Assert.Equal(GenerationJobErrorCodes.MusicCancelledUnconfirmedSubmission, cancelled.ErrorCode);
+        var (_, _, metadata) = await AttemptEvidenceAsync(lost.JobId);
+        Assert.NotNull(metadata);
+        Assert.Contains("InProgress", metadata!, StringComparison.Ordinal);
+        await AssertRetryRefusedAsync(lost.Client, lost.JobId, GenerationJobErrorCodes.MusicSubmissionRetryBlocked);
+        Assert.Equal(1, provider.ReconciliationCalls);
+        Assert.Equal(submissionsBefore + 1, provider.SubmittedGenerations);
+        await lost.StopAsync();
+        Assert.Equal(submissionsBefore + 1, provider.SubmittedGenerations);
+    }
+
+    [Fact]
+    public async Task Unknown_provider_answer_keeps_the_cancellation_closed()
+    {
+        // 404, an unparsable body, a transport failure or an expired result all collapse into Unknown, and
+        // Unknown is the fail-closed branch: the operation id outlives the terminalisation so a later
+        // reconciliation can still answer the question the worker could not.
+        var provider = Provider();
+        var submissionsBefore = provider.SubmittedGenerations;
+        provider.Reset(AcceptedCancellationMode.ReportThenHang);
+        provider.ReconciliationResult = MusicSubmissionReconciliation.Unknown;
+        using var lost = await StartClaimThatWillBeLostAsync(provider, "f361b-unknown");
+
+        var cancelled = await TerminaliseThroughRecoveryAsync(lost.Client, lost.JobId);
+        Assert.Equal(GenerationJobErrorCodes.MusicCancelledUnconfirmedSubmission, cancelled.ErrorCode);
+        Assert.Equal(1, provider.ReconciliationCalls);
+        Assert.Equal(AcceptedCancellationMusicProvider.AcceptedOperationId, provider.ReconciledOperationId);
+        await AssertRetryRefusedAsync(lost.Client, lost.JobId, GenerationJobErrorCodes.MusicSubmissionRetryBlocked);
+        await AssertReservationCancelledAsync(lost.JobId);
+        var (_, marker, _) = await AttemptEvidenceAsync(lost.JobId);
+        Assert.Equal(AcceptedCancellationMusicProvider.AcceptedOperationId, marker);
+        Assert.Equal(submissionsBefore + 1, provider.SubmittedGenerations);
+        await lost.StopAsync();
+        Assert.Equal(submissionsBefore + 1, provider.SubmittedGenerations);
+    }
+
+    [Fact]
+    public async Task Provider_lookup_that_throws_still_terminalises_the_cancellation_closed()
+    {
+        // A reconciliation that cannot complete may not strand the job in Running and may not fall back to
+        // the release: the worker converts the fault into the unknown outcome and finishes the terminal
+        // state, which is the only way the reservation and the member-facing answer stay consistent.
+        var provider = Provider();
+        var submissionsBefore = provider.SubmittedGenerations;
+        provider.Reset(AcceptedCancellationMode.ReportThenHang);
+        provider.ThrowOnReconcile = true;
+        using var lost = await StartClaimThatWillBeLostAsync(provider, "f361b-throwing");
+
+        var cancelled = await TerminaliseThroughRecoveryAsync(lost.Client, lost.JobId);
+        Assert.Equal("Cancelled", cancelled.Status);
+        Assert.Equal(GenerationJobErrorCodes.MusicCancelledUnconfirmedSubmission, cancelled.ErrorCode);
+        Assert.Equal(1, provider.ReconciliationCalls);
+        await AssertRetryRefusedAsync(lost.Client, lost.JobId, GenerationJobErrorCodes.MusicSubmissionRetryBlocked);
+        await AssertReservationCancelledAsync(lost.JobId);
+        Assert.Equal(submissionsBefore + 1, provider.SubmittedGenerations);
+        await lost.StopAsync();
+        Assert.Equal(submissionsBefore + 1, provider.SubmittedGenerations);
+    }
+
+    private sealed class LostClaim : IDisposable
+    {
+        public LostClaim(HttpClient client, Guid jobId, GenerationJobWorker worker, CancellationTokenSource process)
+        {
+            Client = client;
+            JobId = jobId;
+            Worker = worker;
+            Process = process;
+        }
+
+        public HttpClient Client { get; }
+        public Guid JobId { get; }
+        public GenerationJobWorker Worker { get; }
+        public CancellationTokenSource Process { get; }
+        private bool Stopped { get; set; }
+
+        public async Task StopAsync()
+        {
+            if (Stopped) return;
+            Stopped = true;
+            Process.Cancel();
+            await ((IHostedService)Worker).StopAsync(CancellationToken.None);
+            // The client stays usable: two tests post the customer retry after stopping the
+            // abandoned worker, which is exactly what the release and refund legs assert.
+        }
+
+        public void Dispose()
+        {
+            // Defensive cleanup so a failed assertion cannot leave a worker polling this fixture's
+            // database. Every test stops its own claim first, which makes this a no-op.
+            if (!Stopped)
+            {
+                Stopped = true;
+                Process.Cancel();
+                try
+                {
+                    ((IHostedService)Worker).StopAsync(CancellationToken.None).GetAwaiter().GetResult();
+                }
+                catch (Exception)
+                {
+                }
+            }
+
+            Client.Dispose();
+        }
+    }
+
+    /// <summary>
+    /// Creates a music job and lets a real worker claim it, then leaves that worker parked inside the
+    /// provider: the process that knows what it submitted is about to become unavailable, which is what
+    /// lease recovery is tested against. The claim token is deliberately left alone so the durable evidence
+    /// belongs to the claim that is lost.
+    /// </summary>
+    private async Task<LostClaim> StartClaimThatWillBeLostAsync(
+        AcceptedCancellationMusicProvider provider,
+        string label,
+        bool supersedeClaim = false,
+        bool waitAccepted = true)
+    {
+        var client = factory.CreateClient();
+        var auth = await Register(client, $"{label}-{Guid.NewGuid():N}@example.com");
+        var created = await SendWithCsrf(client, HttpMethod.Post, "/api/music-generation/jobs", MusicBody(auth));
+        Assert.Equal(HttpStatusCode.Accepted, created.StatusCode);
+        var job = (await created.Content.ReadFromJsonAsync<CreateMusicGenerationResponse>(Json))!.Job;
+        if (supersedeClaim) provider.BeforeMarkerStampAsync = SupersedeAttemptClaim(job.Id);
+        var acceptances = provider.ReportedAcceptances;
+        var process = new CancellationTokenSource();
+        var worker = CreateWorker(cancellationPollMilliseconds: 60_000);
+        await ((IHostedService)worker).StartAsync(process.Token);
+        if (waitAccepted)
+        {
+            for (var attempt = 0; attempt < 400 && provider.ReportedAcceptances == acceptances; attempt++) await Task.Delay(25);
+            Assert.True(provider.ReportedAcceptances > acceptances, $"{label}: the provider never reported an accepted submission.");
+        }
+
+        return new LostClaim(client, job.Id, worker, process);
+    }
+
+    private Func<Task> SupersedeAttemptClaim(Guid jobId) => async () =>
+    {
+        // Simulates the marker write failing at the durable layer: the attempt row stops matching this
+        // claim's token, so the pre-dispatch UPDATE is a no-op. Only the attempt row is touched - the job
+        // row keeps its token, so the worker's own terminal writes still land and the test observes the
+        // guard's decision rather than a fencing artefact.
+        var superseded = Guid.NewGuid();
+        using var scope = factory.Services.CreateScope();
+        await scope.ServiceProvider.GetRequiredService<TaslimDbContext>().GenerationProviderAttempts
+            .Where(item => item.GenerationJobId == jobId)
+            .ExecuteUpdateAsync(setters => setters.SetProperty(item => item.JobConcurrencyToken, superseded));
+    };
+
+    /// <summary>
+    /// Stages the crash (pending member cancellation + expired lease) and runs the recovery sweep until the
+    /// job is terminal, then stops the recovery worker. The abandoned worker is left parked on purpose: the
+    /// durable evidence belongs to the claim that died, and its later writes must be fenced out.
+    /// </summary>
+    private async Task<GenerationJobDto> TerminaliseThroughRecoveryAsync(HttpClient client, Guid jobId)
+    {
+        using (var stage = factory.Services.CreateScope())
+        {
+            await stage.ServiceProvider.GetRequiredService<TaslimDbContext>().GenerationJobs
+                .Where(item => item.Id == jobId)
+                .ExecuteUpdateAsync(setters => setters
+                    .SetProperty(item => item.CancellationRequested, true)
+                    .SetProperty(item => item.ClaimExpiresAt, DateTime.UtcNow.AddMinutes(-1)));
+        }
+
+        using var recoveryProcess = new CancellationTokenSource();
+        var recoveryWorker = CreateWorker(cancellationPollMilliseconds: 10);
+        await ((IHostedService)recoveryWorker).StartAsync(recoveryProcess.Token);
+        var cancelled = await WaitForStatusAsync(client, jobId, "Cancelled");
+        recoveryProcess.Cancel();
+        await ((IHostedService)recoveryWorker).StopAsync(CancellationToken.None);
+        return cancelled;
+    }
+
+    private async Task<(int Markers, string? Marker, string? Metadata)> AttemptEvidenceAsync(Guid jobId)
+    {
+        using var scope = factory.Services.CreateScope();
+        var rows = await scope.ServiceProvider.GetRequiredService<TaslimDbContext>()
+            .GenerationProviderAttempts.AsNoTracking()
+            .Where(item => item.GenerationJobId == jobId)
+            .ToListAsync();
+        var stamped = rows.Where(item => !string.IsNullOrEmpty(item.ProviderExecutionId)).ToList();
+        return (stamped.Count,
+            stamped.Count == 1 ? stamped[0].ProviderExecutionId : null,
+            stamped.Count == 1 ? stamped[0].SafeMetadataJson : null);
+    }
+
+    private static async Task AssertRetryRefusedAsync(HttpClient client, Guid jobId, string expectedCode)
+    {
+        var retry = await SendWithCsrf(client, HttpMethod.Post, $"/api/generation/jobs/{jobId}/retry", null, $"f361b-retry-{Guid.NewGuid():N}");
+        Assert.Equal(HttpStatusCode.BadRequest, retry.StatusCode);
+        using var refusal = JsonDocument.Parse(await retry.Content.ReadAsStringAsync());
+        Assert.Equal(expectedCode, refusal.RootElement.GetProperty("error").GetProperty("code").GetString());
+        // A fresh idempotency key is not a way around a closed outcome.
+        var second = await SendWithCsrf(client, HttpMethod.Post, $"/api/generation/jobs/{jobId}/retry", null, $"f361b-retry-{Guid.NewGuid():N}");
+        Assert.Equal(HttpStatusCode.BadRequest, second.StatusCode);
+    }
+
+    private async Task AssertReservationCancelledAsync(Guid jobId)
+    {
+        using var scope = factory.Services.CreateScope();
+        var usage = await scope.ServiceProvider.GetRequiredService<TaslimDbContext>().UsageTransactions
+            .AsNoTracking().SingleAsync(item => item.RequestId == $"generation:{jobId:N}");
+        // Never charged for the closed submission, and no refund invented for a generation whose provider
+        // outcome is still unknown - the reservation is cancelled, not reversed.
+        Assert.Equal(UsageTransactionStatus.Cancelled, usage.Status);
+        Assert.Equal(0m, usage.ChargedAmount);
+        Assert.Equal(0m, usage.ReversedAmount);
+    }
     private string? stampedOperationId(Guid attemptId)
     {
         using var scope = factory.Services.CreateScope();
@@ -754,6 +1170,15 @@ internal enum AcceptedCancellationMode
     /// Acceptance is reported and the provider finishes late without observing the caller's token, so the
     /// worker reaches its publication fence with a cancellation already committed instead of an exception.
     ReportThenFinishOnRelease,
+    /// F-36.1b: the durable pre-dispatch marker is the last thing the worker can record before money
+    /// moves. This mode takes the attempt row's claim token away underneath the stamp, so the marker
+    /// UPDATE matches no row - the persistence failure the pre-dispatch guard has to turn into "no paid
+    /// request at all" rather than a log line beside a POST.
+    MarkerWriteFails,
+    /// The marker reached the database and the billable create was handed to the transport, but the
+    /// provider never answered before the process was lost. Recovery then has a sentinel and no operation
+    /// id: the narrowest crash window F-36.1b leaves, and the one it must still refuse to re-dispatch.
+    DispatchThenHang,
 }
 
 /// <summary>
@@ -769,23 +1194,65 @@ internal sealed class AcceptedCancellationMusicProvider : IMusicGenerationProvid
     private readonly TaskCompletionSource released = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private int submittedGenerations;
     private int reportedAcceptances;
+    private int dispatchSinkCalls;
+    private int dispatchSinkFaults;
+    private int reconciliationCalls;
+    private string? reconciledOperationId;
 
     public string Key => "test";
 
     public int SubmittedGenerations => Volatile.Read(ref submittedGenerations);
 
     public int ReportedAcceptances => Volatile.Read(ref reportedAcceptances);
+    public int DispatchSinkCalls => Volatile.Read(ref dispatchSinkCalls);
+    public int DispatchSinkFaults => Volatile.Read(ref dispatchSinkFaults);
+    public int ReconciliationCalls => Volatile.Read(ref reconciliationCalls);
+    public string? ReconciledOperationId => Volatile.Read(ref reconciledOperationId);
+
+    /// Runs immediately before the worker's pre-dispatch stamp, so a test can make that stamp fail for
+    /// a reason the production code cannot see coming (a claim that was superseded underneath it).
+    public Func<Task>? BeforeMarkerStampAsync { get; set; }
+
+    /// The answer recovery's provider-status lookup gets back, i.e. the test-side stand-in for what the
+    /// vendor's own status endpoint says about the durable operation id.
+    public MusicSubmissionReconciliation? ReconciliationResult { get; set; }
+    public bool ThrowOnReconcile { get; set; }
 
     public AcceptedCancellationMode Mode { get; private set; } = AcceptedCancellationMode.ReportThenHang;
 
     public void Reset(AcceptedCancellationMode mode)
     {
         Mode = mode;
+        BeforeMarkerStampAsync = null;
+        ReconciliationResult = null;
+        ThrowOnReconcile = false;
+        Interlocked.Exchange(ref dispatchSinkCalls, 0);
+        Interlocked.Exchange(ref dispatchSinkFaults, 0);
+        Interlocked.Exchange(ref reconciliationCalls, 0);
+        Interlocked.Exchange(ref reconciledOperationId, null);
         Interlocked.Exchange(ref reportedAcceptances, 0);
     }
 
     public void Release() => released.TrySetResult();
 
+    public Task<MusicSubmissionReconciliation> ReconcileAcceptedSubmissionAsync(
+        string providerOperationId,
+        CancellationToken cancellationToken = default)
+    {
+        // Lease recovery's only view of the provider during the crash window, driven by the durable
+        // operation id. The classification is supplied by the test and every call is counted, so a
+        // marker-only cancellation can be proven never to have asked a question it could not phrase.
+        Interlocked.Increment(ref reconciliationCalls);
+        Interlocked.Exchange(ref reconciledOperationId, providerOperationId);
+        if (ThrowOnReconcile)
+        {
+            // Transport failure, timeout, an unparsable answer: the worker has to treat "unanswerable"
+            // exactly like "unknown" and may not fall back to a release.
+            throw new MusicProviderUnavailableException();
+        }
+
+        return Task.FromResult(ReconciliationResult ?? MusicSubmissionReconciliation.Unknown);
+    }
     public Task<MusicProviderResult> GenerateAsync(MusicGenerationInput request, CancellationToken cancellationToken = default)
         => GenerateAsync(request, cancellationToken, onSubmissionAccepted: null);
 
@@ -795,6 +1262,36 @@ internal sealed class AcceptedCancellationMusicProvider : IMusicGenerationProvid
         Func<string, Task>? onSubmissionAccepted,
         Func<Task>? onDispatchSubmitting = null)
     {
+        if (Mode != AcceptedCancellationMode.HangWithoutReporting)
+        {
+            // Both real providers stamp the durable marker before the billable create is issued, so this
+            // is the seam the F-36.1b pre-dispatch guard is exercised through. HangWithoutReporting keeps
+            // the interface default on purpose: it is what a provider double predating F-36.1 does, and
+            // its pre-submission posture has to stay exactly as it was.
+            if (BeforeMarkerStampAsync is not null) await BeforeMarkerStampAsync();
+            if (onDispatchSubmitting is null)
+            {
+                throw new InvalidOperationException("The music handler must attach a pre-dispatch sink for an evidence-aware provider.");
+            }
+
+            Interlocked.Increment(ref dispatchSinkCalls);
+            try
+            {
+                await onDispatchSubmitting();
+            }
+            catch (OperationCanceledException)
+            {
+                // A deliberate caller cancellation is still a cancellation, not a marker fault.
+                throw;
+            }
+            catch (Exception)
+            {
+                // Fail closed above: the counter that stands in for "a generation was paid for" is only
+                // reached when the marker was durable, so a failed write leaves it exactly where it was.
+                Interlocked.Increment(ref dispatchSinkFaults);
+                throw new MusicProviderUnavailableException();
+            }
+        }
         Interlocked.Increment(ref submittedGenerations);
         if (Mode is AcceptedCancellationMode.ReportThenHang or AcceptedCancellationMode.ReportThenFinishOnRelease)
         {

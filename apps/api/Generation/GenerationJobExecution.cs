@@ -2415,6 +2415,13 @@ var qualityFailure = exception as GenerationQualityControlException ?? exception
             : (false, stamped.ProviderExecutionId, stamped.Provider);
     }
 
+    private static IMusicGenerationProvider? MatchMusicProvider(
+        IReadOnlyList<IMusicGenerationProvider> candidates,
+        string? providerKey)
+        => string.IsNullOrWhiteSpace(providerKey)
+            ? null
+            : candidates.FirstOrDefault(item => string.Equals(item.Key, providerKey.Trim(), StringComparison.OrdinalIgnoreCase));
+
     /// <summary>
     /// F-36.1b: asks the music provider what happened to an accepted submission and records the
     /// classification on the attempt row. Reconciliation may only ever make the terminal state MORE
@@ -2434,9 +2441,14 @@ var qualityFailure = exception as GenerationQualityControlException ?? exception
     {
         try
         {
-            var provider = services.GetServices<IMusicGenerationProvider>()
-                .FirstOrDefault(item => !string.IsNullOrWhiteSpace(providerKey)
-                    && string.Equals(item.Key, providerKey, StringComparison.OrdinalIgnoreCase));
+            // The durable record names the provider the attempt was opened against, which is the only
+            // answer that can be trusted after the process that made the submission is gone. A job created
+            // without a provider column carries the guardrail placeholder instead, so the configured key is
+            // the second candidate: it is the same key the handler selected when the request went out.
+            // Still no match, still no answer: Unknown, which the ladder keeps closed.
+            var candidates = services.GetServices<IMusicGenerationProvider>().ToList();
+            var provider = MatchMusicProvider(candidates, providerKey)
+                ?? MatchMusicProvider(candidates, services.GetService<IOptions<MusicGenerationOptions>>()?.Value?.ProviderKey);
             if (provider is null)
                 return MusicSubmissionReconciliation.Unknown;
             var result = await provider.ReconcileAcceptedSubmissionAsync(providerOperationId, cancellationToken);
@@ -2477,10 +2489,19 @@ var qualityFailure = exception as GenerationQualityControlException ?? exception
 
     /// <summary>
     /// F-36.1b: writes the pre-dispatch marker onto the attempt row before the paid request is handed
-    /// to the transport. Never overwrites an accepted operation id, so the two durable facts stay
-    /// distinguishable and a late marker cannot mask a known id. Unlike the acceptance stamp a
-    /// failure here is logged rather than thrown: the marker only narrows the crash window, and
-    /// refusing to run a customer's generation because an evidence write hiccuped is the wrong trade.
+    /// to the transport, and refuses to dispatch when it cannot. Never overwrites an accepted operation
+    /// id, so the two durable facts stay distinguishable and a late marker cannot mask a known id.
+    /// The marker is what separates "nothing was sent" from "a paid generation may exist at the provider
+    /// with no operation id to reconcile", so a persistence failure is not a log line: recovery would
+    /// then have to choose between releasing a cancellation that might have a paid sibling behind it and
+    /// refusing one that had nothing behind it, and the customer could be charged twice for one request.
+    /// Aborting before the transport is the branch where nothing is unknown. No request has left this
+    /// process when this throws, so the pre-dispatch posture is exactly preserved: the failure maps to
+    /// the retryable outage class, the reservation keeps its cancellation/refund handling with zero
+    /// charge, and a retry from here creates the FIRST paid submission rather than a second one - unlike
+    /// the submission-unconfirmed class, whose copy asserts the request may already have reached the
+    /// provider and whose retry is blocked. The same token predicate that fences the write is what makes
+    /// a superseded claim unable to spend money at all, so a zero-row marker is treated as a lost claim.
     /// </summary>
     private async Task StampDispatchingSubmissionAsync(
         TaslimDbContext db,
@@ -2488,9 +2509,10 @@ var qualityFailure = exception as GenerationQualityControlException ?? exception
         Guid jobConcurrencyToken,
         CancellationToken cancellationToken)
     {
+        int stamped;
         try
         {
-            await db.GenerationProviderAttempts
+            stamped = await db.GenerationProviderAttempts
                 .Where(item => item.Id == attemptId
                     && item.JobConcurrencyToken == jobConcurrencyToken
                     && (item.ProviderExecutionId == null || item.ProviderExecutionId == ""))
@@ -2500,8 +2522,23 @@ var qualityFailure = exception as GenerationQualityControlException ?? exception
         }
         catch (Exception exception) when (exception is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
         {
+            // The write did not land. Clearing keeps a faulted context usable for the failure path that
+            // follows; the billable request is never issued behind an unrecorded marker.
             db.ChangeTracker.Clear();
-            logger.LogWarning(exception, "Music dispatch marker could not be persisted; acceptance evidence below still fails closed. AttemptId={AttemptId}", attemptId);
+            logger.LogWarning(exception, "Music dispatch marker could not be persisted; the billable request was not dispatched. AttemptId={AttemptId}", attemptId);
+            throw new MusicProviderUnavailableException();
+        }
+
+        if (stamped == 0)
+        {
+            // No attempt row matched this claim: the concurrency token moved (a superseded claim may not
+            // spend money) or the row already carries submission evidence, which the marker predicate
+            // deliberately refuses to overwrite. Both mean the marker cannot be relied on, so the paid
+            // request stops here. A caller-initiated cancellation is unaffected: a token-filtered UPDATE
+            // observes cancellation by throwing OperationCanceledException rather than returning zero
+            // rows, so the cancellation path above keeps propagating cancellation instead of this.
+            logger.LogWarning("Music dispatch marker matched no current attempt row; the billable request was not dispatched. AttemptId={AttemptId}; JobConcurrencyToken={JobConcurrencyToken}", attemptId, jobConcurrencyToken);
+            throw new MusicProviderUnavailableException();
         }
     }
 
