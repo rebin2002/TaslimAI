@@ -71,8 +71,12 @@ export const academicCapabilities: Readonly<Record<AcademicCapabilityId, Academi
   localDraftPersistence: { id: "localDraftPersistence", status: "available", phase: "A", detailKey: "capability.available.draft" },
   manualEvidenceNotes: { id: "manualEvidenceNotes", status: "available", phase: "A", detailKey: "capability.available.evidenceManual" },
   chapterPlanning: { id: "chapterPlanning", status: "available", phase: "A", detailKey: "capability.available.chapterPlanning" },
-  scholarlyDiscovery: { id: "scholarlyDiscovery", status: "planned", phase: "A", detailKey: "capability.planned.discovery" },
-  isbnCatalogLookup: { id: "isbnCatalogLookup", status: "planned", phase: "A", detailKey: "capability.planned.isbn" },
+  // #1267 slice 1: the workspace-scoped, read-only search endpoint is live, so discovering
+  // bibliographic records and resolving the identifiers inside them is real behaviour, rendered
+  // as a working form. Everything that needs the content itself stays planned: an indicated
+  // full-text location is not the same affordance as reading it, and the panel says so.
+  scholarlyDiscovery: { id: "scholarlyDiscovery", status: "available", phase: "A", detailKey: "capability.available.discovery" },
+  isbnCatalogLookup: { id: "isbnCatalogLookup", status: "available", phase: "A", detailKey: "capability.available.isbnLookup" },
   fullTextRetrieval: { id: "fullTextRetrieval", status: "planned", phase: "B", detailKey: "capability.planned.fullText" },
   automatedScreening: { id: "automatedScreening", status: "planned", phase: "B", detailKey: "capability.planned.screening" },
   evidenceExtraction: { id: "evidenceExtraction", status: "planned", phase: "B", detailKey: "capability.planned.extraction" },

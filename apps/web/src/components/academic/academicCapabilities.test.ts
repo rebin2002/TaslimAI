@@ -47,8 +47,15 @@ describe("capability registry", () => {
     expect(isCapabilityAvailable("standardResearch")).toBe(true);
   });
 
-  it("keeps every backend-dependent behaviour out of the available set", () => {
-    for (const id of ["scholarlyDiscovery", "isbnCatalogLookup", "fullTextRetrieval", "automatedScreening", "evidenceExtraction", "academicJob", "chapterDrafting", "documentExport", "budgetPreflight", "resumeCheckpoints"] as const) {
+  it("marks record discovery and identifier lookup available now that the search endpoint ships", () => {
+    // #1267 slice 1: a workspace-scoped, read-only search endpoint plus a panel that calls it.
+    // That is the whole of what these two ids claim; nothing about reading content is claimed.
+    expect(isCapabilityAvailable("scholarlyDiscovery")).toBe(true);
+    expect(isCapabilityAvailable("isbnCatalogLookup")).toBe(true);
+  });
+
+  it("keeps every behaviour that still needs backend work out of the available set", () => {
+    for (const id of ["fullTextRetrieval", "automatedScreening", "evidenceExtraction", "academicJob", "chapterDrafting", "documentExport", "budgetPreflight", "resumeCheckpoints"] as const) {
       expect(isCapabilityPlanned(id), id).toBe(true);
       expect(isCapabilityAvailable(id), id).toBe(false);
     }
@@ -74,11 +81,13 @@ describe("workflow stages", () => {
     ]);
   });
 
-  it("shows exactly one stage as running today", () => {
+  it("shows the plan and discovery stages as running today, and nothing past discovery", () => {
     const views = academicWorkflowViews();
-    expect(views.filter((stage) => stage.status === "available").map((stage) => stage.id)).toEqual(["plan"]);
-    expect(availableWorkflowStageCount(views)).toBe(1);
+    expect(views.filter((stage) => stage.status === "available").map((stage) => stage.id)).toEqual(["plan", "discovery"]);
+    expect(availableWorkflowStageCount(views)).toBe(2);
     expect(views.every((stage) => stage.status === "planned" || stage.status === "available")).toBe(true);
+    // Screening onward is still a promise, never a control.
+    expect(views.filter((stage) => stage.status === "planned").map((stage) => stage.id)).toEqual(["screen", "extract", "compare", "gaps", "chapters", "verify"]);
   });
 
   it("has customer-facing copy for each stage label and description", () => {

@@ -192,6 +192,11 @@ public sealed record AcademicDiscoveryBatch
 /// <summary>Outcome of validating a DOI against authoritative registration metadata.</summary>
 public sealed record AcademicDoiValidationResult
 {
+    /// <summary>The DOI as the caller asked for it (set by the orchestrator), so a failed check can
+    /// be echoed back without guessing. Provider adapters leave this null; only the batch result
+    /// carries the caller-facing spelling.</summary>
+    public string? SubmittedDoi { get; init; }
+
     /// <summary>DOI exactly as registered (provider casing), null when not found.</summary>
     public string? ResolvedDoi { get; init; }
 

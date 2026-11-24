@@ -6,6 +6,11 @@
  * student supplied, that a missing element is announced rather than papered over,
  * and that an empty section explains the next real step instead of showing a
  * spinner for a job that cannot run.
+ *
+ * Issue #1267 slice 1 adds the scholarly search surface to this panel. A static
+ * render can only ever be the idle state — a search needs a student to start one
+ * — so the result rendering is pinned in `AcademicScholarlySearchResults.test.tsx`
+ * and the request lifecycle in `academicScholarlySearch.test.ts`.
  */
 import { describe, expect, it, vi } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
@@ -22,7 +27,7 @@ const t = createAcademicTranslator("en");
 const labels = createLabelsFixture();
 
 describe("AcademicSourcesPanel", () => {
-  function renderSources(sources: Parameters<typeof AcademicSourcesPanel>[0]["sources"]) {
+  function renderSources(sources: Parameters<typeof AcademicSourcesPanel>[0]["sources"], workspaceId: string | null = "ws-synth-1") {
     return renderToStaticMarkup(
       <AcademicSourcesPanel
         sources={sources}
@@ -32,15 +37,46 @@ describe("AcademicSourcesPanel", () => {
         requireFullText={false}
         t={t}
         labels={labels}
+        workspaceId={workspaceId}
       />,
     );
   }
 
-  it("explains that discovery is a later step and entry is manual", () => {
+  it("explains what live search does and that manual entry still counts", () => {
     const html = renderSources([]);
-    expect(html).toContain("Record what you have verified");
-    expect(html).toContain("Automated scholarly and book catalogue discovery is a later step");
+    expect(html).toContain("Find records, then verify them");
+    expect(html).toContain("It does not read the works");
     expect(html).toContain("No sources yet");
+    // Discovery is live, but nothing here starts a job or generates text.
+    expect(html).not.toMatch(/start academic run|generate chapter|export docx/i);
+  });
+
+  it("offers a real search form once the panel has a workspace", () => {
+    const html = renderSources([], "ws-synth-1");
+    expect(html).toContain("Find scholarly sources");
+    expect(html).toContain("<form");
+    expect(html).toContain('aria-busy="false"');
+    expect(html).toContain(">Search</button>");
+    expect(html).toContain("No search yet. Records appear here once you search.");
+    // Paging, stop and retry belong to a search that has not happened yet.
+    expect(html).not.toContain("Previous page");
+    expect(html).not.toContain(">Stop</button>");
+    expect(html).not.toContain(">Try again</button>");
+  });
+
+  it("does not show a search control it cannot honour without a workspace", () => {
+    const html = renderSources([], null);
+    expect(html).toContain("Scholarly search needs a workspace");
+    expect(html).toContain("Record search is scoped to one workspace and this view has none.");
+    expect(html).not.toContain("Find scholarly sources");
+    expect(html).not.toContain(">Search</button>");
+    // Manual entry is the honest alternative and stays reachable.
+    expect(html).toContain("Add a verified source");
+  });
+
+  it("never names the service behind a record in the panel markup", () => {
+    const html = renderSources([verifiedSource()]).toLowerCase();
+    expect(html).not.toMatch(/openalex|crossref|open library|google books|pubmed|provider|api key|tokens|credits/);
   });
 
   it("shows the verified record with its DOI resolver link", () => {
@@ -207,7 +243,8 @@ describe("AcademicPlanPanel", () => {
       <AcademicPlanPanel brief={brief} issues={validateAcademicBrief(brief)} sourceCount={12} fullTextCount={5} peerReviewedCount={10} t={t} labels={labels} onJumpToField={vi.fn()} />,
     );
     expect(html).toContain("Nothing is blocking this plan");
-    expect(html).toContain("1 of 8 stages run today");
+    // #1267 slice 1 made the discovery stage real: plan and discovery run today.
+    expect(html).toContain("2 of 8 stages run today");
     expect(html).toContain("40,000");
     expect(html).toContain("you have recorded 12");
     expect(html).toContain("5 of 12 sources are marked as fully read");

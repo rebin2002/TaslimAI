@@ -71,19 +71,19 @@ public sealed class AcademicSourceDiscoveryService(
         {
             if (validator is null)
             {
-                validations.Add(new AcademicDoiValidationResult { ResolvedDoi = null, IsRegistered = false, FailureCategory = AcademicSourceFailureCategories.Configuration });
+                validations.Add(new AcademicDoiValidationResult { SubmittedDoi = doi, ResolvedDoi = null, IsRegistered = false, FailureCategory = AcademicSourceFailureCategories.Configuration });
                 continue;
             }
             try
             {
                 var result = await validator.ValidateAsync(doi, cancellationToken);
-                validations.Add(result);
+                validations.Add(result with { SubmittedDoi = result.SubmittedDoi ?? doi });
                 if (result.IsRegistered && result.Source is { } source) records.Add(source);
             }
             catch (AcademicSourceException exception)
             {
                 logger.LogWarning("DOI validation attempt failed safely. Category={FailureCategory}", CategoryOf(exception));
-                validations.Add(new AcademicDoiValidationResult { IsRegistered = false, FailureCategory = CategoryOf(exception) });
+                validations.Add(new AcademicDoiValidationResult { SubmittedDoi = doi, IsRegistered = false, FailureCategory = CategoryOf(exception) });
             }
         }
         if (validator is null && normalized.Dois.Count > 0 && !outcomes.Any(outcome => outcome.ProviderKey == "doi-validator"))

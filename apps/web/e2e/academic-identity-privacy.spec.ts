@@ -18,7 +18,12 @@
  * remains.
  *
  * Synthetic data only, and nothing leaves the page: the academic surface makes no
- * network call, and the harness is served through request interception.
+ * network call of its own accord, and the harness is served through request
+ * interception. #1267 slice 1 added one student-initiated read (the Sources tab's
+ * scholarly record search); no scenario here presses that button, so no request is
+ * made. That read is covered instead by `academicScholarlySearch.test.ts`,
+ * `AcademicScholarlySearchResults.test.tsx`, `api.academicSources.test.ts` and the
+ * API integration tests under `apps/api.Tests/AcademicSources`.
  */
 import { execSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
