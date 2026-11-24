@@ -70,6 +70,27 @@ public sealed class MovieWave4IntegrationSeamTests
     }
 
     [Fact]
+    public void Export_handoff_rejects_video_segments_from_non_final_takes()
+    {
+        var project = Guid.NewGuid();
+        var shot = Guid.NewGuid();
+        var keyframe = Guid.NewGuid();
+        var selectedTake = Guid.NewGuid();
+        var alternateTake = Guid.NewGuid();
+        var timeline = MovieWave4ExportSeam.BuildTimeline(
+        [
+            new(MovieWave4TrackKinds.Video, Guid.NewGuid(), 0, 5_000, selectedTake),
+            new(MovieWave4TrackKinds.Video, Guid.NewGuid(), 5_000, 1_000, alternateTake),
+        ], 6_000);
+
+        var decision = MovieWave4ExportSeam.Evaluate(new MovieWave4ExportRequest(
+            project, shot, selectedTake, selectedTake, keyframe, timeline));
+
+        Assert.False(decision.Ready);
+        Assert.Equal(MovieWave4ExportCodes.NonFinalVideoSource, decision.Code);
+    }
+
+    [Fact]
     public void Timeline_validation_blocks_missing_media_and_overlapping_items()
     {
         Assert.Throws<MovieWave4IntegrationValidationException>(() => MovieWave4ExportSeam.BuildTimeline(

@@ -135,8 +135,134 @@ public static class DocumentGenerationContractMapper
 
     public static string SerializeInput(DocumentGenerationInput input) => JsonSerializer.Serialize(input);
 
-    public static string SerializeResult(string documentType, string title, string language, string summary, IReadOnlyList<DocumentSection> sections) =>
-        JsonSerializer.Serialize(new { documentType, title, language, summary, sections }, ResultJsonOptions);
+    /// <summary>
+    /// Character ceiling for the persisted job result. The completion write stores this payload in
+    /// <c>GenerationJob.ResultJson</c>, whose mapped column is limited to this length, so an
+    /// unbounded canonical preview overflows the write and discards an already rendered document.
+    /// </summary>
+    public const int MaxResultJsonCharacters = 100_000;
+
+    // Headroom so the measured preview never lands on the column boundary.
+    private const int ResultJsonSafetyMargin = 512;
+
+    // The DOCX and PDF artifacts stay complete. This result is only the reading preview the
+    // completion screen renders, so it keeps a bounded number of whole sections and blocks.
+    private const int PreviewSectionBudget = 12;
+    private const int PreviewBlockBudget = 4;
+
+    /// <summary>
+    /// Serializes the canonical Document Studio preview alongside the asset references the
+    /// completion screen reads back. A preview larger than the persisted column is trimmed to the
+    /// largest measured size that still fits, so the job stays succeedable and downloadable instead
+    /// of failing at publication.
+    /// </summary>
+    public static string SerializeResult(string documentType, string title, string language, string summary, IReadOnlyList<DocumentSection> sections)
+    {
+        var budget = MaxResultJsonCharacters - ResultJsonSafetyMargin;
+        var preview = sections ?? [];
+        var complete = Write(documentType, title, language, summary ?? string.Empty, preview, bounded: false);
+        if (complete.Length <= budget) return complete;
+
+        // Draft text is escaped when serialized, so non-ASCII previews expand beyond their source
+        // length. The retained size is therefore chosen by measuring the payload, not by counting
+        // source characters. The ceiling is the largest field that trimming can still shorten;
+        // scale 0 drops the preview body entirely and is the guaranteed floor.
+        var ceiling = new[] { summary?.Length ?? 0 }
+            .Concat(preview.SelectMany(section => section.Blocks).Select(BlockLength))
+            .DefaultIfEmpty(0)
+            .Max();
+        var low = 0;
+        var high = ceiling;
+        var best = Write(documentType, title, language, string.Empty, [], bounded: true);
+        while (low <= high)
+        {
+            var middle = low + ((high - low) / 2);
+            var candidate = BuildBoundedPreview(documentType, title, language, summary ?? string.Empty, preview, middle);
+            if (candidate.Length <= budget)
+            {
+                best = candidate;
+                low = middle + 1;
+            }
+            else
+            {
+                high = middle - 1;
+            }
+        }
+
+        return best;
+    }
+
+    private static string BuildBoundedPreview(
+        string documentType,
+        string title,
+        string language,
+        string summary,
+        IReadOnlyList<DocumentSection> sections,
+        int scale)
+    {
+        if (scale <= 0) return Write(documentType, title, language, string.Empty, [], bounded: true);
+        var boundedSummary = Truncate(summary, scale);
+        if (sections.Count == 0) return Write(documentType, title, language, boundedSummary, sections, bounded: true);
+
+        var kept = new List<DocumentSection>(Math.Min(sections.Count, PreviewSectionBudget));
+        foreach (var section in sections.Take(PreviewSectionBudget))
+        {
+            var blocks = new List<DocumentBlock>();
+            foreach (var block in section.Blocks.Take(PreviewBlockBudget))
+            {
+                blocks.Add(new DocumentBlock
+                {
+                    Type = block.Type,
+                    Text = Truncate(block.Text, scale),
+                    Items = block.Items is null ? null : [.. block.Items.Select(item => Truncate(item, scale))],
+                    Rows = block.Rows is null
+                        ? null
+                        : [.. block.Rows.Select(row => new DocumentTableRow { Cells = [.. row.Cells.Select(cell => Truncate(cell, scale))] })],
+                });
+            }
+
+            kept.Add(new DocumentSection { Heading = section.Heading, Blocks = blocks });
+        }
+
+        return Write(documentType, title, language, boundedSummary, kept, bounded: true);
+    }
+
+    private static int BlockLength(DocumentBlock block) =>
+        new[] { block.Text?.Length ?? 0 }
+            .Concat(block.Items is null ? [] : block.Items.Select(item => item?.Length ?? 0))
+            .Concat(block.Rows is null ? [] : block.Rows.SelectMany(row => row.Cells).Select(cell => cell?.Length ?? 0))
+            .DefaultIfEmpty(0)
+            .Max();
+
+    private static string Truncate(string? value, int maximum)
+    {
+        if (value is null || maximum < 0 || value.Length <= maximum) return value ?? string.Empty;
+        var length = maximum;
+        // Never split a surrogate pair, which would emit invalid JSON string content.
+        if (length > 0 && char.IsHighSurrogate(value[length - 1]) && length < value.Length && char.IsLowSurrogate(value[length]))
+            length -= 1;
+        return value[..length];
+    }
+
+    private static string Write(
+        string documentType,
+        string title,
+        string language,
+        string summary,
+        IReadOnlyList<DocumentSection> sections,
+        bool bounded)
+    {
+        var result = new Dictionary<string, object?>(StringComparer.Ordinal)
+        {
+            ["documentType"] = documentType,
+            ["title"] = title,
+            ["language"] = language,
+            ["summary"] = summary,
+            ["sections"] = sections,
+        };
+        if (bounded) result["previewBounded"] = true;
+        return JsonSerializer.Serialize(result, ResultJsonOptions);
+    }
 
     public static bool TryDeserializeInput(string json, out DocumentGenerationInput? input)
     {
