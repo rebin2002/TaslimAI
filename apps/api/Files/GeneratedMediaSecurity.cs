@@ -182,11 +182,58 @@ public static class GeneratedMediaSecurity
 
     private static bool IsCompletePng(ReadOnlySpan<byte> content)
     {
-        return content.Length >= 40
-            && content[..8].SequenceEqual(new byte[] { 0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A })
-            && BinaryPrimitives.ReadUInt32BigEndian(content[8..12]) >= 13
-            && content[12..16].SequenceEqual("IHDR"u8)
-            && content[^8..^4].SequenceEqual("IEND"u8);
+        // Presence checks alone are not completeness: a file holding only an IHDR and a trailing
+        // IEND passes a signature/terminator test while carrying no pixel data at all, and that is
+        // exactly what a truncated provider response can look like once the IDAT chain is lost. So
+        // the chunk stream is walked: IHDR must be first with its declared header length, at least
+        // one IDAT chunk must carry a non-empty payload, IEND must be reached as a zero-length
+        // chunk, and every declared length must fit inside the buffer. Bytes trailing IEND are
+        // tolerated only as zero fill, mirroring IsCompleteJpeg's rule for data after EOI.
+        if (content.Length < 40
+            || !content[..8].SequenceEqual(new byte[] { 0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A }))
+        {
+            return false;
+        }
+
+        var index = 8L;
+        var sawImageData = false;
+        while (index + 12 <= content.Length)
+        {
+            var start = (int)index;
+            var length = BinaryPrimitives.ReadUInt32BigEndian(content[start..(start + 4)]);
+            if (length > int.MaxValue - 12) return false;
+            var end = index + 12 + length;
+            if (end > content.Length) return false;
+
+            var type = content[(start + 4)..(start + 8)];
+            if (index == 8)
+            {
+                // IHDR is mandatory and must open the chunk stream; without it the offsets below
+                // would describe an arbitrary byte sequence rather than an image.
+                if (!type.SequenceEqual("IHDR"u8) || length < 13) return false;
+            }
+            else if (type.SequenceEqual("IDAT"u8))
+            {
+                sawImageData = sawImageData || length > 0;
+            }
+            else if (type.SequenceEqual("IEND"u8))
+            {
+                // IEND declares an empty payload and ends the image. Anything other than zero fill
+                // behind it means the terminator was not really the terminator.
+                return length == 0 && sawImageData && IsPngFill(content[(int)end..]);
+            }
+
+            index = end;
+        }
+
+        return false;
+    }
+
+    private static bool IsPngFill(ReadOnlySpan<byte> tail)
+    {
+        foreach (var value in tail)
+            if (value != 0x00) return false;
+        return true;
     }
 
     private static bool IsCompleteJpeg(ReadOnlySpan<byte> content)
@@ -262,6 +309,7 @@ public static class GeneratedMediaSecurity
         if (riffEnd > content.Length || riffEnd < 20) return false;
 
         var index = 12L;
+        var extendedHeaderOnly = false;
         while (index + 8 <= riffEnd)
         {
             var chunkStart = (int)index;
@@ -272,13 +320,37 @@ public static class GeneratedMediaSecurity
             var chunkType = content[chunkStart..(chunkStart + 4)];
             if ((chunkType.SequenceEqual("VP8 "u8) || chunkType.SequenceEqual("VP8L"u8)) && chunkLength > 0)
                 return true;
+            // A VP8X chunk is only the extended-format header: it describes the canvas and sets
+            // flags, and the actual samples live in the VP8/VP8L chunk that follows it or inside
+            // ANMF frames. Declaring it complete accepted a header-only container with no image
+            // payload, so it is remembered and the walk continues until real image data shows up.
             if (chunkType.SequenceEqual("VP8X"u8) && chunkLength >= 10)
+                extendedHeaderOnly = true;
+            else if (extendedHeaderOnly && chunkType.SequenceEqual("ANMF"u8) &&
+                     HasAnimatedWebpFrame(content, chunkStart + 8, (int)chunkEnd))
+            {
                 return true;
+            }
 
             index = chunkEnd + (chunkLength & 1);
         }
 
         return false;
+    }
+
+    private static bool HasAnimatedWebpFrame(ReadOnlySpan<byte> content, int payloadStart, int payloadEnd)
+    {
+        // An ANMF payload opens with 12 bytes of canvas position, duration and disposal/blending
+        // flags, then holds the complete chunk carrying the frame, so a frame counts only when that
+        // nested chunk is a VP8 or VP8L chunk with a non-empty body fitting the declared ANMF range.
+        var nested = payloadStart + 12;
+        if (nested + 8 > payloadEnd || payloadEnd > content.Length) return false;
+
+        var nestedType = content[nested..(nested + 4)];
+        if (!nestedType.SequenceEqual("VP8 "u8) && !nestedType.SequenceEqual("VP8L"u8)) return false;
+
+        var nestedLength = BinaryPrimitives.ReadUInt32LittleEndian(content[(nested + 4)..(nested + 8)]);
+        return nestedLength > 0 && (long)nested + 8 + nestedLength <= payloadEnd;
     }
 
     private static bool IsFtyp(ReadOnlySpan<byte> content) =>

@@ -275,13 +275,18 @@ public sealed class GeneratedAssetNameTruncationTests : IAsyncLifetime
 
     private static byte[] Png(int width, int height)
     {
-        var bytes = new byte[40];
+        // Carries a non-empty IDAT chunk so the fixture stays structurally complete under the
+        // generated-image completeness gate.
+        var bytes = new byte[58];
         new byte[] { 137, 80, 78, 71, 13, 10, 26, 10 }.CopyTo(bytes, 0);
         BinaryPrimitives.WriteUInt32BigEndian(bytes.AsSpan(8, 4), 13);
         "IHDR"u8.CopyTo(bytes.AsSpan(12, 4));
         BinaryPrimitives.WriteInt32BigEndian(bytes.AsSpan(16, 4), width);
         BinaryPrimitives.WriteInt32BigEndian(bytes.AsSpan(20, 4), height);
-        "IEND"u8.CopyTo(bytes.AsSpan(32, 4));
+        BinaryPrimitives.WriteUInt32BigEndian(bytes.AsSpan(33, 4), 1);
+        "IDAT"u8.CopyTo(bytes.AsSpan(37, 4));
+        bytes[41] = 0x78;
+        "IEND"u8.CopyTo(bytes.AsSpan(50, 4));
         return bytes;
     }
 }
