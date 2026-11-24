@@ -27,8 +27,46 @@ public interface IMusicGenerationProvider
     Task<MusicProviderResult> GenerateAsync(
         MusicGenerationInput request,
         CancellationToken cancellationToken,
-        Func<string, Task>? onSubmissionAccepted)
+        Func<string, Task>? onSubmissionAccepted,
+        Func<Task>? onDispatchSubmitting = null)
         => GenerateAsync(request, cancellationToken);
+
+    /// <summary>
+    /// F-36.1b: asks the provider, by the operation id recorded at acceptance, what actually happened
+    /// to a submission whose outcome this process never observed. Both shipped music providers answer
+    /// with the same non-billable status GET they already use while polling, so asking cannot itself
+    /// create or bill a generation. The default returns Unknown: a provider that has not adopted
+    /// reconciliation changes nothing, and recovery keeps its fail-closed terminal.
+    /// </summary>
+    Task<MusicSubmissionReconciliation> ReconcileAcceptedSubmissionAsync(
+        string providerOperationId,
+        CancellationToken cancellationToken = default)
+        => Task.FromResult(MusicSubmissionReconciliation.Unknown);
+}
+
+/// <summary>
+/// F-36.1b: what a provider reports about an accepted submission. Unknown is deliberately distinct
+/// from "did not happen": the absence of an answer is never evidence that no credits were spent,
+/// which is the whole basis of the fail-closed posture.
+/// </summary>
+public enum MusicSubmissionOutcome
+{
+    Unknown,
+    InProgress,
+    Completed,
+    ProviderDeclaredFailure,
+}
+
+/// <summary>
+/// F-36.1b: a reconciliation answer plus the vendor's own billing statement about it.
+/// ProviderDeclaresNoCharge is true only where the published contract says a failed generation is
+/// not charged (Stability: "you will not be charged for failed generations"). Mubert publishes no
+/// such statement, so a Mubert failure answer keeps ProviderDeclaresNoCharge false and the retry
+/// stays blocked: the release path exists only where a contract actually supports it.
+/// </summary>
+public sealed record MusicSubmissionReconciliation(MusicSubmissionOutcome Outcome, bool ProviderDeclaresNoCharge)
+{
+    public static readonly MusicSubmissionReconciliation Unknown = new(MusicSubmissionOutcome.Unknown, false);
 }
 
 /// <summary>
@@ -40,6 +78,15 @@ public interface IMusicGenerationProvider
 public interface IAcceptsMusicSubmissionEvidence
 {
     Func<string, Task>? AcceptedSubmissionSink { get; set; }
+
+    /// <summary>
+    /// F-36.1b: called immediately BEFORE the paid create request is handed to the transport. Neither
+    /// music vendor accepts a caller-supplied operation id or idempotency key on the create call, so
+    /// the id only exists once the response has been parsed; a process lost between those instants
+    /// would otherwise leave no trace that a paid generation may have been created. This marker is
+    /// what narrows that window to a durable "dispatched, outcome unknown" state.
+    /// </summary>
+    Func<Task>? DispatchingSink { get; set; }
 }
 
 public sealed class MusicGenerationJobHandler(
@@ -55,6 +102,9 @@ public sealed class MusicGenerationJobHandler(
     /// pre-F-36.1 path unchanged.
     /// </summary>
     public Func<string, Task>? AcceptedSubmissionSink { get; set; }
+
+    /// <summary>F-36.1b: supplied by the worker alongside the acceptance sink.</summary>
+    public Func<Task>? DispatchingSink { get; set; }
 
     public bool CanHandle(string jobType) => string.Equals(jobType, GenerationJobTypes.MusicGenerate, StringComparison.OrdinalIgnoreCase);
 
@@ -81,7 +131,7 @@ public sealed class MusicGenerationJobHandler(
 
         logger.LogInformation("Music generation started. JobId={JobId}; ProviderKey={ProviderKey}", job.Id, provider.Key);
         progress.Report(25);
-        var generated = await provider.GenerateAsync(request, cancellationToken, AcceptedSubmissionSink);
+        var generated = await provider.GenerateAsync(request, cancellationToken, AcceptedSubmissionSink, DispatchingSink);
         cancellationToken.ThrowIfCancellationRequested();
         progress.Report(82);
 

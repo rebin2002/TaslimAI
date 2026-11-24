@@ -34,12 +34,13 @@ public sealed class StableAudioMusicGenerationProvider(
     public Task<MusicProviderResult> GenerateAsync(
         MusicGenerationInput request,
         CancellationToken cancellationToken = default)
-        => GenerateAsync(request, cancellationToken, onSubmissionAccepted: null);
+        => GenerateAsync(request, cancellationToken, onSubmissionAccepted: null, onDispatchSubmitting: null);
 
     public async Task<MusicProviderResult> GenerateAsync(
         MusicGenerationInput request,
         CancellationToken cancellationToken,
-        Func<string, Task>? onSubmissionAccepted)
+        Func<string, Task>? onSubmissionAccepted,
+        Func<Task>? onDispatchSubmitting = null)
     {
         if (!settings.Enabled
             || !string.Equals(settings.ProviderKey, Key, StringComparison.OrdinalIgnoreCase)
@@ -73,6 +74,14 @@ public sealed class StableAudioMusicGenerationProvider(
             var format = NormalizeFormat(settings.StableAudioOutputFormat);
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             timeout.CancelAfter(TimeSpan.FromSeconds(Math.Clamp(settings.ProviderTimeoutSeconds, 15, 900)));
+            // F-36.1b: make the dispatch itself durable before the request leaves this process. The
+            // provider's operation id does not exist yet (neither vendor lets us supply one), so this
+            // marker is the only evidence that a paid submission may have been accepted. A failure to
+            // write it is logged, not fatal: refusing the customer's generation because a telemetry
+            // write hiccuped would be the wrong direction of error, and the acceptance stamp below
+            // still fails closed.
+            if (onDispatchSubmitting is not null) await onDispatchSubmitting();
+
             var stopwatch = Stopwatch.StartNew();
             var createdBody = await SendCreateAsync(
                 new Uri(baseUri, "v2beta/audio/stable-audio/text-to-audio"),
@@ -491,6 +500,52 @@ public sealed class StableAudioMusicGenerationProvider(
     /// was rejected or the request was invalid, so no generation will come from it and an ordinary
     /// retry is honest. Anything else on the polling path leaves an accepted generation unresolved.
     /// </summary>
+    /// <summary>
+    /// F-36.1b: Stability documents GET /v2beta/audio/results/{id} as the polling endpoint for an
+    /// async audio generation (202 while in progress, 200 with the audio when complete), and credits
+    /// are described as "8 credits per successful generation" with "you will not be charged for
+    /// failed generations". That last sentence is what makes a release safe here and nowhere else:
+    /// a provider-declared terminal failure is the vendor itself stating nothing was billed. Results
+    /// are only retained for 24 hours, so a missing answer (404, transport fault, unparseable body)
+    /// is Unknown and must never be read as "not charged".
+    /// </summary>
+    public async Task<MusicSubmissionReconciliation> ReconcileAcceptedSubmissionAsync(
+        string providerOperationId,
+        CancellationToken cancellationToken = default)
+    {
+        var operationId = (providerOperationId ?? string.Empty).Trim();
+        if (operationId.Length == 0 || operationId.StartsWith("taslim:", StringComparison.Ordinal))
+            return MusicSubmissionReconciliation.Unknown;
+        if (!settings.Enabled
+            || !string.Equals(settings.ProviderKey, Key, StringComparison.OrdinalIgnoreCase)
+            || string.IsNullOrWhiteSpace(settings.StableAudioApiKey))
+        {
+            return MusicSubmissionReconciliation.Unknown;
+        }
+        try
+        {
+            var baseUri = BuildBaseUri(settings.StableAudioApiBaseUrl);
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            timeout.CancelAfter(TimeSpan.FromSeconds(Math.Clamp(settings.ProviderTimeoutSeconds, 15, 900)));
+            using var result = await SendResultAsync(new Uri(baseUri, $"v2beta/audio/results/{Uri.EscapeDataString(operationId)}"), timeout.Token);
+            if (result.StatusCode == HttpStatusCode.Accepted)
+                return new MusicSubmissionReconciliation(MusicSubmissionOutcome.InProgress, false);
+            if (result.IsSuccessStatusCode)
+                return new MusicSubmissionReconciliation(MusicSubmissionOutcome.Completed, false);
+            var declared = await MapFailureAsync(result);
+            return IsProviderDeclaredTerminal(declared)
+                // The only contract-supported release: Stability declaring this generation failed
+                // means its own documentation says the credits were not spent.
+                ? new MusicSubmissionReconciliation(MusicSubmissionOutcome.ProviderDeclaredFailure, true)
+                : MusicSubmissionReconciliation.Unknown;
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            logger.LogWarning(exception, "Stable Audio accepted-submission reconciliation was inconclusive. OperationId={OperationId}", operationId);
+            return MusicSubmissionReconciliation.Unknown;
+        }
+    }
+
     private static bool IsProviderDeclaredTerminal(Exception exception) =>
         exception is MusicProviderRejectedException or MusicProviderInvalidRequestException;
 
