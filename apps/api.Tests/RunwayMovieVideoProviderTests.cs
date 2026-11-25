@@ -53,6 +53,22 @@ public sealed class RunwayMovieVideoProviderTests
     }
 
     [Fact]
+    public async Task Submission_rejects_reference_package_instead_of_silently_dropping_it()
+    {
+        var handler = new RecordingHandler(_ => JsonResponse($"{{\"id\":\"{TaskId}\"}}"));
+        var provider = CreateProvider(handler, EnabledOptions());
+        var request = Request() with
+        {
+            ReferencePackageJson = "{\"SchemaVersion\":2,\"References\":[{\"AssetId\":\"00000000-0000-0000-0000-000000000001\",\"Role\":\"composition\"}]}"
+        };
+
+        var exception = await Assert.ThrowsAsync<MovieVideoProviderException>(() => provider.SubmitAsync(request, CancellationToken.None));
+
+        Assert.Equal(GenerationJobErrorCodes.MovieProviderUnsupportedRequest, exception.Code);
+        Assert.Empty(handler.Requests);
+    }
+
+    [Fact]
     public async Task Polling_normalizes_queued_generating_and_completed_states_and_preserves_cost_metadata()
     {
         var calls = 0;
