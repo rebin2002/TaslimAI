@@ -74,7 +74,7 @@ const billingFixture = {
   currentPlan: { code: "free", name: "Free", monthlyPriceUsd: 0, monthlyCreditAllowance: 1_000, currency: "USD" },
   subscription: { status: "active", currentPeriodStart: "2026-11-01T00:00:00Z", currentPeriodEnd: "2026-12-01T00:00:00Z", nextRenewalAt: "2026-12-01T00:00:00Z", cancelAtPeriodEnd: false },
   billingPeriod: { id: "narrow-zoom-period", status: "active", startsAt: "2026-11-01T00:00:00Z", endsAt: "2026-12-01T00:00:00Z", includedCredits: 1_000 },
-  credits: { includedGranted: 1_000, includedRemaining: 640, purchasedRemaining: 0, adjustmentBalance: 0, totalRemaining: 1_505 },
+  credits: { includedGranted: 1_000, includedRemaining: 880, purchasedRemaining: 0, adjustmentBalance: 0, totalRemaining: 880 },
   transactions: [
     { id: "nz-tx-grant", type: "Grant", amount: 1_000, reason: "Monthly plan allowance", createdAt: "2026-11-01T08:00:00Z" },
     { id: "nz-tx-debit", type: "Debit", amount: -120, reason: "Research generation", createdAt: "2026-11-03T10:30:00Z" },
