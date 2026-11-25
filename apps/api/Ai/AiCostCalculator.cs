@@ -17,6 +17,12 @@ public sealed class AiCostCalculator(AiModelCatalog catalog) : IAiCostCalculator
             return decimal.Round(Math.Max(0m, usage.ActualCost.Value), 8, MidpointRounding.AwayFromZero);
         if (model is null || (usage.InputTokens is null && usage.OutputTokens is null))
             return usage.EstimatedCost.HasValue ? decimal.Round(Math.Max(0m, usage.EstimatedCost.Value), 8, MidpointRounding.AwayFromZero) : null;
+        // A misconfigured negative catalog rate must never reduce measured usage cost
+        // or turn a paid request into a negative/zero-cost ledger entry.
+        if (model.InputPricePerMillion is < 0m
+            || model.CachedInputPricePerMillion is < 0m
+            || model.OutputPricePerMillion is < 0m)
+            return null;
 
         var input = Math.Max(0, usage.InputTokens.GetValueOrDefault());
         var cached = Math.Min(input, Math.Max(0, usage.CachedInputTokens.GetValueOrDefault()));
@@ -26,16 +32,24 @@ public sealed class AiCostCalculator(AiModelCatalog catalog) : IAiCostCalculator
             || cached > 0 && !model.CachedInputPricePerMillion.HasValue
             || output > 0 && !model.OutputPricePerMillion.HasValue)
             return null;
-        var cost = uncachedInput * model.InputPricePerMillion.GetValueOrDefault() / 1_000_000m
-            + cached * model.CachedInputPricePerMillion.GetValueOrDefault() / 1_000_000m
-            + output * model.OutputPricePerMillion.GetValueOrDefault() / 1_000_000m;
-        return decimal.Round(cost, 8, MidpointRounding.AwayFromZero);
+        try
+        {
+            var cost = uncachedInput * model.InputPricePerMillion.GetValueOrDefault() / 1_000_000m
+                + cached * model.CachedInputPricePerMillion.GetValueOrDefault() / 1_000_000m
+                + output * model.OutputPricePerMillion.GetValueOrDefault() / 1_000_000m;
+            return decimal.Round(cost, 8, MidpointRounding.AwayFromZero);
+        }
+        catch (OverflowException)
+        {
+            return null;
+        }
     }
 
     public UsagePricingSnapshot? GetPricingSnapshot(AiUsageMetadata usage)
     {
         var model = catalog.Find(usage.ModelKey);
-        if (model is null || model.InputPricePerMillion is null || model.CachedInputPricePerMillion is null || model.OutputPricePerMillion is null) return null;
+        if (model is null || model.InputPricePerMillion is null || model.CachedInputPricePerMillion is null || model.OutputPricePerMillion is null
+            || model.InputPricePerMillion < 0m || model.CachedInputPricePerMillion < 0m || model.OutputPricePerMillion < 0m) return null;
         return new UsagePricingSnapshot(
             model.ProviderKey,
             model.ModelKey,

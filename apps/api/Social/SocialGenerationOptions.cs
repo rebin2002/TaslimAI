@@ -21,7 +21,19 @@ public sealed class SocialGenerationOptions
     public int MaxVisualDirectionCharacters { get; set; } = 1_000;
     public int MaxAttachmentSelections { get; set; } = 5;
     public int MaxAssetSelections { get; set; } = 8;
-    public decimal? EstimatedOutputUsdPer1KTokens { get; set; }
+    private decimal? estimatedOutputUsdPer1KTokens;
+    public decimal? EstimatedOutputUsdPer1KTokens
+    {
+        get => estimatedOutputUsdPer1KTokens;
+        set => estimatedOutputUsdPer1KTokens = EnsureNonNegative(value, nameof(EstimatedOutputUsdPer1KTokens));
+    }
     public string RequestedTier { get; set; } = "Smart";
     public int ProviderTimeoutSeconds { get; set; } = 180;
+
+    private static decimal? EnsureNonNegative(decimal? value, string parameterName)
+    {
+        if (value < 0m)
+            throw new ArgumentOutOfRangeException(parameterName, value, "Social estimated output pricing cannot be negative.");
+        return value;
+    }
 }

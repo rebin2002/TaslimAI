@@ -4,6 +4,7 @@ using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Taslim.Api.Contracts;
+using Taslim.Api.Domain;
 using Taslim.Api.Movies;
 using Taslim.Api.Persistence;
 using Xunit;
@@ -82,6 +83,130 @@ public sealed class MovieWorldTests : IClassFixture<TaslimApiFactory>
         Assert.Equal(HttpStatusCode.BadRequest, invalidUsage.StatusCode);
         var error = await invalidUsage.Content.ReadFromJsonAsync<JsonElement>();
         Assert.Equal("MOVIE_WORLD_USAGE_INVALID", error.GetProperty("error").GetProperty("code").GetString());
+    }
+
+    [Fact]
+    public async Task Workspace_member_without_movie_view_cannot_read_world_continuity()
+    {
+        using var owner = factory.CreateClient();
+        var ownerAuth = await Register(owner, "World View Owner");
+        var movie = await CreateMovie(owner, ownerAuth.PersonalWorkspace.Id, "Private World View Movie");
+        await SendJson<MovieLocationDto>(owner, HttpMethod.Post, $"/api/movie-studio/projects/{movie.Project.Id}/locations", new { name = "Private Pier", description = "A private continuity location." });
+
+        using var workspaceMember = factory.CreateClient();
+        var memberAuth = await Register(workspaceMember, "Workspace-Only World Reader");
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            db.WorkspaceMembers.Add(new WorkspaceMember
+            {
+                Id = Guid.NewGuid(),
+                WorkspaceId = ownerAuth.PersonalWorkspace.Id,
+                UserId = memberAuth.User.Id,
+                Role = WorkspaceRole.Member,
+                JoinedAt = DateTime.UtcNow,
+            });
+            await db.SaveChangesAsync();
+        }
+
+        var world = await workspaceMember.GetAsync($"/api/movie-studio/projects/{movie.Project.Id}/world-continuity");
+
+        Assert.Equal(HttpStatusCode.NotFound, world.StatusCode);
+    }
+
+    [Fact]
+    public async Task World_continuity_denies_project_scene_and_shot_for_workspace_members_without_view()
+    {
+        using var owner = factory.CreateClient();
+        var ownerAuth = await Register(owner, "Continuity Gate Owner");
+        var movie = await CreateMovie(owner, ownerAuth.PersonalWorkspace.Id, "Continuity Gate Movie");
+        var scene = await SendJson<MovieSceneDto>(owner, HttpMethod.Post, $"/api/movie-studio/projects/{movie.Project.Id}/scenes", new { title = "Gated Scene", summary = "A scene behind the continuity gate.", durationSeconds = 6 });
+        var shot = await SendJson<MovieShotDto>(owner, HttpMethod.Post, $"/api/movie-studio/scenes/{scene.Id}/shots", new { description = "A shot behind the continuity gate." });
+
+        Assert.True((await owner.GetAsync($"/api/movie-studio/projects/{movie.Project.Id}/world-continuity")).IsSuccessStatusCode);
+        Assert.True((await owner.GetAsync($"/api/movie-studio/scenes/{scene.Id}/world-continuity")).IsSuccessStatusCode);
+        Assert.True((await owner.GetAsync($"/api/movie-studio/shots/{shot.Id}/world-continuity")).IsSuccessStatusCode);
+
+        using var workspaceMember = factory.CreateClient();
+        var memberAuth = await Register(workspaceMember, "Workspace-Only Continuity Reader");
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            db.WorkspaceMembers.Add(new WorkspaceMember
+            {
+                Id = Guid.NewGuid(),
+                WorkspaceId = ownerAuth.PersonalWorkspace.Id,
+                UserId = memberAuth.User.Id,
+                Role = WorkspaceRole.Member,
+                JoinedAt = DateTime.UtcNow,
+            });
+            await db.SaveChangesAsync();
+        }
+
+        Assert.Equal(HttpStatusCode.NotFound, (await workspaceMember.GetAsync($"/api/movie-studio/projects/{movie.Project.Id}/world-continuity")).StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, (await workspaceMember.GetAsync($"/api/movie-studio/scenes/{scene.Id}/world-continuity")).StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, (await workspaceMember.GetAsync($"/api/movie-studio/shots/{shot.Id}/world-continuity")).StatusCode);
+    }
+
+    [Fact]
+    public async Task World_continuity_honors_explicit_view_denial_and_revocation_for_movie_team_members()
+    {
+        using var owner = factory.CreateClient();
+        var ownerAuth = await Register(owner, "Continuity Team Gate Owner");
+        var movie = await CreateMovie(owner, ownerAuth.PersonalWorkspace.Id, "Continuity Team Gate Movie");
+        var scene = await SendJson<MovieSceneDto>(owner, HttpMethod.Post, $"/api/movie-studio/projects/{movie.Project.Id}/scenes", new { title = "Gated Team Scene", summary = "A team-gated scene.", durationSeconds = 6 });
+        var shot = await SendJson<MovieShotDto>(owner, HttpMethod.Post, $"/api/movie-studio/scenes/{scene.Id}/shots", new { description = "A team-gated shot." });
+
+        using var denied = factory.CreateClient();
+        var deniedAuth = await Register(denied, "View-Denied Continuity Reader");
+        using var allowed = factory.CreateClient();
+        var allowedAuth = await Register(allowed, "View-Granted Continuity Reader");
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            foreach (var userId in new[] { deniedAuth.User.Id, allowedAuth.User.Id })
+            {
+                db.WorkspaceMembers.Add(new WorkspaceMember
+                {
+                    Id = Guid.NewGuid(),
+                    WorkspaceId = ownerAuth.PersonalWorkspace.Id,
+                    UserId = userId,
+                    Role = WorkspaceRole.Member,
+                    JoinedAt = DateTime.UtcNow,
+                });
+            }
+            await db.SaveChangesAsync();
+        }
+
+        await SendJson<MovieTeamMemberDto>(owner, HttpMethod.Post, $"/api/movie-studio/projects/{movie.Project.Id}/collaboration/team", new
+        {
+            userId = deniedAuth.User.Id,
+            role = MovieTeamRoles.Director,
+            permissions = Array.Empty<string>(),
+            permissionOverrides = new[] { new { permission = MoviePermissions.View, granted = false } },
+        });
+        var allowedMember = await SendJson<MovieTeamMemberDto>(owner, HttpMethod.Post, $"/api/movie-studio/projects/{movie.Project.Id}/collaboration/team", new
+        {
+            userId = allowedAuth.User.Id,
+            role = MovieTeamRoles.Writer,
+            permissions = Array.Empty<string>(),
+            permissionOverrides = new[] { new { permission = MoviePermissions.View, granted = true } },
+        });
+
+        Assert.Equal(HttpStatusCode.NotFound, (await denied.GetAsync($"/api/movie-studio/projects/{movie.Project.Id}/world-continuity")).StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, (await denied.GetAsync($"/api/movie-studio/scenes/{scene.Id}/world-continuity")).StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, (await denied.GetAsync($"/api/movie-studio/shots/{shot.Id}/world-continuity")).StatusCode);
+
+        Assert.True((await allowed.GetAsync($"/api/movie-studio/projects/{movie.Project.Id}/world-continuity")).IsSuccessStatusCode);
+        Assert.True((await allowed.GetAsync($"/api/movie-studio/scenes/{scene.Id}/world-continuity")).IsSuccessStatusCode);
+        Assert.True((await allowed.GetAsync($"/api/movie-studio/shots/{shot.Id}/world-continuity")).IsSuccessStatusCode);
+
+        var removed = await SendWithCsrf(owner, HttpMethod.Delete, $"/api/movie-studio/projects/{movie.Project.Id}/collaboration/team/{allowedMember.Id}", null);
+        Assert.True(removed.IsSuccessStatusCode);
+
+        Assert.Equal(HttpStatusCode.NotFound, (await allowed.GetAsync($"/api/movie-studio/projects/{movie.Project.Id}/world-continuity")).StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, (await allowed.GetAsync($"/api/movie-studio/scenes/{scene.Id}/world-continuity")).StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, (await allowed.GetAsync($"/api/movie-studio/shots/{shot.Id}/world-continuity")).StatusCode);
     }
 
     [Fact]
