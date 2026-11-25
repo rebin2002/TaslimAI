@@ -26,7 +26,7 @@ export function AdminPage({ children }: Readonly<{ children: React.ReactNode }>)
   }, [access, pathname, router]);
 
   if (access === "loading" || access === "unauthenticated") {
-    return <div className="loading-state" role="status" aria-busy="true"><span className="loading-spinner" /></div>;
+    return <div className="loading-state" role="status" aria-label="Checking administrator access" aria-busy="true"><span className="loading-spinner" /></div>;
   }
 
   if (access === "forbidden") {
