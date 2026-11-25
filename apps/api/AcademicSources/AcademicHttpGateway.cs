@@ -68,7 +68,6 @@ public sealed class AcademicHttpGateway(HttpClient httpClient, AcademicSourceDis
                 if ((int)response.StatusCode is >= 301 and <= 308)
                 {
                     var location = response.Headers.Location;
-                    var target = location is null ? null : location.IsAbsoluteUri ? location : new Uri(current, location);
                     var redirectStatus = (int)response.StatusCode;
                     // A redirect's body is never read, and every decision below can throw or restart
                     // the loop: take the two values the decision needs, then release the response and
@@ -80,6 +79,14 @@ public sealed class AcademicHttpGateway(HttpClient httpClient, AcademicSourceDis
                     response = null;
                     if (++redirects > options.MaxRedirectHops)
                         throw Reject(current, "too_many_redirects", redirectStatus);
+                    // Resolving the hop now happens after the release, for the reason above plus one
+                    // the release-after-decision ordering missed: `Location: //` and `Location:
+                    // //:80/x` parse as *relative* URIs, and turning either into an absolute address
+                    // against the request URL throws. That throw used to sit a line above the
+                    // dispose, so an unparseable header both kept the payload stream alive and
+                    // escaped the gateway as a bare UriFormatException — which the reader experienced
+                    // as an unlabelled HTTP 500 instead of a refusal the orchestrator can categorize.
+                    var target = ResolveRedirectTarget(current, location, redirectStatus);
                     if (!AcademicSourceUrlGuard.IsAllowedEndpoint(target, allowedHosts, hostExceptions))
                         throw Reject(current, AcademicSourceFailureCategories.BlockedEndpoint, redirectStatus);
                     // Same host is not the same place. `Authority` is host and port only and says
@@ -136,9 +143,19 @@ public sealed class AcademicHttpGateway(HttpClient httpClient, AcademicSourceDis
 
                 if (IsRetryableStatus(response.StatusCode) && attempt < options.MaxAttempts)
                 {
-                    await DelayBeforeRetryAsync(RetryDelaySeconds(attempt, response), operationTimeout.Token, cancellationToken);
+                    // Read the wait, release the response, then sleep — in that order. This delay is
+                    // the one await in the loop that the *caller* is allowed to cut short (a tab
+                    // closed, a newer search, the student navigating away), and a cancellation that
+                    // arrives inside it leaves this method through the caller's own
+                    // OperationCanceledException, which no catch below turns into a disposal: the
+                    // catch that does is filtered to "the caller did not cancel". Sleeping on a
+                    // response that is still held therefore used to keep a provider's 429 payload
+                    // stream and pooled connection alive for the rest of a `Retry-After` window on a
+                    // page nobody is waiting for any more.
+                    var retryDelaySeconds = RetryDelaySeconds(attempt, response);
                     response.Dispose();
                     response = null;
+                    await DelayBeforeRetryAsync(retryDelaySeconds, operationTimeout.Token, cancellationToken);
                     continue;
                 }
 
@@ -184,6 +201,37 @@ public sealed class AcademicHttpGateway(HttpClient httpClient, AcademicSourceDis
                 response?.Dispose();
                 throw new AcademicSourceUnavailableException(new AcademicProviderErrorDetails(null, AcademicSourceFailureCategories.Transient), exception);
             }
+            finally
+            {
+                // The releases above are placed where they are because their timing matters; this one
+                // is here so the next branch added to this loop cannot silently reintroduce the leak
+                // class they were fixing. Every path out of the try — return, throw, continue — runs
+                // it, and a response that was already released is a no-op the second time.
+                response?.Dispose();
+            }
+        }
+    }
+
+    /// <summary>
+    /// Turns a provider's <c>Location</c> header into the address a hop would use, or refuses the
+    /// header. Absent header stays null and is refused by the allow list as it always was; a header
+    /// that parses as a relative URI with no resolvable form — the network-path reference <c>//</c>,
+    /// or <c>//:80/x</c> — is refused here with a category of its own instead of throwing a bare
+    /// <see cref="UriFormatException"/> out of the transport. Only the status the redirect arrived
+    /// with is carried, never the header's text: a provider-issued address is not something to echo.
+    /// </summary>
+    private static Uri? ResolveRedirectTarget(Uri current, Uri? location, int redirectStatus)
+    {
+        if (location is null) return null;
+        if (location.IsAbsoluteUri) return location;
+        try
+        {
+            return new Uri(current, location);
+        }
+        catch (UriFormatException exception)
+        {
+            throw new AcademicSourceRejectedException(
+                Details(redirectStatus, AcademicSourceFailureCategories.MalformedRedirect), exception);
         }
     }
 

@@ -52,6 +52,12 @@ public static class AcademicSourceFailureCategories
     public const string PayloadTooLarge = "payload_too_large";
     public const string UnexpectedContentType = "unexpected_content_type";
     public const string NotFound = "not_found";
+    /// <summary>A provider-issued redirect carried a <c>Location</c> that names no address the
+    /// gateway can dial: <c>//</c> and <c>//:80/x</c> parse as relative URIs, and resolving either
+    /// one against the request URL throws. The header is the provider's defect rather than the
+    /// reader's mistake or an outage, so it surfaces as a categorized refusal instead of an
+    /// unlabelled <see cref="UriFormatException"/> escaping into an HTTP 500.</summary>
+    public const string MalformedRedirect = "malformed_redirect";
     public const string InvalidIdentifier = "invalid_identifier";
     public const string Configuration = "configuration";
     public const string Unknown = "unknown";

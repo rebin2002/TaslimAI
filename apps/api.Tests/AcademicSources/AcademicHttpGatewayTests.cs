@@ -390,6 +390,135 @@ public sealed class AcademicHttpGatewayTests
         Assert.True(looped.Disposed, "the hop-ceiling redirect leaked its payload");
     }
 
+    // Two response lifetimes the release-before-decision above still missed, both reported by the
+    // independent review of this slice (R1 and R2 of issuecomment-7148092453). They are the same
+    // mistake in two different places: work that can throw sat between `SendAsync` and its disposal.
+    [Fact]
+    public async Task Unparseable_redirect_location_is_released_and_refused_by_category()
+    {
+        // R1. `Location: //` is a network-path reference with no host behind it. The header parser
+        // hands it back as a relative URI, and resolving one of those against the request URL
+        // throws. That resolution used to sit a line ABOVE the response release, so the throw left
+        // the gateway holding the payload stream and its pooled connection, and carried a bare
+        // UriFormatException all the way to the reader as an unlabelled HTTP 500 for what is a
+        // provider's malformed header.
+        var slashed = new TrackedContent("redirect body nobody will read");
+        var (gateway, handler) = Create((_, _) => Redirect("//", slashed));
+        var exception = await Assert.ThrowsAsync<AcademicSourceRejectedException>(() =>
+            gateway.GetJsonAsync(OkEndpoint(), CancellationToken.None));
+        Assert.Equal("malformed_redirect", exception.Details?.FailureCategory);
+        Assert.Equal(302, exception.Details?.HttpStatusCode);
+        Assert.Equal(1, handler.RequestCount);
+        Assert.True(slashed.Disposed, "an unresolvable redirect leaked its payload and connection");
+        // A provider-issued address is not something to echo: the refusal says what went wrong
+        // without repeating the header, and nothing names the catalog.
+        Assert.DoesNotContain("//", exception.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("openalex", exception.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("openalex", exception.Details?.FailureCategory ?? string.Empty, StringComparison.OrdinalIgnoreCase);
+
+        // Same shape, different spelling: an empty host with a port also parses as relative and also
+        // refuses to resolve.
+        var ported = new TrackedContent("redirect body");
+        var (portGateway, _) = Create((_, _) => Redirect("//:80/x", ported));
+        var portedRefusal = await Assert.ThrowsAsync<AcademicSourceRejectedException>(() =>
+            portGateway.GetJsonAsync(OkEndpoint(), CancellationToken.None));
+        Assert.Equal("malformed_redirect", portedRefusal.Details?.FailureCategory);
+        Assert.True(ported.Disposed, "the port-only redirect leaked its payload");
+
+        // And what the fix must NOT change: a missing Location is still the allow-list refusal it
+        // always was, not a new category.
+        var absent = new TrackedContent("redirect body");
+        var (absentGateway, _) = Create((_, _) => new HttpResponseMessage(HttpStatusCode.Found) { Content = absent });
+        var absentRefusal = await Assert.ThrowsAsync<AcademicSourceRejectedException>(() =>
+            absentGateway.GetJsonAsync(OkEndpoint(), CancellationToken.None));
+        Assert.Equal("blocked_endpoint", absentRefusal.Details?.FailureCategory);
+        Assert.True(absent.Disposed);
+    }
+
+    [Fact]
+    public async Task Relative_location_that_does_resolve_is_still_followed()
+    {
+        // The ordinary case a provider actually uses (`/works` -> `/works-v2`), kept working by the
+        // reordering above rather than broken by it.
+        var first = new TrackedContent("stale body");
+        var (gateway, handler) = Create((_, number) => number switch
+        {
+            1 => Redirect("/works-v2?q=market+access", first),
+            _ => AcademicFixture.Json("""{"meta":{"count":0,"per-page":25},"results":[]}"""),
+        });
+        var response = await gateway.GetJsonAsync(OkEndpoint(), CancellationToken.None);
+        Assert.True(response.IsSuccess);
+        Assert.Equal(2, handler.RequestCount);
+        Assert.Equal("https://api.openalex.org/works-v2?q=market+access", handler.LastRequest.RequestUri!.ToString());
+        Assert.True(first.Disposed, "a followed redirect leaked the body of the hop it replaced");
+    }
+
+    [Fact]
+    public async Task Caller_cancellation_inside_the_retry_wait_releases_the_response()
+    {
+        // R2. A 429 that says "come back in 30 seconds" is answered by sleeping, and the student
+        // navigating away is the one cancellation no catch here turned into a disposal: the
+        // OperationCanceledException catch is filtered to "the caller did NOT cancel", because
+        // caller cancellation must propagate as cancellation, and it left through that door with the
+        // response still in hand. The payload stream and its pooled connection then stayed alive for
+        // the rest of a wait on a page nobody is looking at. Reading the wait, releasing the
+        // response, and only then sleeping is what closes it; the loop's release-on-every-exit guard
+        // is what keeps the next branch added here from reopening it.
+        var content = new TrackedContent("rate limited body");
+        var (gateway, handler) = Create((_, _) => new HttpResponseMessage(HttpStatusCode.TooManyRequests)
+        {
+            Headers = { RetryAfter = new System.Net.Http.Headers.RetryConditionHeaderValue(TimeSpan.FromSeconds(30)) },
+            Content = content,
+        }, options => options.MaxRetryDelaySeconds = 30);
+        using var source = new CancellationTokenSource();
+        var inFlight = gateway.GetJsonAsync(OkEndpoint(), source.Token);
+        await WaitUntil(() => handler.RequestCount >= 1);
+        await source.CancelAsync();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => inFlight);
+        Assert.Equal(1, handler.RequestCount);
+        Assert.True(content.Disposed, "cancelling during the Retry-After backoff leaked the 429 payload and connection");
+    }
+
+    [Fact]
+    public async Task Timeout_during_the_retry_wait_releases_the_response_too()
+    {
+        // The other cancellation that can land inside the wait: the request's own deadline. This one
+        // becomes a timeout, and it must release on the way out as well.
+        var content = new TrackedContent("rate limited body");
+        var (gateway, handler) = Create((_, _) => new HttpResponseMessage(HttpStatusCode.TooManyRequests)
+        {
+            Headers = { RetryAfter = new System.Net.Http.Headers.RetryConditionHeaderValue(TimeSpan.FromSeconds(30)) },
+            Content = content,
+        }, options =>
+        {
+            options.MaxRetryDelaySeconds = 30;
+            // Normalize floors the operation deadline at the request timeout, so both are pulled
+            // down together: the wait below is cut short after two seconds rather than ten.
+            options.RequestTimeoutSeconds = 2;
+            options.OperationTimeoutSeconds = 2;
+        });
+        await Assert.ThrowsAsync<AcademicSourceTimeoutException>(() => gateway.GetJsonAsync(OkEndpoint(), CancellationToken.None));
+        Assert.Equal(1, handler.RequestCount);
+        Assert.True(content.Disposed, "the timed-out retry wait leaked its payload");
+    }
+
+    private static HttpResponseMessage Redirect(string location, HttpContent content)
+    {
+        var response = new HttpResponseMessage(HttpStatusCode.Found);
+        // Without validation, because the point of these cases is the header a provider is allowed to
+        // send and the gateway must not trust: `//` cannot be built as an absolute Uri at all.
+        response.Headers.TryAddWithoutValidation("Location", location);
+        response.Content = content;
+        return response;
+    }
+
+    private static async Task WaitUntil(Func<bool> condition, int timeoutMilliseconds = 5000)
+    {
+        var deadline = DateTime.UtcNow.AddMilliseconds(timeoutMilliseconds);
+        while (!condition() && DateTime.UtcNow < deadline) await Task.Delay(10);
+        Assert.True(condition(), "condition was not reached before the timeout");
+    }
+
     private sealed class TrackedContent(string body) : HttpContent
     {
         public bool Disposed { get; private set; }
