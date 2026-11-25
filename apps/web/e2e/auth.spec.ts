@@ -9,7 +9,9 @@ test.describe("authentication and onboarding", () => {
     await onboarding.getByRole("button", { name: /continue/i }).click();
     await expect(onboarding.locator("#onboarding-title")).toBeVisible();
     await onboarding.getByRole("button", { name: /choose .*action/i }).click();
-    await onboarding.getByRole("button").filter({ hasText: /project/i }).click();
+    // Project is not a launch choice in the revised five-action onboarding.
+    // The Skip control still completes onboarding and returns to Projects.
+    await onboarding.getByRole("button", { name: /skip/i }).click();
     await expect(onboarding).toBeHidden();
     await expect(page).toHaveURL(/\/projects/);
     await expect(page.getByRole("heading", { name: /projects/i })).toBeVisible();
@@ -99,4 +101,42 @@ test.describe("authentication and onboarding", () => {
     await expect(page.locator("html")).toHaveAttribute("lang", "ar");
     await expect(page.locator("html")).toHaveAttribute("dir", "rtl");
   });
+  for (const { locale, documentLang } of [
+    { locale: "ar", documentLang: "ar" },
+    { locale: "ku", documentLang: "ckb" },
+  ]) {
+    test(`persists a real new account's ${documentLang} onboarding choice across reload and reauthentication`, async ({ page, testUser }) => {
+      // This uses the real registration, CSRF and onboarding API, unlike the
+      // provider-free page.route doubles in accessibility.spec.ts.
+      await registerInUi(page, testUser, false);
+      const onboarding = page.getByRole("dialog");
+      await expect(onboarding).toBeVisible();
+      await onboarding.locator(".onboarding-fields select").first().selectOption(locale);
+      await expect(page.locator("html")).toHaveAttribute("lang", documentLang);
+      await expect(page.locator("html")).toHaveAttribute("dir", "rtl");
+
+      await onboarding.locator(".onboarding-skip").click();
+      await expect(onboarding).toBeHidden();
+      await expect(page).toHaveURL(/\/projects/);
+      await page.reload();
+      await expect(page.getByRole("dialog")).toHaveCount(0);
+      await expect(page.locator("html")).toHaveAttribute("lang", documentLang);
+      await expect(page.locator("html")).toHaveAttribute("dir", "rtl");
+
+      // Use stable form boundaries: translated button/label names legitimately
+      // change after a Sorani/Arabic selection, unlike the English-only helpers.
+      await page.goto("/account");
+      await page.locator(".security-logout").click();
+      await expect(page).toHaveURL((url) => url.pathname === "/" || url.pathname === "/login");
+      await page.goto("/login");
+      await page.locator('input[type="email"]').fill(testUser.email);
+      await page.locator('input[type="password"]').fill(testUser.password);
+      await page.locator(".auth-submit").click();
+      await expect(page).toHaveURL((url) => url.pathname === "/projects");
+      await expect(page.getByRole("dialog")).toHaveCount(0);
+      await expect(page.locator("html")).toHaveAttribute("lang", documentLang);
+      await expect(page.locator("html")).toHaveAttribute("dir", "rtl");
+    });
+  }
+
 });
