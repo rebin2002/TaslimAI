@@ -12,6 +12,7 @@ using Microsoft.Extensions.Options;
 using System.Security.Claims;
 using Taslim.Api.Ai;
 using Taslim.Api.Activity;
+using Taslim.Api.AcademicSources;
 using Taslim.Api.Assets;
 using Taslim.Api.Autopilot;
 using Taslim.Api.Authorization;
@@ -475,6 +476,12 @@ builder.Services.AddSingleton<IResearchPromptBuilder, ResearchPromptBuilder>();
 builder.Services.AddScoped<IResearchSearchProvider>(services => services.GetRequiredService<OpenAiResearchSearchProvider>());
 builder.Services.AddScoped<IResearchReportProvider, AiResearchReportProvider>();
 builder.Services.AddScoped<IGenerationJobHandler, ResearchGenerationJobHandler>();
+// Issue #1267 slice 1: scholarly source discovery for the Academic Research Studio. The standard
+// research pipeline above is untouched; this registers the Phase A (#1262) adapters behind the
+// workspace-scoped read-only endpoint only. With no AcademicSourceDiscovery section written,
+// every switch stays off, so this adds configuration-bound options and singletons but performs
+// no outbound calls; enabling egress remains an explicit deployment decision.
+builder.Services.AddAcademicSourceDiscovery(builder.Configuration);
 builder.Services.AddSingleton<ISocialPromptBuilder, SocialPromptBuilder>();
 builder.Services.AddScoped<ISocialGenerationProvider, AiSocialGenerationProvider>();
 builder.Services.AddScoped<IGenerationJobHandler, SocialGenerationJobHandler>();
