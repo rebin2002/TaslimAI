@@ -155,6 +155,20 @@ describe("validation", () => {
     expect(validateAcademicBrief(tooMany)).toContainEqual(expect.objectContaining({ messageKey: "error.reviewQuestions.max" }));
     expect(validateAcademicBrief(briefFixture({ reviewQuestions: [""] }))).toContainEqual(expect.objectContaining({ field: "reviewQuestion-0" }));
   });
+
+  it("blocks a brief with too many keywords instead of silently dropping terms", () => {
+    const keywords = Array.from({ length: briefLimits.maxKeywords + 1 }, (_, index) => `keyword-${index + 1}`);
+    expect(parseKeywords(keywords.join(", "))).toEqual(keywords);
+    expect(validateAcademicBrief(briefFixture({ keywords }))).toContainEqual(
+      expect.objectContaining({ field: "keywords", severity: "error", messageKey: "error.keywords.max" }),
+    );
+  });
+
+  it("blocks a keyword longer than the server-supported limit", () => {
+    expect(validateAcademicBrief(briefFixture({ keywords: ["k".repeat(briefLimits.keyword.max + 1)] }))).toContainEqual(
+      expect.objectContaining({ field: "keywords", severity: "error", messageKey: "error.keyword.tooLong" }),
+    );
+  });
 });
 
 describe("review summary", () => {
@@ -176,9 +190,9 @@ describe("review summary", () => {
 });
 
 describe("keyword parsing", () => {
-  it("splits, trims, de-duplicates case-insensitively and caps the list", () => {
+  it("splits, trims and de-duplicates case-insensitively without truncating", () => {
     expect(parseKeywords(" pricing,  Pricing ;reimbursement\n , ")).toEqual(["pricing", "reimbursement"]);
-    expect(parseKeywords(Array.from({ length: 20 }, (_, index) => `k${index}`).join(", "))).toHaveLength(briefLimits.maxKeywords);
+    expect(parseKeywords(Array.from({ length: 20 }, (_, index) => `k${index}`).join(", "))).toHaveLength(20);
   });
 });
 

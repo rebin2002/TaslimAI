@@ -3,12 +3,14 @@ using System.Net.Http.Json;
 using System.Reflection;
 using System.Text;
 using System.Text.Json;
+using Microsoft.Extensions.Configuration;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Taslim.Api.AcademicIntegration;
 using Taslim.Api.AcademicIntegration.Persistence;
+using Taslim.Api.AcademicWorkflow;
 using Taslim.Api.Infrastructure;
 using Taslim.Api.Contracts;
 using Taslim.Api.Persistence;
@@ -17,12 +19,10 @@ using Xunit;
 namespace Taslim.Api.Tests.AcademicIntegration;
 
 /// <summary>
-/// The integration surface exactly as deployed on this branch: authenticated,
-/// workspace-scoped, with no provider stage handlers registered yet. These tests pin
-/// the honest staging contract — intake persists and replays idempotently, every read
-/// is fenced to the owning workspace, and running a project answers 501 naming the
-/// missing stage instead of pretending the workflow is live. Nothing here fabricates a
-/// green path: routes that would claim results stay non-success until their lanes land.
+/// The integration surface exactly as composed on this branch: authenticated and
+/// workspace-scoped, with one deterministic local Plan handler. These tests pin the
+/// honest staging contract — intake persists and replays idempotently, Plan is saved and
+/// gated for approval, and the next missing stage remains an explicit resumable 501.
 /// </summary>
 public class AcademicProjectsApiTests : IClassFixture<TaslimApiFactory>
 {
@@ -80,8 +80,9 @@ public class AcademicProjectsApiTests : IClassFixture<TaslimApiFactory>
         Assert.Equal("Running", project.GetProperty("state").GetString());
         Assert.Equal(0, project.GetProperty("revision").GetInt64());
         Assert.Equal("Doctoral", project.GetProperty("level").GetString());
-        Assert.Equal(7, dto.GetProperty("missingStages").GetArrayLength());
-        Assert.Equal(0, dto.GetProperty("connectedStages").GetArrayLength());
+        Assert.Equal(6, dto.GetProperty("missingStages").GetArrayLength());
+        Assert.Equal(1, dto.GetProperty("connectedStages").GetArrayLength());
+        Assert.Equal("Plan", dto.GetProperty("connectedStages")[0].GetString());
         Assert.Equal(0, dto.GetProperty("planVersion").GetInt32());
         Assert.Equal(0, dto.GetProperty("sourceCount").GetInt32());
         // Nothing is projectable yet, so the derived tables are vacuously current; the
@@ -102,6 +103,17 @@ public class AcademicProjectsApiTests : IClassFixture<TaslimApiFactory>
             .ToListAsync();
         Assert.Single(checkpoints);
         Assert.Equal(0, checkpoints.Single().Revision);
+    }
+
+    [Fact]
+    public void Production_composition_registers_only_the_deterministic_plan_handler()
+    {
+        using var scope = _factory.Services.CreateScope();
+        var handlers = scope.ServiceProvider.GetServices<IAcademicStageHandler>().ToArray();
+
+        var handler = Assert.Single(handlers);
+        Assert.IsType<AcademicPlanStageHandler>(handler);
+        Assert.Equal(AcademicStage.Plan, handler.Stage);
     }
 
     [Fact]
@@ -167,6 +179,38 @@ public class AcademicProjectsApiTests : IClassFixture<TaslimApiFactory>
             budget = new { maxTotalUsd = 5m, maxStageUsd = 9m },
         });
         Assert.Equal(HttpStatusCode.BadRequest, stageOverTotal.StatusCode);
+
+        var tooManyKeywords = await PostCreateAsync(client, workspaceId, new
+        {
+            requestKey = $"too-many-keywords-{Guid.NewGuid():N}",
+            researchQuestion = "A valid academic research question",
+            discipline = "Public Health",
+            keywords = Enumerable.Range(1, 13).Select(index => $"keyword-{index}").ToArray(),
+        });
+        Assert.Equal(HttpStatusCode.BadRequest, tooManyKeywords.StatusCode);
+        Assert.Contains("ACADEMIC_REQUEST_INVALID", await tooManyKeywords.Content.ReadAsStringAsync());
+
+        var withoutPlanGate = await PostCreateAsync(client, workspaceId, new
+        {
+            requestKey = "missing-plan-gate",
+            researchQuestion = "A valid academic research question",
+            discipline = "Public Health",
+            requiredApprovals = new[] { "SourceLibrary" },
+        });
+        Assert.Equal(HttpStatusCode.BadRequest, withoutPlanGate.StatusCode);
+        Assert.Contains("Plan approval checkpoint is required", await withoutPlanGate.Content.ReadAsStringAsync());
+    }
+
+    [Fact]
+    public void Academic_composition_can_be_registered_repeatedly_without_duplicate_plan_handlers()
+    {
+        var services = new ServiceCollection();
+        var configuration = new ConfigurationBuilder().Build();
+
+        services.AddAcademicProjects(configuration);
+        services.AddAcademicProjects(configuration);
+
+        Assert.Single(services.Where(descriptor => descriptor.ServiceType == typeof(IAcademicStageHandler)));
     }
 
     [Fact]
@@ -218,33 +262,102 @@ public class AcademicProjectsApiTests : IClassFixture<TaslimApiFactory>
     }
 
     [Fact]
-    public async Task Run_reports_the_exact_missing_stage_and_leaves_state_untouched()
+    public async Task Run_saves_and_gates_the_plan_then_reports_missing_discovery_as_resumable()
     {
         var (client, workspaceId) = await RegisterAsync();
         var create = await PostCreateAsync(client, workspaceId, new
         {
             requestKey = $"not-connected-{Guid.NewGuid():N}",
-            researchQuestion = "Stage gate probe",
-            discipline = "Economics",
+            researchQuestion = "How has pharmaceutical market access regulation evolved in the Kurdistan Region of Iraq since 2012?",
+            discipline = "Pharmacy and Health Policy",
+            level = "Masters",
+            method = "SystematicReview",
+            methodologies = new[] { "SystematicReview", "Qualitative" },
+            citationStyle = "Vancouver",
+            workingTitle = "Pharmaceutical market access in the Kurdistan Region",
+            geographicScope = "Kurdistan Region of Iraq",
+            populationOrContext = "Regulated medicines and patients",
+            timePeriod = "2012-2025",
+            subQuestions = new[] { "Which institutions regulate medicine entry?" },
+            keywords = new[] { "pharmaceutical market access", "medicine regulation" },
+            minimumSources = 60,
+            minimumPeerReviewed = 40,
+            allowedSourceTypes = new[] { "journal_article", "book" },
+            requireFullText = true,
+            programmeRequirements = "Use Vancouver style and keep an auditable screening log.",
         });
         var projectId = (await create.Content.ReadFromJsonAsync<JsonElement>())
             .GetProperty("project").GetProperty("projectId").GetGuid();
 
         var run = await PostJsonAsync(client, $"/api/academic-projects/{projectId}/run", new { });
-        Assert.Equal(HttpStatusCode.NotImplemented, run.StatusCode);
-        var error = (await run.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("error");
-        Assert.Equal("ACADEMIC_STAGE_NOT_CONNECTED", error.GetProperty("code").GetString());
-        Assert.Equal("Plan", error.GetProperty("missingStage").GetString());
-        Assert.Equal(0, error.GetProperty("connectedStages").GetArrayLength());
-        Assert.Equal(0, error.GetProperty("resumableAtRevision").GetInt64());
+        Assert.Equal(HttpStatusCode.OK, run.StatusCode);
+        var prepared = await run.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal("AwaitingApproval", prepared.GetProperty("project").GetProperty("state").GetString());
+        Assert.Equal("Plan", prepared.GetProperty("pendingApproval").GetProperty("kind").GetString());
+        Assert.Equal(1, prepared.GetProperty("planVersion").GetInt32());
+        Assert.Equal(1, prepared.GetProperty("connectedStages").GetArrayLength());
+        Assert.Equal(6, prepared.GetProperty("missingStages").GetArrayLength());
 
-        // Nothing moved: still revision 0, still one intake checkpoint, nothing charged.
+        var prematureResume = await PostJsonAsync(client, $"/api/academic-projects/{projectId}/run", new { });
+        Assert.Equal(HttpStatusCode.OK, prematureResume.StatusCode);
+        var heldForReview = await prematureResume.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal("AwaitingApproval", heldForReview.GetProperty("project").GetProperty("state").GetString());
+        Assert.Equal("Plan", heldForReview.GetProperty("pendingApproval").GetProperty("kind").GetString());
+        Assert.Equal(
+            prepared.GetProperty("project").GetProperty("revision").GetInt64(),
+            heldForReview.GetProperty("project").GetProperty("revision").GetInt64());
+
+        var plan = prepared.GetProperty("plan");
+        Assert.Equal("How has pharmaceutical market access regulation evolved in the Kurdistan Region of Iraq since 2012?", plan.GetProperty("researchQuestion").GetString());
+        Assert.Equal("Masters", plan.GetProperty("level").GetString());
+        Assert.Equal("Vancouver", plan.GetProperty("citationStyle").GetString());
+        Assert.Equal(2, plan.GetProperty("methodologies").GetArrayLength());
+        Assert.Equal("Qualitative", plan.GetProperty("methodologies")[1].GetString());
+        Assert.Equal("Kurdistan Region of Iraq", plan.GetProperty("geographicScope").GetString());
+        Assert.Equal("2012-2025", plan.GetProperty("timePeriod").GetString());
+        Assert.True(plan.GetProperty("requireFullText").GetBoolean());
+        Assert.Equal(60, plan.GetProperty("minimumSources").GetInt32());
+        Assert.Equal(40, plan.GetProperty("minimumPeerReviewed").GetInt32());
+        Assert.Equal("pharmaceutical market access", plan.GetProperty("keywords")[0].GetString());
+        Assert.Equal("medicine regulation", plan.GetProperty("keywords")[1].GetString());
+        Assert.Contains(plan.GetProperty("inclusionCriteria").EnumerateArray(), item =>
+            item.GetString()!.Contains("scholarly books", StringComparison.OrdinalIgnoreCase));
+        Assert.Contains(plan.GetProperty("inclusionCriteria").EnumerateArray(), item =>
+            item.GetString()!.Contains("journal articles", StringComparison.OrdinalIgnoreCase));
+        Assert.Equal(3, plan.GetProperty("searchStrategy").GetArrayLength());
+        Assert.Equal("ScholarlyRecords", plan.GetProperty("searchStrategy")[0].GetProperty("collection").GetString());
+        Assert.Equal("JournalAndIdentifierRecords", plan.GetProperty("searchStrategy")[1].GetProperty("collection").GetString());
+        Assert.Equal("BookRecords", plan.GetProperty("searchStrategy")[2].GetProperty("collection").GetString());
+        Assert.Contains(plan.GetProperty("allowedSourceTypes").EnumerateArray(), item => item.GetString() == "book");
+        Assert.Contains(plan.GetProperty("allowedSourceTypes").EnumerateArray(), item => item.GetString() == "journal_article");
+        Assert.DoesNotContain("OpenAlex", plan.GetRawText(), StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("Crossref", plan.GetRawText(), StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(0, prepared.GetProperty("usage").GetProperty("spentUsd").GetDecimal());
+        Assert.Equal(0, prepared.GetProperty("usage").GetProperty("callsUsed").GetInt32());
+
+        var approve = await PostJsonAsync(client, $"/api/academic-projects/{projectId}/approvals/plan", new { decision = "Approved" });
+        Assert.Equal(HttpStatusCode.OK, approve.StatusCode);
+        var approved = await approve.Content.ReadFromJsonAsync<JsonElement>();
+        var approvedRevision = approved.GetProperty("project").GetProperty("revision").GetInt64();
+        var checkpointsBeforeMissingStage = await client.GetFromJsonAsync<JsonElement[]>($"/api/academic-projects/{projectId}/checkpoints");
+        var missingRun = await PostJsonAsync(client, $"/api/academic-projects/{projectId}/run", new { });
+        Assert.Equal(HttpStatusCode.NotImplemented, missingRun.StatusCode);
+        var error = (await missingRun.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("error");
+        Assert.Equal("ACADEMIC_STAGE_NOT_CONNECTED", error.GetProperty("code").GetString());
+        Assert.Equal("Discover", error.GetProperty("missingStage").GetString());
+        Assert.Equal(1, error.GetProperty("connectedStages").GetArrayLength());
+        Assert.Equal("Plan", error.GetProperty("connectedStages")[0].GetString());
+
+        // After the review checkpoint, the missing stage is reported without advancing
+        // revision or turning the still-resumable project into a terminal failure.
         var detail = await client.GetFromJsonAsync<JsonElement>($"/api/academic-projects/{projectId}");
-        Assert.Equal(0, detail.GetProperty("project").GetProperty("revision").GetInt64());
+        Assert.Equal("Running", detail.GetProperty("project").GetProperty("state").GetString());
+        Assert.Equal(approvedRevision, detail.GetProperty("project").GetProperty("revision").GetInt64());
+        Assert.Equal(1, detail.GetProperty("planVersion").GetInt32());
         Assert.Equal(0, detail.GetProperty("usage").GetProperty("spentUsd").GetDecimal());
         var checkpoints = await client.GetFromJsonAsync<JsonElement[]>($"/api/academic-projects/{projectId}/checkpoints");
         Assert.NotNull(checkpoints);
-        Assert.Single(checkpoints);
+        Assert.Equal(checkpointsBeforeMissingStage!.Length, checkpoints.Length);
     }
 
     [Fact]

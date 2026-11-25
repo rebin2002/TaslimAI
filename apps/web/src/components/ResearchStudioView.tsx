@@ -8,6 +8,8 @@ import { ArrowUpRight, BookOpen, CheckCircle2, Download, ExternalLink, FileText,
 import { useAuth } from "@/components/AuthProvider";
 import { AccessibleProgressBar } from "@/components/AccessibleProgressBar";
 import { useLocale } from "@/components/LocaleProvider";
+import { academicRoute } from "@/components/academic/academicRoutes";
+import { createAcademicTranslator } from "@/components/academic/academicStrings";
 import { ApiError, api, type Asset, type GenerationJob, type Project, type ResearchJobResult, type ResearchSource, type StoredFile } from "@/lib/api";
 import {
   filterStudioDownloadableRepresentations,
@@ -374,6 +376,7 @@ export function ResearchStudioView() {
           <p className="section-eyebrow">{t("research.eyebrow")}</p>
           <h1>{t("research.title")}</h1>
           <p>{t("research.subtitle")}</p>
+          <Link className="secondary-button" href={academicRoute}>{createAcademicTranslator(locale)("mode.academicTitle")}</Link>
         </div>
         <span className="research-studio-header-icon" aria-hidden="true"><BookOpen size={26} /></span>
       </header>

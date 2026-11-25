@@ -13,9 +13,10 @@ endpoint or the AcademicTemplates/export integration, which are owned by other
 workers.
 
 Everything below is what the code in this repository actually does today. The
-"Honest status" table at the end lists what is *not* implemented; nothing in this
-slice claims a stage is functional until a provider lane registers a handler for
-it — the API says so itself (HTTP 501 with a machine-readable stage list).
+"Honest status" table at the end lists what is *not* implemented. The deterministic
+Plan stage is functional; downstream stages remain unconnected until they have real
+handlers, and the API reports the first missing stage (HTTP 501 with a machine-readable
+stage list).
 
 ## Architecture
 
@@ -35,8 +36,9 @@ Composition (`Program.cs`): a single `builder.Services.AddAcademicProjects(build
 call pulls in `AddAcademicEvidence()` / `AddAcademicEvidencePersistence()` (previously
 defined-but-unwired), binds the `AcademicWorkflow` configuration section to the engine
 options, registers the EF state store, the projector, the service, and a per-scope
-`AcademicWorkflowOrchestrator` over whatever `IAcademicStageHandler`s the container
-holds — which in production is *none* (see "Seams").
+`AcademicWorkflowOrchestrator` over the registered `IAcademicStageHandler`s. Production
+registers the deterministic local `AcademicPlanStageHandler`; discovery and later stage
+handlers remain unconnected (see "Seams").
 
 Persistence (`TaslimDbContext` + migration
 `20261124065935_AddAcademicResearchIntegration`): nine new tables, all additive —
@@ -156,14 +158,13 @@ Phase B rows under fixed conventions:
 1. **`IAcademicWorkflowStateStore` (implemented)** — the Phase C engine port now has a
    durable implementation. Any lane that runs the orchestrator over this store gets
    the checkpoint/fence/idempotency guarantees above for free.
-2. **`AddAcademicStageHandler<THandler>()` (open)** — provider lanes (#1266-style
-   discovery/extraction handlers) register `IAcademicStageHandler` services through
-   this extension on the `AcademicProjectsBuilder`; the per-scope orchestrator picks
-   them up automatically, `connectedStages`/`missingStages` update, and the 501s
-   retire per stage as handlers arrive. No changes to this slice's files are needed
-   to connect a stage; the contract is exercised end-to-end by
-   `AcademicProjectsConnectedFlowTests`, which wires the Phase C scripted handlers
-   through exactly this seam.
+2. **`AddAcademicStageHandler<THandler>()`** — production currently registers one
+   deterministic `AcademicPlanStageHandler` through this seam. It creates no network
+   request, generation job or charge. Discovery and later handlers remain unregistered;
+   `connectedStages`/`missingStages` therefore report `Plan` as connected and `Discover`
+   as the first missing stage after the Plan approval gate. The contract is exercised
+   end-to-end by `AcademicProjectsConnectedFlowTests`, which adds scripted handlers only
+   inside its test host.
 3. **Full-text body handoff (deferred seam)** — the projector currently stores
    `FullText = null` because no lane has handed retrieved bodies to Phase B yet.
    When the AcademicSources worker lands a retrieved-copy store, the seam is one
@@ -183,21 +184,22 @@ Phase B rows under fixed conventions:
 | Capability | Status | Evidence |
 | --- | --- | --- |
 | Authenticated workspace-scoped project API | **Implemented** | `AcademicProjectsApiTests` (401/403/404 fencing, CSRF, pagination) |
-| Persisted research-plan intake, idempotent | **Implemented** | request-key replay tests; single row + single checkpoint |
+| Persisted research-plan intake and deterministic Plan artifact | **Implemented** | Plan handler + save/load DTO; run→approval→missing-Discover API test |
 | Idempotent, resumable, append-only checkpoints | **Implemented** | `AcademicWorkflowStoreTests` (CAS, replay, ledger density, fence) |
 | Approval gates incl. RequestRevision/Reject lineage | **Implemented** | connected-flow approval + revision tests |
 | Budget ceilings, pause, raise, no-double-charge | **Implemented** | budget-gate tests; reserve-then-meter attempt keys |
 | Evidence matrix + screening + provenance persisted into Phase B | **Implemented** (for artifacts lanes produce) | projector + matrix API tests; connected drain tests |
 | Citation-verification boundaries (access levels, no fabricated pinpoints) | **Implemented** | access-boundary tests |
-| Discovery of sources from real providers | **Not connected** — no `IAcademicStageHandler` is registered in production; `/run` answers 501 with the exact missing stage | by design; `missingStages` in every response |
+| Discovery of sources in the staged workflow | **Not connected** — `Discover` is the first missing handler after Plan approval; `/run` answers 501 without failing or advancing the project | production composition test and resumable 501 API test |
 | Extraction over retrieved bodies (full-text) | **Not connected** — body handoff seam deferred (see above) | `WF_FULLTEXT_BODY_ABSENT` flags stored honestly |
 | Chapter drafting / real verification runs | **Not connected** — same handler seam; integrity guard runs on committed artifacts only | verification endpoint is recomputation, not execution |
 | Background execution of long runs (queue/worker) | **Not implemented** — `/run` advances through committed checkpoints within one request budget | stated in API docs |
-| UI surfaces | Out of scope for this slice | — |
+| Saved Plan UI from the Academic workspace and Standard Research entry | **Implemented** — create, reload, approve and attempt resume through the existing workspace-fenced API; downstream actions remain unavailable | `AcademicWorkflowPanel`, component tests, and `apps/web/e2e/academic-plan-vertical-slice.spec.ts` (synthetic signed-in browser flow) |
 | Export re-render on evidence change | Not implemented (template worker owns it) | seam documented above |
 
-No endpoint pretends otherwise: until a provider lane registers handlers, the only
-stages that "run" are the ones with handlers, and the API says which are missing.
+No endpoint pretends otherwise: the deterministic Plan stage is real, the user must
+approve its saved checkpoint, and scholarly discovery plus all later stages remain
+missing and are reported exactly by the API.
 
 ## Test evidence
 
@@ -205,26 +207,53 @@ stages that "run" are the ones with handlers, and the API says which are missing
   idempotency, CAS conflicts, checkpoint-key replay without rewrite, byte-identical
   snapshot round-trip, both directions of the workspace fence, forward-only
   watermark, ledger ordering and scoping.
-- `apps/api.Tests/AcademicProjectsApiTests.cs` — the production composition (no
-  handlers): every route's auth envelope, honest 501 with no state movement and no
-  spend, replay semantics, validation ceilings, cross-tenant isolation, antiforgery,
-  privacy token scan, pagination headers.
+- `apps/api.Tests/AcademicProjectsApiTests.cs` — the production composition wires only
+  `AcademicPlanStageHandler`; coverage includes auth/fences, saved Plan and approval,
+  the missing-Discover 501 without terminal failure, zero usage, replay semantics,
+  validation ceilings, antiforgery, privacy token scan and pagination.
 - `apps/api.Tests/AcademicProjectsConnectedFlowTests.cs` — same API with all seven
   Phase C scripted handlers registered through the production seam: full gated
   drain to `Completed` with exact per-stage billing, ledger monotonicity, approval
   replay, RequestRevision lineage (earlier artifacts survive), budget pause →
   raise → resume without double charge, projection staleness self-heal and rebuild
   idempotency, access-boundary rows.
-- Full API suite (`dotnet test apps/api.Tests`) is green with this branch's changes;
-  CI runs it additionally against Postgres.
+- Local full API verification (2026-11-25): `dotnet test apps/api.Tests/Taslim.Api.Tests.csproj
+  --logger 'console;verbosity=minimal'` passed 3,532, skipped 20, failed 0 (8m04s) on .NET 8.
+  No disposable PostgreSQL/API stack was configured locally; the 20 environment-conditional
+  tests did not run here, so hosted API CI must provide the disposable-database evidence.
+  The final focused `AcademicPlanStageHandlerTests` run passed 4/4.
+- Web verification: 291 test files / 1,999 tests passed; lint reported 0 errors and 2 existing
+  warnings in `PresentationStudioView.tsx`; TypeScript checking and production build passed.
+  The build used `NEXT_PUBLIC_API_URL=https://api.e2e.invalid` to satisfy the HTTPS production
+  build guard. No dependency manifests changed; the build reported that Next.js 16.4.3 is
+  affected by a known security vulnerability and offered 16.4.6. The optional upgrade was
+  skipped; a dependency security update remains a separate follow-up.
+- Playwright: `apps/web/e2e/academic-plan-vertical-slice.spec.ts` is discoverable with
+  `playwright test --list` and lint-clean, but was not run locally because no disposable
+  PostgreSQL/API environment is configured. The hosted Browser E2E job must provide that
+  browser acceptance evidence on the pushed head.
 
 ## Deferred / follow-ups (tracked, not silently skipped)
 
-1. Provider stage handlers (discovery, extraction) — separate lane; register via
-   `AddAcademicStageHandler`.
+1. Stage handlers for scholarly discovery, screening, evidence extraction, synthesis,
+   chapter drafting and verification — separate reviewed increments; register via
+   `AddAcademicStageHandler` only when each stage has its own real implementation.
 2. Full-text body handoff to Phase B (one-field seam above).
 3. Queue-backed multi-request runs with resumable checkpoints already in place.
 4. Billing-rail integration review before any paid stage handler ships (this slice
    only enforces ceilings the workspace itself sets; nothing charges).
 5. Migration of provider-lane locator vocabularies into the shared
    `SourceLocatorPolicy` codes as more lanes land assertions.
+6. Review and patch the Next.js 16.4.3 security advisory reported by the local production
+   build; the 16.4.6 upgrade was intentionally not taken in this feature slice.
+
+
+## Controlled acceptance and rollback
+
+This is operator guidance for a future, explicitly approved cutover; it is not evidence that production acceptance or rollout has occurred. This task changed no production flags, and their live values were not reverified here. Before any cutover, verify the live state and keep Academic visibility, provider/search, and charging flags OFF until independent review and a separately authorized release; if any are on, treat that as a blocker rather than changing them in this task.
+
+Before cutover, independently review the PR and confirm the deployed Web and API release metadata both identify the exact intended merge SHA; health checks alone do not prove version identity. Use a configured synthetic/non-billing test identity in a disposable environment (or an explicitly authorized equivalent), never a customer account or customer data. In one test workspace, open Academic Research from Standard Research, submit the synthetic Kurdistan Region pharmaceutical market-access/regulation brief with scholarly books and journal articles allowed, verify the saved Plan and keywords after reload, confirm approval is required before continuing, then confirm a resume attempt reports `ACADEMIC_STAGE_NOT_CONNECTED` for Discover without advancing the project, searching, generating, or charging. Run one bounded Standard/Business Research smoke test alongside it. Keep this to one synthetic project and remove it only through the environment's approved test-data cleanup procedure.
+
+If the controlled acceptance fails, stop the rollout and restore the last known-good Web and API releases together by their recorded SHAs, then verify the corresponding health endpoints and ordinary Research entry point. Keep the additive Academic schema migration and any audit/checkpoint evidence intact; do not run a destructive migration rollback or delete persisted records as part of an application rollback. Do not enable a provider, search, generation, or charging flag as a workaround. This branch has not been merged or deployed, so no production rollback was performed or needed.
+
+The deterministic Plan criteria also state that external/uploaded material is evidence, never workflow instructions; metadata and abstracts are discovery aids rather than full-text evidence; and each book's ISBN and access status must match the exact edition, never a sibling edition. Because Discover is not connected in this slice, no source, edition, ISBN, or open-access claim has been retrieved or verified.

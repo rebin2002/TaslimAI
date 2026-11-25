@@ -53,6 +53,9 @@ public sealed class AcademicConnectedApiFactory : WebApplicationFactory<Program>
             services.AddSingleton(_connection);
             services.AddDbContext<TaslimDbContext>(options => options.UseSqlite(_connection));
             services.Replace(ServiceDescriptor.Singleton<TimeProvider>(new SteadyTimeProvider()));
+            // The production composition now registers the real Plan handler. This test host
+            // deliberately replaces it with scripted handlers so the seven-stage seam stays deterministic.
+            services.RemoveAll<IAcademicStageHandler>();
             foreach (var handler in StageHandlers.Values)
             {
                 // Exactly the seam provider lanes use, exercised here as its contract test.

@@ -18,7 +18,7 @@
  * language pack for this surface is completed, which mirrors the per-key
  * fallback behaviour of the shared translator.
  */
-import { findDiscipline, type DisciplineId } from "./academicBrief";
+import { findDiscipline } from "./academicBrief";
 import { citationStyles, methodologyOptions } from "./academicBrief";
 import { accessLevels, academicSourceTypes, type AccessLevel, type AcademicSourceType, type CitationStyleId } from "./academicSourceLibrary";
 
@@ -52,7 +52,7 @@ const en = {
   "tab.chapters": "Chapters",
 
   "setup.heading": "Research brief",
-  "setup.intro": "Describe the work your programme expects. Nothing runs yet: this builds the plan you review before any academic research is started.",
+  "setup.intro": "Describe the work your programme expects. You can save a structured plan to your workspace and review it before any source discovery begins.",
   "workspace.heading": "Your academic workspace",
   "workspace.intro": "Four sections you control: the plan, the sources you verified, the evidence you extracted and the chapters you are writing towards.",
 
@@ -196,8 +196,8 @@ const enCopy = {
   "plan.stages": "How academic research proceeds",
   "plan.stagesCount": "{ready} of {total} stages run today",
   "plan.stagesIntro": "Each stage is approved by you before the next one uses it, so a running job can be resumed and audited.",
-  "plan.jobTitle": "Starting an academic run is not available yet",
-  "plan.jobBody": "This page captures and reviews your academic plan. Running the staged scholarly workflow, with its approval checkpoints, is delivered with the academic backend; until then no research job is started from here and standard research remains available.",
+  "plan.jobTitle": "The first saved workflow step is available",
+  "plan.jobBody": "Prepare and review a deterministic plan saved to your workspace. Its approval checkpoint is real. Scholarly discovery and later stages are not connected yet, so approval does not start those steps; the project stays saved for later resume.",
   "summary.level": "Level",
   "summary.discipline": "Discipline",
   "summary.question": "Research question",
@@ -407,6 +407,7 @@ const enStatus = {
   "capability.available.draft": "Keep your draft on this device for your workspace.",
   "capability.available.evidenceManual": "Write your own evidence notes per source and question.",
   "capability.available.chapterPlanning": "Plan chapters, status and word targets.",
+  "capability.available.persistedPlan": "Prepare, save and approve an academic research plan in your workspace.",
   "capability.available.discovery": "Search scholarly records for a workspace and page through what matches.",
   "capability.available.isbnLookup": "Look up books by ISBN and resolve DOIs against the public records.",
   "capability.planned.discovery": "Searching scholarly records and resolving each identifier.",
@@ -416,7 +417,7 @@ const enStatus = {
   "capability.planned.extraction": "Extracting passages and attributing them to a source.",
   "capability.planned.contradictions": "Comparing sources and reporting where they disagree.",
   "capability.planned.gapAnalysis": "Summarising what the literature does not yet answer.",
-  "capability.planned.job": "Running the staged academic workflow on your plan.",
+  "capability.planned.job": "Running the remaining staged academic research workflow after the plan is approved.",
   "capability.planned.resume": "Resuming an interrupted run from its last approved stage.",
   "capability.planned.budget": "Showing what a run will consume and asking your approval first.",
   "capability.planned.drafting": "Drafting thesis chapters from your own verified sources.",
@@ -424,7 +425,7 @@ const enStatus = {
   "capability.unknown": "This capability is not part of the academic surface yet.",
 
   "stage.plan.label": "Research plan",
-  "stage.plan.detail": "Your question, method, style and programme rules, reviewed before anything runs.",
+  "stage.plan.detail": "Your question, method, style and programme rules, saved and reviewed before source discovery begins.",
   "stage.discovery.label": "Scholarly discovery",
   "stage.discovery.detail": "Find books, journal articles, theses and reports from scholarly records rather than web pages alone.",
   "stage.screen.label": "Screening",
@@ -451,7 +452,8 @@ const enStatus = {
   "error.title.tooLong": "Keep the working title under {max} characters.",
   "error.reviewQuestions.max": "This section reviews up to {max} sub-questions.",
   "error.reviewQuestion.short": "Write the sub-question, or remove the empty row.",
-  "error.keywords.max": "Keep to {max} keywords so the plan stays reviewable.",
+  "error.keywords.max": "Use no more than {max} keywords; remove extras before saving.",
+  "error.keyword.tooLong": "Shorten each keyword to {max} characters or fewer.",
   "error.wordCount.range": "Enter a word limit between {min} and {max}.",
   "error.sourceCount.range": "Enter a whole number of sources within the supported range.",
   "error.peerReviewed.exceedsTotal": "Peer-reviewed sources cannot be more than the total minimum.",
@@ -473,6 +475,57 @@ const enStatus = {
   "flag.retracted": "Recorded as retracted — do not cite it as support.",
   "flag.corrected": "Recorded as corrected or amended: cite the corrected version.",
   "flag.retractionUnchecked": "Retraction status has not been checked yet.",
+
+  "workflow.title": "Saved academic plan",
+  "workflow.intro": "Create a workspace-saved plan from this brief, inspect its scope and search guidance, and approve it before the later stages can begin.",
+  "workflow.workspaceScoped": "Saved in this workspace",
+  "workflow.workspaceRequired": "Sign in with an active workspace to save or resume an academic plan.",
+  "workflow.savedProjects": "Saved plans",
+  "workflow.selectProject": "Choose a saved plan",
+  "workflow.loadingProjects": "Loading saved plans…",
+  "workflow.loadMoreProjects": "Load more saved plans",
+  "workflow.loadAction": "Load saved plan",
+  "workflow.createAction": "Save and prepare plan",
+  "workflow.working": "Working…",
+  "workflow.noSavedProjects": "No saved academic plans in this workspace yet.",
+  "workflow.briefBlocked": "Resolve the required brief items above before saving a plan.",
+  "workflow.loadFailure": "Saved academic plans could not be loaded. You can retry by reopening this section.",
+  "workflow.actionFailure": "This action could not be completed. Check the workspace and try again.",
+  "workflow.accessChanged": "This plan is no longer available in the current workspace.",
+  "workflow.savedPlan": "Saved project",
+  "workflow.revision": "checkpoint {revision}",
+  "workflow.planNotPrepared": "This saved project has not prepared its Plan artifact yet. Resume it to continue from the last checkpoint.",
+  "workflow.planArtifact": "Research plan for review",
+  "workflow.question": "Research question:",
+  "workflow.methodAndStyle": "Method and citation style:",
+  "workflow.subQuestions": "Sub-questions",
+  "workflow.objectives": "Objectives",
+  "workflow.inclusion": "Inclusion criteria",
+  "workflow.exclusion": "Exclusion criteria",
+  "workflow.allowedSources": "Allowed source types:",
+  "workflow.sourceTargets": "Programme source targets:",
+  "workflow.sourceTargetsValue": "{total} total; {peer} peer-reviewed",
+  "workflow.notSpecified": "not specified",
+  "workflow.fullTextRequirement": "Only works actually read in full may be used as evidence.",
+  "workflow.programmeRules": "Programme notes:",
+  "workflow.chapters": "Chapter outline",
+  "workflow.searchStrategy": "Suggested scholarly search queries",
+  "workflow.collection.ScholarlyRecords": "Scholarly records",
+  "workflow.collection.JournalAndIdentifierRecords": "Journal and identifier records",
+  "workflow.collection.BookRecords": "Book records",
+  "workflow.collection.BiomedicalRecords": "Biomedical records",
+  "workflow.collection.InstitutionalRecords": "Institutional records",
+  "workflow.stages": "Workflow checkpoints",
+  "workflow.stageStatus.notstarted": "Not started",
+  "workflow.stageStatus.running": "Running",
+  "workflow.stageStatus.completed": "Completed",
+  "workflow.stageStatus.failed": "Needs retry",
+  "workflow.stageStatus.invalidated": "Needs review",
+  "workflow.reviewTitle": "Review the plan before continuing",
+  "workflow.reviewPrompt": "Check the question, inclusion and exclusion criteria, scholarly search queries and chapter outline.",
+  "workflow.approveAction": "Approve plan",
+  "workflow.resumeAction": "Resume at the next available step",
+  "workflow.discoverNotConnected": "The Plan is saved, but scholarly discovery is not connected yet. No sources have been added by the workflow. This project remains saved and can resume when that step is connected.",
 } as const;
 
 /**
@@ -888,7 +941,7 @@ export function academicLocaleCoverage(locale: "en" | "ar" | "ku"): number {
 }
 
 export type AcademicLabelers = {
-  discipline: (id: DisciplineId) => string;
+  discipline: (id: string) => string;
   level: (level: "masters" | "doctoral") => string;
   style: (style: CitationStyleId) => string;
   methodology: (methodology: (typeof methodologyOptions)[number]) => string;

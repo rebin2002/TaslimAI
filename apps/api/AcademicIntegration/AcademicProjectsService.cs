@@ -43,11 +43,23 @@ public sealed record AcademicProjectCreateInput
     public required string Discipline { get; init; }
     public AcademicResearchLevel Level { get; init; } = AcademicResearchLevel.Masters;
     public AcademicMethod Method { get; init; } = AcademicMethod.SystematicReview;
+    public IReadOnlyList<AcademicMethod> SelectedMethods { get; init; } = [];
     public AcademicCitationStyle CitationStyle { get; init; } = AcademicCitationStyle.Apa7;
     public string Language { get; init; } = "en";
     public int MaxDiscoverySources { get; init; } = 120;
     public int MaxEvidencePerSource { get; init; } = 6;
     public IReadOnlyList<string> TargetChapterHeadings { get; init; } = [];
+    public string? WorkingTitle { get; init; }
+    public string? GeographicScope { get; init; }
+    public string? PopulationOrContext { get; init; }
+    public string? TimePeriod { get; init; }
+    public IReadOnlyList<string> SubQuestions { get; init; } = [];
+    public IReadOnlyList<string> Keywords { get; init; } = [];
+    public int? MinimumSources { get; init; }
+    public int? MinimumPeerReviewed { get; init; }
+    public IReadOnlyList<string> AllowedSourceTypes { get; init; } = [];
+    public bool RequireFullText { get; init; }
+    public string? ProgrammeRequirements { get; init; }
     public IReadOnlyList<AcademicApprovalKind> RequiredApprovals { get; init; } =
     [
         AcademicApprovalKind.Plan,
@@ -97,10 +109,9 @@ public sealed class AcademicProjectsService(
         [.. stageHandlers.Select(handler => handler.Stage)];
 
     /// <summary>
-    /// Stages whose handler is wired into this process. Empty until the provider lanes
-    /// register through <c>AddAcademicStageHandler</c>, which is exactly what the API
-    /// surfaces as the honest connection status: nothing here pretends a stage exists
-    /// before its lane lands.
+    /// Stages whose handler is wired into this process. The deterministic Plan handler is
+    /// local; later stages are added only through <c>AddAcademicStageHandler</c> as their
+    /// independently reviewed lanes land.
     /// </summary>
     public IReadOnlySet<AcademicStage> ConnectedStages => connectedStages;
 
@@ -117,11 +128,23 @@ public sealed class AcademicProjectsService(
             Discipline = (input.Discipline ?? string.Empty).Trim(),
             Level = input.Level,
             Method = input.Method,
+            SelectedMethods = input.SelectedMethods,
             CitationStyle = input.CitationStyle,
             Language = string.IsNullOrWhiteSpace(input.Language) ? "en" : input.Language.Trim(),
             MaxDiscoverySources = input.MaxDiscoverySources,
             MaxEvidencePerSource = input.MaxEvidencePerSource,
             TargetChapterHeadings = input.TargetChapterHeadings,
+            WorkingTitle = input.WorkingTitle,
+            GeographicScope = input.GeographicScope,
+            PopulationOrContext = input.PopulationOrContext,
+            TimePeriod = input.TimePeriod,
+            SubQuestions = input.SubQuestions,
+            Keywords = input.Keywords,
+            MinimumSources = input.MinimumSources,
+            MinimumPeerReviewed = input.MinimumPeerReviewed,
+            AllowedSourceTypes = input.AllowedSourceTypes,
+            RequireFullText = input.RequireFullText,
+            ProgrammeRequirements = input.ProgrammeRequirements,
             Budget = input.Budget,
             RequiredApprovals = input.RequiredApprovals,
             MaxStageAttempts = input.MaxStageAttempts,
@@ -225,7 +248,7 @@ public sealed class AcademicProjectsService(
         if (snapshot is null) return AcademicProjectServiceResult.NotFound();
 
         var nextStage = FirstActionableStage(snapshot);
-        if (nextStage is AcademicStage stage && !ConnectedStages.Contains(stage))
+        if (snapshot.State == AcademicProjectState.Running && nextStage is AcademicStage stage && !ConnectedStages.Contains(stage))
         {
             return new AcademicProjectServiceResult
             {

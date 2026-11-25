@@ -48,6 +48,10 @@ public enum AcademicMethod
     Quantitative = 3,
     MixedMethods = 4,
     CaseStudy = 5,
+    ScopingReview = 6,
+    Comparative = 7,
+    DoctrinalLegal = 8,
+    SecondaryDesktop = 9,
 }
 
 public enum AcademicCitationStyle
@@ -57,6 +61,7 @@ public enum AcademicCitationStyle
     Chicago = 2,
     Ieee = 3,
     Mla9 = 4,
+    Vancouver = 5,
 }
 
 /// <summary>
@@ -165,17 +170,35 @@ public static class AcademicStageOrder
 /// </summary>
 public sealed record AcademicWorkflowRequest
 {
+    private static readonly HashSet<string> KnownSourceTypes = new(StringComparer.Ordinal)
+    {
+        "journal_article", "book", "book_chapter", "edited_volume", "conference_paper", "thesis",
+        "report", "dataset", "working_paper", "standard_or_guideline", "legislation", "other",
+    };
+
     public required Guid WorkspaceId { get; init; }
     public required string RequestKey { get; init; }
     public required string ResearchQuestion { get; init; }
     public required string Discipline { get; init; }
     public AcademicResearchLevel Level { get; init; } = AcademicResearchLevel.Masters;
     public AcademicMethod Method { get; init; } = AcademicMethod.SystematicReview;
+    public IReadOnlyList<AcademicMethod> SelectedMethods { get; init; } = [];
     public AcademicCitationStyle CitationStyle { get; init; } = AcademicCitationStyle.Apa7;
     public string Language { get; init; } = "en";
     public int MaxDiscoverySources { get; init; } = 120;
     public int MaxEvidencePerSource { get; init; } = 6;
     public IReadOnlyList<string> TargetChapterHeadings { get; init; } = [];
+    public string? WorkingTitle { get; init; }
+    public string? GeographicScope { get; init; }
+    public string? PopulationOrContext { get; init; }
+    public string? TimePeriod { get; init; }
+    public IReadOnlyList<string> SubQuestions { get; init; } = [];
+    public IReadOnlyList<string> Keywords { get; init; } = [];
+    public int? MinimumSources { get; init; }
+    public int? MinimumPeerReviewed { get; init; }
+    public IReadOnlyList<string> AllowedSourceTypes { get; init; } = [];
+    public bool RequireFullText { get; init; }
+    public string? ProgrammeRequirements { get; init; }
     public AcademicBudgetPolicy Budget { get; init; } = new();
     public IReadOnlyList<AcademicApprovalKind> RequiredApprovals { get; init; } =
     [
@@ -198,16 +221,46 @@ public sealed record AcademicWorkflowRequest
             throw Invalid(nameof(ResearchQuestion), "The research question must contain 1 to 8,000 characters.");
         if (string.IsNullOrWhiteSpace(Discipline) || Discipline.Length > 200)
             throw Invalid(nameof(Discipline), "The discipline must contain 1 to 200 characters.");
+        if (!Enum.IsDefined(Level) || !Enum.IsDefined(Method) || !Enum.IsDefined(CitationStyle) || SelectedMethods.Any(method => !Enum.IsDefined(method)))
+            throw Invalid(nameof(Method), "The level, method, or citation style is not supported.");
         if (MaxDiscoverySources is < 1 or > 400)
             throw Invalid(nameof(MaxDiscoverySources), "Discovery must be bounded between 1 and 400 sources.");
         if (MaxEvidencePerSource is < 1 or > 20)
             throw Invalid(nameof(MaxEvidencePerSource), "Evidence per source must be bounded between 1 and 20.");
         if (MaxStageAttempts is < 1 or > 10)
             throw Invalid(nameof(MaxStageAttempts), "Stage attempts must be bounded between 1 and 10.");
+        if (SelectedMethods.Count > 10 || SelectedMethods.Distinct().Count() != SelectedMethods.Count)
+            throw Invalid(nameof(SelectedMethods), "Selected methods must be distinct and within the supported catalogue.");
         if (TargetChapterHeadings.Count > 24)
             throw Invalid(nameof(TargetChapterHeadings), "A workflow may draft at most 24 chapters.");
+        if (TargetChapterHeadings.Any(heading => string.IsNullOrWhiteSpace(heading) || heading.Length > 200))
+            throw Invalid(nameof(TargetChapterHeadings), "Chapter headings must contain 1 to 200 characters.");
+        if (WorkingTitle is { Length: > 200 })
+            throw Invalid(nameof(WorkingTitle), "The working title cannot exceed 200 characters.");
+        if (GeographicScope is { Length: > 160 })
+            throw Invalid(nameof(GeographicScope), "The geographic scope cannot exceed 160 characters.");
+        if (PopulationOrContext is { Length: > 240 })
+            throw Invalid(nameof(PopulationOrContext), "The population or context cannot exceed 240 characters.");
+        if (TimePeriod is { Length: > 120 })
+            throw Invalid(nameof(TimePeriod), "The time period cannot exceed 120 characters.");
+        if (SubQuestions.Count > 4 || SubQuestions.Any(question => string.IsNullOrWhiteSpace(question) || question.Length > 300))
+            throw Invalid(nameof(SubQuestions), "A project may contain up to 4 sub-questions of 1 to 300 characters each.");
+        if (Keywords.Count > 12 || Keywords.Any(keyword => string.IsNullOrWhiteSpace(keyword) || keyword.Length > 120))
+            throw Invalid(nameof(Keywords), "A project may contain up to 12 keywords of 1 to 120 characters each.");
+        if (MinimumSources is < 0 or > 1_000)
+            throw Invalid(nameof(MinimumSources), "The minimum source count must be between 0 and 1,000.");
+        if (MinimumPeerReviewed is < 0 or > 1_000 ||
+            MinimumSources is int minimum && MinimumPeerReviewed is int peerMinimum && peerMinimum > minimum)
+            throw Invalid(nameof(MinimumPeerReviewed), "The peer-reviewed minimum must be between 0 and the total source minimum.");
+        if (AllowedSourceTypes.Count > 20 || AllowedSourceTypes.Distinct(StringComparer.Ordinal).Count() != AllowedSourceTypes.Count ||
+            AllowedSourceTypes.Any(type => string.IsNullOrWhiteSpace(type) || !KnownSourceTypes.Contains(type)))
+            throw Invalid(nameof(AllowedSourceTypes), "The allowed source-type list is invalid or too large.");
+        if (ProgrammeRequirements is { Length: > 2_000 })
+            throw Invalid(nameof(ProgrammeRequirements), "Programme requirements cannot exceed 2,000 characters.");
         if (RequiredApprovals.Distinct().Count() != RequiredApprovals.Count)
             throw Invalid(nameof(RequiredApprovals), "Approval checkpoints must be distinct.");
+        if (!RequiredApprovals.Contains(AcademicApprovalKind.Plan))
+            throw Invalid(nameof(RequiredApprovals), "The Plan approval checkpoint is required.");
         Budget.Validate();
     }
 
@@ -287,11 +340,26 @@ public sealed record AcademicResearchPlan
 {
     public required int PlanVersion { get; init; }
     public required string ResearchQuestion { get; init; }
+    public AcademicResearchLevel Level { get; init; } = AcademicResearchLevel.Masters;
+    public AcademicMethod Method { get; init; } = AcademicMethod.SystematicReview;
+    public IReadOnlyList<AcademicMethod> Methodologies { get; init; } = [];
+    public AcademicCitationStyle CitationStyle { get; init; } = AcademicCitationStyle.Apa7;
     public required IReadOnlyList<string> Objectives { get; init; }
     public required IReadOnlyList<string> InclusionCriteria { get; init; }
     public required IReadOnlyList<string> ExclusionCriteria { get; init; }
     public required IReadOnlyList<AcademicSearchSpecification> SearchStrategy { get; init; }
     public required IReadOnlyList<string> ChapterOutline { get; init; }
+    public string? WorkingTitle { get; init; }
+    public string? GeographicScope { get; init; }
+    public string? PopulationOrContext { get; init; }
+    public string? TimePeriod { get; init; }
+    public IReadOnlyList<string> SubQuestions { get; init; } = [];
+    public IReadOnlyList<string> Keywords { get; init; } = [];
+    public int? MinimumSources { get; init; }
+    public int? MinimumPeerReviewed { get; init; }
+    public IReadOnlyList<string> AllowedSourceTypes { get; init; } = [];
+    public bool RequireFullText { get; init; }
+    public string? ProgrammeRequirements { get; init; }
 }
 
 /// <summary>

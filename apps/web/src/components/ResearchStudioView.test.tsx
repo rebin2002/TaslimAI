@@ -1,3 +1,4 @@
+import { renderToStaticMarkup } from "react-dom/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
@@ -18,6 +19,10 @@ vi.mock("react", async () => {
 });
 
 vi.mock("next/navigation", () => ({ useSearchParams: () => new URLSearchParams() }));
+vi.mock("next/link", () => ({
+  default: ({ href, children, className }: { href: string; children: import("react").ReactNode; className?: string }) =>
+    <a href={href} className={className}>{children}</a>,
+}));
 vi.mock("@/components/AuthProvider", () => ({ useAuth: () => ({ workspace: { id: "workspace-1" } }) }));
 vi.mock("@/components/LocaleProvider", () => ({ useLocale: () => ({ locale: "en", t: (key: string) => key }) }));
 vi.mock("@/lib/api", () => ({
@@ -44,5 +49,14 @@ describe("Research Studio project selection", () => {
 
     expect(mocks.listProjects).toHaveBeenCalledWith("workspace-1", "Active");
     expect(mocks.listProjects).not.toHaveBeenCalledWith("workspace-1", "Archived");
+  });
+
+  it("keeps the Standard Research form and adds a reachable Academic Research entry", () => {
+    const markup = renderToStaticMarkup(ResearchStudioView());
+
+    expect(markup).toContain('href="/create/research/academic"');
+    expect(markup).toContain('class="research-studio-layout"');
+    expect(markup).toContain('type="submit"');
+    expect(markup).toContain("research.generate");
   });
 });

@@ -260,6 +260,7 @@ export const briefLimits = {
   reviewQuestion: { min: 6, max: 300 },
   maxReviewQuestions: 4,
   maxKeywords: 12,
+  keyword: { max: 120 },
   wordCount: { min: 1000, max: 200000 },
   sourceCount: { min: 0, max: 1000 },
 } as const;
@@ -391,9 +392,17 @@ export function validateAcademicBrief(brief: AcademicBrief): BriefIssue[] {
   if (brief.keywords.length > briefLimits.maxKeywords) {
     issues.push({
       field: "keywords",
-      severity: "warning",
+      severity: "error",
       messageKey: "error.keywords.max",
       params: { max: String(briefLimits.maxKeywords) },
+    });
+  }
+  if (brief.keywords.some((keyword) => keyword.length > briefLimits.keyword.max)) {
+    issues.push({
+      field: "keywords",
+      severity: "error",
+      messageKey: "error.keyword.tooLong",
+      params: { max: String(briefLimits.keyword.max) },
     });
   }
 
@@ -487,7 +496,7 @@ export function countAccessLevels(sources: readonly { access: AccessLevel }[]): 
   return counts;
 }
 
-/** Keyword parsing: comma or newline separated, de-duplicated, order kept. */
+/** Keyword parsing: comma or newline separated, de-duplicated, order kept; never silently truncates. */
 export function parseKeywords(raw: string): string[] {
   const seen = new Set<string>();
   const out: string[] = [];
@@ -499,5 +508,5 @@ export function parseKeywords(raw: string): string[] {
     seen.add(key);
     out.push(value);
   }
-  return out.slice(0, briefLimits.maxKeywords);
+  return out;
 }

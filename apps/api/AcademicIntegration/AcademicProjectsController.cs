@@ -23,6 +23,7 @@ public sealed record AcademicProjectCreateRequest(
     string? Discipline,
     string? Level,
     string? Method,
+    IReadOnlyList<string>? Methodologies,
     string? CitationStyle,
     string? Language,
     int? MaxDiscoverySources,
@@ -30,7 +31,18 @@ public sealed record AcademicProjectCreateRequest(
     IReadOnlyList<string>? TargetChapterHeadings,
     IReadOnlyList<string>? RequiredApprovals,
     int? MaxStageAttempts,
-    AcademicBudgetRequestDto? Budget);
+    AcademicBudgetRequestDto? Budget,
+    string? WorkingTitle,
+    string? GeographicScope,
+    string? PopulationOrContext,
+    string? TimePeriod,
+    IReadOnlyList<string>? SubQuestions,
+    IReadOnlyList<string>? Keywords,
+    int? MinimumSources,
+    int? MinimumPeerReviewed,
+    IReadOnlyList<string>? AllowedSourceTypes,
+    bool? RequireFullText,
+    string? ProgrammeRequirements);
 
 public sealed record AcademicBudgetRequestDto(
     decimal? MaxTotalUsd,
@@ -104,9 +116,39 @@ public sealed record AcademicProjectDto(
     int ThemeCount,
     int ChapterCount,
     AcademicVerificationDto? Verification,
+    AcademicResearchPlanDto? Plan,
     // Machine-readable outcome of the action that produced this snapshot (APPLIED,
     // ALREADY_APPLIED, BUDGET_RAISED, BUDGET_UNCHANGED, ...). Null on plain reads.
     string? Code);
+
+public sealed record AcademicResearchPlanDto(
+    int PlanVersion,
+    string ResearchQuestion,
+    string? WorkingTitle,
+    string Level,
+    string Method,
+    IReadOnlyList<string> Methodologies,
+    string CitationStyle,
+    IReadOnlyList<string> Objectives,
+    IReadOnlyList<string> InclusionCriteria,
+    IReadOnlyList<string> ExclusionCriteria,
+    IReadOnlyList<AcademicSearchSpecificationDto> SearchStrategy,
+    IReadOnlyList<string> ChapterOutline,
+    string? GeographicScope,
+    string? PopulationOrContext,
+    string? TimePeriod,
+    IReadOnlyList<string> SubQuestions,
+    IReadOnlyList<string> Keywords,
+    int? MinimumSources,
+    int? MinimumPeerReviewed,
+    IReadOnlyList<string> AllowedSourceTypes,
+    bool RequireFullText,
+    string? ProgrammeRequirements);
+
+public sealed record AcademicSearchSpecificationDto(
+    string Collection,
+    string Query,
+    IReadOnlyList<string> Filters);
 
 public sealed record AcademicVerificationDto(
     bool? ReportPassed,
@@ -165,9 +207,9 @@ public sealed record AcademicCheckpointDto(
 /// behind the generation policy, a resume (which spends stage work when lanes connect)
 /// behind the expensive-AI policy, and a spend-ceiling raise behind account security.
 /// Reads stay on the global limiter only. None of these routes reaches a scholarly catalog or an
-/// export renderer: until those lanes register stage handlers, <c>run</c> reports the
-/// exact missing stage instead of pretending, and reads return whatever the committed
-/// checkpoints actually hold.
+/// export renderer: <c>run</c> can prepare and checkpoint the deterministic Plan stage;
+/// until downstream lanes register stage handlers, it reports the exact missing stage
+/// instead of pretending, and reads return whatever the committed checkpoints actually hold.
 /// </summary>
 [ApiController]
 [Authorize]
@@ -477,8 +519,44 @@ public sealed class AcademicProjectsController(
             snapshot.Themes.Count,
             snapshot.Chapters.Count,
             snapshot.Verification is null ? null : ToVerification(snapshot),
+            snapshot.Plan is null ? null : ToPlan(snapshot.Plan),
             outcome.Code is { Length: > 0 } ? outcome.Code : null);
     }
+
+    private static AcademicResearchPlanDto ToPlan(AcademicResearchPlan plan) => new(
+        plan.PlanVersion,
+        plan.ResearchQuestion,
+        plan.WorkingTitle,
+        plan.Level.ToString(),
+        plan.Method.ToString(),
+        [.. plan.Methodologies.DefaultIfEmpty(plan.Method).Select(method => method.ToString())],
+        plan.CitationStyle.ToString(),
+        plan.Objectives,
+        plan.InclusionCriteria,
+        plan.ExclusionCriteria,
+        [.. plan.SearchStrategy.Select(search => new AcademicSearchSpecificationDto(
+            search.Catalog switch
+            {
+                AcademicCatalog.OpenAlex => "ScholarlyRecords",
+                AcademicCatalog.Crossref => "JournalAndIdentifierRecords",
+                AcademicCatalog.OpenLibrary or AcademicCatalog.GoogleBooks => "BookRecords",
+                AcademicCatalog.PubMed or AcademicCatalog.EuropePMC => "BiomedicalRecords",
+                AcademicCatalog.InstitutionalRepository => "InstitutionalRecords",
+                _ => "ScholarlyRecords",
+            },
+            search.Query,
+            search.Filters))],
+        plan.ChapterOutline,
+        plan.GeographicScope,
+        plan.PopulationOrContext,
+        plan.TimePeriod,
+        plan.SubQuestions,
+        plan.Keywords,
+        plan.MinimumSources,
+        plan.MinimumPeerReviewed,
+        plan.AllowedSourceTypes,
+        plan.RequireFullText,
+        plan.ProgrammeRequirements);
 
     private static AcademicVerificationDto ToVerification(AcademicWorkflowSnapshot snapshot) => new(
         snapshot.Verification!.Passed,
@@ -576,6 +654,21 @@ public sealed class AcademicProjectsController(
 
         var level = ParseEnum<AcademicResearchLevel>(request.Level, AcademicResearchLevel.Masters);
         var method = ParseEnum<AcademicMethod>(request.Method, AcademicMethod.SystematicReview);
+        var methods = new List<AcademicMethod>();
+        if (request.Methodologies is { Count: > 0 })
+        {
+            foreach (var item in request.Methodologies)
+            {
+                if (!Enum.TryParse<AcademicMethod>(item, ignoreCase: true, out var parsed) || !Enum.IsDefined(parsed))
+                    return (null, $"Unknown research methodology: {item}");
+                methods.Add(parsed);
+            }
+            method = methods[0];
+        }
+        else
+        {
+            methods.Add(method);
+        }
         var style = ParseEnum<AcademicCitationStyle>(request.CitationStyle, AcademicCitationStyle.Apa7);
 
         List<AcademicApprovalKind>? approvals = null;
@@ -609,6 +702,7 @@ public sealed class AcademicProjectsController(
             Discipline = request.Discipline,
             Level = level,
             Method = method,
+            SelectedMethods = methods,
             CitationStyle = style,
             Language = string.IsNullOrWhiteSpace(request.Language) ? "en" : request.Language.Trim(),
             MaxDiscoverySources = Math.Clamp(request.MaxDiscoverySources ?? 120, 1, AcademicProjectsService.AbsoluteMaxDiscoverySources),
@@ -618,6 +712,17 @@ public sealed class AcademicProjectsController(
                 .Select(h => h.Trim())
                 .Take(24)
                 .ToArray(),
+            WorkingTitle = request.WorkingTitle?.Trim(),
+            GeographicScope = request.GeographicScope?.Trim(),
+            PopulationOrContext = request.PopulationOrContext?.Trim(),
+            TimePeriod = request.TimePeriod?.Trim(),
+            SubQuestions = (request.SubQuestions ?? []).Where(value => !string.IsNullOrWhiteSpace(value)).Select(value => value.Trim()).Take(4).ToArray(),
+            Keywords = (request.Keywords ?? []).Where(value => !string.IsNullOrWhiteSpace(value)).Select(value => value.Trim()).ToArray(),
+            MinimumSources = request.MinimumSources,
+            MinimumPeerReviewed = request.MinimumPeerReviewed,
+            AllowedSourceTypes = (request.AllowedSourceTypes ?? []).Where(value => !string.IsNullOrWhiteSpace(value)).Select(value => value.Trim()).Take(20).ToArray(),
+            RequireFullText = request.RequireFullText ?? false,
+            ProgrammeRequirements = request.ProgrammeRequirements?.Trim(),
             RequiredApprovals = approvals ??
             [
                 AcademicApprovalKind.Plan,
