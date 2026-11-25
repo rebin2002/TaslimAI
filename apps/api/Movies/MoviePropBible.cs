@@ -374,7 +374,9 @@ public sealed class MoviePropBibleService(
         if (request.AssetId == Guid.Empty || !await db.Assets.AnyAsync(item => item.Id == request.AssetId && item.WorkspaceId == prop.MovieProject.WorkspaceId, cancellationToken)) throw new MoviePropBibleValidationException("The visual reference asset must belong to this workspace.");
         if (await db.MoviePropBibleReferences.AnyAsync(item => item.MoviePropBibleId == bible.Id && item.AssetId == request.AssetId && item.Role == (request.Role ?? "visual_reference").Trim(), cancellationToken)) throw new MoviePropBibleValidationException("This visual reference is already linked to the Prop Bible.");
         var now = DateTime.UtcNow;
-        db.MoviePropBibleReferences.Add(new MoviePropBibleReference { Id = Guid.NewGuid(), MoviePropBibleId = bible.Id, AssetId = request.AssetId, Role = CleanShort(request.Role) ?? "visual_reference", Notes = Clean(request.Notes), ProvenanceJson = ProvenanceJson("visual_reference", request.AssetId, null, userId, now), CreatedByUserId = userId, CreatedAt = now });
+        var reference = new MoviePropBibleReference { Id = Guid.NewGuid(), MoviePropBibleId = bible.Id, AssetId = request.AssetId, Role = CleanShort(request.Role) ?? "visual_reference", Notes = Clean(request.Notes), ProvenanceJson = ProvenanceJson("visual_reference", request.AssetId, null, userId, now), CreatedByUserId = userId, CreatedAt = now };
+        AttachBibleIfNew(bible);
+        db.MoviePropBibleReferences.Add(reference);
         bible.UpdatedAt = now;
         await db.SaveChangesAsync(cancellationToken);
         return await GetPropAsync(userId, propId, cancellationToken);
@@ -390,7 +392,9 @@ public sealed class MoviePropBibleService(
         if (await db.MoviePropBibleVariants.AnyAsync(item => item.MoviePropBibleId == bible.Id && item.Key == request.Key.Trim(), cancellationToken)) throw new MoviePropBibleValidationException("A variant with this key already exists.");
         if (request.ReferenceAssetId.HasValue && !await db.Assets.AnyAsync(item => item.Id == request.ReferenceAssetId && item.WorkspaceId == prop.MovieProject.WorkspaceId, cancellationToken)) throw new MoviePropBibleValidationException("The variant reference asset must belong to this workspace.");
         var now = DateTime.UtcNow;
-        db.MoviePropBibleVariants.Add(new MoviePropBibleVariant { Id = Guid.NewGuid(), MoviePropBibleId = bible.Id, Key = CleanShort(request.Key)!, Label = CleanShort(request.Label)!, Description = Clean(request.Description), State = CleanShort(request.State), VisualNotes = Clean(request.VisualNotes), ReferenceAssetId = request.ReferenceAssetId, ProvenanceJson = ProvenanceJson("variant", bible.Id, null, userId, now), CreatedAt = now, UpdatedAt = now });
+        var variant = new MoviePropBibleVariant { Id = Guid.NewGuid(), MoviePropBibleId = bible.Id, Key = CleanShort(request.Key)!, Label = CleanShort(request.Label)!, Description = Clean(request.Description), State = CleanShort(request.State), VisualNotes = Clean(request.VisualNotes), ReferenceAssetId = request.ReferenceAssetId, ProvenanceJson = ProvenanceJson("variant", bible.Id, null, userId, now), CreatedAt = now, UpdatedAt = now };
+        AttachBibleIfNew(bible);
+        db.MoviePropBibleVariants.Add(variant);
         bible.UpdatedAt = now;
         await db.SaveChangesAsync(cancellationToken);
         return await GetPropAsync(userId, propId, cancellationToken);
@@ -409,6 +413,7 @@ public sealed class MoviePropBibleService(
         bible.ContinuityRules = values.ContinuityRules;
         bible.ApprovalState = MoviePropBibleStatuses.Draft;
         bible.UpdatedAt = now;
+        AttachBibleIfNew(bible);
         await CreateVersionEntityAsync(bible, userId, now, cancellationToken);
         await db.SaveChangesAsync(cancellationToken);
         return await GetPropAsync(userId, propId, cancellationToken);
@@ -493,9 +498,16 @@ public sealed class MoviePropBibleService(
         if (bible is not null) return bible;
         var now = DateTime.UtcNow;
         bible = new MoviePropBible { Id = Guid.NewGuid(), MovieProjectId = prop.MovieProjectId, MoviePropId = prop.Id, IdentityKey = prop.Name, CreatedAt = now, UpdatedAt = now };
-        db.MoviePropBibles.Add(bible);
-        await db.SaveChangesAsync(cancellationToken);
         return bible;
+    }
+
+    // A brand-new Prop Bible stays untracked until every request validation has passed. Attaching
+    // it eagerly let a rejected mutation leave an Added stub in the scoped DbContext, which an
+    // unrelated SaveChanges could then persist and which a valid retry on the same context would
+    // duplicate against the unique MoviePropId index.
+    private void AttachBibleIfNew(MoviePropBible bible)
+    {
+        if (db.Entry(bible).State == EntityState.Detached) db.MoviePropBibles.Add(bible);
     }
 
     private Task<MoviePropBible?> LoadBibleAsync(Guid propId, CancellationToken cancellationToken) => db.MoviePropBibles.Include(item => item.References).Include(item => item.Variants).Include(item => item.Versions).FirstOrDefaultAsync(item => item.MoviePropId == propId, cancellationToken);
