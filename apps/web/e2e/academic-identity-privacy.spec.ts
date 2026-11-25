@@ -181,6 +181,11 @@ function openTab(page: Page, name: RegExp): Promise<void> {
   return page.getByRole("tab", { name }).click();
 }
 
+/** The search surface sits behind a tab in the mounted-container modes and is the whole page in `panel`. */
+async function showSources(page: Page, mode: HarnessMode): Promise<void> {
+  if (mode !== "panel") await openTab(page, /^Sources/);
+}
+
 function buildHarness(): void {
   execSync(
     `npx vite build --config e2e/academic-identity-mount/vite.harness.config.ts --outDir ${harnessOut} --emptyOutDir`,
@@ -214,7 +219,7 @@ async function serveHarness(page: Page): Promise<void> {
   });
 }
 
-async function openHarness(page: Page, identity: HarnessIdentity, mode: "studio" | "workspace", search?: SearchMock): Promise<void> {
+async function openHarness(page: Page, identity: HarnessIdentity, mode: HarnessMode, search?: SearchMock): Promise<void> {
   await page.addInitScript((initial) => {
     window.__academicInitialIdentity = initial;
   }, identity);
@@ -223,6 +228,13 @@ async function openHarness(page: Page, identity: HarnessIdentity, mode: "studio"
   if (search) await installSearchMock(page, search);
   await serveHarness(page);
   await page.goto(`${harnessOrigin}/harness.html?mode=${mode}`);
+  if (mode === "panel") {
+    // No studio chrome at all in this mode - that absence is the point, because it means the
+    // workspace-level fence is not mounted and cannot be what the assertions below are measuring.
+    await expect(page.getByRole("heading", { name: "Find scholarly sources", exact: true })).toBeVisible();
+    await expect(searchField(page)).toBeVisible();
+    return;
+  }
   await expect(page.getByRole("heading", { name: "Academic Research Studio", exact: true })).toBeVisible();
   await expect(questionField(page)).toBeVisible();
 }
@@ -420,63 +432,95 @@ for (const mode of ["studio", "workspace"] as const) {
     });
 
     /**
-     * Reviewer residual R4 (issuecomment-7148092453): every other scenario in this file never
-     * presses Search, so the one student-initiated read this slice added had no browser coverage
-     * of the case that matters for it - an answer that arrives after the student who asked has
-     * gone. The unit tests hold the sequencer and the abort (`academicScholarlySearch.test.ts:337`,
-     * `:381-397`); a static render cannot see a request in flight, and only a real page shows that
-     * the record never paints, the query never carries over, and nothing is persisted.
-     *
-     * Runs in both mount modes. `studio` is the shipped container, whose identity-keyed subtree
-     * remounts the panel; `workspace` is the same workspace without that key, where only the
-     * panel's own fence stands between the two students.
+     * Reviewer residual R4 (issuecomment-7148092453): an answer that arrives after the student who
+     * asked has gone. See `lateSearchAnswerStaysWithItsStudent` for what each mode proves.
      */
     test("never renders a search answer from the student who is no longer signed in", async ({ page }) => {
-      const mock = createSearchMock([studentA.workspaceId, studentB.workspaceId]);
-      await openHarness(page, studentA, mode, mock);
-      await openTab(page, /^Sources/);
-
-      // Student A starts a search and leaves before the catalogs answer.
-      await searchField(page).fill(MARK_A_QUERY);
-      await searchSubmit(page).click();
-      await expect.poll(() => mock.requests.length).toBe(1);
-      expect(mock.requests[0]).toEqual({ workspaceId: studentA.workspaceId, query: MARK_A_QUERY });
-      await expect(page.getByText("Searching scholarly records", { exact: false })).toBeVisible();
-      await setIdentity(page, studentB);
-
-      // A's answer is released only now, into a page that belongs to somebody else.
-      mock.gates[studentA.workspaceId].release();
-      await openTab(page, /^Sources/);
-      await expect(page.getByText(MARK_A_RECORD)).toHaveCount(0);
-      // The query A typed was A's too: the box is empty rather than pre-filled with their topic.
-      await expect(searchField(page)).toHaveValue("");
-      // And nothing about it was written under the new principal's storage keys.
-      const afterSwitch = await storageDump(page);
-      expect(afterSwitch).not.toContain(MARK_A_RECORD);
-      expect(afterSwitch).not.toContain(MARK_A_QUERY);
-      // A's request must not have been re-issued under B's workspace by way of "retrying" it.
-      expect(mock.requests.filter((entry) => entry.query === MARK_A_QUERY).map((entry) => entry.workspaceId))
-        .toEqual([studentA.workspaceId]);
-
-      // The same shape in the other direction: B's answer lands after B has left.
-      await searchField(page).fill(MARK_B_QUERY);
-      await searchSubmit(page).click();
-      await expect.poll(() => mock.requests.length).toBe(2);
-      expect(mock.requests[1]).toEqual({ workspaceId: studentB.workspaceId, query: MARK_B_QUERY });
-      await setIdentity(page, studentA);
-      mock.gates[studentB.workspaceId].release();
-      await openTab(page, /^Sources/);
-      await expect(page.getByText(MARK_B_RECORD)).toHaveCount(0);
-      await expect(searchField(page)).toHaveValue("");
-      expect(await storageDump(page)).not.toContain(MARK_B_RECORD);
-
-      // Positive control, so the absences above are a fence rather than a mock that never answers:
-      // a search that starts and finishes under one student does reach the page.
-      await searchField(page).fill(MARK_A_QUERY);
-      await searchSubmit(page).click();
-      await expect.poll(() => mock.requests.length).toBe(3);
-      await expect(page.getByText(MARK_A_RECORD).first()).toBeVisible();
-      await expect(page.getByText(MARK_B_RECORD)).toHaveCount(0);
+      await lateSearchAnswerStaysWithItsStudent(page, mode);
     });
   });
 }
+
+/**
+ * The Sources panel is embedded by a host in three different shapes, and they do not protect the
+ * same way:
+ *
+ * - `studio` — the shipped container, whose identity-keyed subtree remounts the panel. Here the
+ *   answer cannot land because the component that would have rendered it is gone.
+ * - `workspace` — the same workspace without that key, so its principal fence resets the tab and
+ *   unmounts the panel.
+ * - `panel` — no container at all: an embedding host keeps one panel instance mounted and hands it
+ *   a new `workspaceId`. This is the mode that discriminates, because the only thing left standing
+ *   between student A's late answer and student B's screen is the owner check inside
+ *   `AcademicSourcesPanel` itself. Remove that fence and this mode fails while the other two still
+ *   pass, which is exactly the distinction the reviewer asked to see proven rather than asserted.
+ */
+async function lateSearchAnswerStaysWithItsStudent(page: Page, mode: HarnessMode): Promise<void> {
+  const mock = createSearchMock([studentA.workspaceId, studentB.workspaceId]);
+  await openHarness(page, studentA, mode, mock);
+  await showSources(page, mode);
+
+  // Student A starts a search and leaves before the catalogs answer.
+  await searchField(page).fill(MARK_A_QUERY);
+  await searchSubmit(page).click();
+  await expect.poll(() => mock.requests.length).toBe(1);
+  expect(mock.requests[0]).toEqual({ workspaceId: studentA.workspaceId, query: MARK_A_QUERY });
+  await expect(page.getByText("Searching scholarly records", { exact: false })).toBeVisible();
+  await setIdentity(page, studentB);
+
+  // A's answer is released only now, into a page that belongs to somebody else.
+  mock.gates[studentA.workspaceId].release();
+  await showSources(page, mode);
+  await expect(page.getByText(MARK_A_RECORD)).toHaveCount(0);
+  // The query A typed was A's too: the box is empty rather than pre-filled with their topic.
+  await expect(searchField(page)).toHaveValue("");
+  // And nothing about it was written under the new principal's storage keys.
+  const afterSwitch = await storageDump(page);
+  expect(afterSwitch).not.toContain(MARK_A_RECORD);
+  expect(afterSwitch).not.toContain(MARK_A_QUERY);
+  // A's request must not have been re-issued under B's workspace by way of "retrying" it.
+  expect(mock.requests.filter((entry) => entry.query === MARK_A_QUERY).map((entry) => entry.workspaceId))
+    .toEqual([studentA.workspaceId]);
+
+  // The same shape in the other direction: B's answer lands after B has left.
+  await searchField(page).fill(MARK_B_QUERY);
+  await searchSubmit(page).click();
+  await expect.poll(() => mock.requests.length).toBe(2);
+  expect(mock.requests[1]).toEqual({ workspaceId: studentB.workspaceId, query: MARK_B_QUERY });
+  await setIdentity(page, studentA);
+  mock.gates[studentB.workspaceId].release();
+  await showSources(page, mode);
+  await expect(page.getByText(MARK_B_RECORD)).toHaveCount(0);
+  await expect(searchField(page)).toHaveValue("");
+  expect(await storageDump(page)).not.toContain(MARK_B_RECORD);
+
+  // Positive control, so the absences above are a fence rather than a mock that never answers:
+  // a search that starts and finishes under one student does reach the page.
+  await searchField(page).fill(MARK_A_QUERY);
+  await searchSubmit(page).click();
+  await expect.poll(() => mock.requests.length).toBe(3);
+  await expect(page.getByText(MARK_A_RECORD).first()).toBeVisible();
+  await expect(page.getByText(MARK_B_RECORD)).toHaveCount(0);
+}
+
+test.describe("academic search ownership under a host that only embeds the panel (panel)", () => {
+  /**
+   * The discriminating case for R4. In the two mounted-container modes the panel is unmounted when
+   * the principal moves, so those scenarios prove the outcome without proving which mechanism
+   * produced it. Here the same `AcademicSourcesPanel` instance stays mounted across the switch and
+   * only its own owner check can keep A's answer off B's screen: reverting
+   * `scholarlySearchScopeKey` handling in the component makes this scenario fail, which is what the
+   * reviewer asked the browser evidence to show.
+   */
+  test("an answer released after the principal moved is not rendered by the panel that is still mounted", async ({ page }) => {
+    await lateSearchAnswerStaysWithItsStudent(page, "panel");
+  });
+});
+
+/**
+ * Which host the harness mounts. `studio` is the shipped container (identity-keyed subtree),
+ * `workspace` is the inner workspace without that key, and `panel` renders the Sources panel by
+ * itself, the way an embedding host would: the instance is never remounted when the principal
+ * moves, so nothing but the panel's own owner check stands between two students' search results.
+ */
+type HarnessMode = "studio" | "workspace" | "panel";
