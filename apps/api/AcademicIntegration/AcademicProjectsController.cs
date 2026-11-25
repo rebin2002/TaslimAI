@@ -319,7 +319,8 @@ public sealed class AcademicProjectsController(
 
         if (!Enum.TryParse<AcademicApprovalKind>(kind, ignoreCase: true, out var approvalKind))
             return ApiResults.Validation(this, "Unknown approval checkpoint.");
-        if (!Enum.TryParse<AcademicApprovalDecision>(request.Decision, ignoreCase: true, out var decision))
+        if (!Enum.TryParse<AcademicApprovalDecision>(request.Decision, ignoreCase: true, out var decision)
+            || !Enum.IsDefined(decision))
             return ApiResults.Validation(this, "Decision must be Approved, RequestRevision, or Rejected.");
 
         var outcome = await service.SubmitApprovalAsync(

@@ -135,6 +135,44 @@ public sealed class AcademicWorkflowResumabilityTests
     }
 
     [Fact]
+    public async Task Undefined_numeric_approval_decision_leaves_the_pending_checkpoint_untouched()
+    {
+        var harness = new AcademicWorkflowHarness();
+        await harness.StartAsync("invalid-decision");
+        var before = await harness.Store.LoadAsync(harness.ProjectId, CancellationToken.None);
+        var invalidDecision = (AcademicApprovalDecision)int.MaxValue;
+
+        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(async () =>
+            await harness.Orchestrator.SubmitApprovalDecisionAsync(
+                harness.ProjectId,
+                AcademicApprovalKind.Plan,
+                invalidDecision,
+                "must not be recorded",
+                Guid.NewGuid(),
+                CancellationToken.None));
+
+        var afterInvalid = await harness.Store.LoadAsync(harness.ProjectId, CancellationToken.None);
+        Assert.Equal(before!.Revision, afterInvalid!.Revision);
+        Assert.Equal(AcademicProjectState.AwaitingApproval, afterInvalid.State);
+        Assert.Equal(before.PendingApproval!.ApprovalKey, afterInvalid.PendingApproval!.ApprovalKey);
+        Assert.Empty(afterInvalid.Approvals);
+
+        var valid = await harness.Orchestrator.SubmitApprovalDecisionAsync(
+            harness.ProjectId,
+            AcademicApprovalKind.Plan,
+            AcademicApprovalDecision.Approved,
+            "approved after validation",
+            Guid.NewGuid(),
+            CancellationToken.None);
+
+        Assert.Equal(AcademicApprovalSubmissionStatus.Applied, valid.Status);
+        Assert.Equal(AcademicProjectState.Running, valid.Snapshot!.State);
+        Assert.Null(valid.Snapshot.PendingApproval);
+        Assert.Equal(AcademicApprovalDecision.Approved, Assert.Single(valid.Snapshot.Approvals).Decision);
+        Assert.Equal(before.Revision + 1, valid.Snapshot.Revision);
+    }
+
+    [Fact]
     public async Task Late_Decision_For_A_Stale_Kind_Is_Rejected_Without_State_Movement()
     {
         var harness = new AcademicWorkflowHarness();

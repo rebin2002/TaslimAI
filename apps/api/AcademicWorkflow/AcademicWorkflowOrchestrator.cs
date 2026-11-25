@@ -501,6 +501,9 @@ public sealed partial class AcademicWorkflowOrchestrator
         Guid decidedByUserId,
         CancellationToken cancellationToken)
     {
+        if (!Enum.IsDefined(decision))
+            throw new ArgumentOutOfRangeException(nameof(decision), decision, "Unknown academic approval decision.");
+
         var loaded = await store.LoadAsync(projectId, cancellationToken);
         if (loaded is null)
             return new AcademicApprovalSubmissionResult { Status = AcademicApprovalSubmissionStatus.NotFound };

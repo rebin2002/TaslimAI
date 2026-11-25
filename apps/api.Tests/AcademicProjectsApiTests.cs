@@ -361,6 +361,50 @@ public class AcademicProjectsApiTests : IClassFixture<TaslimApiFactory>
     }
 
     [Fact]
+    public async Task Undefined_numeric_approval_decision_is_rejected_without_moving_the_pending_checkpoint()
+    {
+        var (client, workspaceId) = await RegisterAsync();
+        var create = await PostCreateAsync(client, workspaceId, new
+        {
+            requestKey = $"invalid-decision-{Guid.NewGuid():N}",
+            researchQuestion = "Approval decision validation probe",
+            discipline = "Sociology",
+        });
+        var projectId = (await create.Content.ReadFromJsonAsync<JsonElement>())
+            .GetProperty("project").GetProperty("projectId").GetGuid();
+
+        var run = await PostJsonAsync(client, $"/api/academic-projects/{projectId}/run", new { });
+        Assert.Equal(HttpStatusCode.OK, run.StatusCode);
+        var pending = await run.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal("AwaitingApproval", pending.GetProperty("project").GetProperty("state").GetString());
+        var revision = pending.GetProperty("project").GetProperty("revision").GetInt64();
+        var checkpointRevision = pending.GetProperty("pendingApproval").GetProperty("checkpointRevision").GetInt64();
+
+        var invalid = await PostJsonAsync(
+            client,
+            $"/api/academic-projects/{projectId}/approvals/plan",
+            new { decision = "2147483647", notes = "must not be recorded" });
+        Assert.Equal(HttpStatusCode.BadRequest, invalid.StatusCode);
+
+        var unchanged = await client.GetFromJsonAsync<JsonElement>($"/api/academic-projects/{projectId}");
+        Assert.Equal("AwaitingApproval", unchanged.GetProperty("project").GetProperty("state").GetString());
+        Assert.Equal(revision, unchanged.GetProperty("project").GetProperty("revision").GetInt64());
+        Assert.Equal("Plan", unchanged.GetProperty("pendingApproval").GetProperty("kind").GetString());
+        Assert.Equal(checkpointRevision, unchanged.GetProperty("pendingApproval").GetProperty("checkpointRevision").GetInt64());
+        Assert.Empty(unchanged.GetProperty("approvals").EnumerateArray());
+
+        var valid = await PostJsonAsync(
+            client,
+            $"/api/academic-projects/{projectId}/approvals/plan",
+            new { decision = "Approved" });
+        Assert.Equal(HttpStatusCode.OK, valid.StatusCode);
+        var approved = await valid.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal("APPLIED", approved.GetProperty("code").GetString());
+        Assert.Equal("Running", approved.GetProperty("project").GetProperty("state").GetString());
+        Assert.Single(approved.GetProperty("approvals").EnumerateArray());
+    }
+
+    [Fact]
     public async Task Approval_without_a_pending_checkpoint_is_a_conflict_not_a_fabrication()
     {
         var (client, workspaceId) = await RegisterAsync();
