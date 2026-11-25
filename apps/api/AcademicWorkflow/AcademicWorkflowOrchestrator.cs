@@ -541,9 +541,12 @@ public sealed partial class AcademicWorkflowOrchestrator
                     Code = working.StateCode,
                 };
 
+            if (working.Approvals.Any(record => record.Kind == kind))
+                return new AcademicApprovalSubmissionResult { Status = AcademicApprovalSubmissionStatus.CheckpointMismatch, Snapshot = working };
+
             return new AcademicApprovalSubmissionResult
             {
-                Status = AcademicApprovalSubmissionStatus.CheckpointMismatch,
+                Status = AcademicApprovalSubmissionStatus.NoPendingApproval,
                 Snapshot = working,
             };
         }

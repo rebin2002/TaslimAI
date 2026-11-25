@@ -335,7 +335,13 @@ public class AcademicProjectsApiTests : IClassFixture<TaslimApiFactory>
         Assert.Equal(0, prepared.GetProperty("usage").GetProperty("spentUsd").GetDecimal());
         Assert.Equal(0, prepared.GetProperty("usage").GetProperty("callsUsed").GetInt32());
 
-        var approve = await PostJsonAsync(client, $"/api/academic-projects/{projectId}/approvals/plan", new { decision = "Approved" });
+        var pendingApproval = heldForReview.GetProperty("pendingApproval");
+        var approve = await PostJsonAsync(client, $"/api/academic-projects/{projectId}/approvals/plan", new
+        {
+            decision = "Approved",
+            approvalKey = pendingApproval.GetProperty("approvalKey").GetString(),
+            checkpointRevision = pendingApproval.GetProperty("checkpointRevision").GetInt64(),
+        });
         Assert.Equal(HttpStatusCode.OK, approve.StatusCode);
         var approved = await approve.Content.ReadFromJsonAsync<JsonElement>();
         var approvedRevision = approved.GetProperty("project").GetProperty("revision").GetInt64();
@@ -379,11 +385,12 @@ public class AcademicProjectsApiTests : IClassFixture<TaslimApiFactory>
         Assert.Equal("AwaitingApproval", pending.GetProperty("project").GetProperty("state").GetString());
         var revision = pending.GetProperty("project").GetProperty("revision").GetInt64();
         var checkpointRevision = pending.GetProperty("pendingApproval").GetProperty("checkpointRevision").GetInt64();
+        var approvalKey = pending.GetProperty("pendingApproval").GetProperty("approvalKey").GetString();
 
         var invalid = await PostJsonAsync(
             client,
             $"/api/academic-projects/{projectId}/approvals/plan",
-            new { decision = "2147483647", notes = "must not be recorded" });
+            new { decision = "2147483647", notes = "must not be recorded", approvalKey, checkpointRevision });
         Assert.Equal(HttpStatusCode.BadRequest, invalid.StatusCode);
 
         var unchanged = await client.GetFromJsonAsync<JsonElement>($"/api/academic-projects/{projectId}");
@@ -396,7 +403,7 @@ public class AcademicProjectsApiTests : IClassFixture<TaslimApiFactory>
         var valid = await PostJsonAsync(
             client,
             $"/api/academic-projects/{projectId}/approvals/plan",
-            new { decision = "Approved" });
+            new { decision = "Approved", approvalKey, checkpointRevision });
         Assert.Equal(HttpStatusCode.OK, valid.StatusCode);
         var approved = await valid.Content.ReadFromJsonAsync<JsonElement>();
         Assert.Equal("APPLIED", approved.GetProperty("code").GetString());
@@ -417,8 +424,16 @@ public class AcademicProjectsApiTests : IClassFixture<TaslimApiFactory>
         var projectId = (await create.Content.ReadFromJsonAsync<JsonElement>())
             .GetProperty("project").GetProperty("projectId").GetGuid();
 
-        var approve = await PostJsonAsync(client, $"/api/academic-projects/{projectId}/approvals/plan",
-            new { decision = "Approved", notes = "looks good" });
+        var approve = await PostJsonAsync(
+            client,
+            $"/api/academic-projects/{projectId}/approvals/plan",
+            new
+            {
+                decision = "Approved",
+                notes = "looks good",
+                approvalKey = "missing-checkpoint",
+                checkpointRevision = 1L,
+            });
         Assert.Equal(HttpStatusCode.Conflict, approve.StatusCode);
         Assert.Contains("NO_PENDING_APPROVAL", await approve.Content.ReadAsStringAsync());
     }
