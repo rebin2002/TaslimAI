@@ -26,7 +26,7 @@ test("a signed-in student can save and approve the Academic Plan from Standard R
   await expect(page.getByRole("checkbox", { name: "Book", exact: true })).toBeChecked();
   await expect(page.getByRole("checkbox", { name: /journal article/i })).toBeChecked();
 
-  await page.getByLabel("Research question", { exact: true }).fill(researchQuestion);
+  await page.getByLabel(/research question/i).fill(researchQuestion);
   await page.getByLabel("Geographic scope", { exact: true }).fill("Kurdistan Region of Iraq");
   await page.getByLabel("Population or context", { exact: true }).fill("Pharmaceutical market access, regulation, and medicine availability");
   await page.getByLabel("Time period", { exact: true }).fill("2015–2026");
