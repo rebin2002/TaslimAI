@@ -157,7 +157,7 @@ public sealed class MovieWorldReferenceMediaCasePostgresTests
             .ToArrayAsync();
         var byId = assets.ToDictionary(item => item.Id, item =>
         {
-            var dto = AssetContractMapper.ToDto(item);
+            var dto = AssetContractMapper.ToDto(item, fixture.UserId);
             return new Flags(dto.HasFile, dto.CanPreview);
         });
         return fixture.AssetIdsByName.ToDictionary(item => item.Key, item => byId[item.Value]);
