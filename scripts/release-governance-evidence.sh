@@ -29,9 +29,11 @@ export GOVERNANCE_REPOSITORY="${GITHUB_REPOSITORY:-}"
 export GOVERNANCE_REF="${GITHUB_REF:-}"
 export GOVERNANCE_RUN_ID="${GITHUB_RUN_ID:-}"
 "${GOVERNANCE_PYTHON:-python3}" - "$output_path" <<'PY'
+from fnmatch import fnmatchcase
 import json
 import os
 import re
+import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -49,34 +51,86 @@ required_checks = [
     ("Build production images and smoke-test API", ".github/workflows/container-health-smoke.yml"),
     ("Release evidence and safety contract", ".github/workflows/release-evidence.yml"),
 ]
+def event_settings(definition):
+    if isinstance(definition, str):
+        return {definition: {}}
+    if isinstance(definition, list) and all(isinstance(name, str) for name in definition):
+        return {name: {} for name in definition}
+    return definition if isinstance(definition, dict) else {}
+
+
+def covers_main_pull_requests(settings):
+    if settings in ("", {}):
+        return True
+    if not isinstance(settings, dict) or set(settings) - {"branches", "branches-ignore", "types"}:
+        return False
+    default_types = {"opened", "synchronize", "reopened"}
+    if "types" in settings and not default_types.issubset(settings["types"]):
+        return False
+    if "branches" in settings and "branches-ignore" in settings:
+        return False
+    # GitHub evaluates ordered negations. Ordinary literal, * and ** patterns suffice
+    # for main. A pattern with other glob syntax needs a separate verification.
+    branches = settings.get("branches", settings.get("branches-ignore", []))
+    if not isinstance(branches, list) or not all(
+        isinstance(pattern, str) and re.fullmatch(r"!?[a-zA-Z0-9_./*?+-]+", pattern)
+        for pattern in branches
+    ):
+        return False
+    matched = False
+    for pattern in branches:
+        if fnmatchcase("main", pattern.removeprefix("!")):
+            matched = not pattern.startswith("!")
+    if "branches" in settings:
+        return matched
+    return not matched
+
+
+def mapping_value(node, name):
+    return next((value for key, value in node.value if key.value == name), None)
+
+
+def validate_action_references(source_text, relative):
+    # Retain the location of each YAML value so that the accompanying comment
+    # must be on that occurrence, even when several jobs use the same action.
+    document = yaml.compose(source_text, Loader=yaml.BaseLoader)
+    jobs = mapping_value(document, "jobs")
+    for job_key, job in jobs.value:
+        steps = mapping_value(job, "steps")
+        for entry in [job, *(steps.value if steps else [])]:
+            reference = mapping_value(entry, "uses")
+            if reference is None:
+                continue
+            location = f"{relative}:{reference.start_mark.line + 1} ({job_key.value})"
+            if not re.fullmatch(r"[^\s@]+@[0-9a-fA-F]{40}", reference.value):
+                raise SystemExit(f"Unpinned action at {location}")
+            remainder = source_text[reference.end_mark.index:].partition("\n")[0]
+            if not re.fullmatch(r"[ \t]+#[ \t]*\S.*", remainder):
+                raise SystemExit(f"Missing version comment at {location}")
+
+
 workflow_paths = sorted({relative for _, relative in required_checks})
 workflows = {}
-pinned_action = re.compile(r"[^\s@]+@[0-9a-fA-F]{40}")
 for relative in workflow_paths:
-    path = repo_root / relative
-    if not path.is_file():
-        raise SystemExit(f"Required workflow is missing: {relative}")
-    source_text = path.read_text(encoding="utf-8")
+    source = subprocess.run(
+        ["git", "show", f"{os.environ['GOVERNANCE_COMMIT_SHA']}:{relative}"],
+        cwd=repo_root, text=True, capture_output=True,
+    )
+    if source.returncode:
+        raise SystemExit(f"Required workflow is missing from the recorded commit: {relative}")
+    source_text = source.stdout
     # BaseLoader keeps GitHub's 'on' key and expressions as strings.
     workflow = yaml.load(source_text, Loader=yaml.BaseLoader)
     workflows[relative] = workflow
-    triggers = workflow.get("on") or {}
-    if "pull_request_target" in triggers or "pull_request" not in triggers:
-        raise SystemExit(f"Expected a pull_request trigger without pull_request_target: {relative}")
+    triggers = event_settings(workflow.get("on"))
+    if "pull_request_target" in triggers or not covers_main_pull_requests(triggers.get("pull_request")):
+        raise SystemExit(f"Expected regular pull_request checks for all changes targeting main: {relative}")
     if workflow.get("permissions") != {"contents": "read"}:
         raise SystemExit(f"Workflow must declare read-only contents permission: {relative}")
     for job_id, job in workflow["jobs"].items():
         if "permissions" in job and job["permissions"] not in ({}, {"contents": "read"}):
             raise SystemExit(f"Unexpected job permissions: {relative}, {job_id}")
-        for entry in [job, *job.get("steps", [])]:
-            if "uses" not in entry:
-                continue
-            action = entry["uses"]
-            if not pinned_action.fullmatch(action):
-                raise SystemExit(f"Unpinned action: {relative}, {job_id}")
-            documented_ref = r"(?m)^\s*(?:-\s+)?uses:\s*" + re.escape(action) + r"[ \t]+#[ \t]*\S"
-            if not re.search(documented_ref, source_text):
-                raise SystemExit(f"Missing version comment for {action}: {relative}, {job_id}")
+    validate_action_references(source_text, relative)
 
 release_triggers = workflows[".github/workflows/release-evidence.yml"]["on"]
 push_branches = release_triggers.get("push", {}).get("branches", [])
@@ -97,6 +151,7 @@ manifest = {
         "ref": os.environ.get("GOVERNANCE_REF", ""),
     },
     "workflowContract": {
+        "workflowFiles": workflow_paths,
         "pullRequestCi": True,
         "pullRequestReleaseEvidence": True,
         "readOnlyContentsPermissions": True,

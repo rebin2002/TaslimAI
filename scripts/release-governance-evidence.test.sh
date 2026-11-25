@@ -60,11 +60,42 @@ fixture="$temp_dir/workflow-fixture"
 mkdir -p "$fixture/.github"
 cp -R "$repo_root/.github/workflows" "$fixture/.github/"
 git -C "$fixture" init --quiet
-git -C "$fixture" -c user.name=Fixture -c user.email=fixture@example.invalid commit --quiet --allow-empty -m fixture
+commit_fixture() {
+  git -C "$fixture" add .github/workflows
+  git -C "$fixture" -c user.name=Fixture -c user.email=fixture@example.invalid commit --quiet -m fixture
+}
+commit_fixture
 sed -i 's/^    name: Build production images and smoke-test API$/    name: Container build # Build production images and smoke-test API/' "$fixture/.github/workflows/container-health-smoke.yml"
+# Until the changed workflow is committed, only the recorded commit counts.
+(cd "$fixture" && env -u GITHUB_SHA bash "$script" "$temp_dir/unchanged.json") >/dev/null
+commit_fixture
 if (cd "$fixture" && env -u GITHUB_SHA bash "$script" "$temp_dir/missing-job.json") >"$temp_dir/missing-job.log" 2>&1; then
   echo 'A renamed required container job must fail the evidence check.' >&2
   exit 1
 fi
 grep -F 'Expected exactly one job named Build production images and smoke-test API' "$temp_dir/missing-job.log" >/dev/null
+for mode in wrong-event different-base; do
+  case "$mode" in
+    wrong-event)
+      sed 's/^  pull_request:$/  pull_request_review:/' "$repo_root/.github/workflows/container-health-smoke.yml" > "$fixture/.github/workflows/container-health-smoke.yml"
+      ;;
+    different-base)
+      sed '/^  pull_request:$/a\    branches: [unrelated]' "$repo_root/.github/workflows/container-health-smoke.yml" > "$fixture/.github/workflows/container-health-smoke.yml"
+      ;;
+  esac
+  commit_fixture
+  if (cd "$fixture" && env -u GITHUB_SHA bash "$script" "$temp_dir/$mode.json") >"$temp_dir/$mode.log" 2>&1; then
+    echo "The evidence check accepted the $mode pull-request fixture." >&2
+    exit 1
+  fi
+  grep -F 'Expected regular pull_request checks for all changes targeting main' "$temp_dir/$mode.log" >/dev/null
+done
+cp "$repo_root/.github/workflows/container-health-smoke.yml" "$fixture/.github/workflows/"
+sed '0,/ # v4/s/ # v4//' "$repo_root/.github/workflows/ci.yml" > "$fixture/.github/workflows/ci.yml"
+commit_fixture
+if (cd "$fixture" && env -u GITHUB_SHA bash "$script" "$temp_dir/missing-comment.json") >"$temp_dir/missing-comment.log" 2>&1; then
+  echo 'Each use of an action needs its own version comment.' >&2
+  exit 1
+fi
+grep -F 'Missing version comment' "$temp_dir/missing-comment.log" >/dev/null
 printf '%s\n' 'release-governance-evidence behavior tests passed.'

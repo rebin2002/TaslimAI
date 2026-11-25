@@ -26,7 +26,7 @@ The public probe did not send cookies, credentials, CSRF tokens, provider reques
 
 ## Repository-controlled acceptance evidence
 
-The evidence helper uses Python 3 with PyYAML to read GitHub workflow definitions. The Ubuntu runner uses the distribution package `python3-yaml`. For a local run, `GOVERNANCE_PYTHON` can select the Python interpreter.
+The evidence helper uses Python 3 with PyYAML to inspect the CI, production container smoke, and release evidence workflows from the recorded Git commit. The Ubuntu runner uses the distribution package `python3-yaml`. For a local run, `GOVERNANCE_PYTHON` can select the Python interpreter.
 
 The governance evidence script must report all of the following:
 
@@ -36,8 +36,8 @@ The governance evidence script must report all of the following:
 - The production container workflow exposes `Build production images and smoke-test API`.
 - The release-evidence workflow exposes `Release evidence and safety contract`.
 - Workflow permissions are limited to `contents: read`.
-- Every referenced GitHub Action is pinned to a full commit SHA and retains a version comment.
-- No workflow uses `pull_request_target`.
+- Every referenced GitHub Action in these three workflows is pinned to a full commit SHA and retains a version comment.
+- None of these three workflows uses `pull_request_target`.
 - The evidence explicitly records that remote main protection and ruleset state still require administrator attestation.
 - The evidence explicitly records that PR #275 cannot be merged or released automatically.
 
