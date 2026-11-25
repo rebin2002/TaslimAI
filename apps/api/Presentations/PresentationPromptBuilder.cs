@@ -17,9 +17,10 @@ public sealed class PresentationPromptBuilder : IPresentationPromptBuilder
     public PresentationGenerationPrompt Build(PresentationGenerationInput input, PresentationProjectContext? project, IReadOnlyList<PresentationSourceContext> sources, PresentationGenerationOptions options)
     {
         var language = input.Language == "auto" ? "the source language unless the user requests another language" : input.Language;
-        var boundaryToken = Guid.NewGuid().ToString("N");
-        var beginMarker = $"[BEGIN UNTRUSTED SOURCE:{boundaryToken}]";
-        var endMarker = $"[END UNTRUSTED SOURCE:{boundaryToken}]";
+        // The boundary markers are minted inside this call only. They are never persisted,
+        // cached, returned to a client, or shared with another request, so uploaded source
+        // text cannot predict the marker that would close its own section.
+        var (beginMarker, endMarker) = BuildBoundaryMarkers(sources);
         var system = $"""
 	You are Taslim Presentation Studio. Create a concise, factual, professional slide deck from the supplied instructions and explicitly selected source material.
 	Return only valid JSON with no Markdown fences, commentary, provider names, model names, storage details, pricing, or internal metadata.
@@ -61,6 +62,36 @@ Preserve source facts, identify uncertainty in notes when needed, and never inve
         if (user.Length > options.MaxContextCharacters) throw new PresentationContextLimitException();
         return new PresentationGenerationPrompt(system, user, language);
     }
+
+    // A token that is merely random is a probabilistic guarantee. Regenerating until the
+    // generated markers provably do not occur in any supplied source text, filename or
+    // extension turns it into an invariant the tests can check directly: whatever a source
+    // contains, it cannot include a copy of the marker that is live for this call.
+    private const int BoundaryTokenAttempts = 8;
+
+    private static (string BeginMarker, string EndMarker) BuildBoundaryMarkers(IReadOnlyList<PresentationSourceContext> sources)
+    {
+        for (var attempt = 0; attempt < BoundaryTokenAttempts; attempt++)
+        {
+            var boundaryToken = Guid.NewGuid().ToString("N");
+            var beginMarker = $"[BEGIN UNTRUSTED SOURCE:{boundaryToken}]";
+            var endMarker = $"[END UNTRUSTED SOURCE:{boundaryToken}]";
+            var collides = sources.Any(source => ContainsMarker(source.Text, beginMarker, endMarker)
+                || ContainsMarker(source.FileName, beginMarker, endMarker)
+                || ContainsMarker(source.Extension, beginMarker, endMarker));
+            if (!collides) return (beginMarker, endMarker);
+        }
+
+        // Reaching this line requires a payload that already contains a freshly minted
+        // 122-bit token. Rather than emit a fence that one known source can close early,
+        // refuse the request; it is surfaced through the existing context failure so no
+        // new provider-facing error contract is introduced by this hardening.
+        throw new PresentationContextLimitException();
+    }
+
+    private static bool ContainsMarker(string? value, string beginMarker, string endMarker) =>
+        !string.IsNullOrEmpty(value)
+        && (value.Contains(beginMarker, StringComparison.Ordinal) || value.Contains(endMarker, StringComparison.Ordinal));
 }
 
 public sealed class PresentationContextLimitException : Exception;

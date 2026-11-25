@@ -163,9 +163,9 @@ public sealed class ContextIntegrationTests : IClassFixture<ContextRecordingFact
         Assert.Contains(db.ChatMessageAttachments, attachment => attachment.StoredFileId == file.Id);
 
         var recorder = factory.Services.GetRequiredService<RecordingChatCompletionService>();
-        Assert.Contains("[Attached file: research proposal.pdf]", recorder.LastRequest!.SystemInstruction, StringComparison.Ordinal);
+        Assert.Matches(@"\[BEGIN ATTACHED FILE:[0-9a-fA-F]{32} file=1\] research proposal\.pdf", recorder.LastRequest!.SystemInstruction);
         Assert.Contains("PDF_CONTEXT_MARKER", recorder.LastRequest.SystemInstruction, StringComparison.Ordinal);
-        Assert.Contains("[End attached file]", recorder.LastRequest.SystemInstruction, StringComparison.Ordinal);
+        Assert.Matches(@"\[END ATTACHED FILE:[0-9a-fA-F]{32} file=1\]", recorder.LastRequest.SystemInstruction);
         Assert.Single(recorder.LastRequest.Attachments!);
     }
 
@@ -187,7 +187,7 @@ public sealed class ContextIntegrationTests : IClassFixture<ContextRecordingFact
         Assert.Equal(HttpStatusCode.OK, send.StatusCode);
 
         var recorder = factory.Services.GetRequiredService<RecordingChatCompletionService>();
-        Assert.Contains("[Attached file: existing.pdf]", recorder.LastRequest!.SystemInstruction, StringComparison.Ordinal);
+        Assert.Matches(@"\[BEGIN ATTACHED FILE:[0-9a-fA-F]{32} file=1\] existing\.pdf", recorder.LastRequest!.SystemInstruction);
         Assert.Contains("EXISTING_PDF_MARKER", recorder.LastRequest.SystemInstruction, StringComparison.Ordinal);
     }
 
@@ -211,9 +211,9 @@ public sealed class ContextIntegrationTests : IClassFixture<ContextRecordingFact
         Assert.Equal(HttpStatusCode.OK, send.StatusCode);
 
         var recorder = factory.Services.GetRequiredService<RecordingChatCompletionService>();
-        Assert.Contains("[Attached file: one.txt]", recorder.LastRequest!.SystemInstruction, StringComparison.Ordinal);
+        Assert.Matches(@"\[BEGIN ATTACHED FILE:[0-9a-fA-F]{32} file=1\] one\.txt", recorder.LastRequest!.SystemInstruction);
         Assert.Contains("FIRST_ATTACHMENT_MARKER", recorder.LastRequest.SystemInstruction, StringComparison.Ordinal);
-        Assert.Contains("[Attached file: two.txt]", recorder.LastRequest.SystemInstruction, StringComparison.Ordinal);
+        Assert.Matches(@"\[BEGIN ATTACHED FILE:[0-9a-fA-F]{32} file=2\] two\.txt", recorder.LastRequest.SystemInstruction);
         Assert.Contains("SECOND_ATTACHMENT_MARKER", recorder.LastRequest.SystemInstruction, StringComparison.Ordinal);
     }
 
