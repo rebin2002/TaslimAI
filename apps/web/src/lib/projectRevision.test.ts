@@ -264,7 +264,9 @@ describe("project revision fence - a token only ever certifies the copy it was p
     let first: unknown;
     tabA.noteDraft(view);
     await tabA.begin().catch((error) => { first = error; });
-    expect(first).toBeInstanceOf(TypeError);
+    // An unreachable network now surfaces as the client's bounded 503 rather
+    // than an opaque fetch TypeError, but it is still a read that never landed.
+    expect((first as { code?: string }).code).toBe("NETWORK_ERROR");
     expect(tabA.heldRevision).toBeNull();
 
     // The other tab commits while this page still shows the older copy.
