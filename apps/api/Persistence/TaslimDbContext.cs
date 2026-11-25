@@ -2,6 +2,8 @@ using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Identity.EntityFrameworkCore;
 using Microsoft.AspNetCore.DataProtection.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore;
+using Taslim.Api.AcademicEvidence.Persistence;
+using Taslim.Api.AcademicIntegration.Persistence;
 using Taslim.Api.Autopilot;
 using Taslim.Api.Benchmarking;
 using Taslim.Api.Domain;
@@ -2369,5 +2371,11 @@ public sealed class TaslimDbContext(DbContextOptions<TaslimDbContext> options)
             entity.HasIndex(item => item.ItemKey).IsUnique();
             entity.HasIndex(item => new { item.Approved, item.Kind, item.ConsumedByWaveKey });
         });
+
+        // Academic Research Studio (integration commit for #1267): the Phase B evidence
+        // lane and this lane's workflow tables keep their schema inside their own folders
+        // behind Apply*Model extensions, so a later lane change never edits this body.
+        builder.ApplyAcademicEvidenceModel();
+        builder.ApplyAcademicIntegrationModel();
     }
 }
