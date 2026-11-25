@@ -232,6 +232,10 @@ missing and are reported exactly by the API.
   `playwright test --list` and lint-clean, but was not run locally because no disposable
   PostgreSQL/API environment is configured. The hosted Browser E2E job must provide that
   browser acceptance evidence on the pushed head.
+- Autopilot ref regression: `scripts/next-wave-refs.test.sh` passed 15/15 with the dedicated
+  next-wave branch default and 15/15 with this exact feature branch explicitly supplied;
+  unrelated and parallel refs remain denied. The full disposable-PostgreSQL safety gate is
+  hosted-only and must pass on the final pushed head.
 
 ## Deferred / follow-ups (tracked, not silently skipped)
 

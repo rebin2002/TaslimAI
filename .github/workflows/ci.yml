@@ -159,6 +159,10 @@ jobs:
     # Do not make the next-wave policy reject chained PRs on other dependency bases.
     if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/feature/taslim-autopilot-next-wave' || github.ref == 'refs/heads/feat/academic-workflow-plan-slice-20261125' || (github.event_name == 'pull_request' && (github.base_ref == 'main' || github.base_ref == 'feature/taslim-autopilot-next-wave')) }}
     runs-on: ubuntu-latest
+    env:
+      # Permit only this explicitly opted-in push branch as the expected ref;
+      # all other contexts keep the gate's dedicated next-wave default.
+      NEXT_WAVE_EXPECTED_BRANCH: ${{ github.ref == 'refs/heads/feat/academic-workflow-plan-slice-20261125' && 'feat/academic-workflow-plan-slice-20261125' || 'feature/taslim-autopilot-next-wave' }}
     services:
       postgres:
         image: postgres:15@sha256:e27d24a29acce1b554771ba68c43afa55446069d228310451bb8c96c1531d2cb # postgres:15 linux/amd64
