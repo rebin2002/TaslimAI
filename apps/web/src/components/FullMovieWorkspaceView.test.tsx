@@ -224,12 +224,6 @@ describe("Full Movie workspace foundation", () => {
     expect(salvageSource).toContain("movieTakeSelectId");
     expect(selectsSource).toContain("api.createMovieTakeSelect");
     expect(selectsSource).toContain("api.reviewMovieTakeSelect");
-    expect(selectsSource).toContain("api.materializeMovieMissingInsertDecisions");
-    expect(selectsSource).toContain("api.reviewMovieMissingInsertDecision");
-    expect(selectsSource).toContain("api.applyMovieMissingInsertDecision");
-    expect(selectsSource).toContain("server-grounded");
-    expect(selectsSource).not.toContain("api.createMovieTimelineRevision");
-    expect(selectsSource).not.toContain("buildSalvageTimelineRevision");
     expect(selectsSource).not.toContain("Accept recommendation");
   });
 
@@ -241,6 +235,14 @@ describe("Full Movie workspace foundation", () => {
     expect(workspaceSource).toContain("Refresh timeline");
     expect(workspaceSource).toContain("Validation blockers");
     expect(workspaceSource).toContain("no provider call or media mutation");
+  });
+
+  it("keeps Edit review grounded in the persisted scene output", () => {
+    expect(workspaceSource).toContain("selectedScene.clipAssetId");
+    expect(workspaceSource).toContain("assetFileUrl(selectedScene.clipAssetId, true)");
+    expect(workspaceSource).toContain('controls preload="metadata"');
+    expect(workspaceSource).toContain("Download scene output");
+    expect(workspaceSource).toContain("No private scene output recorded yet.");
   });
 
 });
