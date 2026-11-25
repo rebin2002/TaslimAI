@@ -1,5 +1,6 @@
 using System.Net;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using Taslim.Api.Ai;
@@ -37,8 +38,73 @@ public sealed class ResearchSearchProviderTests
         Assert.Contains("citationStartIndex", result.Sources[0].MetadataJson, StringComparison.Ordinal);
         Assert.Equal("The Iraq market shows current appliance tr", result.Sources[0].Snippet);
         Assert.Null(result.Sources[1].Snippet);
+        Assert.Null(result.Sources[1].ExtractedText);
+        Assert.Null(result.Sources[1].MetadataJson);
         Assert.Single(result.Evidence);
         Assert.Equal(result.Sources[0].Snippet, result.Evidence[0].Excerpt);
+    }
+
+    [Theory]
+    [InlineData("{}")]
+    [InlineData("{\"start_index\": 0}")]
+    [InlineData("{\"end_index\": 5}")]
+    [InlineData("{\"start_index\": null, \"end_index\": 5}")]
+    [InlineData("{\"start_index\": \"0\", \"end_index\": 5}")]
+    [InlineData("{\"start_index\": 0, \"end_index\": 1.5}")]
+    [InlineData("{\"start_index\": -1, \"end_index\": 5}")]
+    [InlineData("{\"start_index\": 6, \"end_index\": 2}")]
+    [InlineData("{\"start_index\": 4, \"end_index\": 4}")]
+    [InlineData("{\"start_index\": 0, \"end_index\": 1000}")]
+    public async Task Invalid_or_missing_offsets_keep_the_source_without_attributed_text(string offsets)
+    {
+        var response = JsonNode.Parse(ValidResponseJson())!;
+        var annotation = JsonNode.Parse(offsets)!.AsObject();
+        annotation["type"] = "url_citation";
+        annotation["url"] = "https://example.gov/iraq-appliances";
+        annotation["title"] = "Iraq appliance market source";
+        response["output"]![1]!["content"]![0]!["annotations"] = new JsonArray(annotation);
+        using var client = new HttpClient(new StubHandler(_ => SuccessResponse(response.ToJsonString())));
+        var options = new ResearchGenerationOptions();
+
+        var result = await CreateProvider(client).SearchAsync(ProductionRequest(), options);
+
+        Assert.Equal("Iraq appliance market source", result.Sources[0].Title);
+        Assert.Equal(2, result.Sources.Count);
+        Assert.All(result.Sources, source =>
+        {
+            Assert.Null(source.Snippet);
+            Assert.Null(source.ExtractedText);
+            Assert.Null(source.MetadataJson);
+        });
+        Assert.Empty(result.Evidence);
+        Assert.Empty(new DeterministicResearchEvidenceProcessor().Normalize(result.Sources, result.Evidence, options));
+    }
+
+    [Fact]
+    public async Task Citations_use_part_local_offsets_and_keep_each_sources_evidence_separate()
+    {
+        var response = JsonNode.Parse(ValidResponseJson())!;
+        response["output"]![1]!["content"] = JsonNode.Parse("""
+        [
+          { "text": "Alpha. Beta.", "annotations": [
+            { "url": "https://example.gov/iraq-appliances", "start_index": 0, "end_index": 6 },
+            { "url": "https://example.gov/iraq-appliances", "start_index": 0, "end_index": 6 },
+            { "url_citation": { "url": "https://example.org/iraq-market", "start_index": 7, "end_index": 12 } },
+            { "url": "https://example.org/IRAQ-MARKET", "start_index": 0, "end_index": 6 }
+          ] },
+          { "text": "Other. Gamma.", "annotations": [
+            { "url": "https://example.gov/iraq-appliances", "start_index": 7, "end_index": 13 }
+          ] }
+        ]
+        """);
+        using var client = new HttpClient(new StubHandler(_ => SuccessResponse(response.ToJsonString())));
+
+        var result = await CreateProvider(client).SearchAsync(ProductionRequest(), new ResearchGenerationOptions());
+
+        Assert.Equal(new[] { "Alpha.\nGamma.", "Beta." }, result.Sources.Select(source => source.Snippet));
+        Assert.Equal(new[] { "Alpha.\nGamma.", "Beta." }, result.Sources.Select(source => source.ExtractedText));
+        Assert.Equal(new[] { ("S1", "Alpha.\nGamma."), ("S2", "Beta.") },
+            result.Evidence.Select(item => (item.CitationId, item.Excerpt)));
     }
 
     [Fact]

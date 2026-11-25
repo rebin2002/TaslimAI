@@ -23,6 +23,14 @@ describe("AccessibleProgressBar", () => {
     expect(html).toContain('style="width:100%"');
   });
 
+  it("leaves unknown progress indeterminate for assistive technology", () => {
+    const html = renderToStaticMarkup(<AccessibleProgressBar className="test-progress" label="Generation progress" value={undefined} />);
+
+    expect(html).toContain('role="progressbar"');
+    expect(html).not.toContain("aria-valuenow");
+    expect(html).not.toContain("aria-valuetext");
+  });
+
   it("keeps Image, Music, and Research Studio progress indicators on the shared accessible implementation", () => {
     expect(imageSource).toContain('import { AccessibleProgressBar } from "@/components/AccessibleProgressBar";');
     expect(imageSource).toContain('<AccessibleProgressBar className="image-progress-track"');

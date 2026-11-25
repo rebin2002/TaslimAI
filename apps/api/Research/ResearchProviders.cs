@@ -271,7 +271,7 @@ public sealed class OpenAiResearchSearchProvider(
     private static ResearchSearchResult Parse(JsonElement root, long latencyMs, ResearchGenerationOptions options)
     {
         var output = root.TryGetProperty("output", out var outputElement) && outputElement.ValueKind == JsonValueKind.Array ? outputElement.EnumerateArray().ToArray() : [];
-        var annotations = new List<(string Url, string? Title, int Start, int End, string Text)>();
+        var annotations = new List<(string Url, string? Title, int? Start, int? End, string? Excerpt)>();
         var sourceUrls = new List<string>();
         foreach (var item in output)
         {
@@ -291,15 +291,24 @@ public sealed class OpenAiResearchSearchProvider(
                     if (!part.TryGetProperty("annotations", out var annotationList) || annotationList.ValueKind != JsonValueKind.Array) continue;
                     foreach (var annotation in annotationList.EnumerateArray())
                     {
+                        if (annotation.ValueKind != JsonValueKind.Object) continue;
                         var citation = annotation.TryGetProperty("url_citation", out var nested) && nested.ValueKind == JsonValueKind.Object ? nested : annotation;
                         if (!citation.TryGetProperty("url", out var url) || url.ValueKind != JsonValueKind.String) continue;
-                        annotations.Add((url.GetString()!, citation.TryGetProperty("title", out var title) && title.ValueKind == JsonValueKind.String ? title.GetString() : null, citation.TryGetProperty("start_index", out var start) && start.TryGetInt32(out var startValue) ? startValue : 0, citation.TryGetProperty("end_index", out var end) && end.TryGetInt32(out var endValue) ? endValue : text.Length, text));
+                        var title = citation.TryGetProperty("title", out var name) && name.ValueKind == JsonValueKind.String ? name.GetString() : null;
+                        var start = ReadInt(citation, "start_index");
+                        var end = ReadInt(citation, "end_index");
+                        var excerpt = start is int from && end is int to && from >= 0 && from < to && to <= text.Length
+                            ? text[from..to].Trim()
+                            : null;
+                        annotations.Add((url.GetString()!, title, start, end, excerpt));
                     }
                 }
             }
         }
+        // A path or query can be case-sensitive. Only attribute text to the exact URL reported by the search.
+        var annotationsByUrl = annotations.ToLookup(annotation => annotation.Url, StringComparer.Ordinal);
         var orderedUrls = sourceUrls
-            .Where(IsHttpUrl)
+            .Where(IsSafeCitationUrl)
             .DistinctBy(Canonicalize, StringComparer.OrdinalIgnoreCase)
             .Take(options.MaxSourceCount)
             .ToArray();
@@ -309,19 +318,23 @@ public sealed class OpenAiResearchSearchProvider(
         for (var index = 0; index < orderedUrls.Length; index++)
         {
             var url = orderedUrls[index];
-            var sourceAnnotations = annotations.Where(item => item.Url.Equals(url, StringComparison.OrdinalIgnoreCase)).ToArray();
-            var title = string.IsNullOrWhiteSpace(sourceAnnotations.FirstOrDefault().Title) ? new Uri(url).Host : sourceAnnotations[0].Title!;
-            var excerpts = sourceAnnotations
-                .Select(annotation => CitationExcerpt(annotation.Text, annotation.Start, annotation.End))
-                .Where(excerpt => !string.IsNullOrWhiteSpace(excerpt))
-                .Distinct(StringComparer.Ordinal)
-                .ToArray();
-            var evidenceText = excerpts.Length == 0 ? null : string.Join("\n", excerpts);
+            var sourceAnnotations = annotationsByUrl[url];
+            var title = sourceAnnotations.Select(item => item.Title).FirstOrDefault(value => !string.IsNullOrWhiteSpace(value))
+                ?? new Uri(url).Host;
+            var citedSpans = sourceAnnotations.Where(item => !string.IsNullOrWhiteSpace(item.Excerpt)).ToArray();
+            var text = string.Join("\n", citedSpans.Select(item => item.Excerpt).Distinct(StringComparer.Ordinal));
             var citationId = $"S{index + 1}";
-            var canonical = Canonicalize(url);
-            var citationMetadata = sourceAnnotations.Length == 0 ? null : JsonSerializer.Serialize(new { citationStartIndex = sourceAnnotations[0].Start, citationEndIndex = sourceAnnotations[0].End });
-            sourceByUrl[url] = new ResearchSourceCandidate(citationId, url, canonical, Trim(title, options.MaxSourceTitleCharacters), new Uri(url).Host, null, null, DateTime.UtcNow, "web", TrimNullable(evidenceText, options.MaxSourceSnippetCharacters), TrimNullable(evidenceText, options.MaxSourceTextCharacters), null, index + 1, true, citationMetadata);
-            if (evidenceText is not null) evidence.Add(new ResearchEvidenceCandidate(citationId, "web evidence", Trim(evidenceText, options.MaxEvidenceCharacters), null, null));
+            var canonical = StorableCanonicalUrl(url);
+            var citationMetadata = citedSpans.Length == 0 ? null : JsonSerializer.Serialize(new
+            {
+                citationStartIndex = citedSpans[0].Start,
+                citationEndIndex = citedSpans[0].End,
+            });
+            var snippet = text.Length == 0 ? null : Trim(text, options.MaxSourceSnippetCharacters);
+            var extractedText = text.Length == 0 ? null : Trim(text, options.MaxSourceTextCharacters);
+            sourceByUrl[url] = new ResearchSourceCandidate(citationId, url, canonical, Trim(title, options.MaxSourceTitleCharacters), new Uri(url).Host, null, null, DateTime.UtcNow, "web", snippet, extractedText, null, index + 1, true, citationMetadata);
+            if (text.Length > 0)
+                evidence.Add(new ResearchEvidenceCandidate(citationId, "web evidence", Trim(text, options.MaxEvidenceCharacters), null, null));
         }
         var model = root.TryGetProperty("model", out var modelElement) && modelElement.ValueKind == JsonValueKind.String ? modelElement.GetString()! : options.SearchModel;
         var usage = root.TryGetProperty("usage", out var usageElement) ? usageElement : default;
@@ -331,18 +344,26 @@ public sealed class OpenAiResearchSearchProvider(
         return new ResearchSearchResult(sourceByUrl.Values.ToArray(), evidence, new AiUsageMetadata("openai", model, inputTokens, null, outputTokens, null, null, (int)Math.Min(int.MaxValue, latencyMs), "completed", false, PricingVersion: options.PricingVersion, Currency: "USD", CostBasis: UsageCostBasis.Estimated, SafeMetadataJson: metadata));
     }
 
-    private static bool IsHttpUrl(string value) => Uri.TryCreate(value, UriKind.Absolute, out var uri) && (uri.Scheme == Uri.UriSchemeHttp || uri.Scheme == Uri.UriSchemeHttps);
-    private static string Canonicalize(string url) { var uri = new Uri(url); var builder = new UriBuilder(uri) { Query = string.Empty, Fragment = string.Empty }; return builder.Uri.ToString().TrimEnd('/'); }
-    private static string? CitationExcerpt(string text, int start, int end)
-    {
-        var safeStart = Math.Clamp(start, 0, text.Length);
-        var safeEnd = Math.Clamp(end, safeStart, text.Length);
-        var excerpt = text[safeStart..safeEnd].Trim();
-        return string.IsNullOrWhiteSpace(excerpt) ? null : excerpt;
-    }
-    private static string? TrimNullable(string? value, int max) => string.IsNullOrWhiteSpace(value) ? null : Trim(value, max);
+    private static bool IsSafeCitationUrl(string value) => ResearchCitationUrlPolicy.IsSafe(value);
+    private const int MaxCanonicalUrlCharacters = 2_000;
+    /// <summary>
+    /// Normalizes a citation URL so that provider spellings of one document collapse into a single
+    /// citation: the query, fragment, default port, and trailing slash are removed and the scheme
+    /// and host are lower-cased. <see cref="Uri.AbsoluteUri"/> is returned rather than
+    /// <see cref="Uri.ToString()"/>, whose unescaped display form decodes percent-escapes such as
+    /// %20, %22, and %3C into raw spaces, quotes, and angle brackets.
+    /// </summary>
+    private static string Canonicalize(string url) { var uri = new Uri(url); var builder = new UriBuilder(uri) { Query = string.Empty, Fragment = string.Empty }; return builder.Uri.AbsoluteUri.TrimEnd('/'); }
+    /// <summary>
+    /// The canonical locator as it is persisted on the source row and exported in the citation
+    /// manifest, so it has to stay a URL a strict parser can resolve. Percent-escaping can be
+    /// several times longer than the provider URL, so a canonical locator that no longer fits the
+    /// bounded column is reported as unavailable instead of being written in a form the database
+    /// would reject.
+    /// </summary>
+    private static string? StorableCanonicalUrl(string url) { var canonical = Canonicalize(url); return canonical.Length <= MaxCanonicalUrlCharacters ? canonical : null; }
     private static string Trim(string value, int max) => value.Length <= max ? value : value[..Math.Max(1, max - 3)].TrimEnd() + "...";
-    private static int? ReadInt(JsonElement element, string property) => element.ValueKind == JsonValueKind.Object && element.TryGetProperty(property, out var value) && value.TryGetInt32(out var result) ? result : null;
+    private static int? ReadInt(JsonElement element, string property) => element.ValueKind == JsonValueKind.Object && element.TryGetProperty(property, out var value) && value.ValueKind == JsonValueKind.Number && value.TryGetInt32(out var result) ? result : null;
     private static Uri BuildResponsesUrl(string baseUrl) => new Uri($"{(string.IsNullOrWhiteSpace(baseUrl) ? "https://api.openai.com/v1" : baseUrl.TrimEnd('/'))}/responses", UriKind.Absolute);
 }
 

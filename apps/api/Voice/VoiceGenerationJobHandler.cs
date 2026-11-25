@@ -43,9 +43,16 @@ public sealed class VoiceGenerationJobHandler(
 
         ValidateOutput(generated);
         var format = generated.Format.Trim().ToLowerInvariant();
+        // The download name this take is saved under ends in this container, and the media type beside
+        // it is the one served on download, so the pair is resolved from the speech contract instead of
+        // from the provider's own header. Passing the header through verbatim let a valid alias (an
+        // Opus stream announced as audio/opus, for instance) clear the quality gate and then be refused
+        // by the storage boundary, failing a synthesis whose provider spend was already booked.
+        if (!VoiceGenerationValues.TryResolveSpeechContentType(format, generated.ContentType, out var persistedContentType))
+            throw new VoiceOutputInvalidException();
         var metadata = new VoiceOutputMetadata(
             AssetTypes.Audio,
-            generated.ContentType.Trim().ToLowerInvariant(),
+            persistedContentType,
             format,
             request.Language,
             request.VoiceStyle,
@@ -85,7 +92,12 @@ public sealed class VoiceGenerationJobHandler(
     {
         if (generated.Content.Length <= 0 || generated.Content.Length > Math.Min(10 * 1_048_576, Math.Max(1, settings.MaxOutputBytes)))
             throw new VoiceOutputInvalidException();
-        if (string.IsNullOrWhiteSpace(generated.ContentType) || !generated.ContentType.StartsWith("audio/", StringComparison.OrdinalIgnoreCase))
+        // Compared as a bare type name so the gate judges the essence the header announces rather than
+        // its formatting: it used to accept a trailing space and reject a leading one, and a response
+        // annotated with parameters ("audio/ogg;codecs=opus") is the audio container being asked for.
+        // The value that is persisted comes from the speech contract, never from this header.
+        if (!VoiceGenerationValues.NormalizeDeclaredContentType(generated.ContentType)
+                .StartsWith("audio/", StringComparison.OrdinalIgnoreCase))
             throw new VoiceOutputInvalidException();
         if (!VoiceGenerationValues.Formats.Contains(generated.Format.Trim()))
             throw new VoiceOutputInvalidException();
