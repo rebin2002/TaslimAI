@@ -88,6 +88,20 @@ public sealed class MovieWave3IntegrationPrepTests
     }
 
     [Fact]
+    public void Finalized_selected_take_remains_upscale_eligible()
+    {
+        var selected = new MovieTake { Id = Guid.NewGuid(), Status = MovieTakeStatuses.Selected };
+        var shot = new MovieShot { Id = Guid.NewGuid(), SelectedTakeId = selected.Id, FinalTakeId = selected.Id };
+
+        var decision = MovieWave3UpscaleEligibilityCompatibility.Evaluate(selected, shot);
+
+        Assert.True(decision.Eligible);
+        Assert.Equal(MovieWave3UpscaleEligibilityCodes.Eligible, decision.Code);
+        Assert.True(decision.IsSelected);
+        Assert.True(decision.IsFinal);
+    }
+
+    [Fact]
     public void Existing_movie_vocabulary_keeps_planning_separate_from_generation()
     {
         Assert.Equal(
