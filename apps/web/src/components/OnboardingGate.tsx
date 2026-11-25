@@ -18,7 +18,8 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import { useAuth } from "@/components/AuthProvider";
-import { localeNames, locales, useLocale } from "@/components/LocaleProvider";
+import { languagePackIds, languagePackNames, localeNames, locales, useLocale } from "@/components/LocaleProvider";
+import { languagePackDirection } from "@/lib/languagePackRegistry";
 import type { User } from "@/lib/api";
 import { onboardingFormDefaults, onboardingWorkflowDefinitions, shouldShowOnboarding, type OnboardingIntent } from "@/lib/onboarding";
 import type { Locale } from "@/lib/i18n";
@@ -43,19 +44,19 @@ export function OnboardingGate() {
 
 function OnboardingFlow({ user }: Readonly<{ user: User }>) {
   const { completeOnboarding } = useAuth();
-  const { locale, setLocale, t } = useLocale();
+  const { locale, languagePackId, setLanguagePack, t } = useLocale();
   const router = useRouter();
   const [step, setStep] = useState<OnboardingStep>("preferences");
   const defaults = onboardingFormDefaults(user, locale);
   const [displayName, setDisplayName] = useState(defaults.displayName);
-  const [preferredLanguage, setPreferredLanguage] = useState<Locale>(defaults.preferredLanguage);
+  const [preferredLanguage, setPreferredLanguage] = useState<string>(defaults.preferredLanguage);
   const [defaultGenerationLanguage, setDefaultGenerationLanguage] = useState<Locale>(defaults.defaultGenerationLanguage);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
 
   const steps: OnboardingStep[] = ["preferences", "tour", "workflow"];
   const currentStep = steps.indexOf(step) + 1;
-  const NextIcon = locale === "en" ? ArrowRight : ArrowLeft;
+  const NextIcon = languagePackDirection(languagePackId) === "ltr" ? ArrowRight : ArrowLeft;
 
   async function finish(intent?: OnboardingIntent, href = "/projects") {
     setSaving(true);
@@ -67,7 +68,8 @@ function OnboardingFlow({ user }: Readonly<{ user: User }>) {
         defaultGenerationLanguage,
         intent,
       });
-      setLocale(preferredLanguage);
+      // AuthProvider applies the persisted server preference only after the
+      // onboarding request succeeds; never write a transient preview to storage.
       router.push(href);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : t("onboarding.saveError"));
@@ -93,9 +95,10 @@ function OnboardingFlow({ user }: Readonly<{ user: User }>) {
           <p className="onboarding-description">{t("onboarding.preferencesDescription")}</p>
           <div className="onboarding-fields">
             <label><span>{t("onboarding.displayName")}</span><input value={displayName} maxLength={120} onChange={(event) => setDisplayName(event.target.value)} placeholder={t("onboarding.displayNamePlaceholder")} autoComplete="name" /></label>
-            <label><span><Globe2 size={15} /> {t("onboarding.interfaceLanguage")}</span><select value={preferredLanguage} onChange={(event) => { const next = event.target.value as Locale; setPreferredLanguage(next); setLocale(next); }}>{locales.map((item) => <option key={item} value={item}>{localeNames[item]}</option>)}</select></label>
+            <label><span><Globe2 size={15} /> {t("onboarding.interfaceLanguage")}</span><select value={preferredLanguage} onChange={(event) => { const next = event.target.value; setPreferredLanguage(next); setLanguagePack(next, { persist: false, source: "user" }); }}>{languagePackIds.map((item) => <option key={item} value={item}>{languagePackNames[item]}</option>)}</select></label>
             <label><span><Languages size={15} /> {t("onboarding.generationLanguage")}</span><select value={defaultGenerationLanguage} onChange={(event) => setDefaultGenerationLanguage(event.target.value as Locale)}>{locales.map((item) => <option key={item} value={item}>{localeNames[item]}</option>)}</select></label>
           </div>
+          {preferredLanguage === "zh-CN" && <p className="onboarding-description" role="status">{t("onboarding.zhPreviewNote")}</p>}
           <footer className="onboarding-actions"><span>{t("onboarding.preferencesHint")}</span><button type="button" className="primary-button" onClick={() => setStep("tour")}><span>{t("onboarding.continue")}</span><NextIcon size={16} /></button></footer>
         </div>}
 
