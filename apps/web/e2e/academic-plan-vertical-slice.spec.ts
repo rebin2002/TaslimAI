@@ -34,8 +34,9 @@ test("a signed-in student can save and approve the Academic Plan from Standard R
 
   await page.getByRole("button", { name: "Save and prepare plan", exact: true }).click();
   await expect(page.getByRole("heading", { name: "Research plan for review", exact: true })).toBeVisible();
-  await expect(page.getByText(researchQuestion, { exact: false })).toBeVisible();
-  await expect(page.getByText(keywords, { exact: false })).toBeVisible();
+  const savedPlanArtifact = page.getByRole("heading", { name: "Research plan for review", exact: true }).locator("..");
+  await expect(savedPlanArtifact.locator("p").filter({ hasText: researchQuestion })).toContainText(researchQuestion);
+  await expect(savedPlanArtifact.locator("p").filter({ hasText: keywords })).toContainText(keywords);
   await expect(page.getByRole("heading", { name: "Suggested scholarly search queries", exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "Approve plan", exact: true })).toBeVisible();
 
@@ -45,7 +46,8 @@ test("a signed-in student can save and approve the Academic Plan from Standard R
   await expect(page).toHaveURL(/\/create\/research\/academic$/);
   await expect(page.getByRole("heading", { name: "Academic Research Studio" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "Research plan for review", exact: true })).toBeVisible();
-  await expect(page.getByText(keywords, { exact: false })).toBeVisible();
+  const reloadedPlanArtifact = page.getByRole("heading", { name: "Research plan for review", exact: true }).locator("..");
+  await expect(reloadedPlanArtifact.locator("p").filter({ hasText: keywords })).toContainText(keywords);
   await expect(page.getByRole("button", { name: "Approve plan", exact: true })).toBeVisible();
 
   await page.getByRole("button", { name: "Approve plan", exact: true }).click();

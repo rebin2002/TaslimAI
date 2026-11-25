@@ -235,9 +235,13 @@ missing and are reported exactly by the API.
   findings in Vite and Zod. The new `jsdom` dependency is dev-only and is not named in the audit
   findings. No broad or automatic dependency fixes were applied.
 - Playwright: `playwright test --list` finds the Academic Plan test and reports 198 tests across
-  42 files. The browser suite was not run locally because no disposable PostgreSQL/API environment
-  is configured; hosted Browser E2E provides that acceptance evidence on the pushed head. The
-  local E2E guide documents the synthetic-only visibility opt-in.
+  42 files. The full browser suite was not run locally. The signed-in synthetic Academic Plan
+  scenario did pass 1/1 on local Chromium against a disposable PostgreSQL/API stack with AI
+  disabled, covering save, reload, approval, and the expected 501 for unconnected Discover. On
+  the prior `7034ff5` head, local reproduction traced its E2E failure to an unscoped question-text
+  locator matching eight elements; the regression now scopes question and keyword assertions to
+  the saved Plan artifact. Hosted Browser E2E remains required on the final pushed head. The local
+  E2E guide documents the synthetic-only visibility opt-in.
 - Autopilot ref regression: `scripts/next-wave-refs.test.sh` passed 15/15 with the dedicated
   next-wave branch default and 15/15 with this exact feature branch explicitly supplied;
   unrelated and parallel refs remain denied. The full disposable-PostgreSQL safety gate is
