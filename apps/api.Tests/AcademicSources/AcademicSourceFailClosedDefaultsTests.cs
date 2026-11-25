@@ -84,6 +84,44 @@ public sealed class AcademicSourceFailClosedDefaultsTests
     }
 
     [Fact]
+    public void A_plaintext_provider_base_is_a_configuration_error_not_a_degraded_mode()
+    {
+        var validator = new AcademicSourceDiscoveryOptionsValidator();
+        // Every catalog this feature speaks to serves HTTPS, so an http:// base can only be a typo
+        // or a proxy — and the request it would carry is the reader's topic plus, for Google Books,
+        // the deployment's key. Refusing at options resolution means a deployment cannot boot into
+        // that shape by accident; the message names the transport, not the host, so an operator is
+        // not sent to the allow list to look for a host that was already there.
+        var plaintext = validator.Validate("x", new AcademicSourceDiscoveryOptions { OpenAlexBaseUrl = "http://api.openalex.org" });
+        Assert.False(plaintext.Succeeded);
+        Assert.Contains("plaintext HTTP", plaintext.FailureMessage, StringComparison.Ordinal);
+        Assert.False(validator.Validate("x", new AcademicSourceDiscoveryOptions { GoogleBooksBaseUrl = "http://www.googleapis.com" }).Succeeded);
+        Assert.True(validator.Validate("x", new AcademicSourceDiscoveryOptions { OpenAlexBaseUrl = "https://api.openalex.org" }).Succeeded);
+    }
+
+    [Fact]
+    public void The_plaintext_switch_is_not_reachable_from_configuration()
+    {
+        // The gateway lets a test inject a plaintext transport, and nothing else may. A switch with
+        // no public setter cannot be bound from appsettings, an environment variable or a command
+        // line, so a deployment cannot silently downgrade its own egress; if this ever reads as
+        // public, the escape hatch has become a production setting and this test is the alarm.
+        // Looked up across both visibilities on purpose: the point of the assertion is which of the
+        // two the setter ended up in, so a search that could only see one would prove nothing.
+        var property = typeof(AcademicSourceDiscoveryOptions).GetProperty(
+            "AllowInsecureProviderEndpoints",
+            System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+        Assert.NotNull(property);
+        Assert.True(property!.CanRead);
+        // The accessor lookup answers for the visibility asked about: false means public only. A
+        // null here and a method there is exactly the shape the gateway depends on — the switch
+        // exists for tests in this assembly, and no binder, appsettings file or environment
+        // variable running as the application can reach it.
+        Assert.Null(property.GetSetMethod(false));
+        Assert.NotNull(property.GetSetMethod(true));
+    }
+
+    [Fact]
     public void Feature_composes_from_an_empty_configuration_section_and_stays_inert()
     {
         var services = new ServiceCollection();
