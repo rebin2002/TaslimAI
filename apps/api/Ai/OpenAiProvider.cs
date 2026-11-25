@@ -140,6 +140,15 @@ public sealed class OpenAiProvider(
                     return new AiMessageDelta(delta.GetString() ?? string.Empty);
                 if (type == "response.completed")
                     return new AiMessageCompleted(ReadUsage(root, selection, stopwatch.ElapsedMilliseconds));
+                if (type == "response.incomplete")
+                {
+                    // The Responses API terminates a stream with response.incomplete when the output
+                    // budget (max_output_tokens) or a content filter cuts generation short. The deltas
+                    // already streamed are valid content, so the turn is completed as truncated rather
+                    // than surfacing AI_GENERATION_FAILED for an ordinary long reply.
+                    logger.LogWarning("OpenAI provider emitted an incomplete response event. FinishReason={FinishReason}; ProviderKey={ProviderKey}; ModelKey={ModelKey}; StructuredOutput={StructuredOutput}; Streaming=true", ReadFinishReason(root), selection.ProviderKey, selection.ModelKey, structuredOutputRequested);
+                    return new AiMessageCompleted(ReadUsage(root, selection, stopwatch.ElapsedMilliseconds));
+                }
                 if (type is "error" or "response.failed")
                 {
                     var providerError = ReadSafeProviderError(root);
@@ -248,8 +257,30 @@ public sealed class OpenAiProvider(
         var output = ReadInt(usage, "output_tokens");
         var cached = usage.ValueKind == JsonValueKind.Object && usage.TryGetProperty("input_tokens_details", out var details)
             ? ReadInt(details, "cached_tokens") : null;
-        var status = response.TryGetProperty("status", out var statusElement) ? statusElement.GetString() : null;
-        return new AiUsageMetadata(selection.ProviderKey, selection.ModelKey, input, cached, output, null, null, (int)Math.Min(int.MaxValue, latencyMs), status ?? "completed", false);
+        return new AiUsageMetadata(selection.ProviderKey, selection.ModelKey, input, cached, output, null, null, (int)Math.Min(int.MaxValue, latencyMs), ReadFinishReason(root), false);
+    }
+
+    /// <summary>
+    /// Maps the Responses API terminal status to a safe finish-reason token. An incomplete response
+    /// records which allowlisted incomplete_details.reason cut it short (max_output_tokens budget
+    /// exhaustion or content_filter); unknown or missing reasons stay on the bare "incomplete" token so
+    /// no arbitrary provider text reaches persisted metadata.
+    /// </summary>
+    private static string ReadFinishReason(JsonElement root)
+    {
+        var response = root.TryGetProperty("response", out var responseElement) ? responseElement : root;
+        var status = response.TryGetProperty("status", out var statusElement) && statusElement.ValueKind == JsonValueKind.String
+            ? statusElement.GetString()
+            : null;
+        if (!string.Equals(status, "incomplete", StringComparison.Ordinal))
+            return status ?? "completed";
+        if (response.TryGetProperty("incomplete_details", out var incompleteDetails)
+            && incompleteDetails.ValueKind == JsonValueKind.Object
+            && incompleteDetails.TryGetProperty("reason", out var reason)
+            && reason.ValueKind == JsonValueKind.String
+            && reason.GetString() is "max_output_tokens" or "content_filter")
+            return $"incomplete:{reason.GetString()}";
+        return "incomplete";
     }
 
     private static int? ReadInt(JsonElement element, string property)

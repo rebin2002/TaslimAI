@@ -156,6 +156,84 @@ public sealed class OpenAiProviderTests
         Assert.DoesNotContain("usage", exception.Message, StringComparison.OrdinalIgnoreCase);
     }
 
+    [Fact]
+    public async Task Adapter_completes_a_stream_as_truncated_when_the_provider_emits_response_incomplete()
+    {
+        var handler = new StubHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent("data: {\"type\":\"response.output_text.delta\",\"delta\":\"Partial \"}\n\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"answer\"}\n\ndata: {\"type\":\"response.incomplete\",\"response\":{\"status\":\"incomplete\",\"incomplete_details\":{\"reason\":\"max_output_tokens\"},\"usage\":{\"input_tokens\":80,\"input_tokens_details\":{\"cached_tokens\":10},\"output_tokens\":2048}}}\n\ndata: [DONE]\n\n"),
+        });
+        using var client = new HttpClient(handler);
+        var provider = new OpenAiProvider(client, Options.Create(new AiOptions { OpenAI = new OpenAiOptions { Enabled = true, ApiKey = "test-key", BaseUrl = "https://example.test/v1" } }), Microsoft.Extensions.Logging.Abstractions.NullLogger<OpenAiProvider>.Instance);
+
+        var events = new List<AiStreamEvent>();
+        await foreach (var item in provider.StreamAsync(new AiChatRequest([new("user", "long answer")], "instruction", "Smart", EnableStreaming: true, MaxOutputTokens: 2048), new AiProviderSelection("openai", "gpt-5.6-terra", "Taslim Smart", "Smart", false))) events.Add(item);
+
+        Assert.Equal(3, events.Count);
+        Assert.Equal("Partial ", ((AiMessageDelta)events[0]).Delta);
+        Assert.Equal("answer", ((AiMessageDelta)events[1]).Delta);
+        var completed = Assert.IsType<AiMessageCompleted>(events[2]);
+        Assert.Equal("incomplete:max_output_tokens", completed.Usage.FinishReason);
+        Assert.Equal(80, completed.Usage.InputTokens);
+        Assert.Equal(10, completed.Usage.CachedInputTokens);
+        Assert.Equal(2048, completed.Usage.OutputTokens);
+        Assert.Equal(2048, JsonDocument.Parse(handler.RequestBody!).RootElement.GetProperty("max_output_tokens").GetInt32());
+    }
+
+    [Fact]
+    public async Task Adapter_falls_back_to_the_bare_incomplete_finish_reason_for_unknown_provider_reasons()
+    {
+        var handler = new StubHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent("data: {\"type\":\"response.output_text.delta\",\"delta\":\"Partial\"}\n\ndata: {\"type\":\"response.incomplete\",\"response\":{\"status\":\"incomplete\",\"incomplete_details\":{\"reason\":\"private provider detail text\"},\"usage\":{\"input_tokens\":3,\"output_tokens\":4}}}\n\n"),
+        });
+        using var client = new HttpClient(handler);
+        var provider = new OpenAiProvider(client, Options.Create(new AiOptions { OpenAI = new OpenAiOptions { Enabled = true, ApiKey = "test-key", BaseUrl = "https://example.test/v1" } }), Microsoft.Extensions.Logging.Abstractions.NullLogger<OpenAiProvider>.Instance);
+
+        var events = new List<AiStreamEvent>();
+        await foreach (var item in provider.StreamAsync(new AiChatRequest([new("user", "long answer")], "instruction", "Smart", EnableStreaming: true, MaxOutputTokens: 2048), new AiProviderSelection("openai", "gpt-5.6-terra", "Taslim Smart", "Smart", false))) events.Add(item);
+
+        var completed = Assert.IsType<AiMessageCompleted>(Assert.Single(events.OfType<AiMessageCompleted>()));
+        Assert.Equal("incomplete", completed.Usage.FinishReason);
+        Assert.DoesNotContain("private", completed.Usage.FinishReason, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task Adapter_keeps_a_stream_fatal_when_no_terminal_event_arrives()
+    {
+        var handler = new StubHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent("data: {\"type\":\"response.output_text.delta\",\"delta\":\"Hello\"}\n\ndata: [DONE]\n\n"),
+        });
+        using var client = new HttpClient(handler);
+        var provider = new OpenAiProvider(client, Options.Create(new AiOptions { OpenAI = new OpenAiOptions { Enabled = true, ApiKey = "test-key", BaseUrl = "https://example.test/v1" } }), Microsoft.Extensions.Logging.Abstractions.NullLogger<OpenAiProvider>.Instance);
+
+        var exception = await Assert.ThrowsAsync<AiProviderException>(async () =>
+        {
+            await foreach (var _ in provider.StreamAsync(new AiChatRequest([new("user", "Hello")], "instruction", "Smart", EnableStreaming: true, MaxOutputTokens: 2048), new AiProviderSelection("openai", "gpt-5.6-terra", "Taslim Smart", "Smart", false))) { }
+        });
+        Assert.Equal(AiProviderFailureCategories.MalformedResponse, exception.FailureCategory);
+    }
+
+    [Fact]
+    public async Task Adapter_marks_a_non_stream_incomplete_response_as_truncated_completion()
+    {
+        var handler = new StubHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent("{\"status\":\"incomplete\",\"incomplete_details\":{\"reason\":\"max_output_tokens\"},\"output\":[{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"Partial draft\"}]}],\"usage\":{\"input_tokens\":5,\"output_tokens\":10}}"),
+        });
+        using var client = new HttpClient(handler);
+        var provider = new OpenAiProvider(client, Options.Create(new AiOptions { OpenAI = new OpenAiOptions { Enabled = true, ApiKey = "test-key", BaseUrl = "https://example.test/v1" } }), Microsoft.Extensions.Logging.Abstractions.NullLogger<OpenAiProvider>.Instance);
+
+        var events = new List<AiStreamEvent>();
+        await foreach (var item in provider.StreamAsync(new AiChatRequest([new("user", "draft")], "instruction", "Smart", EnableStreaming: false, MaxOutputTokens: 2048), new AiProviderSelection("openai", "gpt-5.6-terra", "Taslim Smart", "Smart", false))) events.Add(item);
+
+        Assert.Equal(2, events.Count);
+        Assert.Equal("Partial draft", ((AiMessageDelta)events[0]).Delta);
+        var completed = Assert.IsType<AiMessageCompleted>(events[1]);
+        Assert.Equal("incomplete:max_output_tokens", completed.Usage.FinishReason);
+    }
+
     private sealed class StubHandler(Func<HttpRequestMessage, HttpResponseMessage> responseFactory) : HttpMessageHandler
     {
         public HttpRequestMessage? Request { get; private set; }

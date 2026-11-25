@@ -177,6 +177,31 @@ public sealed class AiCoreTests
     }
 
     [Fact]
+    public void Production_configuration_declares_the_explicit_chat_output_budget()
+    {
+        var root = LocateRepositoryRoot();
+        Assert.NotNull(root);
+        using var document = System.Text.Json.JsonDocument.Parse(File.ReadAllText(Path.Combine(root!, "apps", "api", "appsettings.Production.json")));
+        var declared = document.RootElement.GetProperty("Ai").GetProperty("MaxChatOutputTokens").GetInt32();
+        Assert.Equal(new AiOptions().MaxChatOutputTokens, declared);
+        Assert.Equal(declared, Math.Clamp(declared, 256, 16_000));
+        var context = new AiContextBuilder(Options.Create(new AiOptions { MaxChatOutputTokens = declared })).Build([]);
+        Assert.Equal(2_048, context.MaxOutputTokens);
+    }
+
+    private static string? LocateRepositoryRoot()
+    {
+        var dir = new DirectoryInfo(AppContext.BaseDirectory);
+        while (dir is not null)
+        {
+            if (Directory.Exists(Path.Combine(dir.FullName, "apps", "web")) && File.Exists(Path.Combine(dir.FullName, "package.json")))
+                return dir.FullName;
+            dir = dir.Parent;
+        }
+        return null;
+    }
+
+    [Fact]
     public async Task Completion_service_exposes_provider_independent_stream_events()
     {
         var options = Options.Create(new AiOptions { AllowMockProvider = false, OpenAI = new OpenAiOptions { Enabled = true, ApiKey = "test-only" } });

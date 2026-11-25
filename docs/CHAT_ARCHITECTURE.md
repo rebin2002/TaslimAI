@@ -40,11 +40,13 @@ Taslim uses three internal tiers:
 | Smart | `gpt-5.6-terra` | Not exposed; default |
 | Advanced | `gpt-5.6-sol` | Not exposed |
 
-The default is configured with `Ai__DefaultChatTier=Smart`. Chat output is bounded by the server-side `Ai__MaxChatOutputTokens` setting, which defaults to 2,048 and is clamped to 256–16,000 before a provider request is built. The current router is deterministic and configuration-driven. It is intentionally not an automatic classifier. A future router can analyze task characteristics while retaining the same contract.
+The default is configured with `Ai__DefaultChatTier=Smart`. Chat output is bounded by the server-side `Ai__MaxChatOutputTokens` setting, which defaults to 2,048 and is clamped to 256–16,000 before a provider request is built. The Production configuration file declares `Ai:MaxChatOutputTokens` explicitly at the same value as the code default, so the live production cap is visible in the repository and can be raised or lowered through the `Ai__MaxChatOutputTokens` environment variable without a code change. The current router is deterministic and configuration-driven. It is intentionally not an automatic classifier. A future router can analyze task characteristics while retaining the same contract.
 
 ## OpenAI adapter
 
-`OpenAiProvider` is registered behind `IAiProvider`. It calls the official Responses API at the configured server-side base URL, sends the authoritative `instructions` value, passes original Unicode conversation content unchanged, requests `stream: true`, and converts OpenAI SSE events into Taslim events. It recognizes `response.output_text.delta`, `response.completed`, and provider error/failure events.
+`OpenAiProvider` is registered behind `IAiProvider`. It calls the official Responses API at the configured server-side base URL, sends the authoritative `instructions` value, passes original Unicode conversation content unchanged, requests `stream: true`, and converts OpenAI SSE events into Taslim events. It recognizes `response.output_text.delta`, `response.completed`, `response.incomplete`, and provider error/failure events.
+
+A stream that ends with `response.incomplete` — which the Responses API emits when the output budget or a content filter cuts generation short — is a truncated success, not a failure. The deltas already delivered remain the assistant response, the turn completes normally, and the persisted finish reason records why it was cut short: `incomplete:max_output_tokens`, `incomplete:content_filter`, or the bare `incomplete` token when the provider supplies no allowlisted reason. Arbitrary provider-supplied reason strings are never persisted. A stream that closes without any terminal `response.completed`/`response.incomplete` event stays on the malformed-response failure path.
 
 The OpenAI API key is read only from `Ai__OpenAI__ApiKey` on the API service. It is never sent to the browser, compiled into Next.js, returned in a response, or written to logs. Provider errors are logged with provider/model identifiers and trace context, never with authorization headers or response secrets.
 
@@ -125,7 +127,7 @@ The OpenAI adapter captures input tokens, cached input tokens where supplied, ou
 
 ## Failure, timeout, and cancellation behavior
 
-Provider requests use a bounded timeout configured by `Ai__ProviderTimeoutSeconds`. If the provider returns an error, times out, or emits a failure event, the API logs safe diagnostics, marks the pending assistant message as `Failed`, preserves the user message, and emits/returns `AI_GENERATION_FAILED`. If the browser disconnects, the linked cancellation token stops the provider stream and the persistence cleanup path marks the assistant failure state. No failed request is silently converted into a simulated response.
+Provider requests use a bounded timeout configured by `Ai__ProviderTimeoutSeconds`. If the provider returns an error, times out, or emits a failure event, the API logs safe diagnostics, marks the pending assistant message as `Failed`, preserves the user message, and emits/returns `AI_GENERATION_FAILED`. If the browser disconnects, the linked cancellation token stops the provider stream and the persistence cleanup path marks the assistant failure state. No failed request is silently converted into a simulated response. Truncation by the configured output budget is not a failure path: a stream the provider ends with `response.incomplete` completes the turn with an `incomplete:*` finish reason instead of surfacing `AI_GENERATION_FAILED`.
 
 ## Security and privacy boundaries
 
