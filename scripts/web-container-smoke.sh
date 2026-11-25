@@ -39,7 +39,7 @@ trap cleanup EXIT
 
 docker rm --force "$container_name" >/dev/null 2>&1 || true
 if [[ "${GITHUB_ACTIONS:-}" == "true" && "$image" == "taslim-web:release-smoke" && -f "$(dirname "${BASH_SOURCE[0]}")/web-final-image-evidence.sh" ]]; then
-    bash "$(dirname "${BASH_SOURCE[0]}")/web-final-image-evidence.sh" "$image" "$port"
+    FINAL_IMAGE_EXPECT_CLEAN=1 bash "$(dirname "${BASH_SOURCE[0]}")/web-final-image-evidence.sh" "$image" "$port"
 fi
 docker run --detach --publish "${port}:${port}" --name "$container_name" \
     --env NODE_ENV=production \

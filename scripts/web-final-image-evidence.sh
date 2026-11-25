@@ -24,6 +24,8 @@ audit_status=0
     npm audit --json > "$tmp_dir/npm-audit.json"
 ) || audit_status=$?
 printf 'LOCKFILE_NPM_AUDIT_EXIT_CODE=%s\n' "$audit_status"
+image_id="$(docker image inspect --format '{{.Id}}' "$image")"
+printf 'FINAL_RUNNER_IMAGE_ID=%s\n' "$image_id"
 
 # Enumerate actual package.json files beneath the built runner's node_modules. This
 # is a filesystem inventory from the Docker image, not npm ls/audit omit metadata.
