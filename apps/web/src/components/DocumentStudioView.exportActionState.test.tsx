@@ -98,6 +98,7 @@ class TestDocument extends TestNode {
 }
 
 const harness = vi.hoisted(() => ({
+  user: { id: "synthetic-test-user" },
   workspace: null as { id: string } | null,
   api: {
     listProjects: vi.fn(),
@@ -111,7 +112,7 @@ const harness = vi.hoisted(() => ({
 }));
 
 vi.mock("@/components/AuthProvider", () => ({
-  useAuth: () => ({ workspace: harness.workspace }),
+  useAuth: () => ({ user: harness.user, workspace: harness.workspace }),
 }));
 const translate = (key: string) => key;
 const localeValue = { locale: "en", t: translate };

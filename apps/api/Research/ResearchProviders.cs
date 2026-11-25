@@ -315,7 +315,7 @@ public sealed class OpenAiResearchSearchProvider(
             var annotation = annotations.FirstOrDefault(item => item.Url.Equals(url, StringComparison.OrdinalIgnoreCase));
             var title = string.IsNullOrWhiteSpace(annotation.Title) ? new Uri(url).Host : annotation.Title!;
             var citationId = $"S{index + 1}";
-            var canonical = Canonicalize(url);
+            var canonical = StorableCanonicalUrl(url);
             var citationMetadata = annotation.Url is null ? null : JsonSerializer.Serialize(new { citationStartIndex = annotation.Start, citationEndIndex = annotation.End });
             sourceByUrl[url] = new ResearchSourceCandidate(citationId, url, canonical, Trim(title, options.MaxSourceTitleCharacters), new Uri(url).Host, null, null, DateTime.UtcNow, "web", Trim(answer, options.MaxSourceSnippetCharacters), Trim(answer, options.MaxSourceTextCharacters), null, index + 1, true, citationMetadata);
             if (annotations.Any(item => item.Url.Equals(url, StringComparison.OrdinalIgnoreCase))) evidence.Add(new ResearchEvidenceCandidate(citationId, "web evidence", Trim(answer, options.MaxEvidenceCharacters), null, null));
@@ -329,7 +329,23 @@ public sealed class OpenAiResearchSearchProvider(
     }
 
     private static bool IsSafeCitationUrl(string value) => ResearchCitationUrlPolicy.IsSafe(value);
-    private static string Canonicalize(string url) { var uri = new Uri(url); var builder = new UriBuilder(uri) { Query = string.Empty, Fragment = string.Empty }; return builder.Uri.ToString().TrimEnd('/'); }
+    private const int MaxCanonicalUrlCharacters = 2_000;
+    /// <summary>
+    /// Normalizes a citation URL so that provider spellings of one document collapse into a single
+    /// citation: the query, fragment, default port, and trailing slash are removed and the scheme
+    /// and host are lower-cased. <see cref="Uri.AbsoluteUri"/> is returned rather than
+    /// <see cref="Uri.ToString()"/>, whose unescaped display form decodes percent-escapes such as
+    /// %20, %22, and %3C into raw spaces, quotes, and angle brackets.
+    /// </summary>
+    private static string Canonicalize(string url) { var uri = new Uri(url); var builder = new UriBuilder(uri) { Query = string.Empty, Fragment = string.Empty }; return builder.Uri.AbsoluteUri.TrimEnd('/'); }
+    /// <summary>
+    /// The canonical locator as it is persisted on the source row and exported in the citation
+    /// manifest, so it has to stay a URL a strict parser can resolve. Percent-escaping can be
+    /// several times longer than the provider URL, so a canonical locator that no longer fits the
+    /// bounded column is reported as unavailable instead of being written in a form the database
+    /// would reject.
+    /// </summary>
+    private static string? StorableCanonicalUrl(string url) { var canonical = Canonicalize(url); return canonical.Length <= MaxCanonicalUrlCharacters ? canonical : null; }
     private static string Trim(string value, int max) => value.Length <= max ? value : value[..Math.Max(1, max - 3)].TrimEnd() + "...";
     private static int? ReadInt(JsonElement element, string property) => element.ValueKind == JsonValueKind.Object && element.TryGetProperty(property, out var value) && value.TryGetInt32(out var result) ? result : null;
     private static Uri BuildResponsesUrl(string baseUrl) => new Uri($"{(string.IsNullOrWhiteSpace(baseUrl) ? "https://api.openai.com/v1" : baseUrl.TrimEnd('/'))}/responses", UriKind.Absolute);
