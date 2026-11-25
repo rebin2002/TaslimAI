@@ -180,6 +180,83 @@ public sealed class NotificationTests : IClassFixture<GenerationJobsNoWorkerFact
         Assert.Equal(1, await db.Notifications.CountAsync(item => item.UserId == auth.User.Id && item.GenerationJobId == job.Id));
     }
 
+    [Fact]
+    public async Task Notification_read_mutations_stay_inside_the_requested_workspace()
+    {
+        using var client = factory.CreateClient();
+        var auth = await Register(client, $"notification-workspace-scope-{Guid.NewGuid():N}@example.com");
+        var teamWorkspaceId = Guid.NewGuid();
+        var personalNotificationId = Guid.NewGuid();
+        var teamNotificationId = Guid.NewGuid();
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            var now = DateTime.UtcNow;
+            db.Workspaces.Add(new Workspace
+            {
+                Id = teamWorkspaceId,
+                Name = "Notification scope workspace",
+                Slug = $"notification-scope-{teamWorkspaceId:N}",
+                Type = WorkspaceType.Business,
+                CreatedAt = now,
+                UpdatedAt = now,
+            });
+            db.WorkspaceMembers.Add(new WorkspaceMember
+            {
+                Id = Guid.NewGuid(),
+                WorkspaceId = teamWorkspaceId,
+                UserId = auth.User.Id,
+                Role = WorkspaceRole.Owner,
+                JoinedAt = now,
+            });
+            db.Notifications.AddRange(
+                new Notification { Id = personalNotificationId, UserId = auth.User.Id, WorkspaceId = auth.PersonalWorkspace.Id, Type = NotificationTypes.GenerationFailed, DeduplicationKey = $"test:ws-scope:{personalNotificationId:N}", ResourceTitle = "Personal alert", CreatedAt = now },
+                new Notification { Id = teamNotificationId, UserId = auth.User.Id, WorkspaceId = teamWorkspaceId, Type = NotificationTypes.GenerationFailed, DeduplicationKey = $"test:ws-scope:{teamNotificationId:N}", ResourceTitle = "Team alert", CreatedAt = now });
+            await db.SaveChangesAsync();
+        }
+
+        // Lists and counts are scoped per workspace even though both records
+        // belong to the same authenticated user.
+        var personalList = await client.GetFromJsonAsync<JsonElement>($"/api/notifications?workspaceId={auth.PersonalWorkspace.Id}");
+        Assert.Equal(1, personalList.GetProperty("unreadCount").GetInt32());
+        Assert.Equal(personalNotificationId, Assert.Single(personalList.GetProperty("items").EnumerateArray()).GetProperty("id").GetGuid());
+        var teamList = await client.GetFromJsonAsync<JsonElement>($"/api/notifications?workspaceId={teamWorkspaceId}");
+        Assert.Equal(1, teamList.GetProperty("unreadCount").GetInt32());
+        Assert.Equal(teamNotificationId, Assert.Single(teamList.GetProperty("items").EnumerateArray()).GetProperty("id").GetGuid());
+
+        // A mark-one mutation may not reach into another workspace the same
+        // user legitimately belongs to; the mismatched request is rejected
+        // without changing either unread count.
+        Assert.Equal(HttpStatusCode.Forbidden, (await SendWithCsrf(client, HttpMethod.Post, $"/api/notifications/{personalNotificationId}/read", new { workspaceId = teamWorkspaceId })).StatusCode);
+        var personalCount = await client.GetFromJsonAsync<JsonElement>($"/api/notifications/unread-count?workspaceId={auth.PersonalWorkspace.Id}");
+        Assert.Equal(1, personalCount.GetProperty("unreadCount").GetInt32());
+        var teamCount = await client.GetFromJsonAsync<JsonElement>($"/api/notifications/unread-count?workspaceId={teamWorkspaceId}");
+        Assert.Equal(1, teamCount.GetProperty("unreadCount").GetInt32());
+
+        // The matching workspace succeeds and only that workspace's count moves.
+        Assert.Equal(HttpStatusCode.OK, (await SendWithCsrf(client, HttpMethod.Post, $"/api/notifications/{personalNotificationId}/read", new { workspaceId = auth.PersonalWorkspace.Id })).StatusCode);
+        personalCount = await client.GetFromJsonAsync<JsonElement>($"/api/notifications/unread-count?workspaceId={auth.PersonalWorkspace.Id}");
+        Assert.Equal(0, personalCount.GetProperty("unreadCount").GetInt32());
+        teamCount = await client.GetFromJsonAsync<JsonElement>($"/api/notifications/unread-count?workspaceId={teamWorkspaceId}");
+        Assert.Equal(1, teamCount.GetProperty("unreadCount").GetInt32());
+
+        // Mark-all is confined to the requested workspace, and reading is
+        // idempotent across repeats.
+        Assert.Equal(HttpStatusCode.OK, (await SendWithCsrf(client, HttpMethod.Post, "/api/notifications/read-all", new { workspaceId = teamWorkspaceId })).StatusCode);
+        Assert.Equal(HttpStatusCode.OK, (await SendWithCsrf(client, HttpMethod.Post, "/api/notifications/read-all", new { workspaceId = teamWorkspaceId })).StatusCode);
+        teamCount = await client.GetFromJsonAsync<JsonElement>($"/api/notifications/unread-count?workspaceId={teamWorkspaceId}");
+        Assert.Equal(0, teamCount.GetProperty("unreadCount").GetInt32());
+        personalCount = await client.GetFromJsonAsync<JsonElement>($"/api/notifications/unread-count?workspaceId={auth.PersonalWorkspace.Id}");
+        Assert.Equal(0, personalCount.GetProperty("unreadCount").GetInt32());
+
+        // The team notification's persisted state proves the cross-workspace
+        // mark-one never touched the personal record.
+        var teamAfterAll = await client.GetFromJsonAsync<JsonElement>($"/api/notifications?workspaceId={teamWorkspaceId}");
+        var teamItem = teamAfterAll.GetProperty("items")[0];
+        Assert.Equal(teamNotificationId, teamItem.GetProperty("id").GetGuid());
+        Assert.True(teamItem.GetProperty("isRead").GetBoolean());
+    }
+
     private async Task CreateNotificationAsync(Guid jobId)
     {
         using var scope = factory.Services.CreateScope();

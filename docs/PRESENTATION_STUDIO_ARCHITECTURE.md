@@ -32,6 +32,8 @@ Blocks are intentionally structural rather than arbitrary markup. Supported bloc
 
 The managed renderer creates a 16:9 presentation package with a presentation part, slide master, blank layout, theme, slide relationships, and one slide XML part per canonical slide. It uses a restrained navy, blue, teal, and whitespace-oriented theme. Text is stored in editable DrawingML runs. Cards, accent bars, metric panels, process/timeline cards, and table cells are editable shapes or editable DrawingML tables. Slide numbers are placed in a consistent footer position.
 
+The theme part also carries the DrawingML format scheme, where ECMA-376 fixes each style list (fill, line, effect, background fill) at exactly three entries. Self-closed empty lists are schema-invalid and make PowerPoint report the downloaded deck as damaged content, so the renderer emits populated lists and the export integrity gate rejects any theme whose format scheme deviates from that content model.
+
 For Arabic and Kurdish Sorani, the renderer emits right-to-left paragraph alignment and `rtl="1"` markers, uses Arabic-capable font markers, and leaves Unicode content in its original order. Table text also carries RTL column and paragraph metadata. The package is stored privately and downloaded only through the existing authenticated Asset representation endpoint.
 
 Charts are not automatically generated in this batch. A future chart model can be added as a canonical block with validated data and an editable chart renderer. Until then, KPI and chart-like requests use explicitly supplied metrics or table/shape fallbacks; the system never invents numeric values.

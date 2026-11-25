@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { GET, POST } from "./route";
+import { GET, PATCH, POST } from "./route";
 
 function context(path: string[]) {
   return { params: Promise.resolve({ path }) };
@@ -29,6 +29,50 @@ describe("same-origin API proxy", () => {
     expect(response.status).toBe(200);
     expect(response.headers.get("set-cookie")).toContain("taslim.csrf=csrf-cookie");
     await expect(response.json()).resolves.toEqual({ token: "safe-test-token" });
+    vi.unstubAllGlobals();
+  });
+
+  it("does not forward client-controlled proxy headers to the API", async () => {
+    const upstream = new Response("{}", { status: 200 });
+    const fetchMock = vi.fn().mockResolvedValue(upstream);
+    vi.stubGlobal("fetch", fetchMock);
+    const request = new Request("http://localhost:3000/api/auth/me", {
+      headers: {
+        forwarded: "for=198.51.100.7;proto=http",
+        via: "client-proxy",
+        "x-forwarded-for": "198.51.100.7",
+        "x-forwarded-host": "attacker.example",
+        "x-forwarded-port": "80",
+        "x-forwarded-prefix": "/spoofed",
+        "x-forwarded-client-cert": "spoofed-client-certificate",
+        "x-forwarded-server": "spoofed-upstream",
+        "x-forwarded-custom-future-header": "spoofed-extension",
+        "x-csrf-token": "legitimate-csrf",
+        cookie: "taslim.auth=synthetic-session",
+        "x-forwarded-proto": "http",
+        "x-real-ip": "198.51.100.7",
+      },
+    });
+    await GET(request, context(["auth", "me"]));
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    const forwardedHeaders = new Headers(init.headers);
+    for (const header of [
+      "forwarded",
+      "via",
+      "x-forwarded-for",
+      "x-forwarded-host",
+      "x-forwarded-port",
+      "x-forwarded-prefix",
+      "x-forwarded-client-cert",
+      "x-forwarded-server",
+      "x-forwarded-custom-future-header",
+      "x-forwarded-proto",
+      "x-real-ip",
+    ]) {
+      expect(forwardedHeaders.get(header)).toBeNull();
+    }
+    expect(forwardedHeaders.get("x-csrf-token")).toBe("legitimate-csrf");
+    expect(forwardedHeaders.get("cookie")).toBe("taslim.auth=synthetic-session");
     vi.unstubAllGlobals();
   });
 
@@ -127,6 +171,62 @@ describe("same-origin API proxy", () => {
 
     expect(response.status).toBe(504);
     await expect(response.json()).resolves.toEqual({ error: { code: "API_TIMEOUT", message: "The service took too long to respond. Please try again." } });
+    vi.unstubAllGlobals();
+  });
+
+  // The project revision fence depends on this route: the browser calls the API
+  // same-origin in production, so a conditional PATCH has to reach the API with
+  // its If-Match intact and the API's answer has to reach the browser with the
+  // ETag it published. Anything dropped here turns every fenced save into an
+  // unfenced last-write-wins one, or leaves the conflict prompt without the
+  // revision it needs to offer.
+  it("forwards a fenced PATCH's If-Match upstream and returns the committed ETag", async () => {
+    const held = '"2026-11-16T09:00:00.0000123Z"';
+    const committed = '"2026-11-16T09:00:00.0000456Z"';
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ id: "project-1", name: "Renamed" }), { status: 200, headers: { ETag: committed } }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const request = new Request("http://localhost:3000/api/projects/project-1", {
+      method: "PATCH",
+      headers: { "if-match": held, "content-type": "application/json", cookie: "taslim.auth=session" },
+      body: JSON.stringify({ name: "Renamed" }),
+    });
+    const response = await PATCH(request, context(["projects", "project-1"]));
+    const [target, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+
+    expect(target).toBe("http://localhost:5000/api/projects/project-1");
+    expect(init.method).toBe("PATCH");
+    expect(new Headers(init.headers).get("If-Match")).toBe(held);
+    expect(response.status).toBe(200);
+    expect(response.headers.get("etag")).toBe(committed);
+    await expect(response.json()).resolves.toMatchObject({ id: "project-1" });
+    vi.unstubAllGlobals();
+  });
+
+  it("passes a revision refusal through with the live ETag intact", async () => {
+    const live = '"2026-11-16T09:00:00.0000789Z"';
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ error: { code: "PROJECT_REVISION_CONFLICT", message: "This project was changed by someone else." } }), {
+        status: 409,
+        headers: { ETag: live },
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const request = new Request("http://localhost:3000/api/projects/project-1", {
+      method: "PATCH",
+      headers: { "if-match": '"2026-11-16T09:00:00.0000123Z"', "content-type": "application/json", cookie: "taslim.auth=session" },
+      body: JSON.stringify({ name: "Stale" }),
+    });
+    const response = await PATCH(request, context(["projects", "project-1"]));
+
+    // Not flattened into a generic failure: the client branches on the status and
+    // the code, then reads the revision that actually holds the row.
+    expect(response.status).toBe(409);
+    expect(response.headers.get("etag")).toBe(live);
+    await expect(response.json()).resolves.toMatchObject({ error: { code: "PROJECT_REVISION_CONFLICT" } });
     vi.unstubAllGlobals();
   });
 });
