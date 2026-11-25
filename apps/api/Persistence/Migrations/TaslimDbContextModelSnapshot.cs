@@ -171,6 +171,667 @@ namespace Taslim.Api.Persistence.Migrations
                     b.ToTable("AspNetUserTokens", (string)null);
                 });
 
+            modelBuilder.Entity("Taslim.Api.AcademicEvidence.Persistence.AcademicAuditEventEntity", b =>
+                {
+                    b.Property<Guid>("SourceId")
+                        .HasColumnType("uuid");
+
+                    b.Property<long>("Sequence")
+                        .HasColumnType("bigint");
+
+                    b.Property<Guid?>("ActorId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("ActorKind")
+                        .IsRequired()
+                        .HasMaxLength(16)
+                        .HasColumnType("character varying(16)");
+
+                    b.Property<string>("EntryHash")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<string>("EventKind")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<DateTime>("OccurredAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("PayloadCanonical")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<string>("PreviousHash")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<Guid>("WorkspaceId")
+                        .HasColumnType("uuid");
+
+                    b.HasKey("SourceId", "Sequence");
+
+                    b.HasIndex("EntryHash");
+
+                    b.HasIndex("WorkspaceId", "SourceId", "Sequence");
+
+                    b.ToTable("AcademicEvidenceAuditEvents", (string)null);
+                });
+
+            modelBuilder.Entity("Taslim.Api.AcademicEvidence.Persistence.AcademicEvidenceItemEntity", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("AccessLevelAtRecord")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)");
+
+                    b.Property<int?>("AnchorEnd")
+                        .HasColumnType("integer");
+
+                    b.Property<int?>("AnchorStart")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("Claim")
+                        .HasColumnType("text");
+
+                    b.Property<string>("ClaimJson")
+                        .HasColumnType("text");
+
+                    b.Property<string>("Content")
+                        .HasColumnType("text");
+
+                    b.Property<string>("FlagsJson")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<string>("Integrity")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)");
+
+                    b.Property<string>("IntegrityReasonsJson")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<string>("LocatorKind")
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)");
+
+                    b.Property<string>("LocatorLabel")
+                        .HasMaxLength(128)
+                        .HasColumnType("character varying(128)");
+
+                    b.Property<string>("LocatorOrigin")
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)");
+
+                    b.Property<string>("LocatorPaginationBasis")
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)");
+
+                    b.Property<string>("LocatorRejectionCode")
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<DateTime>("RecordedAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<Guid>("SourceId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("SupportKind")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)");
+
+                    b.Property<string>("Topic")
+                        .IsRequired()
+                        .HasMaxLength(256)
+                        .HasColumnType("character varying(256)");
+
+                    b.Property<Guid>("WorkspaceId")
+                        .HasColumnType("uuid");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("SourceId", "Topic");
+
+                    b.HasIndex("WorkspaceId", "Integrity");
+
+                    b.ToTable("AcademicEvidenceItems", (string)null);
+                });
+
+            modelBuilder.Entity("Taslim.Api.AcademicEvidence.Persistence.AcademicMatrixCellEntity", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("AccessLevel")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)");
+
+                    b.Property<DateTime>("BuiltAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("EvidenceIdsJson")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<string>("FlagsJson")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<bool>("HasVerifiableLocator")
+                        .HasColumnType("boolean");
+
+                    b.Property<Guid>("ProjectId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("Provenance")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)");
+
+                    b.Property<string>("Quality")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)");
+
+                    b.Property<string>("QuestionKey")
+                        .IsRequired()
+                        .HasMaxLength(256)
+                        .HasColumnType("character varying(256)");
+
+                    b.Property<string>("QuestionText")
+                        .IsRequired()
+                        .HasMaxLength(2048)
+                        .HasColumnType("character varying(2048)");
+
+                    b.Property<string>("Screening")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)");
+
+                    b.Property<Guid>("SourceId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("Stance")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)");
+
+                    b.Property<Guid>("WorkspaceId")
+                        .HasColumnType("uuid");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("WorkspaceId", "ProjectId");
+
+                    b.HasIndex("ProjectId", "QuestionKey", "SourceId")
+                        .IsUnique();
+
+                    b.ToTable("AcademicEvidenceMatrixCells", (string)null);
+                });
+
+            modelBuilder.Entity("Taslim.Api.AcademicEvidence.Persistence.AcademicMatrixFindingEntity", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTime>("BuiltAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("Code")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<string>("Explanation")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<string>("FindingType")
+                        .IsRequired()
+                        .HasMaxLength(16)
+                        .HasColumnType("character varying(16)");
+
+                    b.Property<Guid?>("LeftSourceId")
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid>("ProjectId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("QuestionKey")
+                        .IsRequired()
+                        .HasMaxLength(256)
+                        .HasColumnType("character varying(256)");
+
+                    b.Property<string>("ReasonCodesJson")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<Guid?>("RightSourceId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("Severity")
+                        .IsRequired()
+                        .HasMaxLength(16)
+                        .HasColumnType("character varying(16)");
+
+                    b.Property<string>("SourceIdsJson")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<string>("SuggestedStep")
+                        .HasMaxLength(2048)
+                        .HasColumnType("character varying(2048)");
+
+                    b.Property<Guid>("WorkspaceId")
+                        .HasColumnType("uuid");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("WorkspaceId", "ProjectId");
+
+                    b.HasIndex("ProjectId", "FindingType", "Code");
+
+                    b.ToTable("AcademicEvidenceMatrixFindings", (string)null);
+                });
+
+            modelBuilder.Entity("Taslim.Api.AcademicEvidence.Persistence.AcademicProvenanceEntity", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTime>("AssessedAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<int>("CorroboratingOriginCount")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("FieldEvidenceJson")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<bool>("MayPresentAsVerified")
+                        .HasColumnType("boolean");
+
+                    b.Property<string>("ReasonCodesJson")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<string>("RetractionNoticesJson")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<Guid>("SourceId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("Verdict")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)");
+
+                    b.Property<Guid>("WorkspaceId")
+                        .HasColumnType("uuid");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("SourceId")
+                        .IsUnique();
+
+                    b.HasIndex("WorkspaceId", "Verdict");
+
+                    b.ToTable("AcademicEvidenceProvenance", (string)null);
+                });
+
+            modelBuilder.Entity("Taslim.Api.AcademicEvidence.Persistence.AcademicScreeningEntity", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("BiasJson")
+                        .HasColumnType("text");
+
+                    b.Property<string>("CriteriaJson")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<DateTime>("DecidedAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("DecidedBy")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)");
+
+                    b.Property<string>("Decision")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)");
+
+                    b.Property<string>("ExclusionReasonsJson")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<string>("FlagsJson")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<string>("InclusionReasonsJson")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<string>("MemberNote")
+                        .HasMaxLength(4096)
+                        .HasColumnType("character varying(4096)");
+
+                    b.Property<string>("ProtocolId")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<string>("ProvenanceVerdict")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)");
+
+                    b.Property<double>("QualityCoverage")
+                        .HasColumnType("double precision");
+
+                    b.Property<double>("QualityScore")
+                        .HasColumnType("double precision");
+
+                    b.Property<string>("QualityTier")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)");
+
+                    b.Property<DateTime>("ScreenedAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<Guid>("SourceId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("UndeterminedReasonsJson")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<Guid>("WorkspaceId")
+                        .HasColumnType("uuid");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("SourceId", "ProtocolId")
+                        .IsUnique();
+
+                    b.HasIndex("WorkspaceId", "Decision");
+
+                    b.ToTable("AcademicEvidenceScreening", (string)null);
+                });
+
+            modelBuilder.Entity("Taslim.Api.AcademicEvidence.Persistence.AcademicSourceEntity", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("AbstractText")
+                        .HasColumnType("text");
+
+                    b.Property<string>("AccessLevel")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)");
+
+                    b.Property<string>("AuthorsJson")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<string>("ContentAcquisition")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)");
+
+                    b.Property<string>("ContentSha256")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<string>("CorpusId")
+                        .HasMaxLength(256)
+                        .HasColumnType("character varying(256)");
+
+                    b.Property<string>("DedupeKey")
+                        .IsRequired()
+                        .HasMaxLength(2048)
+                        .HasColumnType("character varying(2048)");
+
+                    b.Property<string>("Discipline")
+                        .HasMaxLength(256)
+                        .HasColumnType("character varying(256)");
+
+                    b.Property<Guid?>("DuplicateOfSourceId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("EditionLabel")
+                        .HasMaxLength(128)
+                        .HasColumnType("character varying(128)");
+
+                    b.Property<int?>("EditionNumber")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("EditorsJson")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<string>("FullText")
+                        .HasColumnType("text");
+
+                    b.Property<string>("IdentifiersJson")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<string>("Issue")
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)");
+
+                    b.Property<string>("LandingPageUrl")
+                        .HasMaxLength(2048)
+                        .HasColumnType("character varying(2048)");
+
+                    b.Property<string>("Language")
+                        .HasMaxLength(16)
+                        .HasColumnType("character varying(16)");
+
+                    b.Property<DateTime>("NormalizedAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("OriginalScriptTitle")
+                        .HasMaxLength(2048)
+                        .HasColumnType("character varying(2048)");
+
+                    b.Property<string>("PageRange")
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<string>("PageRangeOrigin")
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)");
+
+                    b.Property<Guid?>("ProjectId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("ProtocolId")
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<DateTime?>("PublicationDateUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("PublicationYear")
+                        .HasMaxLength(8)
+                        .HasColumnType("character varying(8)");
+
+                    b.Property<string>("Publisher")
+                        .HasMaxLength(512)
+                        .HasColumnType("character varying(512)");
+
+                    b.Property<string>("SourceKind")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)");
+
+                    b.Property<string>("StudyDesign")
+                        .HasMaxLength(128)
+                        .HasColumnType("character varying(128)");
+
+                    b.Property<string>("Subtitle")
+                        .HasMaxLength(1024)
+                        .HasColumnType("character varying(1024)");
+
+                    b.Property<string>("Title")
+                        .IsRequired()
+                        .HasMaxLength(2048)
+                        .HasColumnType("character varying(2048)");
+
+                    b.Property<DateTime>("UpdatedAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("Venue")
+                        .HasMaxLength(1024)
+                        .HasColumnType("character varying(1024)");
+
+                    b.Property<string>("Volume")
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)");
+
+                    b.Property<Guid>("WorkspaceId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("YearBasis")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("WorkspaceId");
+
+                    b.HasIndex("WorkspaceId", "CorpusId");
+
+                    b.HasIndex("WorkspaceId", "ProjectId");
+
+                    b.HasIndex("WorkspaceId", "ProjectId", "DedupeKey")
+                        .IsUnique()
+                        .HasFilter("\"DuplicateOfSourceId\" IS NULL");
+
+                    b.ToTable("AcademicEvidenceSources", (string)null);
+                });
+
+            modelBuilder.Entity("Taslim.Api.AcademicIntegration.Persistence.AcademicWorkflowCheckpointEntity", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("CheckpointKey")
+                        .IsRequired()
+                        .HasMaxLength(160)
+                        .HasColumnType("character varying(160)");
+
+                    b.Property<DateTime>("CommittedAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<Guid>("ProjectId")
+                        .HasColumnType("uuid");
+
+                    b.Property<long>("Revision")
+                        .HasColumnType("bigint");
+
+                    b.Property<Guid>("WorkspaceId")
+                        .HasColumnType("uuid");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("CheckpointKey")
+                        .IsUnique();
+
+                    b.HasIndex("WorkspaceId");
+
+                    b.HasIndex("ProjectId", "Revision")
+                        .IsUnique();
+
+                    b.ToTable("AcademicWorkflowCheckpoints", (string)null);
+                });
+
+            modelBuilder.Entity("Taslim.Api.AcademicIntegration.Persistence.AcademicWorkflowProjectEntity", b =>
+                {
+                    b.Property<Guid>("ProjectId")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTime>("CreatedAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<long>("EvidenceProjectedRevision")
+                        .HasColumnType("bigint");
+
+                    b.Property<string>("RequestKey")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("character varying(200)");
+
+                    b.Property<long>("Revision")
+                        .HasColumnType("bigint");
+
+                    b.Property<string>("SnapshotJson")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<string>("State")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)");
+
+                    b.Property<string>("StateCode")
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<string>("StateDetail")
+                        .HasMaxLength(1024)
+                        .HasColumnType("character varying(1024)");
+
+                    b.Property<DateTime>("UpdatedAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<Guid>("WorkspaceId")
+                        .HasColumnType("uuid");
+
+                    b.HasKey("ProjectId");
+
+                    b.HasIndex("WorkspaceId", "CreatedAtUtc");
+
+                    b.HasIndex("WorkspaceId", "RequestKey")
+                        .IsUnique();
+
+                    b.HasIndex("WorkspaceId", "State");
+
+                    b.ToTable("AcademicWorkflowProjects", (string)null);
+                });
+
             modelBuilder.Entity("Taslim.Api.Autopilot.AutopilotAuditEvent", b =>
                 {
                     b.Property<Guid>("Id")
@@ -2213,14 +2874,14 @@ namespace Taslim.Api.Persistence.Migrations
                         .IsUnique()
                         .HasFilter("\"IdempotencyKey\" IS NOT NULL");
 
+                    b.HasIndex("WorkspaceId", "CreatedAt");
+
+                    b.HasIndex("Status", "QueuedAt", "CreatedAt");
+
                     b.HasIndex("WorkspaceId", "CreatedByUserId", "JobType")
                         .IsUnique()
                         .HasDatabaseName("IX_GenerationJobs_ImageActiveByUser")
                         .HasFilter("\"JobType\" = 'image.generate' AND \"RequestId\" LIKE 'image-studio:%' AND \"Status\" IN ('Pending', 'Queued', 'Running')");
-
-                    b.HasIndex("WorkspaceId", "CreatedAt");
-
-                    b.HasIndex("Status", "QueuedAt", "CreatedAt");
 
                     b.HasIndex("WorkspaceId", "Status", "CreatedAt");
 
@@ -5511,9 +6172,7 @@ namespace Taslim.Api.Persistence.Migrations
 
                     b.HasIndex("MovieShotId", "RequestedAt");
 
-                    b.HasIndex("SourceTakeId", "TargetProfile", "SupersededByMasterId")
-                        .IsUnique()
-                        .HasFilter("\"SupersededByMasterId\" IS NULL");
+                    b.HasIndex("SourceTakeId", "TargetProfile", "SupersededByMasterId");
 
                     b.ToTable("MovieFinalMasters");
                 });
@@ -6122,61 +6781,6 @@ namespace Taslim.Api.Persistence.Migrations
                         .IsUnique();
 
                     b.ToTable("MovieProductionKitReferences");
-                });
-
-            modelBuilder.Entity("Taslim.Api.Movies.MovieMissingInsertDecision", b =>
-                {
-                    b.Property<Guid>("Id").ValueGeneratedOnAdd().HasColumnType("uuid");
-                    b.Property<Guid?>("AfterShotId").HasColumnType("uuid");
-                    b.Property<Guid?>("AfterTimelineItemId").HasColumnType("uuid");
-                    b.Property<Guid?>("AppliedByUserId").HasColumnType("uuid");
-                    b.Property<DateTime?>("AppliedAt").HasColumnType("timestamp with time zone");
-                    b.Property<Guid?>("AppliedTimelineRevisionId").HasColumnType("uuid");
-                    b.Property<Guid?>("AnchorSelectId").HasColumnType("uuid");
-                    b.Property<Guid?>("AnchorShotId").HasColumnType("uuid");
-                    b.Property<Guid?>("AnchorTakeId").HasColumnType("uuid");
-                    b.Property<Guid?>("ApprovedStoryRevisionId").HasColumnType("uuid");
-                    b.Property<Guid?>("BeforeShotId").HasColumnType("uuid");
-                    b.Property<Guid?>("BeforeTimelineItemId").HasColumnType("uuid");
-                    b.Property<string>("ContinuityAnchorJson").IsRequired().HasMaxLength(8000).HasColumnType("character varying(8000)");
-                    b.Property<string>("ContractVersion").IsRequired().HasMaxLength(80).HasColumnType("character varying(80)");
-                    b.Property<Guid>("CreatedByUserId").HasColumnType("uuid");
-                    b.Property<DateTime>("CreatedAt").HasColumnType("timestamp with time zone");
-                    b.Property<string>("Description").IsRequired().HasMaxLength(2000).HasColumnType("character varying(2000)");
-                    b.Property<int>("DurationMilliseconds").HasColumnType("integer");
-                    b.Property<Guid>("GapId").HasColumnType("uuid");
-                    b.Property<string>("InsertType").IsRequired().HasMaxLength(30).HasColumnType("character varying(30)");
-                    b.Property<Guid?>("LockedGuideRevisionId").HasColumnType("uuid");
-                    b.Property<Guid>("MovieProjectId").HasColumnType("uuid");
-                    b.Property<Guid>("ProposalId").HasColumnType("uuid");
-                    b.Property<string>("ProposalGroundingJson").IsRequired().HasMaxLength(4000).HasColumnType("character varying(4000)");
-                    b.Property<string>("ProductionKitHash").HasMaxLength(64).HasColumnType("character varying(64)");
-                    b.Property<int?>("ProductionKitSchemaVersion").HasColumnType("integer");
-                    b.Property<string>("Purpose").IsRequired().HasMaxLength(2000).HasColumnType("character varying(2000)");
-                    b.Property<string>("ReviewNote").HasMaxLength(4000).HasColumnType("character varying(4000)");
-                    b.Property<DateTime?>("ReviewedAt").HasColumnType("timestamp with time zone");
-                    b.Property<Guid?>("ReviewedByUserId").HasColumnType("uuid");
-                    b.Property<Guid?>("SceneId").HasColumnType("uuid");
-                    b.Property<Guid?>("SelectedSelectId").HasColumnType("uuid");
-                    b.Property<Guid?>("SelectedTakeId").HasColumnType("uuid");
-                    b.Property<string>("ScreenDirectionAnchorJson").IsRequired().HasMaxLength(8000).HasColumnType("character varying(8000)");
-                    b.Property<string>("Status").IsRequired().HasMaxLength(30).HasColumnType("character varying(30)");
-                    b.Property<Guid?>("StorySceneId").HasColumnType("uuid");
-                    b.Property<int>("TimelineInMilliseconds").HasColumnType("integer");
-                    b.Property<int>("TimelineOutMilliseconds").HasColumnType("integer");
-                    b.Property<Guid>("TimelineRevisionId").HasColumnType("uuid");
-                    b.Property<int>("TimelineRevisionNumber").HasColumnType("integer");
-                    b.Property<Guid>("TrackId").HasColumnType("uuid");
-                    b.HasKey("Id");
-                    b.HasIndex("AnchorSelectId");
-                    b.HasIndex("AnchorTakeId");
-                    b.HasIndex("AppliedByUserId");
-                    b.HasIndex("CreatedByUserId");
-                    b.HasIndex("MovieProjectId", "Status", "CreatedAt");
-                    b.HasIndex("MovieProjectId", "TimelineRevisionId", "ProposalId").IsUnique();
-                    b.HasIndex("ReviewedByUserId");
-                    b.HasIndex("TimelineRevisionId");
-                    b.ToTable("MovieMissingInsertDecisions");
                 });
 
             modelBuilder.Entity("Taslim.Api.Movies.MovieProductionKitRevision", b =>
@@ -8490,11 +9094,6 @@ namespace Taslim.Api.Persistence.Migrations
 
                     b.HasIndex("MovieTakeId", "CreatedAt");
 
-                    b.HasIndex("MovieTakeId", "TargetMasterResolution")
-                        .IsUnique()
-                        .HasDatabaseName("UX_MovieTakeUpscaleAudit_Active")
-                        .HasFilter("\"Status\" IN ('PendingExecution', 'Completed')");
-
                     b.ToTable("MovieTakeUpscaleAudits");
                 });
 
@@ -9455,6 +10054,42 @@ namespace Taslim.Api.Persistence.Migrations
                     b.HasOne("Taslim.Api.Domain.ApplicationUser", null)
                         .WithMany()
                         .HasForeignKey("UserId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("Taslim.Api.AcademicEvidence.Persistence.AcademicEvidenceItemEntity", b =>
+                {
+                    b.HasOne("Taslim.Api.AcademicEvidence.Persistence.AcademicSourceEntity", null)
+                        .WithMany()
+                        .HasForeignKey("SourceId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("Taslim.Api.AcademicEvidence.Persistence.AcademicProvenanceEntity", b =>
+                {
+                    b.HasOne("Taslim.Api.AcademicEvidence.Persistence.AcademicSourceEntity", null)
+                        .WithMany()
+                        .HasForeignKey("SourceId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("Taslim.Api.AcademicEvidence.Persistence.AcademicScreeningEntity", b =>
+                {
+                    b.HasOne("Taslim.Api.AcademicEvidence.Persistence.AcademicSourceEntity", null)
+                        .WithMany()
+                        .HasForeignKey("SourceId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("Taslim.Api.AcademicIntegration.Persistence.AcademicWorkflowCheckpointEntity", b =>
+                {
+                    b.HasOne("Taslim.Api.AcademicIntegration.Persistence.AcademicWorkflowProjectEntity", null)
+                        .WithMany()
+                        .HasForeignKey("ProjectId")
                         .OnDelete(DeleteBehavior.Cascade)
                         .IsRequired();
                 });
@@ -11162,32 +11797,6 @@ namespace Taslim.Api.Persistence.Migrations
                         .IsRequired();
 
                     b.Navigation("Revision");
-                });
-
-            modelBuilder.Entity("Taslim.Api.Movies.MovieMissingInsertDecision", b =>
-                {
-                    b.HasOne("Taslim.Api.Domain.ApplicationUser", "AppliedByUser")
-                        .WithMany()
-                        .HasForeignKey("AppliedByUserId")
-                        .OnDelete(DeleteBehavior.SetNull);
-                    b.HasOne("Taslim.Api.Domain.ApplicationUser", "CreatedByUser")
-                        .WithMany()
-                        .HasForeignKey("CreatedByUserId")
-                        .OnDelete(DeleteBehavior.Restrict)
-                        .IsRequired();
-                    b.HasOne("Taslim.Api.Movies.MovieProject", "MovieProject")
-                        .WithMany()
-                        .HasForeignKey("MovieProjectId")
-                        .OnDelete(DeleteBehavior.Cascade)
-                        .IsRequired();
-                    b.HasOne("Taslim.Api.Domain.ApplicationUser", "ReviewedByUser")
-                        .WithMany()
-                        .HasForeignKey("ReviewedByUserId")
-                        .OnDelete(DeleteBehavior.SetNull);
-                    b.Navigation("AppliedByUser");
-                    b.Navigation("CreatedByUser");
-                    b.Navigation("MovieProject");
-                    b.Navigation("ReviewedByUser");
                 });
 
             modelBuilder.Entity("Taslim.Api.Movies.MovieProductionKitRevision", b =>
