@@ -133,6 +133,41 @@ public sealed class MovieShotProductionContractTests
         Assert.Null(contract.QualityRequirements);
     }
 
+    [Theory]
+    [InlineData(@"{""productionContractQualityRequirements"":[]}")]
+    [InlineData(@"{""productionContractQualityRequirements"":""text""}")]
+    [InlineData(@"{""productionContractQualityRequirements"":null}")]
+    [InlineData(@"{""productionContractQualityRequirements"":5}")]
+    [InlineData(@"{""productionContractQualityRequirements"":true}")]
+    public void Projection_treats_wrapped_non_object_quality_requirements_as_absent(string qualityRequirementsJson)
+    {
+        var shot = new MovieShot { QualityRequirementsJson = qualityRequirementsJson };
+
+        var contract = MovieShotProductionContractProjection.FromShot(shot);
+
+        Assert.Null(contract.QualityRequirements);
+    }
+
+    [Fact]
+    public void Projection_parses_a_wrapped_quality_requirements_object()
+    {
+        var quality = new MovieShotQualityRequirements(
+            MovieQualityLevels.Studio,
+            ["Readable facial performance", "Stable subject identity"],
+            "Protect the approved composition through downstream stages.");
+        var shot = new MovieShot
+        {
+            QualityRequirementsJson = $@"{{""productionContractQualityRequirements"":{MovieShotProductionContractSerialization.ToJson(quality)}}}",
+        };
+
+        var contract = MovieShotProductionContractProjection.FromShot(shot);
+
+        Assert.NotNull(contract.QualityRequirements);
+        Assert.Equal(MovieQualityLevels.Studio, contract.QualityRequirements!.MinimumLevel);
+        Assert.Equal(quality.AcceptanceCriteria, contract.QualityRequirements.AcceptanceCriteria);
+        Assert.Equal(quality.Notes, contract.QualityRequirements.Notes);
+    }
+
     [Fact]
     public void Contract_serialization_does_not_introduce_provider_or_model_fields()
     {

@@ -79,9 +79,7 @@ public sealed class UsageController(
             transaction.InputTokens,
             transaction.CachedInputTokens,
             transaction.OutputTokens,
-            transaction.ChargedAmount > transaction.ReversedAmount
-                ? transaction.ChargedAmount - transaction.ReversedAmount
-                : 0m,
+            transaction.ChargedAmount - transaction.ReversedAmount,
             transaction.ChargedUnit.ToString(),
             transaction.CreatedAt,
             transaction.CompletedAt,
