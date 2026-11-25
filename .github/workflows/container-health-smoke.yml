@@ -17,7 +17,7 @@ jobs:
         image: postgres:15@sha256:e27d24a29acce1b554771ba68c43afa55446069d228310451bb8c96c1531d2cb
         env:
           POSTGRES_USER: taslim
-          POSTGRES_PASSWORD: change-me
+          POSTGRES_PASSWORD: smoke-password
           POSTGRES_DB: taslim_container_smoke
         ports:
           - 5432:5432
@@ -49,7 +49,7 @@ jobs:
 
       - name: Smoke-test API container liveness and readiness
         env:
-          SMOKE_CONNECTION_STRING: Host=host.docker.internal;Port=5432;Database=taslim_container_smoke;Username=taslim;Password=change-me
+          SMOKE_CONNECTION_STRING: Host=host.docker.internal;Port=5432;Database=taslim_container_smoke;Username=taslim;Password=smoke-password
         run: bash scripts/container-health-smoke.sh taslim-api:release-smoke 8080 120
 
       - name: Smoke-test web container runtime and security headers

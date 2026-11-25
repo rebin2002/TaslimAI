@@ -301,6 +301,8 @@ public sealed class MovieProductionComplexityService(
     TaslimDbContext db,
     MovieCollaborationAccess collaboration) : IMovieProductionComplexityService
 {
+    private const int MaxVersionAllocationAttempts = 3;
+
     public async Task<MovieProductionComplexityAssessmentDto?> GetAsync(Guid userId, Guid shotId, CancellationToken cancellationToken = default)
     {
         var shot = await db.MovieShots.AsNoTracking().Include(item => item.Scene).FirstOrDefaultAsync(item => item.Id == shotId, cancellationToken);
@@ -315,18 +317,46 @@ public sealed class MovieProductionComplexityService(
         if (shot is null || !await collaboration.HasPermissionAsync(userId, shot.Scene.MovieProjectId, MoviePermissions.Edit, cancellationToken)) return null;
         var validation = MovieProductionComplexityValidator.Validate(request);
         if (!validation.IsValid || validation.Profile is null) throw new MovieProductionComplexityValidationException(validation);
-        var version = (await db.MovieProductionComplexityAssessments.Where(item => item.MovieShotId == shotId).Select(item => (int?)item.Version).MaxAsync(cancellationToken) ?? 0) + 1;
-        var now = DateTime.UtcNow;
-        var assessment = new MovieProductionComplexityAssessment
+        for (var attempt = 1; attempt <= MaxVersionAllocationAttempts; attempt++)
         {
-            Id = Guid.NewGuid(), MovieShotId = shotId, Version = version,
-            Source = string.IsNullOrWhiteSpace(request.Source) ? MovieProductionComplexitySources.Manual : request.Source.Trim(),
-            ProfileJson = JsonSerializer.Serialize(validation.Profile, MovieProductionComplexityValidator.JsonOptions),
-            OverallScore = validation.Profile.OverallScore, OverallBand = validation.Profile.OverallBand,
-            CreatedByUserId = userId, CreatedAt = now,
-        };
-        db.MovieProductionComplexityAssessments.Add(assessment);
-        await db.SaveChangesAsync(cancellationToken);
-        return MovieProductionComplexityProjection.ToDto(assessment);
+            var version = (await db.MovieProductionComplexityAssessments.Where(item => item.MovieShotId == shotId).Select(item => (int?)item.Version).MaxAsync(cancellationToken) ?? 0) + 1;
+            var now = DateTime.UtcNow;
+            var assessment = new MovieProductionComplexityAssessment
+            {
+                Id = Guid.NewGuid(), MovieShotId = shotId, Version = version,
+                Source = string.IsNullOrWhiteSpace(request.Source) ? MovieProductionComplexitySources.Manual : request.Source.Trim(),
+                ProfileJson = JsonSerializer.Serialize(validation.Profile, MovieProductionComplexityValidator.JsonOptions),
+                OverallScore = validation.Profile.OverallScore, OverallBand = validation.Profile.OverallBand,
+                CreatedByUserId = userId, CreatedAt = now,
+            };
+            db.MovieProductionComplexityAssessments.Add(assessment);
+            try
+            {
+                await db.SaveChangesAsync(cancellationToken);
+                return MovieProductionComplexityProjection.ToDto(assessment);
+            }
+            catch (DbUpdateException exception) when (IsVersionUniqueViolation(exception) && attempt < MaxVersionAllocationAttempts)
+            {
+                // A concurrent writer may have claimed this version. Detach the failed
+                // insert before re-reading MAX so EF cannot replay the same entity.
+                db.Entry(assessment).State = EntityState.Detached;
+            }
+        }
+
+        throw new InvalidOperationException("A complexity assessment version could not be allocated after bounded retries.");
+    }
+
+    public static bool IsVersionUniqueViolation(DbUpdateException exception)
+    {
+        for (Exception? current = exception; current is not null; current = current.InnerException)
+        {
+            var message = current.Message;
+            if (message.Contains("MovieProductionComplexityAssessments.MovieShotId, MovieProductionComplexityAssessments.Version", StringComparison.Ordinal)
+                || message.Contains("IX_MovieProductionComplexityAssessments_MovieShotId_Version", StringComparison.Ordinal)
+                || message.Contains("IX_MovieProductionComplexityAssessments_MovieShotId_Versio~", StringComparison.Ordinal))
+                return true;
+        }
+
+        return false;
     }
 }
