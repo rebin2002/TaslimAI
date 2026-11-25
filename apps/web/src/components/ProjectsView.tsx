@@ -11,6 +11,7 @@ import { useAuth } from "@/components/AuthProvider";
 import { useLocale } from "@/components/LocaleProvider";
 import { ProjectForm } from "@/components/ProjectForm";
 import { scopedProjectList } from "@/lib/projectListPagination";
+import { createRequestGuard, isAbortError } from "@/lib/requestLifecycle";
 
 const typeKey = (type: string) => `project.type.${type.toLowerCase()}`;
 
@@ -38,11 +39,13 @@ export function ProjectsView() {
   const [editing, setEditing] = useState<Project | undefined>();
   const [error, setError] = useState("");
   const formOpenerRef = useRef<HTMLElement | null>(null);
+  // Only the most recent tab/workspace load may publish its pages; a slow
+  // earlier walk must not overwrite the tab that replaced it. The guard both
+  // aborts the superseded request and fences its late result, so an unmount
+  // cancellation cannot leave a generation that still believes it is current.
+  const loadGuard = useRef(createRequestGuard());
   const workspaceTypeLabel = workspace?.type === "Business" ? t("projects.businessWorkspace") : t("projects.personalWorkspace");
   const workspaceRoleLabel = workspace ? t(`projects.role.${workspace.role.toLowerCase()}`) : "";
-  // Only the most recent tab/workspace load may publish its pages; a slow
-  // earlier walk must not overwrite the tab that replaced it.
-  const projectLoadRef = useRef<AbortController | null>(null);
   const visibleProjects = scopedProjectList(projects, workspace?.id, status);
   // The edit modal declares the revision the draft was built on. The session
   // belongs to one project id: opening the editor for another row - or closing
@@ -52,15 +55,13 @@ export function ProjectsView() {
 
   const load = useCallback(async () => {
     if (!workspace) {
-      projectLoadRef.current?.abort();
+      loadGuard.current.cancel();
       setProjects([]);
       setError("");
       setLoading(false);
       return;
     }
-    projectLoadRef.current?.abort();
-    const controller = new AbortController();
-    projectLoadRef.current = controller;
+    const request = loadGuard.current.begin();
     setLoading(true);
     // A failed page must not redisplay the previously completed list.
     setProjects([]);
@@ -68,24 +69,25 @@ export function ProjectsView() {
     try {
       // A single request only ever returns one server page; walking all
       // pages is what keeps the tab counts honest for large workspaces.
-      const items = await api.listAllProjects(workspace.id, status, controller.signal);
-      if (controller.signal.aborted) return;
+      const items = await api.listAllProjects(workspace.id, status, request.signal);
+      if (!request.isCurrent()) return;
       setProjects(items);
     } catch (caught) {
-      if (controller.signal.aborted) return;
+      if (!request.isCurrent() || isAbortError(caught)) return;
       setError(caught instanceof Error ? caught.message : t("projects.loadError"));
     } finally {
-      if (!controller.signal.aborted) setLoading(false);
+      if (request.isCurrent()) setLoading(false);
     }
   }, [status, t, workspace]);
 
   // Loading remote projects after the workspace or tab changes is an external synchronization.
   useEffect(() => {
+    const guard = loadGuard.current;
     // eslint-disable-next-line react-hooks/set-state-in-effect
     void load();
     // A multi-page walk outlives a fast navigation; stop paying for results
     // no component instance will publish.
-    return () => { projectLoadRef.current?.abort(); };
+    return () => guard.cancel();
   }, [load]);
 
   async function create(input: ProjectInput) {
@@ -137,7 +139,7 @@ export function ProjectsView() {
       <button role="tab" aria-selected={status === "Archived"} className={status === "Archived" ? "is-active" : ""} onClick={() => setStatus("Archived")}>{t("projects.archived")} <span>{status === "Archived" ? visibleProjects.length : ""}</span></button>
     </div>
 
-    {error && <div className="inline-error" role="alert">{error}</div>}
+    {error && <div className="inline-error" role="alert"><span>{error}</span> <button type="button" className="text-button" onClick={() => void load()}>{t("error.retry")}</button></div>}
     {loading ? <div className="loading-state"><span className="loading-spinner" /></div> : visibleProjects.length === 0 ? <div className="projects-empty"><span className="empty-icon"><FolderOpen size={24} /></span><h2>{status === "Active" ? t("projects.emptyTitle") : t("projects.emptyArchivedTitle")}</h2><p>{status === "Active" ? t("projects.emptyDescription") : t("projects.emptyArchivedDescription")}</p>{status === "Active" && <button className="primary-button" onClick={() => openForm()}><Plus size={16} /> {t("projects.newProject")}</button>}</div> : <div className="project-list project-list-premium">{visibleProjects.map((project) => <article className={`project-card project-card-premium ${projectAccent(project.type)}`} key={project.id}>
       <Link href={`/projects/${project.id}`} className="project-card-main">
         <span className="project-card-icon"><FolderOpen size={19} /></span>
