@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Globalization;
 using System.Text.RegularExpressions;
 
@@ -82,6 +83,9 @@ public sealed record MovieShotImportanceAssessment(
 /// </summary>
 public sealed class MovieShotImportanceClassifier
 {
+    // Keys come from the fixed signal lists in this classifier.
+    private static readonly ConcurrentDictionary<string, Regex> SignalPatterns = new(StringComparer.Ordinal);
+
     private static readonly string[] HeroSignals =
     [
         "climax", "final showdown", "major reveal", "truth is revealed", "reveals the truth",
@@ -211,17 +215,17 @@ public sealed class MovieShotImportanceClassifier
 
     private static int FindSignalIndex(string text, string signal)
     {
-        var normalizedSignal = NormalizeSignalText(signal);
-        if (normalizedSignal.Length == 0) return -1;
-
-        var words = normalizedSignal.Split(' ', StringSplitOptions.RemoveEmptyEntries);
-        var pattern = @"(?<![\p{L}\p{N}])" + string.Join(@"[^\p{L}\p{N}]+", words.Select(Regex.Escape)) + @"(?![\p{L}\p{N}])";
-        var match = Regex.Match(text, pattern, RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+        if (text.Length == 0) return -1;
+        var match = SignalPatterns.GetOrAdd(signal, CreateSignalPattern).Match(text);
         return match.Success ? match.Index : -1;
     }
 
-    private static string NormalizeSignalText(string value) =>
-        Regex.Replace(value.ToLowerInvariant(), @"[^\p{L}\p{N}]+", " ").Trim();
+    private static Regex CreateSignalPattern(string signal)
+    {
+        var words = Regex.Split(signal, @"[^\p{L}\p{N}]+");
+        var pattern = @"(?<![\p{L}\p{N}])" + string.Join(@"[^\p{L}\p{N}]+", words.Select(Regex.Escape)) + @"(?![\p{L}\p{N}])";
+        return new Regex(pattern, RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+    }
 
     private static string Excerpt(string text, string? signal)
     {
