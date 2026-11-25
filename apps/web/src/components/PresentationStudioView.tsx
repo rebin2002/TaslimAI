@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
-import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import {
   ArrowLeft,
   ArrowRight,
@@ -26,19 +26,35 @@ import { useLocale } from "@/components/LocaleProvider";
 import { ApiError, api, type Asset, type GenerationJob, type PresentationJobResult, type Project, type StoredFile } from "@/lib/api";
 import { assetFileUrl } from "@/lib/apiBase";
 import {
+  canActivatePresentationExport,
+  presentationExportAccessibleName,
+  presentationExportCaption,
+  resolvePresentationExportControl,
+  selectPresentationExports,
+} from "@/lib/presentationExportAccess";
+import {
   canCancelPresentationJob,
   clearPresentationActiveJobId,
   displayPresentationProgress,
+  loadPresentationDraftState,
   isRestorablePresentationJob,
   isPresentationSourceReady,
+  markPresentationCancellationRequestedForJob,
+  resolvePresentationJobSnapshot,
+  isPresentationCancellationNoOp,
   nextPresentationPollDelay,
   parsePresentationJobResult,
   persistPresentationActiveJobId,
+  persistPresentationDraftState,
   presentationStudioState,
   readPresentationActiveJobId,
   shouldResetPresentationWorkspaceState,
   shouldPollPresentationJob,
 } from "@/lib/presentationStudioState";
+import {
+  filterStudioDownloadableRepresentations,
+  readStudioRepresentationDownloadability,
+} from "@/lib/studioRepresentationAvailability";
 
 const extensions = [".pdf", ".docx", ".txt", ".md", ".csv", ".xlsx"];
 type PresentationType = "auto" | "business" | "company_profile" | "sales" | "investor" | "proposal" | "training" | "project_update" | "report" | "educational" | "general";
@@ -114,7 +130,15 @@ function RecentPresentationCard({ asset }: { asset: Asset }) {
   );
 }
 
+// Remount on any authenticated principal/workspace transition so old drafts,
+// file selections, previews and in-flight UI responses cannot appear in a new session.
 export function PresentationStudioView() {
+  const { user, workspace, loading } = useAuth();
+  if (loading || !user?.id || !workspace?.id) return null;
+  return <IdentityScopedPresentationStudioView key={`${encodeURIComponent(user.id)}:${encodeURIComponent(workspace.id)}`} userId={user.id} />;
+}
+
+function IdentityScopedPresentationStudioView({ userId }: { userId: string }) {
   const { workspace } = useAuth();
   const { locale, t } = useLocale();
   const searchParams = useSearchParams();
@@ -138,16 +162,47 @@ export function PresentationStudioView() {
   const [activeSlide, setActiveSlide] = useState(0);
   const [loadingSources, setLoadingSources] = useState(true);
   const [working, setWorking] = useState(false);
+  /** Which rendition the in-flight download was started from; see `presentationExportAccess.ts`. */
+  const [pendingExportId, setPendingExportId] = useState<string | null>(null);
   const [pollRetry, setPollRetry] = useState(0);
+  const [sessionDenied, setSessionDenied] = useState(false);
+  const sessionDeniedRef = useRef(false);
   const [retryingCompleted, setRetryingCompleted] = useState(false);
   const [error, setError] = useState("");
   const [downloadError, setDownloadError] = useState("");
   const restoreJobId = useRef<string | null>(null);
+  const draftHydratedWorkspace = useRef<string | null>(null);
   const observedWorkspaceId = useRef<string | null>(workspace?.id ?? null);
   const workspaceGeneration = useRef(0);
 
+  // A revoked session is terminal for this mounted user/workspace. Do not
+  // render cached private slides or start new protected requests after HTTP 401.
+  const revokeSession = useCallback(() => {
+    if (sessionDeniedRef.current) return;
+    sessionDeniedRef.current = true;
+    workspaceGeneration.current += 1;
+    restoreJobId.current = null;
+    if (workspace) clearPresentationActiveJobId(userId, workspace.id);
+    setSessionDenied(true);
+    setCurrent(null);
+    setProjects([]);
+    setFiles([]);
+    setRecentPresentations([]);
+    setSelected([]);
+    setTitle("");
+    setDescription("");
+    setAudience("");
+    setBrandCompany("");
+    setAdditionalInstructions("");
+    setWorking(false);
+    setRetryingCompleted(false);
+    setLoadingSources(false);
+    setPollRetry(0);
+    setError(t("presentation.pollError"));
+  }, [userId, workspace, t]);
+
   const loadSources = useCallback(async () => {
-    if (!workspace) return;
+    if (!workspace || sessionDeniedRef.current) return;
     const workspaceId = workspace.id;
     const workspaceVersion = workspaceGeneration.current;
     setLoadingSources(true);
@@ -158,19 +213,28 @@ export function PresentationStudioView() {
         api.listFiles(workspaceId),
         api.listAssets(workspaceId, { assetType: "presentation", sort: "recent", pageSize: 6 }),
       ]);
-      if (observedWorkspaceId.current !== workspaceId || workspaceGeneration.current !== workspaceVersion) return;
-      setProjects([...active, ...archived]);
-      setFiles(sourceFiles.filter((file) => extensions.includes(file.extension.toLowerCase())));
+      if (sessionDeniedRef.current || observedWorkspaceId.current !== workspaceId || workspaceGeneration.current !== workspaceVersion) return;
+      const availableProjects = [...active, ...archived];
+      const availableFiles = sourceFiles.filter((file) => extensions.includes(file.extension.toLowerCase()));
+      setProjects(availableProjects);
+      setProjectId((value) => value && availableProjects.some((project) => project.id === value) ? value : "");
+      setFiles(availableFiles);
+      const readyIds = new Set(availableFiles.filter((file) => isPresentationSourceReady(file)).map((file) => file.id));
+      setSelected((value) => value.filter((id) => readyIds.has(id)).slice(0, 5));
       setRecentPresentations(assetResult.items);
-    } catch {
-      if (observedWorkspaceId.current !== workspaceId || workspaceGeneration.current !== workspaceVersion) return;
+    } catch (cause) {
+      if (sessionDeniedRef.current || observedWorkspaceId.current !== workspaceId || workspaceGeneration.current !== workspaceVersion) return;
+      if (cause instanceof ApiError && cause.status === 401) {
+        revokeSession();
+        return;
+      }
       setProjects([]);
       setFiles([]);
       setRecentPresentations([]);
     } finally {
-      if (observedWorkspaceId.current === workspaceId && workspaceGeneration.current === workspaceVersion) setLoadingSources(false);
+      if (!sessionDeniedRef.current && observedWorkspaceId.current === workspaceId && workspaceGeneration.current === workspaceVersion) setLoadingSources(false);
     }
-  }, [workspace]);
+  }, [workspace, revokeSession]);
 
   // Workspace-scoped jobs, briefs, selections, and source lists must not survive an ownership boundary.
   // The generation counter fences responses and actions that started in the previous workspace.
@@ -181,6 +245,7 @@ export function PresentationStudioView() {
     observedWorkspaceId.current = nextWorkspaceId;
     workspaceGeneration.current += 1;
     restoreJobId.current = null;
+    draftHydratedWorkspace.current = null;
     if (previousWorkspaceId === null && nextWorkspaceId !== null && !shouldResetPresentationWorkspaceState(current, nextWorkspaceId)) return;
     setCurrent(null);
     setSelected([]);
@@ -212,48 +277,94 @@ export function PresentationStudioView() {
   // eslint-disable-next-line react-hooks/set-state-in-effect
   useEffect(() => { void loadSources(); }, [loadSources]);
   useEffect(() => {
-    if (!workspace || current) return;
-    const storedJobId = readPresentationActiveJobId(workspace.id);
+    if (!workspace || sessionDeniedRef.current || current || draftHydratedWorkspace.current === workspace.id) return;
+    const draft = loadPresentationDraftState(userId, workspace.id);
+    setProjectId(searchParams.get("projectId") ?? draft.projectId);
+    setSelected(draft.selected);
+    setTitle(draft.title);
+    setDescription(draft.description);
+    setPresentationType(draft.presentationType as PresentationType);
+    setLength(draft.length as Length);
+    setTone(draft.tone as Tone);
+    setLanguage(draft.language as Language);
+    setAudience(draft.audience);
+    setBrandCompany(draft.brandCompany);
+    setAdditionalInstructions(draft.additionalInstructions);
+    setIncludeAgenda(draft.includeAgenda);
+    setIncludeClosingNextSteps(draft.includeClosingNextSteps);
+    draftHydratedWorkspace.current = workspace.id;
+  }, [current, searchParams, workspace]);
+  const draft = useMemo(() => ({ projectId, selected, title, description, presentationType, length, tone, language, audience, brandCompany, additionalInstructions, includeAgenda, includeClosingNextSteps }), [additionalInstructions, audience, brandCompany, description, includeAgenda, includeClosingNextSteps, language, length, presentationType, projectId, selected, title, tone]);
+  useEffect(() => {
+    if (!workspace || sessionDeniedRef.current || current || draftHydratedWorkspace.current !== workspace.id) return;
+    persistPresentationDraftState(userId, workspace.id, draft);
+  }, [current, draft, workspace]);
+  useEffect(() => {
+    if (!workspace || sessionDeniedRef.current || current) return;
+    const storedJobId = readPresentationActiveJobId(userId, workspace.id);
     if (!storedJobId) return;
     restoreJobId.current = storedJobId;
     const workspaceVersion = workspaceGeneration.current;
     let active = true;
     void api.getGenerationJob(storedJobId).then((job) => {
-      if (!active || workspaceGeneration.current !== workspaceVersion || restoreJobId.current !== storedJobId) return;
+      if (!active || sessionDeniedRef.current || workspaceGeneration.current !== workspaceVersion || restoreJobId.current !== storedJobId) return;
       if (!isRestorablePresentationJob(job, workspace.id)) {
-        clearPresentationActiveJobId(workspace.id);
+        clearPresentationActiveJobId(userId, workspace.id);
         return;
       }
-      setCurrent(job);
+      setCurrent((previous) => resolvePresentationJobSnapshot(previous, job));
       setPollRetry(0);
     }).catch((cause) => {
-      if (!active || workspaceGeneration.current !== workspaceVersion || restoreJobId.current !== storedJobId) return;
-      if (cause instanceof ApiError && (cause.status === 403 || cause.status === 404)) clearPresentationActiveJobId(workspace.id);
+      if (!active || sessionDeniedRef.current || workspaceGeneration.current !== workspaceVersion || restoreJobId.current !== storedJobId) return;
+      if (cause instanceof ApiError && cause.status === 401) {
+        revokeSession();
+        return;
+      }
+      if (cause instanceof ApiError && (cause.status === 403 || cause.status === 404)) {
+        clearPresentationActiveJobId(userId, workspace.id);
+        restoreJobId.current = null;
+      }
     });
     return () => { active = false; };
-  }, [workspace, current]);
+  }, [workspace, current, userId, revokeSession]);
   useEffect(() => {
-    if (!current || !shouldPollPresentationJob(current)) return;
+    if (sessionDeniedRef.current || !current || !shouldPollPresentationJob(current)) return;
     const jobId = current.id;
     const workspaceVersion = workspaceGeneration.current;
     let active = true;
     const timer = window.setTimeout(async () => {
       try {
         const next = await api.getGenerationJob(jobId);
-        if (!active || workspaceGeneration.current !== workspaceVersion || current.id !== jobId) return;
-        setCurrent(next);
+        if (!active || sessionDeniedRef.current || workspaceGeneration.current !== workspaceVersion || current.id !== jobId) return;
+        setCurrent((previous) => resolvePresentationJobSnapshot(previous, next));
         setPollRetry(0);
         setError("");
-      } catch {
-        if (!active || workspaceGeneration.current !== workspaceVersion || current.id !== jobId) return;
+      } catch (cause) {
+        if (!active || sessionDeniedRef.current || workspaceGeneration.current !== workspaceVersion || current.id !== jobId) return;
+        if (cause instanceof ApiError && cause.status === 401) {
+          revokeSession();
+          return;
+        }
+        if (cause instanceof ApiError && (cause.status === 403 || cause.status === 404)) {
+          if (workspace) clearPresentationActiveJobId(userId, workspace.id);
+          restoreJobId.current = null;
+          setCurrent(null);
+          setPollRetry(0);
+          setError(t("presentation.pollError"));
+          return;
+        }
         setPollRetry((attempt) => attempt + 1);
         setError(t("presentation.pollError"));
       }
     }, nextPresentationPollDelay(current, pollRetry) ?? 700);
     return () => { active = false; window.clearTimeout(timer); };
-  }, [current, pollRetry, t]);
+  }, [current, pollRetry, t, workspace, userId, revokeSession]);
 
   const result = parsePresentationJobResult(current);
+  // #1049: gate the export menu on the live per-representation facts delivered beside the
+  // immutable ResultJson snapshot (`representationDownloads`, the #1117 API contract). No
+  // field, no change: legacy payloads keep advertising every rendition exactly as before.
+  const representationDownloadability = readStudioRepresentationDownloadability(current);
   const state = presentationStudioState(current, result);
   const readyFiles = files.filter((file) => isPresentationSourceReady(file));
   const progress = displayPresentationProgress(current);
@@ -264,12 +375,13 @@ export function PresentationStudioView() {
   const progressSteps = [t("presentation.progress.brief"), t("presentation.progress.structure"), t("presentation.progress.slides")];
 
   function toggleFile(file: StoredFile) {
-    if (!isPresentationSourceReady(file)) return;
+    if (sessionDeniedRef.current || !isPresentationSourceReady(file)) return;
     setSelected((value) => value.includes(file.id) ? value.filter((id) => id !== file.id) : value.length >= 5 ? value : [...value, file.id]);
   }
 
   async function create(event: FormEvent) {
     event.preventDefault();
+    if (sessionDeniedRef.current) return;
     if (!workspace || title.trim().length < 3 || description.trim().length < 3) {
       setError(t("presentation.required"));
       return;
@@ -280,7 +392,8 @@ export function PresentationStudioView() {
     restoreJobId.current = null;
     const workspaceId = workspace.id;
     const workspaceVersion = workspaceGeneration.current;
-    clearPresentationActiveJobId(workspaceId);
+    persistPresentationDraftState(userId, workspaceId, draft);
+    clearPresentationActiveJobId(userId, workspaceId);
     try {
       const job = await api.createPresentationGenerationJob({
         workspaceId,
@@ -298,76 +411,101 @@ export function PresentationStudioView() {
         includeClosingNextSteps,
         attachmentIds: selected,
       });
-      if (workspaceGeneration.current !== workspaceVersion || observedWorkspaceId.current !== workspaceId) return;
-      persistPresentationActiveJobId(workspaceId, job.id);
+      if (sessionDeniedRef.current || workspaceGeneration.current !== workspaceVersion || observedWorkspaceId.current !== workspaceId) return;
+      persistPresentationActiveJobId(userId, workspaceId, job.id);
       setCurrent(job);
       setActiveSlide(0);
       setPollRetry(0);
-    } catch {
-      if (workspaceGeneration.current === workspaceVersion && observedWorkspaceId.current === workspaceId) setError(t("presentation.createError"));
+    } catch (cause) {
+      if (cause instanceof ApiError && cause.status === 401 && !sessionDeniedRef.current) revokeSession();
+      else if (!sessionDeniedRef.current && workspaceGeneration.current === workspaceVersion && observedWorkspaceId.current === workspaceId) setError(t("presentation.createError"));
     } finally {
-      if (workspaceGeneration.current === workspaceVersion && observedWorkspaceId.current === workspaceId) setWorking(false);
+      if (!sessionDeniedRef.current && workspaceGeneration.current === workspaceVersion && observedWorkspaceId.current === workspaceId) setWorking(false);
     }
   }
 
   async function cancel() {
-    if (!current || !canCancelPresentationJob(current)) return;
+    if (sessionDeniedRef.current || !current || !canCancelPresentationJob(current)) return;
     const workspaceVersion = workspaceGeneration.current;
     const jobId = current.id;
     setWorking(true);
     setError("");
     try {
       await api.cancelGenerationJob(jobId);
+      // The accepted cancellation is durable. Keep the UI on the cancelling path
+      // even if a poll that started before this request resolves afterwards.
+      // Bound to the job that issued it: a new brief can already own this state
+      // when the request settles, and must not be stranded as cancelling.
+      setCurrent(markPresentationCancellationRequestedForJob(jobId));
       const next = await api.getGenerationJob(jobId);
-      if (workspaceGeneration.current !== workspaceVersion || current.id !== jobId) return;
-      setCurrent(next);
-    } catch {
-      if (workspaceGeneration.current === workspaceVersion && current.id === jobId) setError(t("presentation.cancelError"));
+      if (sessionDeniedRef.current || workspaceGeneration.current !== workspaceVersion || current.id !== jobId) return;
+      setCurrent((previous) => resolvePresentationJobSnapshot(previous, next));
+    } catch (cause) {
+      if (cause instanceof ApiError && cause.status === 401 && !sessionDeniedRef.current) revokeSession();
+      else if (cause instanceof ApiError && isPresentationCancellationNoOp(cause.status, cause.code) && !sessionDeniedRef.current && workspaceGeneration.current === workspaceVersion && current.id === jobId) {
+        // The job settled before the cancellation was recorded, so cancelling it
+        // again is an idempotent no-op: adopt the authoritative state instead of
+        // reporting a failed cancellation for work that already finished.
+        try {
+          const next = await api.getGenerationJob(jobId);
+          if (!sessionDeniedRef.current && workspaceGeneration.current === workspaceVersion && current.id === jobId) setCurrent((previous) => resolvePresentationJobSnapshot(previous, next));
+        } catch {
+          setError(t("presentation.completedLoadError"));
+        }
+      }
+      else if (!sessionDeniedRef.current && workspaceGeneration.current === workspaceVersion && current.id === jobId) setError(t("presentation.cancelError"));
     } finally {
-      if (workspaceGeneration.current === workspaceVersion) setWorking(false);
+      if (!sessionDeniedRef.current && workspaceGeneration.current === workspaceVersion) setWorking(false);
     }
   }
 
   async function retryCompleted() {
-    if (!current) return;
+    if (sessionDeniedRef.current || !current) return;
     const workspaceVersion = workspaceGeneration.current;
     const jobId = current.id;
     setRetryingCompleted(true);
     setError("");
     try {
       const next = await api.getGenerationJob(jobId);
-      if (workspaceGeneration.current === workspaceVersion && current.id === jobId) setCurrent(next);
-    } catch {
-      if (workspaceGeneration.current === workspaceVersion && current.id === jobId) setError(t("presentation.completedLoadError"));
+      if (!sessionDeniedRef.current && workspaceGeneration.current === workspaceVersion && current.id === jobId) setCurrent((previous) => resolvePresentationJobSnapshot(previous, next));
+    } catch (cause) {
+      if (cause instanceof ApiError && cause.status === 401 && !sessionDeniedRef.current) revokeSession();
+      else if (!sessionDeniedRef.current && workspaceGeneration.current === workspaceVersion && current.id === jobId) setError(t("presentation.completedLoadError"));
     } finally {
-      if (workspaceGeneration.current === workspaceVersion) setRetryingCompleted(false);
+      if (!sessionDeniedRef.current && workspaceGeneration.current === workspaceVersion) setRetryingCompleted(false);
     }
   }
 
   async function downloadRepresentation(representationId: string, fileName: string) {
-    if (!result?.assetId) return;
+    if (sessionDeniedRef.current || !result?.assetId) return;
     const workspaceVersion = workspaceGeneration.current;
     setWorking(true);
+    setPendingExportId(representationId);
     setDownloadError("");
     try {
       const blob = await api.downloadAssetRepresentation(result.assetId, representationId);
-      if (workspaceGeneration.current !== workspaceVersion) return;
+      if (sessionDeniedRef.current || workspaceGeneration.current !== workspaceVersion) return;
       const url = URL.createObjectURL(blob);
       const anchor = window.document.createElement("a");
       anchor.href = url;
       anchor.download = fileName;
       anchor.click();
       window.setTimeout(() => URL.revokeObjectURL(url), 0);
-    } catch {
-      if (workspaceGeneration.current === workspaceVersion) setDownloadError(t("presentation.downloadError"));
+    } catch (cause) {
+      if (cause instanceof ApiError && cause.status === 401 && !sessionDeniedRef.current) revokeSession();
+      else if (!sessionDeniedRef.current && workspaceGeneration.current === workspaceVersion) setDownloadError(t("presentation.downloadError"));
     } finally {
-      if (workspaceGeneration.current === workspaceVersion) setWorking(false);
+      if (!sessionDeniedRef.current && workspaceGeneration.current === workspaceVersion) {
+        setWorking(false);
+        setPendingExportId(null);
+      }
     }
   }
 
   function createAnother() {
+    if (sessionDeniedRef.current) return;
     restoreJobId.current = null;
-    if (workspace) clearPresentationActiveJobId(workspace.id);
+    if (workspace) clearPresentationActiveJobId(userId, workspace.id);
     setCurrent(null);
     setActiveSlide(0);
     setError("");
@@ -388,7 +526,11 @@ export function PresentationStudioView() {
       <span className="presentation-studio-header-icon"><PresentationIcon size={26} /></span>
     </div>
 
-    {!current ? <>
+    {sessionDenied ? <section className="account-card presentation-generation-state presentation-terminal-state" role="alert">
+      <LockKeyhole size={28} />
+      <h2>{t("presentation.pollError")}</h2>
+      <p>{t("presentation.privateWorkspace")}</p>
+    </section> : !current ? <>
       <form className="presentation-compose-workspace" onSubmit={(event) => void create(event)} aria-busy={working}>
         <section className="presentation-compose-stage">
           <div className="presentation-stage-toolbar"><div><span className="stage-label">{t("presentation.stageLabel")}</span><strong>{t("presentation.stageTitle")}</strong></div><span className="stage-status"><LockKeyhole size={13} /> {t("presentation.privateWorkspace")}</span></div>
@@ -417,7 +559,18 @@ export function PresentationStudioView() {
       {recentPresentations.length > 0 && <section className="recent-presentations-section"><div className="recent-presentations-heading"><div><p className="section-eyebrow">{t("presentation.library")}</p><h2>{t("presentation.recentTitle")}</h2></div><Link className="text-link" href="/assets?assetType=presentation">{t("presentation.viewAll")} <ArrowRight size={14} /></Link></div><div className="recent-presentations-grid">{recentPresentations.map((asset) => <RecentPresentationCard asset={asset} key={asset.id} />)}</div></section>}
     </> : state === "failed" || state === "cancelled" ? <section className="account-card presentation-generation-state presentation-terminal-state" aria-live="polite"><XCircle size={28} /><p className="section-eyebrow">{t(`jobs.status${statusKey}`)}</p><h2>{current.errorMessage || t("presentation.failedSafe")}</h2><div className="presentation-result-actions"><button className="primary-button" onClick={createAnother}><RefreshCw size={15} /> {t("presentation.createAnother")}</button><Link className="secondary-button" href="/assets">{t("presentation.openAssets")}</Link></div></section> : state === "succeeded" && result ? <section className="presentation-output-workspace" aria-live="polite" aria-busy={working}>
       <nav className="presentation-slide-navigator" aria-label={t("presentation.storyboard")}><div className="slide-navigator-heading"><div><p className="section-eyebrow">{t("presentation.storyboard")}</p><strong>{t("presentation.slides", { count: String(slides.length || result.slideCount || 0) })}</strong></div><span>{selectedSlideNumber}/{slides.length || result.slideCount || 0}</span></div><div className="slide-thumbnail-list">{slides.map((slide, index) => <button className={`slide-thumbnail ${index === activeSlide ? "is-active" : ""}`} key={`${slide.order}-${slide.title}`} onClick={() => setActiveSlide(index)} type="button" aria-current={index === activeSlide ? "true" : undefined} aria-label={t("presentation.openSlide", { number: String(slide.order), title: slide.title })}><SlideArtwork slide={slide} compact /><span className="slide-thumbnail-label"><b>{String(slide.order).padStart(2, "0")}</b><span>{slide.title}</span></span></button>)}</div></nav>
-      <section className="presentation-output-main"><div className="presentation-output-toolbar"><div><p className="section-eyebrow">{t("presentation.resultEyebrow")}</p><h2>{result.title || t("presentation.resultTitle")}</h2><span>{result.slideCount ? t("presentation.slideCount", { count: String(result.slideCount) }) : ""}{dateLabel ? ` · ${dateLabel}` : ""}</span></div><div className="presentation-output-actions">{result.representations?.filter((representation) => representation.type === "pptx").map((representation) => <button className="secondary-button" key={representation.id} type="button" onClick={() => void downloadRepresentation(representation.id, representation.fileName)} disabled={working} aria-busy={working}><Download size={15} /> PPTX</button>)}<Link className="secondary-button" href="/assets"><ExternalLink size={15} /> {t("presentation.openAssets")}</Link></div></div><div className="presentation-active-slide" role="region" aria-label={selectedSlide ? `${t("presentation.selectedSlide")}: ${selectedSlide.title}` : t("presentation.resultTitle")}><span className="sr-only" aria-live="polite">{selectedSlide ? `${t("presentation.selectedSlide")}: ${selectedSlide.title}` : t("presentation.resultTitle")}</span>{selectedSlide ? <SlideArtwork slide={selectedSlide} /> : <EmptySlideCanvas title={t("presentation.resultTitle")} description={t("presentation.completedLoadHint")} />}<button className="slide-nav-button slide-nav-prev" onClick={() => setActiveSlide((index) => Math.max(0, index - 1))} disabled={activeSlide === 0} aria-label={t("presentation.previousSlide")}><ArrowLeft size={17} /></button><button className="slide-nav-button slide-nav-next" onClick={() => setActiveSlide((index) => Math.min(Math.max(0, slides.length - 1), index + 1))} disabled={activeSlide >= slides.length - 1} aria-label={t("presentation.nextSlide")}><ArrowRight size={17} /></button></div><div className="presentation-output-footer"><span><CheckCircle2 size={15} /> {t("presentation.savedToAssets")}</span><span>{t("presentation.safetyNote")}</span></div>{downloadError && <div className="form-error" role="alert"><XCircle size={15} /> {downloadError}</div>}</section>
+      <section className="presentation-output-main"><div className="presentation-output-toolbar"><div><p className="section-eyebrow">{t("presentation.resultEyebrow")}</p><h2>{result.title || t("presentation.resultTitle")}</h2><span>{result.slideCount ? t("presentation.slideCount", { count: String(result.slideCount) }) : ""}{dateLabel ? ` · ${dateLabel}` : ""}</span></div><div className="presentation-output-actions">{/*
+           * The export menu keeps its buttons mounted and focusable for the whole download. `disabled` used
+           * to apply to the button the keyboard user had just activated, which blurs it and hands focus to
+           * `document.body` until the blob settles - the same harm PR #975 removed from the Image Studio
+           * project selector and its retry and cancel controls. The transient state is therefore reported on
+           * the control through `aria-busy` / `aria-disabled` and refused by the click handler, and the
+           * accessible name states the action plus the specific file, because the bare format token could
+           * not tell two PowerPoint renditions apart. presentationExportAccess.ts owns both decisions.
+           */}{filterStudioDownloadableRepresentations(selectPresentationExports(result.representations), representationDownloadability).map((representation) => {
+             const exportControl = resolvePresentationExportControl({ working, pendingExportId, exportId: representation.id });
+             return <button className="secondary-button" key={representation.id} type="button" onClick={() => { if (canActivatePresentationExport(exportControl)) void downloadRepresentation(representation.id, representation.fileName); }} aria-busy={exportControl.busy || undefined} aria-disabled={exportControl.blocked || undefined} aria-label={presentationExportAccessibleName({ action: t("presentation.downloadLabel"), caption: presentationExportCaption(representation.type), fileName: representation.fileName })}><Download size={15} /> {presentationExportCaption(representation.type)}</button>;
+           })}<Link className="secondary-button" href="/assets"><ExternalLink size={15} /> {t("presentation.openAssets")}</Link></div></div><div className="presentation-active-slide" role="region" aria-label={selectedSlide ? `${t("presentation.selectedSlide")}: ${selectedSlide.title}` : t("presentation.resultTitle")}><span className="sr-only" aria-live="polite">{selectedSlide ? `${t("presentation.selectedSlide")}: ${selectedSlide.title}` : t("presentation.resultTitle")}</span>{selectedSlide ? <SlideArtwork slide={selectedSlide} /> : <EmptySlideCanvas title={t("presentation.resultTitle")} description={t("presentation.completedLoadHint")} />}<button className="slide-nav-button slide-nav-prev" onClick={() => setActiveSlide((index) => Math.max(0, index - 1))} disabled={activeSlide === 0} aria-label={t("presentation.previousSlide")}><ArrowLeft size={17} /></button><button className="slide-nav-button slide-nav-next" onClick={() => setActiveSlide((index) => Math.min(Math.max(0, slides.length - 1), index + 1))} disabled={activeSlide >= slides.length - 1} aria-label={t("presentation.nextSlide")}><ArrowRight size={17} /></button></div><div className="presentation-output-footer"><span><CheckCircle2 size={15} /> {t("presentation.savedToAssets")}</span><span>{t("presentation.safetyNote")}</span></div>{downloadError && <div className="form-error" role="alert"><XCircle size={15} /> {downloadError}</div>}</section>
       <aside className="presentation-output-rail"><div className="output-rail-card"><span className="output-rail-icon"><PresentationIcon size={17} /></span><p className="section-eyebrow">{t("presentation.selectedSlide")}</p><h3>{selectedSlide?.title || t("presentation.resultTitle")}</h3><p>{selectedSlide?.subtitle || t("presentation.reviewSlide")}</p><div className="output-rail-meta"><span>{selectedSlide ? t("presentation.slide", { number: String(selectedSlide.order) }) : "—"}</span><span>{selectedSlide ? slideTypeLabel(selectedSlide.type, t) : "—"}</span></div></div><div className="output-rail-card output-rail-note"><LockKeyhole size={16} /><strong>{t("presentation.privateByDefault")}</strong><p>{t("presentation.privateNote")}</p></div><button className="primary-button output-new-button" onClick={createAnother}><RefreshCw size={15} /> {t("presentation.createAnother")}</button></aside>
     </section> : state === "completed-unavailable" ? <section className="account-card presentation-generation-state presentation-terminal-state" aria-live="polite"><RefreshCw size={28} /><p className="section-eyebrow">{t("jobs.statusSucceeded")}</p><h2>{t("presentation.completedLoadError")}</h2><p>{t("presentation.completedLoadHint")}</p><div className="presentation-result-actions"><button className="primary-button" onClick={() => void retryCompleted()} disabled={retryingCompleted}>{retryingCompleted ? t("presentation.working") : t("presentation.retry")}</button><Link className="secondary-button" href="/assets">{t("presentation.openAssets")}</Link></div></section> : <section className="presentation-progress-workspace" aria-live="polite" aria-busy="true"><div className="presentation-progress-canvas"><div className="presentation-progress-orb"><LoaderCircle size={30} /></div><p className="section-eyebrow">{t("presentation.progressEyebrow")}</p><h2>{t(`jobs.status${statusKey}`)}</h2><p>{t("presentation.progressText")}</p><div className="generation-progress-label"><span>{t("jobs.progress")}</span><strong>{progress}%</strong></div><div className="generation-progress-track" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={progress} aria-label={t("jobs.progress")}><span style={{ width: `${progress}%` }} /></div></div><div className="presentation-progress-steps">{progressSteps.map((step, index) => <div className={index <= (progress > 66 ? 2 : progress > 33 ? 1 : 0) ? "is-done" : ""} key={step}><span>{index + 1}</span><strong>{step}</strong></div>)}</div>{error && <div className="form-error" role="alert"><XCircle size={15} /> {error}</div>}{canCancelPresentationJob(current) && <button className="secondary-button generation-cancel-button" onClick={() => void cancel()} disabled={working}><XCircle size={15} /> {t("presentation.cancel")}</button>}</section>}
     <p className="presentation-studio-footnote">{t("presentation.safetyNote")}</p>

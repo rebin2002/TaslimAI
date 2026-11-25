@@ -6,8 +6,14 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { Check, Clapperboard, Download, Film, Sparkles, WandSparkles, XCircle } from "lucide-react";
 import { useAuth } from "@/components/AuthProvider";
 import { useLocale } from "@/components/LocaleProvider";
-import { api, type GenerationJob, type MovieProject, type MovieProviderReadiness, type Project } from "@/lib/api";
+import { ApiError, api, type GenerationJob, type MovieProject, type MovieProviderReadiness, type Project } from "@/lib/api";
 import { assetFileUrl } from "@/lib/apiBase";
+import {
+  isMovieQuickJobTerminal,
+  markMovieQuickJobUnreachable,
+  nextMovieQuickPoll,
+  shouldSubmitMovieQuickGeneration,
+} from "@/lib/movieQuickJobPolling";
 
 const aspects = ["16:9", "9:16", "1:1", "4:5", "4:3"];
 const styles = ["cinematic", "documentary", "animation", "commercial", "experimental"];
@@ -72,7 +78,9 @@ export function MovieStudioView() {
 
   async function createMovie(event: FormEvent) {
     event.preventDefault();
-    if (!workspace) return;
+    // A submission POSTs a new project and enqueues a provider pass, so a second activation while
+    // an earlier brief is still generating would be a duplicate generation and a duplicate debit.
+    if (!workspace || !shouldSubmitMovieQuickGeneration(working, job)) return;
     setWorking(true);
     setError("");
     try {
@@ -113,16 +121,85 @@ export function MovieStudioView() {
     setForm((current) => ({ ...current, title: "", description: "", additionalInstructions: "" }));
   }
 
+  // Derived from the same guard createMovie applies, so the control and the handler can never
+  // disagree about whether a brief is already generating.
+  const canSubmit = shouldSubmitMovieQuickGeneration(working, job);
+
+  // The quick-result poll reads one frame at a time and every scheduling choice comes from
+  // nextMovieQuickPoll, so the loop terminates on a terminal frame, on a detail read that reports
+  // the job is no longer reachable (401/403/404), and on its time and read budgets. Recovering
+  // from either is a re-read of the same job id: this effect never submits, so a stalled or
+  // revoked poll cannot turn into a second provider pass for the same brief.
   useEffect(() => {
-    if (!job || ["Succeeded", "Failed", "Cancelled"].includes(job.status) || !saved) return;
-    const timer = window.setInterval(() => {
-      void api.getGenerationJob(job.id).then((nextJob) => {
-        setJob(nextJob);
-        if (["Succeeded", "Failed", "Cancelled"].includes(nextJob.status)) void api.getMovieProject(saved.id).then(setSaved).catch(() => undefined);
-      }).catch(() => undefined);
-    }, 3000);
-    return () => window.clearInterval(timer);
-  }, [job, saved]);
+    const jobId = job?.id ?? null;
+    const projectId = saved?.id ?? null;
+    if (!jobId || !projectId || isMovieQuickJobTerminal(job)) return;
+
+    // The guard above narrows the ids; the hoisted read closure reads these narrowed copies.
+    const trackedJobId = jobId;
+    const trackedProjectId = projectId;
+
+    let active = true;
+    let timer = 0;
+    let attempt = 0;
+    let pending = false;
+    let frame: GenerationJob | null = job;
+    let lastErrorStatus: number | null = null;
+    const startedAt = Date.now();
+
+    const readBackProject = () => {
+      void api.getMovieProject(trackedProjectId)
+        .then((project) => { if (active) setSaved(project); })
+        .catch(() => { /* a failed read-back leaves the settled frame on screen */ });
+    };
+
+    const advance = () => {
+      const decision = nextMovieQuickPoll({
+        job: frame,
+        errorStatus: lastErrorStatus,
+        attempt,
+        elapsedMs: Date.now() - startedAt,
+        pending,
+      });
+      if (decision.kind === "stop") {
+        if (decision.readBackProject) readBackProject();
+        // A job the browser can no longer follow is re-labelled in place, which routes the
+        // existing localized failure copy through quickStatus and releases the submit guard.
+        if (decision.reason !== "terminal" && frame) setJob(markMovieQuickJobUnreachable(frame, decision.reason));
+        return;
+      }
+      // A read is still in flight and owns the next schedule, so this tick issues nothing.
+      if (decision.kind === "wait") return;
+      timer = window.setTimeout(read, decision.delayMs);
+    };
+
+    function read() {
+      if (!active || pending) return;
+      pending = true;
+      attempt += 1;
+      void api.getGenerationJob(trackedJobId)
+        .then((nextFrame) => {
+          pending = false;
+          lastErrorStatus = null;
+          if (!active) return;
+          frame = nextFrame;
+          setJob(nextFrame);
+          advance();
+        })
+        .catch((cause: unknown) => {
+          pending = false;
+          if (!active) return;
+          lastErrorStatus = cause instanceof ApiError ? cause.status : null;
+          advance();
+        });
+    }
+
+    advance();
+    return () => { active = false; window.clearTimeout(timer); };
+    // The chain re-schedules itself, so it is keyed on job identity rather than on every frame:
+    // re-running on `job` would tear down the chain on each read and stack a second one over it.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [job?.id, saved?.id]);
 
   if (saved) return <QuickMovieResult project={saved} job={job} provider={provider} onReset={reset} t={t} />;
 
@@ -137,7 +214,7 @@ export function MovieStudioView() {
         <label className="movie-field"><span>{t("movie.project")}</span><select value={form.projectId} onChange={(event) => setForm({ ...form, projectId: event.target.value })}><option value="">{t("movie.noProject")}</option>{projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}</select><small>{t("movie.projectHint")}</small></label>
         <label className="movie-field"><span>{t("movie.instructions")}</span><textarea value={form.additionalInstructions} onChange={(event) => setForm({ ...form, additionalInstructions: event.target.value })} placeholder={t("movie.instructionsPlaceholder")} rows={3} maxLength={8000} /></label>
         {mode === "Full" && <div className="movie-continuity-form"><div className="movie-section-heading"><span className="movie-step-index">02</span><div><p className="section-eyebrow">{t("movie.guideEyebrow")}</p><h2>{t("movie.guideTitle")}</h2></div></div><p className="movie-field-note">{t("movie.guideIntro")}</p><div className="movie-control-grid"><label className="movie-field"><span>{t("movie.visualLanguage")}</span><input value={form.visualLanguage} onChange={(event) => setForm({ ...form, visualLanguage: event.target.value })} placeholder={t("movie.visualLanguagePlaceholder")} /></label><label className="movie-field"><span>{t("movie.cameraLanguage")}</span><input value={form.cameraLanguage} onChange={(event) => setForm({ ...form, cameraLanguage: event.target.value })} placeholder={t("movie.cameraLanguagePlaceholder")} /></label><label className="movie-field"><span>{t("movie.colorLighting")}</span><input value={form.colorAndLighting} onChange={(event) => setForm({ ...form, colorAndLighting: event.target.value })} placeholder={t("movie.colorLightingPlaceholder")} /></label><label className="movie-field"><span>{t("movie.soundNarration")}</span><input value={form.soundAndNarration} onChange={(event) => setForm({ ...form, soundAndNarration: event.target.value })} placeholder={t("movie.soundNarrationPlaceholder")} /></label></div><label className="movie-field"><span>{t("movie.continuityRules")}</span><textarea value={form.continuityRules} onChange={(event) => setForm({ ...form, continuityRules: event.target.value })} placeholder={t("movie.continuityRulesPlaceholder")} rows={3} /></label></div>}
-        {error && <div className="form-error"><XCircle size={15} /> {error}</div>}<div className="movie-submit-row"><span>{mode === "Quick" ? t("movieBody.quick.quickNote") : t("movieBody.quick.fullNote")}</span><button className="primary-button movie-submit" type="submit" disabled={working || form.description.trim().length < 3}><Sparkles size={16} /> {working ? t("movie.saving") : mode === "Quick" ? t("movie.createQuick") : t("movie.createFull")}</button></div>
+        {error && <div className="form-error"><XCircle size={15} /> {error}</div>}<div className="movie-submit-row"><span>{mode === "Quick" ? t("movieBody.quick.quickNote") : t("movieBody.quick.fullNote")}</span><button className="primary-button movie-submit" type="submit" disabled={!canSubmit || form.description.trim().length < 3}><Sparkles size={16} /> {working ? t("movie.saving") : mode === "Quick" ? t("movie.createQuick") : t("movie.createFull")}</button></div>
       </section>
       <aside className="movie-empty-stage"><div className="movie-stage-label"><span>{mode === "Quick" ? t("movieBody.quick.preview") : t("movieBody.quick.canvas")}</span><span>00 / 00</span></div><div className="movie-empty-frame"><div className="movie-frame-grid" /><div className="movie-empty-mark"><Film size={30} /><span>{mode === "Quick" ? t("movieBody.quick.oneFocused") : t("movieBody.quick.grow")}</span><small>{mode === "Quick" ? t("movieBody.quick.concise") : t("movieBody.quick.workspace")}</small></div></div><div className="movie-stage-footer"><span><span className="movie-status-dot" /> {t("movieBody.quick.ready")}</span><span>{mode === "Quick" ? t("movieBody.quick.simple") : t("movieBody.quick.rooms")}</span></div></aside>
     </form>
@@ -147,6 +224,9 @@ export function MovieStudioView() {
 function QuickMovieResult({ project, job, provider, onReset, t }: { project: MovieProject; job: GenerationJob | null; provider: MovieProviderReadiness | null; onReset: () => void; t: (key: string, variables?: Record<string, string>) => string }) {
   const status = quickStatus(job);
   const outputAssetId = readyAsset(project);
-  const label = outputAssetId ? "Ready to review" : status === "empty" ? "Brief saved" : t(`movie.state.${status}`);
+  // The chip must come from the translation catalogs: hardcoded English here
+  // bypasses key lookup entirely, so no launch locale and no installable
+  // language pack (including zh-CN) can translate the quick-result status.
+  const label = outputAssetId ? t("movie.completed") : status === "empty" ? t("movie.briefSaved") : t(`movie.state.${status}`);
   return <div className="movie-studio-page movie-quick-result"><div className="movie-quick-toolbar"><Link href="/create" className="movie-back-link">← {t("movie.backToStudios")}</Link><div><span>{t("movieBody.quick.brief")}</span><strong>{project.title}</strong></div><button type="button" className="movie-refine-button" onClick={onReset}>{t("movieBody.quick.createAnother")}</button></div><div className="movie-quick-layout"><main className="movie-quick-main"><span className="movie-workspace-kicker">{label}</span><h1>{project.title}</h1><p>{project.description}</p>{outputAssetId ? <div className="movie-quick-video"><video src={assetFileUrl(outputAssetId, true)} controls preload="metadata" aria-label={project.title} /><a href={assetFileUrl(outputAssetId)} className="movie-workspace-button is-primary"><Download size={14} /> {t("movieBody.quick.download")}</a></div> : <div className="movie-quick-empty"><Film size={24} /><strong>{status === "failed" ? t("movieBody.quick.noOutput") : t("movieBody.quick.willAppear")}</strong><p>{status === "failed" ? t("movieBody.quick.failedHint") : t("movieBody.quick.savedHint")}</p></div>}</main><aside className="movie-quick-inspector"><span className="movie-workspace-kicker">{t("movieBody.quick.brief")}</span><div><span>Format</span><strong>{project.aspectRatio}</strong></div><div><span>Duration</span><strong>{project.durationSeconds}s</strong></div><div><span>Style</span><strong>{project.style}</strong></div><div className="movie-quick-note"><span className="movie-live-dot" />{provider?.ready ? t("movieBody.quick.available") : t("movieBody.quick.unavailable")}</div></aside></div></div>;
 }

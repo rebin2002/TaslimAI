@@ -134,19 +134,21 @@ public sealed class MovieShotExecutionService(
             throw new MovieShotExecutionValidationException("SHOT_EXECUTION_TAKE_COUNT_INVALID", $"Choose between 1 and {MaximumTakes} takes.");
         var normalizedIdempotencyKey = NormalizeIdempotencyKey(idempotencyKey);
         var candidateKeys = Enumerable.Range(1, takeCount).Select(index => CandidateIdempotencyKey(normalizedIdempotencyKey, index)).ToArray();
+        var movie = shot.Scene.MovieProject;
         if (normalizedIdempotencyKey is not null)
         {
             var existing = await db.MovieTakes
                 .Include(item => item.GenerationJob)
                 .Where(item => item.MovieShotId == shotId && item.GenerationJob != null && candidateKeys.Contains(item.GenerationJob.IdempotencyKey!))
                 .ToListAsync(cancellationToken);
+            if (existing.Count > 0)
+                EnsureIdempotencyRequestMatches(existing, normalizedIdempotencyKey, shot, keyframe, durationSeconds.Value, resolution, qualityLevel, takeCount, request.Title);
             if (existing.Count == takeCount && existing.All(item => item.GenerationJob is not null))
                 return ToResponse(shot, keyframe.Id, durationSeconds.Value, resolution, existing.OrderBy(item => item.VersionNumber).ToArray());
             if (existing.Count > 0)
                 throw new MovieShotExecutionValidationException("SHOT_EXECUTION_IDEMPOTENCY_PARTIAL", "The requested take batch was only partially created; use the original idempotency key to retrieve it.");
         }
 
-        var movie = shot.Scene.MovieProject;
         var estimate = await costEstimator.EstimateAsync(
             new MovieGenerationCostRequest(
                 durationSeconds.Value,
@@ -216,6 +218,7 @@ public sealed class MovieShotExecutionService(
                 SourceResolution: resolution.SourceResolution,
                 MasterResolution: resolution.MasterResolution,
                 ProcessingPath: resolution.ProcessingPath,
+                QualityTier: qualityLevel,
                 UpscalingRequested: false,
                 TakeNumber: index,
                 TakeCount: takeCount);
@@ -350,6 +353,57 @@ public sealed class MovieShotExecutionService(
     }
 
     private static string? CandidateIdempotencyKey(string? value, int index) => value is null ? null : $"{value}:{index}";
+
+    private static void EnsureIdempotencyRequestMatches(
+        IReadOnlyCollection<MovieTake> existing,
+        string idempotencyKey,
+        MovieShot shot,
+        MovieProductionVersion keyframe,
+        int durationSeconds,
+        MovieShotExecutionResolutionDto resolution,
+        string qualityLevel,
+        int takeCount,
+        string? requestedTitle)
+    {
+        foreach (var take in existing)
+        {
+            var job = take.GenerationJob;
+            MovieGenerationInput? input = null;
+            if (job is not null)
+            {
+                try { input = JsonSerializer.Deserialize<MovieGenerationInput>(job.InputJson); }
+                catch (JsonException) { }
+            }
+
+            var candidateIndex = CandidateIndex(job?.IdempotencyKey, idempotencyKey);
+            var expectedTitle = candidateIndex.HasValue && string.IsNullOrWhiteSpace(requestedTitle)
+                ? $"{shot.Scene.MovieProject.Title} — Take {candidateIndex.Value}"
+                : requestedTitle?.Trim();
+            if (job is null
+                || input is null
+                || candidateIndex is null
+                || input.MovieShotId != shot.Id
+                || input.SourceProductionVersionId != keyframe.Id
+                || input.DurationSeconds != durationSeconds
+                || !string.Equals(input.SourceResolution, resolution.SourceResolution, StringComparison.OrdinalIgnoreCase)
+                || !string.Equals(input.MasterResolution, resolution.MasterResolution, StringComparison.OrdinalIgnoreCase)
+                || !string.Equals(input.ProcessingPath, resolution.ProcessingPath, StringComparison.OrdinalIgnoreCase)
+                || input.TakeCount != takeCount
+                || input.TakeNumber != candidateIndex
+                || input.QualityTier is not null && !string.Equals(input.QualityTier, qualityLevel, StringComparison.OrdinalIgnoreCase)
+                || !string.Equals(job.Title, expectedTitle, StringComparison.Ordinal))
+                throw new MovieShotExecutionValidationException(
+                    "SHOT_EXECUTION_IDEMPOTENCY_REUSED",
+                    "This idempotency key was already used for a different shot-execution request.");
+        }
+    }
+
+    private static int? CandidateIndex(string? candidateKey, string idempotencyKey)
+    {
+        var prefix = idempotencyKey + ":";
+        if (candidateKey is null || !candidateKey.StartsWith(prefix, StringComparison.Ordinal)) return null;
+        return int.TryParse(candidateKey[prefix.Length..], out var index) && index > 0 ? index : null;
+    }
 
     private static string SceneSnapshot(MovieScene scene) => JsonSerializer.Serialize(new
     {
