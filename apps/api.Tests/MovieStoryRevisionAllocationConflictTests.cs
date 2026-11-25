@@ -24,7 +24,7 @@ namespace Taslim.Api.Tests;
 /// DIRECTOR_STORY_BASE_CHANGED through the Director executor), never a constraint fault.
 ///
 /// The races are real: separate DbContext instances on separate connections, driven through the
-/// production service, released together by a read barrier so both actors snapshot the base
+/// production service, released together at transaction start after both actors snapshot the base
 /// before either writes (the same declared-interleave convention as
 /// <c>MovieProductionKitTests.Concurrent_revision_creation_retries_the_losing_revision_number_allocation</c>).
 /// Pre-fix, the contended round throws <see cref="DbUpdateException"/> where this expects the
@@ -79,7 +79,7 @@ public sealed class MovieStoryRevisionAllocationConflictTests
         try
         {
             // The barrier must gate only the racing creates: a seeded base revision would
-            // otherwise wait forever for a second snapshot reader that never arrives.
+            // otherwise wait forever for a second writer that never arrives.
             var seedOptions = FileOptions(databasePath);
             var raceOptions = FileOptions(databasePath, barrier);
             await using (var seedDb = new TaslimDbContext(seedOptions))
@@ -96,7 +96,7 @@ public sealed class MovieStoryRevisionAllocationConflictTests
                 await using var _firstDb = outcomes[0].Database;
                 await using var _secondDb = outcomes[1].Database;
 
-                // The barrier had to release two simultaneous snapshot readers for this to be a
+                // The barrier had to release two writers with materialized snapshots for this to be a
                 // real race, not two accidentally serialized requests.
                 Assert.True(barrier.Arrivals >= 2, $"Expected at least two concurrent story snapshots, saw {barrier.Arrivals}.");
                 Assert.Equal(1, outcomes.Count(outcome => outcome.Success));
@@ -135,7 +135,7 @@ public sealed class MovieStoryRevisionAllocationConflictTests
         try
         {
             var options = FileOptions(databasePath, barrier);
-            await using (var seedDb = new TaslimDbContext(options))
+            await using (var seedDb = new TaslimDbContext(FileOptions(databasePath)))
             {
                 await seedDb.Database.EnsureCreatedAsync(TestToken);
                 var seeded = await SeedAsync(seedDb);
@@ -191,7 +191,7 @@ public sealed class MovieStoryRevisionAllocationConflictTests
                 .UseNpgsql(new Npgsql.NpgsqlConnectionStringBuilder(connectionString) { SearchPath = schema }.ConnectionString)
                 .Options;
             // Only the two racing writers carry the barrier; the base-revision seed create must not
-            // wait for a second snapshot reader that never arrives on that single path.
+            // wait for a second writer that never arrives on that single path.
             var barrier = new StorySnapshotBarrier();
             var raceOptions = new DbContextOptionsBuilder<TaslimDbContext>()
                 .UseNpgsql(new Npgsql.NpgsqlConnectionStringBuilder(connectionString) { SearchPath = schema }.ConnectionString)
@@ -215,7 +215,7 @@ public sealed class MovieStoryRevisionAllocationConflictTests
             }
             Assert.True(barrier.Arrivals >= 2, $"Expected at least two concurrent story snapshots, saw {barrier.Arrivals}.");
 
-            // Both snapshot readers were released together, so both allocated the same revision
+            // Both writers were released after reading the same base, so both allocated the same revision
             // number: this is the contended shape by construction. Exactly one writer wins, and
             // the other must surface the conflict contract — never the DbUpdateException that
             // reached the client as a 500 before the mapping.
@@ -360,7 +360,7 @@ public sealed class MovieStoryRevisionAllocationConflictTests
         }
     }
 
-    private static DbContextOptions<TaslimDbContext> FileOptions(string databasePath, DbCommandInterceptor? interceptor = null)
+    private static DbContextOptions<TaslimDbContext> FileOptions(string databasePath, StorySnapshotBarrier? interceptor = null)
     {
         var builder = new DbContextOptionsBuilder<TaslimDbContext>()
             .UseSqlite($"Data Source={databasePath};Default Timeout=30");
@@ -378,28 +378,23 @@ public sealed class MovieStoryRevisionAllocationConflictTests
     private static MovieStoryService BaseService(TaslimDbContext db) =>
         new(db, new MovieCollaborationAccess(db, new WorkspaceAccessService(db)));
 
-    private sealed class StorySnapshotBarrier : DbCommandInterceptor
+    private sealed class StorySnapshotBarrier : DbTransactionInterceptor
     {
         private readonly TaskCompletionSource<bool> released = new(TaskCreationOptions.RunContinuationsAsynchronously);
         private int arrivals;
 
         public int Arrivals => arrivals;
 
-        public override async ValueTask<InterceptionResult<DbDataReader>> ReaderExecutingAsync(
-            DbCommand command,
-            CommandEventData eventData,
-            InterceptionResult<DbDataReader> result,
+        public override async ValueTask<InterceptionResult<DbTransaction>> TransactionStartingAsync(
+            DbConnection connection,
+            TransactionStartingEventData eventData,
+            InterceptionResult<DbTransaction> result,
             CancellationToken cancellationToken = default)
         {
-            // Gate on the snapshot read only: the MovieStories join to MovieStoryRevisions that
-            // CreateRevisionAsync performs before allocating the next revision number.
-            if (command.CommandText.Contains("MovieStories", StringComparison.OrdinalIgnoreCase)
-                && command.CommandText.Contains("MovieStoryRevisions", StringComparison.OrdinalIgnoreCase)
-                && command.CommandText.Contains("MovieProjectId", StringComparison.OrdinalIgnoreCase))
-            {
-                if (Interlocked.Increment(ref arrivals) >= 2) released.TrySetResult(true);
-                await released.Task.WaitAsync(TimeSpan.FromSeconds(30), cancellationToken);
-            }
+            // CreateRevisionAsync has materialized the story and allocated its revision number.
+            // Hold both writers here, before either can acquire a write transaction or commit.
+            if (Interlocked.Increment(ref arrivals) == 2) released.TrySetResult(true);
+            await released.Task.WaitAsync(TimeSpan.FromSeconds(30), cancellationToken);
 
             return result;
         }
