@@ -6,6 +6,8 @@ import { useLocale } from "@/components/LocaleProvider";
 import { BrandMark } from "@/components/BrandMark";
 import { useAuth } from "@/components/AuthProvider";
 import { NotificationBell } from "@/components/ActivityBell";
+import { profileAvatarInitial } from "@/lib/profileAvatar";
+import { languagePackTag } from "@/lib/languagePackRegistry";
 import { desktopNavigation, matchesNavigationPath } from "@/lib/navigation";
 
 export function AppHeader({ unreadCount }: Readonly<{ unreadCount: number }>) {
@@ -41,7 +43,7 @@ export function AppHeader({ unreadCount }: Readonly<{ unreadCount: number }>) {
             <ChevronDown size={14} aria-hidden="true" />
           </label>
           {user ? <Link href="/account" className="profile-chip" aria-label={t("navigation.account")}>
-            <span className="profile-avatar" aria-hidden="true">{user.displayName.slice(0, 1).toUpperCase()}</span>
+            <span className="profile-avatar" aria-hidden="true">{profileAvatarInitial(user, languagePackTag(languagePackId))}</span>
             <span className="profile-name">{user.displayName}</span>
           </Link> : <Link href="/login" className="profile-chip auth-link">{t("auth.signIn")}</Link>}
         </div>

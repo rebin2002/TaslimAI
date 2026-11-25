@@ -2,15 +2,18 @@
 import { localeTag } from "@/lib/i18n";
 
 import Link from "next/link";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Activity, Archive, ArrowLeft, ArrowUpRight, BarChart3, CalendarDays, FileText, FolderOpen, LibraryBig, MessageSquare, Pencil, Plus, RotateCcw, Sparkles } from "lucide-react";
 import { useParams, useRouter } from "next/navigation";
-import { api, type Project, type ProjectInput, type ProjectOverview } from "@/lib/api";
+import { api, type Project, type ProjectOverview } from "@/lib/api";
+import { ProjectRevisionSession } from "@/lib/projectRevision";
 import { useLocale } from "@/components/LocaleProvider";
 import { ProjectForm } from "@/components/ProjectForm";
 import { ProjectContextEditor } from "@/components/ProjectContextEditor";
 import { ProjectFilesSection } from "@/components/ProjectFilesSection";
 import { ProjectAssetsSection } from "@/components/ProjectAssetsSection";
+import { resolveProjectDetailSnapshotAfterFailure } from "@/lib/projectDetailAccessState";
+import { canApplyProjectDetailSnapshot, hasProjectDetailAccessEnded } from "@/lib/projectDetailAccessOrdering";
 
 const projectActions = [
   ["/chat", "projects.newConversation", MessageSquare, "project-action-chat"],
@@ -28,25 +31,83 @@ export function ProjectDetailView() {
   const [formOpen, setFormOpen] = useState(false);
   const [error, setError] = useState("");
   const [loadAttempt, setLoadAttempt] = useState(0);
-  const overviewRequest = useRef<{ key: string; promise: Promise<ProjectOverview> } | null>(null);
-  const activeProjectId = useRef(params.projectId);
+  const overviewRequest = useRef<{ key: string; promise: Promise<ProjectOverview>; epoch: number } | null>(null);
+  // How many definitive "access ended" answers this mount has seen. It is the
+  // ordering marker behind the role badge: every overview read records the
+  // value it was issued under and may only commit while that value still
+  // holds, so a membership snapshot the server captured before a revocation
+  // can never re-pin the badge after one. A read issued afterwards sees the
+  // new value and paints normally, which is what keeps the retry, the
+  // language-pack refresh and a re-admitted role working.
+  const accessEndedEpoch = useRef(0);
+  // The message that answer carried. A retired response must leave the page
+  // exactly where the revocation left it: the effect that re-issued it has
+  // already cleared the banner, so without this the member would land on the
+  // not-found branch, which has no retry affordance at all.
+  const accessEndedMessage = useRef("");
+  // The project the route currently names, kept live so continuations that
+  // outlive their originating page can be retired. The load effect fences
+  // itself with a per-run `active` flag; the mutation continuations have no
+  // effect run of their own, so they consult this instead: a mutation answer
+  // about a project the member navigated away from must not act on the page
+  // at all — not its snapshot, not the access-ended epoch, not the error banner.
+  const routeProjectId = useRef(params.projectId);
 
-  useEffect(() => {
-    activeProjectId.current = params.projectId;
-  }, [params.projectId]);
+  // The revision tokens for the project this route names: ONE PER EDITABLE DRAFT,
+  // not one per page. Both forms submit the whole row, so a token earned by the
+  // details draft would otherwise certify the context draft's independently typed
+  // fields as if they had been read from the same revision. A session binds its
+  // token to the content that token was published for and is keyed on the route
+  // parameter, so a token can never be carried over to another project.
+  const detailRevision = useMemo(() => new ProjectRevisionSession(params.projectId, "details"), [params.projectId]);
+  const contextRevision = useMemo(() => new ProjectRevisionSession(params.projectId, "context"), [params.projectId]);
+
+  // Archive and restore are status writes that also advance the row's revision.
+  // Each draft adopts that stamp only while its own base still matches the row the
+  // answer describes; a draft holding content the answer does not have is dropped
+  // back to unbound so its next save re-verifies instead of being blessed by a
+  // token it never earned.
+  function adoptStatusRevision(answer: { project: Project; revision: string | null }) {
+    detailRevision.adopt(answer);
+    contextRevision.adopt(answer);
+  }
 
   useEffect(() => {
     let active = true;
+    routeProjectId.current = params.projectId;
     const requestKey = `${params.projectId}:${loadAttempt}`;
-    const cachedRequest = overviewRequest.current?.key === requestKey ? overviewRequest.current.promise : null;
+    const cachedRequest = overviewRequest.current?.key === requestKey ? overviewRequest.current : null;
+    // The access-ended epoch this read was issued under. It is taken when the
+    // request is created and kept with it in the single-slot cache, so a
+    // refresh re-issued after a revocation still carries the epoch of the
+    // membership it asked for, not the epoch of the answer that superseded it.
+    const accessEpoch = cachedRequest ? cachedRequest.epoch : accessEndedEpoch.current;
     // Loading remote project state is an external synchronization.
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setLoading(true); setError("");
-    const request = cachedRequest ?? api.getProjectOverview(params.projectId);
-    if (!cachedRequest) overviewRequest.current = { key: requestKey, promise: request };
+    const request = cachedRequest ? cachedRequest.promise : api.getProjectOverview(params.projectId);
+    if (!cachedRequest) overviewRequest.current = { key: requestKey, promise: request, epoch: accessEpoch };
     void request
-      .then((next) => { if (active) setOverview(next); })
-      .catch((caught) => { if (active) setError(caught instanceof Error ? caught.message : t("projects.loadError")); })
+      .then((next) => {
+        if (!active) return;
+        if (canApplyProjectDetailSnapshot(accessEpoch, accessEndedEpoch.current)) { setOverview(next); return; }
+        // Retired: the page stays exactly where the definitive answer left it.
+        setError((current) => current || accessEndedMessage.current);
+      })
+      .catch((caught) => {
+        if (!active) return;
+        const message = caught instanceof Error ? caught.message : t("projects.loadError");
+        // Ordering, not disposition: a definitive access answer also retires
+        // every snapshot issued before it, so the one on screen and the ones
+        // still on the wire are dropped by the same event that clears this
+        // read's own result. Transient failures leave the epoch untouched.
+        if (hasProjectDetailAccessEnded(caught)) { accessEndedEpoch.current += 1; accessEndedMessage.current = message; }
+        // A definitive access answer outranks the cached membership snapshot:
+        // clear it so the workspace member role badge fails closed with the
+        // retry affordance, while a transient load keeps the last view.
+        if (resolveProjectDetailSnapshotAfterFailure(caught) === "invalidate") setOverview(null);
+        setError(message);
+      })
       .finally(() => {
         if (overviewRequest.current?.promise === request) overviewRequest.current = null;
         if (active) setLoading(false);
@@ -55,20 +116,50 @@ export function ProjectDetailView() {
   }, [loadAttempt, params.projectId, t]);
 
   function replaceProject(project: Project) {
-    if (project.id !== activeProjectId.current) return;
-    setOverview((current) => current?.project.id === project.id ? { ...current, project } : current);
+    setOverview((current) => current ? { ...current, project } : current);
   }
 
   async function archive() {
     if (!overview || !window.confirm(t("projects.archiveConfirm"))) return;
-    try { replaceProject(await api.archiveProject(overview.project.id)); }
-    catch (caught) { setError(caught instanceof Error ? caught.message : t("projects.saveError")); }
+    // Captured at click time: the answer, whatever it carries, is only about
+    // this project. If the route has moved on by the time it lands, retire it.
+    const targetProjectId = overview.project.id;
+    try {
+      const archived = await api.archiveProjectWithRevision(targetProjectId);
+      // A status change is not a content conflict: adopt the revision it
+      // committed so a draft that still describes the row stays savable against
+      // the revision the row actually holds.
+      adoptStatusRevision(archived);
+      if (routeProjectId.current === targetProjectId) replaceProject(archived.project);
+    }
+    catch (caught) {
+      if (routeProjectId.current !== targetProjectId) return;
+      // 401/403/404 here means the server no longer resolves this project for
+      // this principal; a "removed" member must not keep a live role badge.
+      // This is also the answer that usually confirms the revocation, so it
+      // must retire the overview read that was still in flight at the time.
+      const message = caught instanceof Error ? caught.message : t("projects.saveError");
+      if (hasProjectDetailAccessEnded(caught)) { accessEndedEpoch.current += 1; accessEndedMessage.current = message; }
+      if (resolveProjectDetailSnapshotAfterFailure(caught) === "invalidate") setOverview(null);
+      setError(message);
+    }
   }
 
   async function restore() {
     if (!overview) return;
-    try { replaceProject(await api.restoreProject(overview.project.id)); }
-    catch (caught) { setError(caught instanceof Error ? caught.message : t("projects.saveError")); }
+    const targetProjectId = overview.project.id;
+    try {
+      const restored = await api.restoreProjectWithRevision(targetProjectId);
+      adoptStatusRevision(restored);
+      if (routeProjectId.current === targetProjectId) replaceProject(restored.project);
+    }
+    catch (caught) {
+      if (routeProjectId.current !== targetProjectId) return;
+      const message = caught instanceof Error ? caught.message : t("projects.saveError");
+      if (hasProjectDetailAccessEnded(caught)) { accessEndedEpoch.current += 1; accessEndedMessage.current = message; }
+      if (resolveProjectDetailSnapshotAfterFailure(caught) === "invalidate") setOverview(null);
+      setError(message);
+    }
   }
 
   function startConversation() {
@@ -139,11 +230,11 @@ export function ProjectDetailView() {
       </section>
     </div>
 
-    <ProjectContextEditor project={project} onSaved={replaceProject} />
+    <ProjectContextEditor project={project} onSaved={replaceProject} revision={contextRevision} />
     <ProjectFilesSection project={project} />
     <ProjectAssetsSection project={project} />
     <section className="project-metadata-card account-card"><div><p className="section-eyebrow">{t("projects.metadataEyebrow")}</p><h2>{t("projects.metadataTitle")}</h2></div><dl><div><dt>{t("projects.metadataCreated")}</dt><dd>{formatDate(project.createdAt, locale)}</dd></div><div><dt>{t("projects.metadataUpdated")}</dt><dd>{formatDate(project.updatedAt, locale)}</dd></div><div><dt>{t("projects.metadataWorkspace")}</dt><dd>{workspace.name}</dd></div><div><dt>{t("projects.metadataRole")}</dt><dd>{t(roleKey)}</dd></div></dl></section>
-    {formOpen && <ProjectForm project={project} onClose={() => setFormOpen(false)} onSubmit={async (input: ProjectInput) => { const updated = await api.updateProject(project.id, input); replaceProject(updated); setFormOpen(false); }} />}
+    {formOpen && <ProjectForm project={project} onClose={() => setFormOpen(false)} revision={detailRevision} onSaved={replaceProject} />}
   </div>;
 }
 
