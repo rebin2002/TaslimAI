@@ -9,12 +9,18 @@ GITHUB_SHA="$commit_sha" bash "$script" "$temp_dir/governance.json"
 bash "$script" "$temp_dir/governance-second.json"
 python3 - "$temp_dir/governance.json" "$temp_dir/governance-second.json" "$commit_sha" <<'PY'
 import json
+from datetime import datetime, timezone
+import subprocess
 import sys
 from pathlib import Path
 first = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
 second = json.loads(Path(sys.argv[2]).read_text(encoding="utf-8"))
 assert first["schemaVersion"] == 1
 assert first["source"]["commitSha"] == sys.argv[3]
+raw_commit_date = subprocess.check_output(["git", "show", "-s", "--format=%cI", sys.argv[3]], text=True).strip()
+expected_commit_date_utc = datetime.fromisoformat(raw_commit_date).astimezone(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+assert first["source"]["commitDateUtc"] == expected_commit_date_utc
+assert first["source"]["commitDateUtc"].endswith("Z")
 assert first["workflowContract"]["pullRequestCi"] is True
 assert first["workflowContract"]["pullRequestReleaseEvidence"] is True
 assert first["workflowContract"]["readOnlyContentsPermissions"] is True
@@ -90,6 +96,14 @@ for mode in wrong-event different-base; do
   fi
   grep -F 'Expected regular pull_request checks for all changes targeting main' "$temp_dir/$mode.log" >/dev/null
 done
+cp "$repo_root/.github/workflows/container-health-smoke.yml" "$fixture/.github/workflows/"
+sed -i 's/^name: Production container smoke$/name: Renamed production smoke/' "$fixture/.github/workflows/container-health-smoke.yml"
+commit_fixture
+if (cd "$fixture" && env -u GITHUB_SHA bash "$script" "$temp_dir/renamed-workflow.json") >"$temp_dir/renamed-workflow.log" 2>&1; then
+  echo 'A renamed workflow must fail the evidence check because its required check context changes.' >&2
+  exit 1
+fi
+grep -F 'Unexpected workflow name in .github/workflows/container-health-smoke.yml' "$temp_dir/renamed-workflow.log" >/dev/null
 cp "$repo_root/.github/workflows/container-health-smoke.yml" "$fixture/.github/workflows/"
 sed '0,/ # v4/s/ # v4//' "$repo_root/.github/workflows/ci.yml" > "$fixture/.github/workflows/ci.yml"
 commit_fixture

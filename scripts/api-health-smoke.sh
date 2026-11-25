@@ -73,10 +73,12 @@ for position, line in enumerate(blocks[-1]):
 if terminal_status != 200:
     raise SystemExit(f"{endpoint}: terminal HTTP response status is {terminal_status}, not 200")
 
-cache_control = headers.get("cache-control", "").lower()
-if "no-store" not in cache_control:
+def has_directive(name, expected):
+    return any(part.strip().lower() == expected for part in headers.get(name, "").split(","))
+
+if not has_directive("cache-control", "no-store"):
     raise SystemExit(f"{endpoint}: terminal response is missing Cache-Control: no-store")
-if "no-cache" not in headers.get("pragma", "").lower():
+if not has_directive("pragma", "no-cache"):
     raise SystemExit(f"{endpoint}: terminal response is missing Pragma: no-cache")
 request_id = headers.get("x-request-id", "")
 if not request_id:
@@ -159,7 +161,7 @@ probe_endpoint() {
   return 1
 }
 
-printf '%s\n' "[api-health-smoke] checking $BASE_URL"
+printf '%s\n' '[api-health-smoke] checking configured API base URL'
 probe_endpoint "/health/live"
 probe_endpoint "/health/ready"
 printf '%s\n' "[api-health-smoke] PASS — liveness and required dependency readiness are healthy"

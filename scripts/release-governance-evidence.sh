@@ -51,6 +51,11 @@ required_checks = [
     ("Build production images and smoke-test API", ".github/workflows/container-health-smoke.yml"),
     ("Release evidence and safety contract", ".github/workflows/release-evidence.yml"),
 ]
+expected_workflow_names = {
+    ".github/workflows/ci.yml": "Taslim CI",
+    ".github/workflows/container-health-smoke.yml": "Production container smoke",
+    ".github/workflows/release-evidence.yml": "Taslim Release Evidence",
+}
 def event_settings(definition):
     if isinstance(definition, str):
         return {definition: {}}
@@ -121,6 +126,8 @@ for relative in workflow_paths:
     source_text = source.stdout
     # BaseLoader keeps GitHub's 'on' key and expressions as strings.
     workflow = yaml.load(source_text, Loader=yaml.BaseLoader)
+    if workflow.get("name") != expected_workflow_names[relative]:
+        raise SystemExit(f"Unexpected workflow name in {relative}: expected {expected_workflow_names[relative]}")
     workflows[relative] = workflow
     triggers = event_settings(workflow.get("on"))
     if "pull_request_target" in triggers or not covers_main_pull_requests(triggers.get("pull_request")):
@@ -141,12 +148,17 @@ for check_name, relative in required_checks:
     if len(matches) != 1:
         raise SystemExit(f"Expected exactly one job named {check_name} in {relative}")
 
+raw_commit_date = datetime.fromisoformat(os.environ["GOVERNANCE_COMMIT_DATE"])
+if raw_commit_date.tzinfo is None:
+    raise SystemExit("The recorded commit date has no timezone; refusing to emit governance evidence.")
+commit_date_utc = raw_commit_date.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
 manifest = {
     "schemaVersion": 1,
     "generatedAtUtc": datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
     "source": {
         "commitSha": os.environ["GOVERNANCE_COMMIT_SHA"],
-        "commitDateUtc": os.environ["GOVERNANCE_COMMIT_DATE"],
+        "commitDateUtc": commit_date_utc,
         "repository": os.environ.get("GOVERNANCE_REPOSITORY", ""),
         "ref": os.environ.get("GOVERNANCE_REF", ""),
     },
