@@ -47,6 +47,8 @@ All Asset routes require authenticated Identity cookies. `AssetService` owns wor
 
 Storage remains private. The API does not expose a public bucket URL or storage key. `GET /api/assets/{id}/download` authorizes the caller, opens the private `StoredFile` through `IFileStorageService`, and streams the response. `inline=true` is accepted only for image MIME types and supports authenticated image previews. Mutating routes retain CSRF validation.
 
+Download responses answer for one principal at a URL that names only the asset, and the attachment form discloses the owner's original file name in `Content-Disposition`. `AssetDownloadResponsePolicy` therefore makes the download endpoint claim its own cache fence: `Cache-Control: private, no-store`, `Pragma: no-cache`, and `Vary: Cookie`. The `no-store` half is not new on the wire, because every authenticated request currently re-issues the session cookie and cookie issuance writes a non-store directive of its own; that incidental coupling is exactly what the explicit claim removes, so the fence survives a change to stamp validation interval, cookie provider, or re-issue rules. The credential partition is the added half: an intermediary configured to ignore or rewrite `Cache-Control` still has to key the entry per caller, which keeps one member's bytes and file name out of another member's cache hit.
+
 ## API Surface
 
 | Method | Route | Purpose |

@@ -90,10 +90,28 @@ describe("movie audio window alignment", () => {
     expect(merged.map((track) => track.id)).toEqual(["no-start", "half-frame", "zero-duration", "zero", "whole-frame", "no-window"]);
   });
 
+  it("keeps incomplete windows at the tail and preserves authored ties", () => {
+    const noEnd = soundTrack({ id: "no-end", startMilliseconds: 0, endMilliseconds: null });
+    const noStart = soundTrack({ id: "no-start", startMilliseconds: undefined, endMilliseconds: 10 });
+    const lateEnd = soundTrack({ id: "late-end", startMilliseconds: 10, endMilliseconds: 30 });
+    const earlyEnd = soundTrack({ id: "early-end", startMilliseconds: 10, endMilliseconds: 20 });
+    const tie = { ...earlyEnd, id: "tie" };
+    const input = [noEnd, lateEnd, noStart, earlyEnd, tie];
+
+    expect(sortSoundTracksByAuthoredWindow(input).map((track) => track.id)).toEqual([
+      "early-end", "tie", "late-end", "no-end", "no-start",
+    ]);
+  });
+
   it("formats fractional windows to whole milliseconds and flags absent windows", () => {
-    expect(formatSoundTrackWindow(soundTrack({ startMilliseconds: 20.833, endMilliseconds: 1_041.667 }))).toBe("21–1042 ms");
-    expect(formatSoundTrackWindow(soundTrack({ startMilliseconds: 0, endMilliseconds: 0 }))).toBe("0–0 ms");
-    expect(formatSoundTrackWindow(soundTrack({ startMilliseconds: undefined, endMilliseconds: undefined }))).toBe("—–— ms");
-    expect(formatSoundTrackWindow(soundTrack({ startMilliseconds: 1_000, endMilliseconds: null }))).toBe("1000–— ms");
+    expect(formatSoundTrackWindow("en", soundTrack({ startMilliseconds: 20.833, endMilliseconds: 1_041.667 }))).toBe("21–1,042 ms");
+    expect(formatSoundTrackWindow("en", soundTrack({ startMilliseconds: 0, endMilliseconds: 0 }))).toBe("0–0 ms");
+    expect(formatSoundTrackWindow("en", soundTrack({ startMilliseconds: undefined, endMilliseconds: undefined }))).toBe("—–— ms");
+    expect(formatSoundTrackWindow("en", soundTrack({ startMilliseconds: 1_000, endMilliseconds: null }))).toBe("1,000–— ms");
+  });
+
+  it.each(["ar", "ku"] as const)("preserves localized digits for %s windows", (locale) => {
+    const track = soundTrack({ startMilliseconds: 10.833, endMilliseconds: null });
+    expect(formatSoundTrackWindow(locale, track)).toBe("١١–— ms");
   });
 });

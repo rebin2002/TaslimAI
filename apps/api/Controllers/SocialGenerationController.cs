@@ -39,7 +39,7 @@ public sealed class SocialGenerationController(
                 WorkspaceId = input.WorkspaceId,
                 ProjectId = input.ProjectId,
                 JobType = GenerationJobTypes.SocialGenerate,
-                Title = input.Prompt.Length > 160 ? input.Prompt[..160] : input.Prompt,
+                Title = TruncateTitle(input.Prompt),
                 InputJson = SocialGenerationContractMapper.SerializeInput(input),
                 EstimatedProviderCostUsd = preflight.EstimatedProviderCostUsd,
             }, cancellationToken, idempotencyKey);
@@ -52,6 +52,19 @@ public sealed class SocialGenerationController(
     }
 
     private Guid GetUserId() => Guid.Parse(User.FindFirst(ClaimTypes.NameIdentifier)?.Value ?? throw new InvalidOperationException("Authenticated user identifier is missing."));
+
+    // Job titles derive from the user prompt. Cutting at the 160-character
+    // boundary must never split a surrogate pair, which would persist a
+    // dangling high surrogate and emit invalid JSON string content — the same
+    // rule the document contract enforces for provider payloads.
+    private static string TruncateTitle(string prompt)
+    {
+        if (prompt.Length <= 160) return prompt;
+        var length = 160;
+        if (char.IsHighSurrogate(prompt[length - 1]) && length < prompt.Length && char.IsLowSurrogate(prompt[length]))
+            length -= 1;
+        return prompt[..length];
+    }
 }
 
 public sealed record CreateSocialGenerationResponse(GenerationJobDto Job);
