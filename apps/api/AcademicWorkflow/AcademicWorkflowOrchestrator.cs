@@ -104,8 +104,8 @@ public sealed partial class AcademicWorkflowOrchestrator
                 done.StateCode = null;
                 done.StateDetail = null;
                 var commit = await CommitAsync(done, loaded.Revision, $"project-complete|r{loaded.Revision + 1}", cancellationToken);
-                if (commit == AcademicCommitStatus.RevisionConflict)
-                    return AcademicWorkflowRunResult.From(AcademicWorkflowRunStatus.RevisionConflict, loaded, code: "CHECKPOINT_CONFLICT");
+                if (commit != AcademicCommitStatus.Committed)
+                    return await CheckpointConflictAsync(projectId, null, cancellationToken);
                 return AcademicWorkflowRunResult.From(AcademicWorkflowRunStatus.Completed, done);
             }
 
@@ -175,6 +175,22 @@ public sealed partial class AcademicWorkflowOrchestrator
         var outcome = await store.TryCommitAsync(working, expectedRevision, BuildCheckpointKey(working.ProjectId, working.Revision, reason), cancellationToken);
         return outcome.Status;
     }
+
+    private async Task<AcademicWorkflowRunResult> CheckpointConflictAsync(
+        Guid projectId,
+        AcademicStage? stage,
+        CancellationToken cancellationToken)
+    {
+        var latest = await store.LoadAsync(projectId, cancellationToken);
+        return latest is null
+            ? AcademicWorkflowRunResult.From(AcademicWorkflowRunStatus.NotFound, null, stage, "PROJECT_NOT_FOUND")
+            : AcademicWorkflowRunResult.From(
+                AcademicWorkflowRunStatus.RevisionConflict,
+                latest,
+                stage,
+                "CHECKPOINT_CONFLICT",
+                "Another writer advanced the checkpoint first; reload and retry.");
+    }
 }
 
 // --- Stage execution ------------------------------------------------------------
@@ -220,8 +236,11 @@ public sealed partial class AcademicWorkflowOrchestrator
         // Commit the reservation before the provider call so an attempt that dies
         // mid-flight leaves an auditable, already-charged reservation on resume.
         var startCommit = await CommitAsync(working, loaded.Revision, $"stage-start|{attemptKey}", cancellationToken);
-        if (startCommit == AcademicCommitStatus.RevisionConflict)
-            return (true, AcademicWorkflowRunResult.From(AcademicWorkflowRunStatus.RevisionConflict, loaded, stage, "CHECKPOINT_CONFLICT", "Another writer advanced the checkpoint first; resume again."));
+        // The handler is owned only by the writer that atomically committed this claim.
+        // DuplicateCheckpoint is also a losing claim: it is not evidence that this call
+        // started the attempt, even when another worker committed the same key.
+        if (startCommit != AcademicCommitStatus.Committed)
+            return (true, await CheckpointConflictAsync(loaded.ProjectId, stage, cancellationToken));
 
         AcademicStageOutcome outcome;
         var meterUsage = true;
@@ -292,8 +311,8 @@ public sealed partial class AcademicWorkflowOrchestrator
             record.OutputCheckpointRevision = checkpointRevision;
             candidate.State = AcademicProjectState.AwaitingApproval;
             var gateCommit = await CommitAsync(candidate, working.Revision, $"stage-complete|{attemptKey}", cancellationToken);
-            if (gateCommit == AcademicCommitStatus.RevisionConflict)
-                return (true, AcademicWorkflowRunResult.From(AcademicWorkflowRunStatus.RevisionConflict, working, stage, "CHECKPOINT_CONFLICT", null));
+            if (gateCommit != AcademicCommitStatus.Committed)
+                return (true, await CheckpointConflictAsync(working.ProjectId, stage, cancellationToken));
             return (true, AcademicWorkflowRunResult.From(AcademicWorkflowRunStatus.AwaitingApproval, candidate, stage, "APPROVAL_REQUIRED", ReviewerPromptsFor(gateKind.Value).FirstOrDefault()));
         }
 
@@ -302,15 +321,15 @@ public sealed partial class AcademicWorkflowOrchestrator
             candidate.State = AcademicProjectState.Completed;
             record.OutputCheckpointRevision = candidate.Revision + 1;
             var finalCommit = await CommitAsync(candidate, working.Revision, $"stage-complete|{attemptKey}", cancellationToken);
-            if (finalCommit == AcademicCommitStatus.RevisionConflict)
-                return (true, AcademicWorkflowRunResult.From(AcademicWorkflowRunStatus.RevisionConflict, working, stage, "CHECKPOINT_CONFLICT", null));
+            if (finalCommit != AcademicCommitStatus.Committed)
+                return (true, await CheckpointConflictAsync(working.ProjectId, stage, cancellationToken));
             return (true, AcademicWorkflowRunResult.From(AcademicWorkflowRunStatus.Completed, candidate, stage));
         }
 
         record.OutputCheckpointRevision = candidate.Revision + 1;
         var commit = await CommitAsync(candidate, working.Revision, $"stage-complete|{attemptKey}", cancellationToken);
-        if (commit == AcademicCommitStatus.RevisionConflict)
-            return (true, AcademicWorkflowRunResult.From(AcademicWorkflowRunStatus.RevisionConflict, working, stage, "CHECKPOINT_CONFLICT", null));
+        if (commit != AcademicCommitStatus.Committed)
+            return (true, await CheckpointConflictAsync(working.ProjectId, stage, cancellationToken));
 
         return (false, AcademicWorkflowRunResult.From(AcademicWorkflowRunStatus.Completed, candidate, stage));
     }

@@ -234,21 +234,37 @@ public class AcademicProjectsApiTests : IClassFixture<TaslimApiFactory>
         Assert.Equal(HttpStatusCode.OK, list.StatusCode);
         Assert.Empty(JsonDocument.Parse(await list.Content.ReadAsStringAsync()).RootElement.EnumerateArray());
 
-        // Direct id access: not a member of the owning workspace. 404 vs 403 both deny;
-        // the fence must never answer with data.
-        foreach (var path in new[]
+        // Every project route must make a foreign project indistinguishable from an
+        // unknown project id, without weakening workspace authorization elsewhere.
+        foreach (var suffix in new[]
         {
-            $"/api/academic-projects/{projectId}",
-            $"/api/academic-projects/{projectId}/evidence-matrix",
-            $"/api/academic-projects/{projectId}/verification",
-            $"/api/academic-projects/{projectId}/checkpoints",
+            "",
+            "/evidence-matrix",
+            "/verification",
+            "/checkpoints",
+            "/run",
+            "/approvals/plan",
+            "/budget",
         })
         {
-            var denied = await otherClient.GetAsync(path);
-            Assert.True(
-                denied.StatusCode is HttpStatusCode.Forbidden or HttpStatusCode.NotFound,
-                $"{path} answered {denied.StatusCode} with body {await denied.Content.ReadAsStringAsync()}");
-            Assert.DoesNotContain("isolation probe", await SafeBody(denied));
+            async Task<HttpResponseMessage> SendProbeAsync(Guid id)
+            {
+                var path = $"/api/academic-projects/{id}{suffix}";
+                return suffix is "/run" or "/approvals/plan" or "/budget"
+                    ? await PostJsonAsync(otherClient, path, new { })
+                    : await otherClient.GetAsync(path);
+            }
+
+            using var foreign = await SendProbeAsync(projectId);
+            using var unknown = await SendProbeAsync(Guid.NewGuid());
+            Assert.Equal(HttpStatusCode.NotFound, foreign.StatusCode);
+            Assert.Equal(HttpStatusCode.NotFound, unknown.StatusCode);
+            var foreignBody = await foreign.Content.ReadAsStringAsync();
+            var unknownBody = await unknown.Content.ReadAsStringAsync();
+            Assert.Equal(unknownBody, foreignBody);
+            var error = JsonDocument.Parse(foreignBody).RootElement.GetProperty("error");
+            Assert.Equal("PROJECT_NOT_FOUND", error.GetProperty("code").GetString());
+            Assert.Equal("Project not found.", error.GetProperty("message").GetString());
         }
 
         // And they cannot create into someone else's workspace.

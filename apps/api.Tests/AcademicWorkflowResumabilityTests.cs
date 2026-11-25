@@ -52,6 +52,34 @@ public sealed class AcademicWorkflowResumabilityTests
         }
     }
 
+    private sealed class DuplicatePlanCompletionStore(IAcademicWorkflowStateStore inner) : IAcademicWorkflowStateStore
+    {
+        public Task<AcademicWorkflowSnapshot?> LoadAsync(Guid projectId, CancellationToken cancellationToken) =>
+            inner.LoadAsync(projectId, cancellationToken);
+
+        public Task<AcademicWorkflowSnapshot?> FindByRequestKeyAsync(Guid workspaceId, string requestKey, CancellationToken cancellationToken) =>
+            inner.FindByRequestKeyAsync(workspaceId, requestKey, cancellationToken);
+
+        public Task<bool> TryCreateAsync(AcademicWorkflowSnapshot snapshot, CancellationToken cancellationToken) =>
+            inner.TryCreateAsync(snapshot, cancellationToken);
+
+        public async Task<AcademicCommitOutcome> TryCommitAsync(
+            AcademicWorkflowSnapshot snapshot,
+            long expectedRevision,
+            string checkpointKey,
+            CancellationToken cancellationToken)
+        {
+            var outcome = await inner.TryCommitAsync(snapshot, expectedRevision, checkpointKey, cancellationToken);
+            // Model a commit whose durable write won but whose caller observes the replay
+            // classification for the identical completion checkpoint.
+            return expectedRevision == 1
+                && snapshot.State == AcademicProjectState.AwaitingApproval
+                && outcome.Status == AcademicCommitStatus.Committed
+                    ? new AcademicCommitOutcome(AcademicCommitStatus.DuplicateCheckpoint)
+                    : outcome;
+        }
+    }
+
     [Fact]
     public async Task Fresh_Worker_Resuming_The_Same_Store_Skips_Completed_Stages()
     {
@@ -211,6 +239,37 @@ public sealed class AcademicWorkflowResumabilityTests
             ? AcademicProjectState.Cancelled
             : AcademicProjectState.Running, committed.State);
         Assert.Null(committed.PendingApproval);
+    }
+
+    [Fact]
+    public async Task Duplicate_stage_completion_acknowledgement_is_not_reported_as_a_new_success()
+    {
+        var inner = new InMemoryAcademicWorkflowStateStore();
+        var request = AcademicWorkflowFixtures.Request("duplicate-stage-completion");
+        var snapshot = new AcademicWorkflowSnapshot
+        {
+            ProjectId = AcademicWorkflowOrchestrator.DeriveProjectId(request.WorkspaceId, request.RequestKey),
+            WorkspaceId = request.WorkspaceId,
+            RequestKey = request.RequestKey,
+            Request = request,
+            State = AcademicProjectState.Running,
+            Revision = 0,
+            CreatedAtUtc = DateTime.UtcNow,
+            UpdatedAtUtc = DateTime.UtcNow,
+        };
+        Assert.True(await inner.TryCreateAsync(snapshot, CancellationToken.None));
+
+        var plan = new ScriptedStageHandler(AcademicStage.Plan);
+        var store = new DuplicatePlanCompletionStore(inner);
+        var engine = new AcademicWorkflowOrchestrator(store, [plan], new SteadyTimeProvider());
+        var result = await engine.ResumeAsync(snapshot.ProjectId, CancellationToken.None);
+
+        Assert.Equal(AcademicWorkflowRunStatus.RevisionConflict, result.Status);
+        Assert.Equal(AcademicProjectState.AwaitingApproval, result.Snapshot!.State);
+        Assert.Equal(1, plan.Calls.Count);
+        var durable = await inner.LoadAsync(snapshot.ProjectId, CancellationToken.None);
+        Assert.Equal(AcademicProjectState.AwaitingApproval, durable!.State);
+        Assert.Equal(AcademicApprovalKind.Plan, durable.PendingApproval!.Kind);
     }
 
     [Fact]

@@ -2,7 +2,7 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { api, type AcademicProjectDto, type AcademicProjectSummary } from "@/lib/api";
+import { ApiError, api, type AcademicProjectDto, type AcademicProjectSummary } from "@/lib/api";
 import { createDefaultBrief } from "./academicBrief";
 import { createAcademicLabels, createAcademicTranslator } from "./academicStrings";
 import { AcademicWorkflowPanel } from "./AcademicWorkflowPanel";
@@ -94,10 +94,45 @@ function project(projectId: string): AcademicProjectDto {
   };
 }
 
+function approvedProject(projectId: string, state: string): AcademicProjectDto {
+  const pending = project(projectId);
+  return {
+    ...pending,
+    project: { ...pending.project, state, revision: 2 },
+    pendingApproval: null,
+    approvals: [{
+      kind: "Plan",
+      checkpointRevision: 1,
+      decision: "Approved",
+      notes: null,
+      decidedAtUtc: now,
+    }],
+  };
+}
+
 function buttonNamed(container: HTMLElement, label: string): HTMLButtonElement {
   const button = Array.from(container.querySelectorAll("button")).find((candidate) => candidate.textContent?.trim() === label);
   if (!button) throw new Error(`Expected a button named "${label}"`);
   return button;
+}
+
+async function mountPanel() {
+  const translate = createAcademicTranslator("en");
+  await act(async () => {
+    root.render(
+      <AcademicWorkflowPanel
+        workspaceId={workspaceId}
+        brief={createDefaultBrief("masters")}
+        chapterHeadings={[]}
+        language="en"
+        canStart={true}
+        t={translate}
+        labels={createAcademicLabels(translate)}
+      />,
+    );
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+  return translate;
 }
 
 let container: HTMLDivElement;
@@ -183,5 +218,108 @@ describe("Academic workflow latest-intent guard", () => {
       1,
       "Approved",
     );
+  });
+});
+
+describe("Academic workflow create idempotency and conflict refresh", () => {
+  it("uses a fresh key for each successful logical Create", async () => {
+    vi.spyOn(api, "listAcademicProjects").mockResolvedValue([]);
+    let createCount = 0;
+    const create = vi.spyOn(api, "createAcademicProject").mockImplementation(async () => {
+      createCount += 1;
+      return project(`created-${createCount}`);
+    });
+    vi.spyOn(api, "runAcademicProject").mockImplementation(async (projectId) => project(projectId));
+
+    const translate = await mountPanel();
+    await act(async () => {
+      buttonNamed(container, translate("workflow.createAction")).click();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    await act(async () => {
+      buttonNamed(container, translate("workflow.createAction")).click();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    expect(create).toHaveBeenCalledTimes(2);
+    const firstKey = create.mock.calls[0][1].requestKey;
+    const secondKey = create.mock.calls[1][1].requestKey;
+    expect(firstKey).toBeTruthy();
+    expect(secondKey).toBeTruthy();
+    expect(secondKey).not.toBe(firstKey);
+  });
+
+  it("retains the same key when retrying a Create whose response failed", async () => {
+    vi.spyOn(api, "listAcademicProjects").mockResolvedValue([]);
+    const create = vi.spyOn(api, "createAcademicProject")
+      .mockRejectedValueOnce(new Error("request interrupted"))
+      .mockResolvedValueOnce(project("created-after-retry"));
+    vi.spyOn(api, "runAcademicProject").mockResolvedValue(project("created-after-retry"));
+
+    const translate = await mountPanel();
+    await act(async () => {
+      buttonNamed(container, translate("workflow.createAction")).click();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    await act(async () => {
+      buttonNamed(container, translate("workflow.createAction")).click();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    expect(create).toHaveBeenCalledTimes(2);
+    expect(create.mock.calls[1][1].requestKey).toBe(create.mock.calls[0][1].requestKey);
+  });
+
+  it("reloads after an approval 409 and replaces the stale approval action", async () => {
+    const latest = deferred<AcademicProjectDto>();
+    const getProject = vi.spyOn(api, "getAcademicProject")
+      .mockResolvedValueOnce(project("approval-conflict"))
+      .mockReturnValueOnce(latest.promise);
+    vi.spyOn(api, "listAcademicProjects").mockResolvedValue([summary("approval-conflict")]);
+    vi.spyOn(api, "submitAcademicApproval").mockRejectedValue(new ApiError(409, "checkpoint changed"));
+
+    const translate = await mountPanel();
+    expect(container.textContent).toContain(translate("workflow.approveAction"));
+    await act(async () => {
+      buttonNamed(container, translate("workflow.approveAction")).click();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    expect(getProject).toHaveBeenCalledTimes(2);
+    expect(container.textContent).toContain(translate("workflow.conflictReloading"));
+    expect(container.textContent).not.toContain(translate("workflow.approveAction"));
+    await act(async () => {
+      latest.resolve(approvedProject("approval-conflict", "Running"));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(container.textContent).toContain(translate("workflow.conflictReloaded"));
+    expect(container.textContent).not.toContain(translate("workflow.approveAction"));
+    expect(container.textContent).toContain(translate("workflow.resumeAction"));
+  });
+
+  it("reloads after a resume 409 and removes the stale resume action", async () => {
+    const latest = deferred<AcademicProjectDto>();
+    const getProject = vi.spyOn(api, "getAcademicProject")
+      .mockResolvedValueOnce(approvedProject("resume-conflict", "Running"))
+      .mockReturnValueOnce(latest.promise);
+    vi.spyOn(api, "listAcademicProjects").mockResolvedValue([summary("resume-conflict")]);
+    vi.spyOn(api, "runAcademicProject").mockRejectedValue(new ApiError(409, "checkpoint changed"));
+
+    const translate = await mountPanel();
+    expect(container.textContent).toContain(translate("workflow.resumeAction"));
+    await act(async () => {
+      buttonNamed(container, translate("workflow.resumeAction")).click();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    expect(getProject).toHaveBeenCalledTimes(2);
+    expect(container.textContent).toContain(translate("workflow.conflictReloading"));
+    expect(container.textContent).not.toContain(translate("workflow.resumeAction"));
+    await act(async () => {
+      latest.resolve(approvedProject("resume-conflict", "Completed"));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(container.textContent).toContain(translate("workflow.conflictReloaded"));
+    expect(container.textContent).not.toContain(translate("workflow.resumeAction"));
   });
 });

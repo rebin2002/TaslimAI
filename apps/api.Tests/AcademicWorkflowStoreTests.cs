@@ -50,6 +50,99 @@ public sealed class AcademicWorkflowStoreTests
         }
     }
 
+    private sealed class ConcurrentStageStartStore(IAcademicWorkflowStateStore inner) : IAcademicWorkflowStateStore
+    {
+        private readonly TaskCompletionSource<bool> bothInitialLoads = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource<bool> bothInitialClaims = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly SemaphoreSlim databaseGate = new(1, 1);
+        private int initialLoadCount;
+        private int initialClaimCount;
+
+        public async Task<AcademicWorkflowSnapshot?> LoadAsync(Guid projectId, CancellationToken cancellationToken)
+        {
+            AcademicWorkflowSnapshot? snapshot;
+            await databaseGate.WaitAsync(cancellationToken);
+            try
+            {
+                snapshot = await inner.LoadAsync(projectId, cancellationToken);
+            }
+            finally
+            {
+                databaseGate.Release();
+            }
+
+            var arrival = Interlocked.Increment(ref initialLoadCount);
+            if (arrival <= 2)
+            {
+                if (arrival == 2) bothInitialLoads.TrySetResult(true);
+                await bothInitialLoads.Task.WaitAsync(cancellationToken);
+            }
+            return snapshot;
+        }
+
+        public Task<AcademicWorkflowSnapshot?> FindByRequestKeyAsync(Guid workspaceId, string requestKey, CancellationToken cancellationToken) =>
+            inner.FindByRequestKeyAsync(workspaceId, requestKey, cancellationToken);
+
+        public Task<bool> TryCreateAsync(AcademicWorkflowSnapshot snapshot, CancellationToken cancellationToken) =>
+            inner.TryCreateAsync(snapshot, cancellationToken);
+
+        public async Task<AcademicCommitOutcome> TryCommitAsync(
+            AcademicWorkflowSnapshot snapshot,
+            long expectedRevision,
+            string checkpointKey,
+            CancellationToken cancellationToken)
+        {
+            if (expectedRevision == 0)
+            {
+                var arrival = Interlocked.Increment(ref initialClaimCount);
+                if (arrival <= 2)
+                {
+                    if (arrival == 2) bothInitialClaims.TrySetResult(true);
+                    await bothInitialClaims.Task.WaitAsync(cancellationToken);
+                }
+            }
+
+            await databaseGate.WaitAsync(cancellationToken);
+            try
+            {
+                return await inner.TryCommitAsync(snapshot, expectedRevision, checkpointKey, cancellationToken);
+            }
+            finally
+            {
+                databaseGate.Release();
+            }
+        }
+    }
+
+    private sealed class BlockingPlanHandler : IAcademicStageHandler
+    {
+        private readonly TaskCompletionSource<bool> entered = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource<bool> release = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private int calls;
+
+        public AcademicStage Stage => AcademicStage.Plan;
+        public int CallCount => Volatile.Read(ref calls);
+        public Task Started => entered.Task;
+        public void Release() => release.TrySetResult(true);
+
+        public AcademicStageEstimate Estimate(AcademicStageContext context) => new()
+        {
+            EstimatedCostUsd = 0.5m,
+            EstimatedProviderCalls = 2,
+        };
+
+        public async Task<AcademicStageOutcome> ExecuteAsync(AcademicStageContext context, CancellationToken cancellationToken)
+        {
+            Interlocked.Increment(ref calls);
+            entered.TrySetResult(true);
+            await release.Task.WaitAsync(cancellationToken);
+            return AcademicWorkflowFixtures.OutcomeFor(
+                AcademicStage.Plan,
+                context.Snapshot,
+                new AcademicUsageRecord { CostUsd = 0.5m, ProviderCalls = 2 });
+        }
+    }
+
     private static AcademicWorkflowSnapshot Snapshot(Guid workspaceId, string requestKey) => new()
     {
         ProjectId = AcademicWorkflowOrchestrator.DeriveProjectId(workspaceId, requestKey),
@@ -109,6 +202,58 @@ public sealed class AcademicWorkflowStoreTests
         Assert.Equal(1, loaded.Revision);
         Assert.Equal(AcademicProjectState.AwaitingApproval, loaded.State);
         Assert.NotNull(loaded.Plan);
+    }
+
+    [Fact]
+    public async Task Concurrent_resumes_on_disposable_sqlite_allow_only_the_stage_start_claim_winner_to_execute()
+    {
+        using var fixture = new Fixture();
+        var request = AcademicWorkflowFixtures.Request("sqlite-concurrent-stage-start") with { WorkspaceId = WorkspaceA };
+        var snapshot = new AcademicWorkflowSnapshot
+        {
+            ProjectId = AcademicWorkflowOrchestrator.DeriveProjectId(WorkspaceA, request.RequestKey),
+            WorkspaceId = WorkspaceA,
+            RequestKey = request.RequestKey,
+            Request = request,
+            State = AcademicProjectState.Running,
+            Revision = 0,
+            CreatedAtUtc = new DateTime(2026, 11, 24, 9, 0, 0, DateTimeKind.Utc),
+            UpdatedAtUtc = new DateTime(2026, 11, 24, 9, 0, 0, DateTimeKind.Utc),
+        };
+        Assert.True(await fixture.Store.TryCreateAsync(snapshot, default));
+
+        // Both engines read the same durable revision and race the same revision-0 claim.
+        // The adapter serializes DbContext access because EF contexts are not thread-safe;
+        // SQLite still persists the winner and reports the identical claim as a duplicate.
+        var racingStore = new ConcurrentStageStartStore(fixture.Store);
+        var handler = new BlockingPlanHandler();
+        var firstWorker = new AcademicWorkflowOrchestrator(racingStore, [handler]);
+        var secondWorker = new AcademicWorkflowOrchestrator(racingStore, [handler]);
+        var first = firstWorker.ResumeAsync(snapshot.ProjectId, CancellationToken.None);
+        var second = secondWorker.ResumeAsync(snapshot.ProjectId, CancellationToken.None);
+
+        await handler.Started.WaitAsync(TimeSpan.FromSeconds(5));
+        Task<AcademicWorkflowRunResult>? firstFinished = null;
+        try
+        {
+            firstFinished = await Task.WhenAny(first, second).WaitAsync(TimeSpan.FromSeconds(5));
+            Assert.Equal(AcademicWorkflowRunStatus.RevisionConflict, (await firstFinished).Status);
+            Assert.Equal(1, handler.CallCount);
+        }
+        finally
+        {
+            handler.Release();
+        }
+
+        var results = await Task.WhenAll(first, second);
+        Assert.Equal(1, results.Count(result => result.Status == AcademicWorkflowRunStatus.AwaitingApproval));
+        Assert.Equal(1, results.Count(result => result.Status == AcademicWorkflowRunStatus.RevisionConflict));
+        Assert.Equal(1, handler.CallCount);
+
+        var durable = await fixture.Store.LoadAsync(snapshot.ProjectId, default);
+        Assert.Equal(AcademicProjectState.AwaitingApproval, durable!.State);
+        Assert.Equal(AcademicApprovalKind.Plan, durable.PendingApproval!.Kind);
+        Assert.Equal(2, durable.Revision);
     }
 
     [Fact]

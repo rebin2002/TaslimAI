@@ -469,7 +469,7 @@ public sealed class AcademicProjectsController(
         if (ownerWorkspace is null)
             return (null, ApiResults.Error(this, 404, "PROJECT_NOT_FOUND", "Project not found."));
         if (!await access.IsMemberAsync(GetUserId(), ownerWorkspace.Value, cancellationToken))
-            return (null, Forbid());
+            return (null, ApiResults.Error(this, 404, "PROJECT_NOT_FOUND", "Project not found."));
 
         var snapshot = await service.LoadFencedAsync(ownerWorkspace.Value, projectId, cancellationToken);
         if (snapshot is null)

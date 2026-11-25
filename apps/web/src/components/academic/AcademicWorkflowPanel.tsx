@@ -261,10 +261,14 @@ export function AcademicWorkflowPanel({ workspaceId, brief, chapterHeadings, lan
       requestKeyRef.current = { signature, key: requestKey() };
     }
     const input = { ...draft, requestKey: requestKeyRef.current.key };
+    const operationRequestKey = input.requestKey;
     setBusy(true);
     setError("");
     try {
       const created = await api.createAcademicProject(workspaceId, input);
+      // The server accepted this logical Create. A later click is a new project,
+      // while failures before this response keep the key available for a retry.
+      if (requestKeyRef.current?.key === operationRequestKey) requestKeyRef.current = null;
       if (!isCurrentOperation()) return;
       if (created.project.workspaceId !== workspaceId) {
         setError(t("workflow.accessChanged"));
@@ -282,11 +286,14 @@ export function AcademicWorkflowPanel({ workspaceId, brief, chapterHeadings, lan
           const rows = await api.listAcademicProjects(workspaceId);
           if (!isCurrentOperation()) return;
           setProjects(rows);
-          const match = rows.find((row) => row.requestKey === requestKeyRef.current?.key);
+          const match = rows.find((row) => row.requestKey === operationRequestKey);
           if (match) {
             const recovered = await api.getAcademicProject(match.projectId);
             if (isCurrentOperation() && recovered.project.projectId === match.projectId
-              && recovered.project.workspaceId === workspaceId) remember(recovered);
+              && recovered.project.workspaceId === workspaceId) {
+              if (requestKeyRef.current?.key === operationRequestKey) requestKeyRef.current = null;
+              remember(recovered);
+            }
           }
         } catch { /* Keep the primary action error; the next load can recover from server state. */ }
       }
@@ -319,9 +326,36 @@ export function AcademicWorkflowPanel({ workspaceId, brief, chapterHeadings, lan
     }
   }
 
+  async function refreshAfterConflict(
+    targetProjectId: string,
+    operationWorkspaceId: string,
+    isCurrentOperation: () => boolean,
+  ) {
+    if (!isCurrentOperation()) return;
+    // Hide stale approval/resume controls before asking the server for the new head.
+    setProject(null);
+    setError(t("workflow.conflictReloading"));
+    try {
+      const latest = await api.getAcademicProject(targetProjectId);
+      if (!isCurrentOperation()) return;
+      if (latest.project.projectId !== targetProjectId || latest.project.workspaceId !== operationWorkspaceId) {
+        setProject(null);
+        setError(t("workflow.accessChanged"));
+        return;
+      }
+      remember(latest);
+      setError(t("workflow.conflictReloaded"));
+    } catch {
+      if (isCurrentOperation()) {
+        setProject(null);
+        setError(t("workflow.conflictReloadFailed"));
+      }
+    }
+  }
+
   async function resume() {
     const targetProjectId = project?.project.projectId;
-    if (!project || !targetProjectId || busy || project.pendingApproval
+    if (!workspaceId || !project || !targetProjectId || busy || project.pendingApproval
       || !isSelectedAcademicProject(targetProjectId, selectedId) || selectedIdRef.current !== targetProjectId) return;
     const operationWorkspaceId = workspaceId;
     const operationWorkspaceGeneration = workspaceGenerationRef.current;
@@ -338,7 +372,11 @@ export function AcademicWorkflowPanel({ workspaceId, brief, chapterHeadings, lan
       if (resumed.project.projectId === targetProjectId && resumed.project.workspaceId === operationWorkspaceId) remember(resumed);
     } catch (cause) {
       if (!isCurrentOperation()) return;
-      setError(safeAcademicError(cause, t));
+      if (cause instanceof ApiError && cause.status === 409) {
+        await refreshAfterConflict(targetProjectId, operationWorkspaceId, isCurrentOperation);
+      } else {
+        setError(safeAcademicError(cause, t));
+      }
       if (cause instanceof ApiError && cause.status === 501) {
         try {
           const latest = await api.getAcademicProject(targetProjectId);
@@ -354,7 +392,7 @@ export function AcademicWorkflowPanel({ workspaceId, brief, chapterHeadings, lan
   async function approvePlan() {
     const targetProjectId = project?.project.projectId;
     const pendingApproval = project?.pendingApproval;
-    if (!project || !targetProjectId || pendingApproval?.kind !== "Plan" || busy
+    if (!workspaceId || !project || !targetProjectId || pendingApproval?.kind !== "Plan" || busy
       || !isSelectedAcademicProject(targetProjectId, selectedId)
       || selectedIdRef.current !== targetProjectId) return;
     const operationWorkspaceId = workspaceId;
@@ -373,7 +411,12 @@ export function AcademicWorkflowPanel({ workspaceId, brief, chapterHeadings, lan
       if (approved.project.projectId === targetProjectId && approved.project.workspaceId === operationWorkspaceId) remember(approved);
       else setError(t("workflow.accessChanged"));
     } catch (cause) {
-      if (isCurrentOperation()) setError(safeAcademicError(cause, t));
+      if (!isCurrentOperation()) return;
+      if (cause instanceof ApiError && cause.status === 409) {
+        await refreshAfterConflict(targetProjectId, operationWorkspaceId, isCurrentOperation);
+      } else {
+        setError(safeAcademicError(cause, t));
+      }
     } finally {
       if (isCurrentOperation()) setBusy(false);
     }

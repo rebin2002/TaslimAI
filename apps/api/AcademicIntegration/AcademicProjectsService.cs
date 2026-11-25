@@ -273,6 +273,17 @@ public sealed class AcademicProjectsService(
             };
         }
 
+        if (run.Status == AcademicWorkflowRunStatus.RevisionConflict)
+        {
+            return new AcademicProjectServiceResult
+            {
+                Status = AcademicProjectServiceStatus.Conflict,
+                Snapshot = run.Snapshot,
+                Code = run.Code ?? "CHECKPOINT_CONFLICT",
+                Detail = run.Detail ?? "Another writer advanced the project first; reload and retry.",
+            };
+        }
+
         // A resume that lost the checkpoint race returns the loser's copy of the tree.
         // Projecting it here would rewrite the derived evidence tables from state the
         // durable store already rejected, so the conflict path never projects; the
