@@ -30,7 +30,7 @@ public sealed class GlobalSearchController(TaslimDbContext db) : ControllerBase
     {
         var normalized = (query ?? string.Empty).Trim();
         if (normalized.Length > MaxQueryLength)
-            normalized = normalized[..MaxQueryLength];
+            normalized = CapQueryLength(normalized);
 
         var currentPage = Math.Clamp(page, 1, MaxPage);
         var perType = Math.Clamp(limit, 1, MaxLimitPerType);
@@ -98,16 +98,13 @@ public sealed class GlobalSearchController(TaslimDbContext db) : ControllerBase
         AddGroup(groups, GlobalSearchResultTypes.Conversation, conversations, currentPage, perType);
 
         // Keep asset search aligned with the asset-library privacy boundary:
-        // Research assets remain creator-private even when a project is
-        // attached; other project assets are shared only when their backing
-        // file is also workspace-shareable.
+        // project assets are shared only when their backing file is also
+        // workspace-shareable; personal and conversation-backed assets remain
+        // visible only to their creator.
         var assetQuery = db.Assets.AsNoTracking()
             .Where(asset => workspaceIds.Contains(asset.WorkspaceId)
                 && (asset.CreatedByUserId == userId
-                    || (asset.AssetType != AssetTypes.Research
-                        && asset.ProjectId.HasValue
-                        && asset.Project != null
-                        && asset.Project.WorkspaceId == asset.WorkspaceId))
+                    || (asset.ProjectId.HasValue && asset.Project != null && asset.Project.WorkspaceId == asset.WorkspaceId))
                 && (asset.CreatedByUserId == userId
                     || !asset.StoredFileId.HasValue
                     || (asset.StoredFile!.WorkspaceId == asset.WorkspaceId
@@ -219,6 +216,22 @@ public sealed class GlobalSearchController(TaslimDbContext db) : ControllerBase
     }
 
     private Guid GetUserId() => Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier) ?? throw new InvalidOperationException("Authenticated user identifier is missing."));
+
+    /// <summary>
+    /// Bounds the query to <see cref="MaxQueryLength"/> UTF-16 units without ever
+    /// cutting a surrogate pair in half. A severed high surrogate is not a
+    /// character: it is encoded as a replacement glyph on the way to the database,
+    /// so the search term stops being the caller's text and matches nothing — a
+    /// title containing an emoji could never be found by searching that exact
+    /// title. Dropping the split pair keeps the bound intact and the needle valid.
+    /// </summary>
+    private static string CapQueryLength(string value)
+    {
+        var length = MaxQueryLength;
+        if (char.IsHighSurrogate(value[length - 1]))
+            length--;
+        return value[..length];
+    }
 
     private static async Task<SearchPage<T>> LoadPageAsync<T>(IQueryable<T> query, int page, int pageSize, CancellationToken cancellationToken)
     {
