@@ -133,6 +133,120 @@ public sealed class MovieDirectorScenePlanningTests : IClassFixture<ScenePlanApi
         Assert.NotNull(storedAction.StartedAt);
     }
 
+    [Fact]
+    public async Task An_orphaned_running_director_action_is_reconciled_to_a_terminal_failure_only_once()
+    {
+        using var client = factory.CreateClient();
+        var actionId = await CreateApprovedScenePlanActionAsync(client, "Orphaned Claim Owner");
+        var orphanedAt = DateTime.UtcNow - MovieDirectorService.RunningActionGrace - TimeSpan.FromMinutes(1);
+        using (var claimScope = factory.Services.CreateScope())
+            Assert.True(await MovieDirectorService.TryClaimReadyActionAsync(claimScope.ServiceProvider.GetRequiredService<TaslimDbContext>(), actionId, orphanedAt, CancellationToken.None));
+
+        using (var recoverScope = factory.Services.CreateScope())
+            Assert.True(await MovieDirectorService.TryRecoverStaleRunningActionAsync(recoverScope.ServiceProvider.GetRequiredService<TaslimDbContext>(), actionId, DateTime.UtcNow, CancellationToken.None));
+
+        using var verifyScope = factory.Services.CreateScope();
+        var db = verifyScope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        var stored = await db.DirectorActions.AsNoTracking().SingleAsync(item => item.Id == actionId);
+        Assert.Equal(DirectorActionStatuses.Failed, stored.Status);
+        Assert.Equal(MovieDirectorService.InterruptedFailureCode, stored.FailureCode);
+        Assert.NotNull(stored.CompletedAt);
+        Assert.Equal(1, await db.DirectorActionResults.AsNoTracking().CountAsync(item => item.DirectorActionId == actionId));
+        Assert.Equal(1, await db.DirectorHistoryEvents.AsNoTracking().CountAsync(item => item.DirectorActionId == actionId && item.EventType == DirectorHistoryEventTypes.ActionFailed));
+
+        // Reconciling a second time must not settle the action again or duplicate its evidence trail.
+        using (var repeatScope = factory.Services.CreateScope())
+            Assert.False(await MovieDirectorService.TryRecoverStaleRunningActionAsync(repeatScope.ServiceProvider.GetRequiredService<TaslimDbContext>(), actionId, DateTime.UtcNow, CancellationToken.None));
+        Assert.Equal(1, await db.DirectorActionResults.AsNoTracking().CountAsync(item => item.DirectorActionId == actionId));
+    }
+
+    [Fact]
+    public async Task A_running_director_action_owned_by_a_live_claim_is_never_reconciled()
+    {
+        using var client = factory.CreateClient();
+        var actionId = await CreateApprovedScenePlanActionAsync(client, "Live Claim Owner");
+        using (var claimScope = factory.Services.CreateScope())
+            Assert.True(await MovieDirectorService.TryClaimReadyActionAsync(claimScope.ServiceProvider.GetRequiredService<TaslimDbContext>(), actionId, DateTime.UtcNow, CancellationToken.None));
+
+        using (var recoverScope = factory.Services.CreateScope())
+            Assert.False(await MovieDirectorService.TryRecoverStaleRunningActionAsync(recoverScope.ServiceProvider.GetRequiredService<TaslimDbContext>(), actionId, DateTime.UtcNow, CancellationToken.None));
+
+        using var verifyScope = factory.Services.CreateScope();
+        var db = verifyScope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        var stored = await db.DirectorActions.AsNoTracking().SingleAsync(item => item.Id == actionId);
+        Assert.Equal(DirectorActionStatuses.Running, stored.Status);
+        Assert.Null(stored.CompletedAt);
+        Assert.Equal(0, await db.DirectorActionResults.AsNoTracking().CountAsync(item => item.DirectorActionId == actionId));
+    }
+
+    [Fact]
+    public async Task A_running_director_action_without_a_start_timestamp_is_recoverable()
+    {
+        using var client = factory.CreateClient();
+        var actionId = await CreateApprovedScenePlanActionAsync(client, "Timestampless Claim Owner");
+        using (var strandScope = factory.Services.CreateScope())
+        {
+            var db = strandScope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            var stranded = await db.DirectorActions.SingleAsync(item => item.Id == actionId);
+            stranded.Status = DirectorActionStatuses.Running;
+            stranded.StartedAt = null;
+            await db.SaveChangesAsync();
+        }
+
+        using (var recoverScope = factory.Services.CreateScope())
+            Assert.True(await MovieDirectorService.TryRecoverStaleRunningActionAsync(recoverScope.ServiceProvider.GetRequiredService<TaslimDbContext>(), actionId, DateTime.UtcNow, CancellationToken.None));
+        using var verifyScope = factory.Services.CreateScope();
+        var verifyDb = verifyScope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        var stored = await verifyDb.DirectorActions.AsNoTracking().SingleAsync(item => item.Id == actionId);
+        Assert.Equal(DirectorActionStatuses.Failed, stored.Status);
+        Assert.Equal(MovieDirectorService.InterruptedFailureCode, stored.FailureCode);
+    }
+
+    [Fact]
+    public async Task Executing_an_orphaned_director_action_recovers_it_instead_of_leaving_it_permanently_running()
+    {
+        using var client = factory.CreateClient();
+        var actionId = await CreateApprovedScenePlanActionAsync(client, "Interrupted Director Owner");
+        // Reproduce the crash window: the claim committed, then the process died before the executor settled.
+        var orphanedAt = DateTime.UtcNow - MovieDirectorService.RunningActionGrace - TimeSpan.FromMinutes(1);
+        using (var claimScope = factory.Services.CreateScope())
+            Assert.True(await MovieDirectorService.TryClaimReadyActionAsync(claimScope.ServiceProvider.GetRequiredService<TaslimDbContext>(), actionId, orphanedAt, CancellationToken.None));
+
+        using var interrupted = await SendWithCsrf(client, HttpMethod.Post, $"/api/movie-director/actions/{actionId}/execute", null);
+        Assert.Equal(HttpStatusCode.Conflict, interrupted.StatusCode);
+        var interruptedBody = await interrupted.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal(MovieDirectorService.InterruptedFailureCode, interruptedBody.GetProperty("error").GetProperty("code").GetString());
+
+        using (var verifyScope = factory.Services.CreateScope())
+        {
+            var db = verifyScope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            var stored = await db.DirectorActions.AsNoTracking().SingleAsync(item => item.Id == actionId);
+            Assert.Equal(DirectorActionStatuses.Failed, stored.Status);
+            Assert.Equal(MovieDirectorService.InterruptedFailureCode, stored.FailureCode);
+            Assert.NotNull(stored.CompletedAt);
+        }
+
+        // The recovered action is terminal: a later attempt never re-drives the interrupted provider work.
+        using var repeat = await SendWithCsrf(client, HttpMethod.Post, $"/api/movie-director/actions/{actionId}/execute", null);
+        Assert.Equal(HttpStatusCode.Conflict, repeat.StatusCode);
+        var repeatBody = await repeat.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal("DIRECTOR_APPROVAL_REQUIRED", repeatBody.GetProperty("error").GetProperty("code").GetString());
+    }
+
+    private async Task<Guid> CreateApprovedScenePlanActionAsync(HttpClient client, string ownerDisplayName)
+    {
+        var auth = await Register(client, ownerDisplayName);
+        var movie = await CreateMovie(client, auth.PersonalWorkspace.Id);
+        await CreateCharacter(client, movie.Project.Id);
+        await CreateStory(client, movie.Project.Id);
+        await LockGuide(client, movie.Project.Id);
+        var proposal = await SendWithCsrf<DirectorProposalResponse>(client, HttpMethod.Post, $"/api/movie-director/projects/{movie.Project.Id}/proposals", new { scenePlanAction = DirectorScenePlanActionTypes.PlanScenes });
+        var approved = await SendWithCsrf<DirectorProposalDto>(client, HttpMethod.Post, $"/api/movie-director/proposals/{proposal.Proposal.Id}/approve", null);
+        var action = approved.Actions.Single();
+        Assert.Equal(DirectorActionStatuses.Ready, action.Status);
+        return action.Id;
+    }
+
     private static async Task<AuthResponse> Register(HttpClient client, string displayName)
     {
         var response = await SendWithCsrf(client, HttpMethod.Post, "/api/auth/register", new { displayName, email = $"scene-plan-{Guid.NewGuid():N}@example.com", password = "StrongPassword!123", preferredLanguage = "en" });
