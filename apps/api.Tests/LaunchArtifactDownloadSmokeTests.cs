@@ -136,7 +136,7 @@ public sealed class LaunchArtifactDownloadSmokeTests :
             tone = "professional",
             includeTableOfContents = false,
             attachmentIds = Array.Empty<Guid>(),
-        });
+        }, "launch-smoke-document-owner-20261029-0001");
         Assert.Equal(HttpStatusCode.Accepted, create.StatusCode);
         var created = (await create.Content.ReadFromJsonAsync<CreateDocumentGenerationResponse>())!;
         var job = await WaitForTerminal(owner, created.Job.Id);
@@ -180,7 +180,7 @@ public sealed class LaunchArtifactDownloadSmokeTests :
             tone = "professional",
             includeTableOfContents = false,
             attachmentIds = Array.Empty<Guid>(),
-        });
+        }, "launch-smoke-document-other-20261029-0002");
         Assert.Equal(HttpStatusCode.Accepted, otherCreate.StatusCode);
         var otherCreated = (await otherCreate.Content.ReadFromJsonAsync<CreateDocumentGenerationResponse>())!;
         var otherJob = await WaitForTerminal(other, otherCreated.Job.Id);
