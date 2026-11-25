@@ -61,6 +61,29 @@ describe("failure classification", () => {
     expect(classify(400).kind).toBe("rejected");
   });
 
+  it("tells the two 503s apart, because only one of them is about the deployment", () => {
+    // The shared transport wraps a dead connection as 503 NETWORK_ERROR; the endpoint's own refusal
+    // is 503 ACADEMIC_SEARCH_UNAVAILABLE. Same status, opposite sentences: the first is "we could
+    // not reach the search", the second is "this deployment has not turned search on". Reading the
+    // status instead of the code would tell an offline student something about their own product
+    // that this client never observed.
+    const signal = new AbortController().signal;
+    const classify = (status: number, code?: string) =>
+      classifyScholarlySearchFailure(new ApiError(status, "The search did not complete.", undefined, code), signal);
+    expect(classify(503, "NETWORK_ERROR").kind).toBe("failed");
+    expect(scholarlySearchFailureKey(classify(503, "NETWORK_ERROR"))).toBe("sources.findErrFailed");
+    // An unanswered 503 with no code the client recognises is still reported as unreachable rather
+    // than as a configuration fact: a proxy can produce it, and the client cannot tell the two apart.
+    expect(classify(503).kind).toBe("failed");
+    expect(classify(503, "SOMETHING_ELSE").kind).toBe("failed");
+    // And the real refusal keeps its precise wording, so this is not "never say unavailable".
+    const off = classify(503, "ACADEMIC_SEARCH_UNAVAILABLE");
+    expect(off.kind).toBe("unavailable");
+    expect(scholarlySearchFailureKey(off)).toBe("sources.findErrUnavailable");
+    expect(scholarlyDiscoveryNotice({ state: "failed", failureKind: off.kind }).state).toBe("disabled");
+    expect(scholarlyDiscoveryNotice({ state: "failed", failureKind: classify(503, "NETWORK_ERROR").kind }).state).not.toBe("disabled");
+  });
+
   it("reads an aborted request as stopped, not as a failure to reach records", () => {
     const controller = new AbortController();
     controller.abort();

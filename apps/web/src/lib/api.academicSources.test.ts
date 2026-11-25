@@ -197,4 +197,48 @@ describe("academic sources search request", () => {
     expect(failure.retryAfterSeconds).toBe(60);
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
+
+  /**
+   * The one place where this lane and the shipped transport meet, and the reason the classification
+   * is keyed on codes rather than on statuses. `request()` wraps any non-abort rejection from `fetch`
+   * as `ApiError(503, …, "NETWORK_ERROR")`, so a student whose connection dropped mid-search arrives
+   * at the scholarly panel with a 503 that has nothing whatsoever to do with their deployment's
+   * configuration. The panel's classifier must read that as "could not be reached", not as "record
+   * search is not turned on here" — and the lane's own unit cases cannot see the wrapper, because
+   * they build an `ApiError` by hand. So the pair is pinned here, end to end, through the real
+ * `request()` at the tree where both lanes coexist.
+   */
+  it("hands a transport failure to the panel as an unreachable search, not as a switched-off deployment", async () => {
+    const fetchMock = vi.fn().mockRejectedValue(new TypeError("Failed to fetch"));
+    const { ApiError, api } = await clientWith(fetchMock);
+
+    const thrown = await api
+      .searchAcademicSources(workspaceId, { term: "ethics", page: 1, pageSize: 10 })
+      .then(() => null)
+      .catch((error) => error);
+
+    // What the shared client actually produces for an offline student.
+    expect(thrown).toBeInstanceOf(ApiError);
+    expect(thrown.status).toBe(503);
+    expect(thrown.code).toBe("NETWORK_ERROR");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    // And what the student is therefore told. `failed` is `sources.findErrFailed` — the search could
+    // not be reached, your library is unchanged — and it must not flip the discovery notice to the
+    // `disabled` wording, which would be a claim about their deployment that nobody observed.
+    const { classifyScholarlySearchFailure, scholarlyDiscoveryNotice, scholarlySearchFailureKey } = await import(
+      "../components/academic/academicScholarlySearch"
+    );
+    const failure = classifyScholarlySearchFailure(thrown, new AbortController().signal);
+    expect(failure.kind).toBe("failed");
+    expect(scholarlySearchFailureKey(failure)).toBe("sources.findErrFailed");
+    expect(scholarlyDiscoveryNotice({ state: "failed", failureKind: failure.kind }).state).not.toBe("disabled");
+
+    // The genuine configuration refusal keeps its own honest sentence, so the fix is not "never say
+    // unavailable": that copy is reserved for the code the endpoint actually uses to say it.
+    const off = classifyScholarlySearchFailure(new ApiError(503, "Scholarly source search is not available right now.", undefined, "ACADEMIC_SEARCH_UNAVAILABLE"), new AbortController().signal);
+    expect(off.kind).toBe("unavailable");
+    expect(scholarlySearchFailureKey(off)).toBe("sources.findErrUnavailable");
+    expect(scholarlyDiscoveryNotice({ state: "failed", failureKind: off.kind }).state).toBe("disabled");
+  });
 });

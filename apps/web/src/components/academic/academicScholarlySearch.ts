@@ -113,10 +113,13 @@ export function scholarlySearchFailureIsRetryable(failure: ScholarlySearchFailur
  * fact the client cannot know before it asks, so the copy must not assert more than the client
  * has observed:
  *
- * - `disabled` — a search came back `unavailable` (HTTP 503), which is exactly what
- *   `AcademicSourceDiscovery.Enabled = false` produces. That is the shipped default, so this is
- *   the state most students are in, and saying "search is live" here would be a false claim
- *   about their own product.
+ * - `disabled` — a search came back `unavailable`, which is the endpoint's own
+ *   `ACADEMIC_SEARCH_UNAVAILABLE` refusal and exactly what `AcademicSourceDiscovery.Enabled = false`
+ *   produces. That is the shipped default, so this is the state most students are in, and saying
+ *   "search is live" here would be a false claim about their own product. A transport failure never
+ *   reaches this branch: `NETWORK_ERROR` from the shared client classifies as `failed`, so an
+ *   offline student is told the search could not be reached, which is the truth, rather than being
+ *   told something about their deployment that nobody asked.
  * - `enabled` — a search answered, so the deployment has discovery configured and the live
  *   sentence is now an observed fact rather than a promise.
  * - `unknown` — nothing has been attempted yet, so the copy describes the affordance without
@@ -227,7 +230,20 @@ export function classifyScholarlySearchFailure(error: unknown, signal: AbortSign
     if (error.status === 401) return { kind: "unauthenticated", retryAfterSeconds: null };
     if (error.status === 403) return { kind: "forbidden", retryAfterSeconds: null };
     if (error.status === 429) return { kind: "rate_limited", retryAfterSeconds: error.retryAfterSeconds ?? null };
-    if (error.status === 503 || error.code === "ACADEMIC_SEARCH_UNAVAILABLE") return { kind: "unavailable", retryAfterSeconds: null };
+    // A status number cannot carry this decision, because two unrelated facts arrive as 503. The
+    // endpoint's own statement about its configuration is `ACADEMIC_SEARCH_UNAVAILABLE`, which is
+    // what `AcademicSourcesController` answers when discovery is switched off or no catalog is
+    // enabled, and nothing else in this route answers 503. The other 503 says nothing about
+    // configuration: the shared transport in `lib/api.ts` turns any non-abort rejection from `fetch`
+    // into `ApiError(503, …, "NETWORK_ERROR")` before a caller sees it, which is what a student who
+    // is offline, or whose connection dropped mid-request, actually produces. Reading that as
+    // `unavailable` would tell them "scholarly record search is not turned on for this deployment" —
+    // a confident claim about their product's configuration that this client never observed, and the
+    // kind of sentence that sends a working student to support. So the refusal is recognised by its
+    // code, the transport failure by its code, and a 503 carrying neither is reported as the one
+    // thing a client can honestly say about an unanswered request: it could not be reached.
+    if (error.code === "NETWORK_ERROR") return { kind: "failed", retryAfterSeconds: null };
+    if (error.code === "ACADEMIC_SEARCH_UNAVAILABLE") return { kind: "unavailable", retryAfterSeconds: null };
     if (error.status === 400) return { kind: "rejected", retryAfterSeconds: null };
     return { kind: "failed", retryAfterSeconds: null };
   }
