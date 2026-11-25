@@ -172,6 +172,9 @@ public sealed class MovieSoundtrackService(
     MovieAuthorizationService authorization,
     IMovieSoundtrackMediaService mediaService) : IMovieSoundtrackService
 {
+    private const int MaximumVersionNumberAllocationAttempts = 3;
+    internal const string VersionNumberUniqueIndexName = "IX_MovieSoundtrackCueVersions_MovieSoundtrackCueId_VersionNumber";
+
     public async Task<MovieSoundtrackDto?> GetProjectAsync(Guid userId, Guid movieProjectId, CancellationToken cancellationToken)
     {
         var project = await db.MovieProjects.AsNoTracking().FirstOrDefaultAsync(item => item.Id == movieProjectId, cancellationToken);
@@ -247,23 +250,65 @@ public sealed class MovieSoundtrackService(
         if (cue is null) return null;
         await authorization.RequireAsync(userId, cue.MovieProjectId, MovieOperationalActions.SoundtrackEdit, cancellationToken);
         ValidateVersion(request.Label, request.Mood ?? cue.Mood, request.Intensity ?? cue.Intensity, request.ArrangementIntent);
-        var asset = request.AssetId.HasValue ? await LoadAudioAssetAsync(request.AssetId.Value, cue.MovieProject, cancellationToken) : null;
-        var now = DateTime.UtcNow;
-        var version = new MovieSoundtrackCueVersion
+        for (var attempt = 0; attempt < MaximumVersionNumberAllocationAttempts; attempt++)
         {
-            Id = Guid.NewGuid(), MovieSoundtrackCueId = cue.Id,
-            VersionNumber = (await db.MovieSoundtrackCueVersions.Where(item => item.MovieSoundtrackCueId == cue.Id).MaxAsync(item => (int?)item.VersionNumber, cancellationToken) ?? 0) + 1,
-            Label = request.Label.Trim(), ArrangementIntent = Clean(request.ArrangementIntent), Mood = (request.Mood ?? cue.Mood).Trim().ToLowerInvariant(),
-            Intensity = request.Intensity ?? cue.Intensity, AssetId = asset?.Id, ApprovalState = MovieSoundtrackApprovalStates.Draft,
-            CreatedByUserId = userId, CreatedAt = now, UpdatedAt = now,
-        };
-        if (asset is not null) version.AudioAssetProvenance = BuildProvenance(version.Id, asset, now);
-        cue.ApprovalState = MovieSoundtrackApprovalStates.InReview;
-        cue.UpdatedAt = now;
-        db.MovieSoundtrackCueVersions.Add(version);
-        await db.SaveChangesAsync(cancellationToken);
-        return await LoadCueDtoAsync(cue.Id, cancellationToken);
+            if (attempt > 0)
+            {
+                // The losing insert leaves both the version and the modified cue
+                // tracked. Re-read the canonical cue before allocating again so
+                // the retry cannot replay stale state or a failed entity.
+                db.ChangeTracker.Clear();
+                cue = await CueQuery(tracking: true).FirstOrDefaultAsync(item => item.Id == cueId, cancellationToken);
+                if (cue is null) return null;
+            }
+
+            var asset = request.AssetId.HasValue ? await LoadAudioAssetAsync(request.AssetId.Value, cue.MovieProject, cancellationToken) : null;
+            var now = DateTime.UtcNow;
+            var version = new MovieSoundtrackCueVersion
+            {
+                Id = Guid.NewGuid(), MovieSoundtrackCueId = cue.Id,
+                // The unique index is the authoritative allocator boundary. Two
+                // writers can observe the same MAX; only the losing insert is
+                // retried, while unrelated persistence failures still surface.
+                VersionNumber = (await db.MovieSoundtrackCueVersions.Where(item => item.MovieSoundtrackCueId == cue.Id).MaxAsync(item => (int?)item.VersionNumber, cancellationToken) ?? 0) + 1,
+                Label = request.Label.Trim(), ArrangementIntent = Clean(request.ArrangementIntent), Mood = (request.Mood ?? cue.Mood).Trim().ToLowerInvariant(),
+                Intensity = request.Intensity ?? cue.Intensity, AssetId = asset?.Id, ApprovalState = MovieSoundtrackApprovalStates.Draft,
+                CreatedByUserId = userId, CreatedAt = now, UpdatedAt = now,
+            };
+            if (asset is not null) version.AudioAssetProvenance = BuildProvenance(version.Id, asset, now);
+            cue.ApprovalState = MovieSoundtrackApprovalStates.InReview;
+            cue.UpdatedAt = now;
+            db.MovieSoundtrackCueVersions.Add(version);
+            try
+            {
+                await db.SaveChangesAsync(cancellationToken);
+                return await LoadCueDtoAsync(cue.Id, cancellationToken);
+            }
+            catch (DbUpdateException exception) when (attempt + 1 < MaximumVersionNumberAllocationAttempts && IsVersionNumberUniqueViolation(exception))
+            {
+                db.ChangeTracker.Clear();
+            }
+        }
+
+        throw new InvalidOperationException("Movie soundtrack version-number allocation did not converge after concurrent retries.");
     }
+
+    internal static bool IsVersionNumberUniqueViolation(DbUpdateException exception)
+    {
+        var details = exception.ToString();
+        var isUniqueViolation = details.Contains("duplicate key", StringComparison.OrdinalIgnoreCase)
+            || details.Contains("UNIQUE constraint failed", StringComparison.OrdinalIgnoreCase)
+            || details.Contains("Cannot insert duplicate key", StringComparison.OrdinalIgnoreCase);
+        if (!isUniqueViolation) return false;
+        return details.Contains(VersionNumberUniqueIndexName, StringComparison.OrdinalIgnoreCase)
+            // PostgreSQL truncates identifiers to 63 bytes and replaces the
+            // final byte with '~' when the EF-generated index name is longer.
+            || details.Contains(PostgresTruncatedIdentifier(VersionNumberUniqueIndexName), StringComparison.OrdinalIgnoreCase)
+            || details.Contains("MovieSoundtrackCueVersions.MovieSoundtrackCueId, MovieSoundtrackCueVersions.VersionNumber", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static string PostgresTruncatedIdentifier(string identifier) =>
+        identifier.Length <= 63 ? identifier : identifier[..62] + "~";
 
     public async Task<MovieSoundtrackCueDto?> ReviewVersionAsync(Guid userId, Guid versionId, MovieSoundtrackCueVersionReviewRequest request, CancellationToken cancellationToken)
     {
