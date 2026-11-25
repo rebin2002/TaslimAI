@@ -23,7 +23,7 @@ test("a signed-in student can save and approve the Academic Plan from Standard R
 
   // The plan is constrained to scholarly material; books and journal articles
   // are first-class source types for this synthetic regulation topic.
-  await expect(page.getByRole("checkbox", { name: /book/i })).toBeChecked();
+  await expect(page.getByRole("checkbox", { name: "Book", exact: true })).toBeChecked();
   await expect(page.getByRole("checkbox", { name: /journal article/i })).toBeChecked();
 
   await page.getByLabel("Research question", { exact: true }).fill(researchQuestion);
