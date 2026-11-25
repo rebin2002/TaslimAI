@@ -107,11 +107,21 @@ public sealed class MovieSoundGenerationJobHandler(
         progress.Report(25);
         var generated = await provider.GenerateAsync(request, cancellationToken);
         cancellationToken.ThrowIfCancellationRequested();
+        var usage = ToUsage(generated.Usage);
         progress.Report(82);
-        var output = MovieSoundOutputInspector.Validate(generated, settings.MaxOutputBytes);
-        var durationMilliseconds = generated.DurationMilliseconds ?? request.DurationMilliseconds;
-        if (durationMilliseconds is < 1 or > 86_400_000 || durationMilliseconds > settings.MaxDurationMilliseconds)
-            throw new MovieSoundOutputInvalidException();
+        MovieSoundOutputInfo output;
+        int durationMilliseconds;
+        try
+        {
+            output = MovieSoundOutputInspector.Validate(generated, settings.MaxOutputBytes);
+            durationMilliseconds = generated.DurationMilliseconds ?? request.DurationMilliseconds;
+            if (durationMilliseconds is < 1 or > 86_400_000 || durationMilliseconds > settings.MaxDurationMilliseconds)
+                throw new MovieSoundOutputInvalidException();
+        }
+        catch (MovieSoundOutputInvalidException exception)
+        {
+            throw new MovieSoundOutputInvalidException(usage, exception);
+        }
         var metadata = JsonSerializer.Serialize(new
         {
             assetType = AssetTypes.Audio,
@@ -130,25 +140,26 @@ public sealed class MovieSoundGenerationJobHandler(
             format = output.Format,
             durationMilliseconds,
         });
-        var usage = new AiUsageMetadata(
-            settings.ProviderKey,
-            settings.Model,
-            null,
-            null,
-            null,
-            generated.Usage.EstimatedCostUsd,
-            generated.Usage.ActualCostUsd,
-            generated.Usage.LatencyMs,
-            generated.Usage.FinishReason,
-            false,
-            PricingVersion: settings.PricingVersion,
-            Currency: settings.Currency,
-            CostBasis: generated.Usage.CostBasis,
-            SafeMetadataJson: generated.Usage.SafeMetadataJson);
         logger.LogInformation("Movie sound output validated. JobId={JobId}; TrackId={TrackId}; ContentType={ContentType}; SizeBytes={SizeBytes}", job.Id, request.MovieSoundTrackId, output.ContentType, generated.Content.Length);
         progress.Report(90);
         return new GenerationHandlerResult(resultJson, [new GenerationHandlerOutput(GenerationJobOutputTypes.StoredFile, null, metadata, artifact, asset)], usage);
     }
+
+    private AiUsageMetadata ToUsage(MovieSoundProviderUsage providerUsage) => new(
+        settings.ProviderKey,
+        settings.Model,
+        null,
+        null,
+        null,
+        providerUsage.EstimatedCostUsd,
+        providerUsage.ActualCostUsd,
+        providerUsage.LatencyMs,
+        providerUsage.FinishReason,
+        false,
+        PricingVersion: settings.PricingVersion,
+        Currency: settings.Currency,
+        CostBasis: providerUsage.CostBasis,
+        SafeMetadataJson: providerUsage.SafeMetadataJson);
 
     private static void Validate(MovieSoundGenerationInput request, MovieSoundOptions options)
     {

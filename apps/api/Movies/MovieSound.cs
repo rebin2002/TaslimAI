@@ -244,7 +244,18 @@ public interface IMovieSoundProvider
 }
 
 public sealed class MovieSoundProviderUnavailableException() : Exception("No movie sound provider is configured.");
-public sealed class MovieSoundOutputInvalidException() : Exception("The movie sound provider returned an invalid audio file.");
+public sealed class MovieSoundOutputInvalidException : Exception
+{
+    public MovieSoundOutputInvalidException() : this(null, null) { }
+
+    public MovieSoundOutputInvalidException(Taslim.Api.Ai.AiUsageMetadata? usage, Exception? innerException = null)
+        : base("The movie sound provider returned an invalid audio file.", innerException)
+    {
+        Usage = usage;
+    }
+
+    public Taslim.Api.Ai.AiUsageMetadata? Usage { get; }
+}
 public sealed class MovieSoundRequestValidationException(string code, string message) : Exception(message)
 {
     public string Code { get; } = code;
