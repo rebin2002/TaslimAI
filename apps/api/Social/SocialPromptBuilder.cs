@@ -10,13 +10,28 @@ public interface ISocialPromptBuilder
 
 public sealed class SocialPromptBuilder : ISocialPromptBuilder
 {
+    // The token source is a constructor dependency rather than an argument on a side door, so
+    // the collision guard is proven to be the code path that actually runs when a prompt is
+    // built, and not a helper that tests call while production bypasses it.
+    private readonly Func<string> boundaryTokenSource;
+
+    public SocialPromptBuilder()
+        : this(NewBoundaryToken)
+    {
+    }
+
+    internal SocialPromptBuilder(Func<string> boundaryTokenSource)
+    {
+        this.boundaryTokenSource = boundaryTokenSource;
+    }
+
     public SocialGenerationPrompt Build(SocialGenerationInput input, SocialProjectContext? project, IReadOnlyList<SocialSourceContext> sources, SocialGenerationOptions options)
     {
         // Same boundary contract as the Document and Presentation builders: the markers carry
         // a token minted inside this call, so source text cannot predict the marker that
         // would close its own section, and the system string names the live markers instead
         // of a constant the model has to guess about.
-        var (beginMarker, endMarker) = BuildBoundaryMarkers(sources);
+        var (beginMarker, endMarker) = BuildBoundaryMarkers(sources, boundaryTokenSource);
         var context = new StringBuilder();
         // Project context is trusted workspace data, so it is emitted ahead of the untrusted
         // regions and never after them. With it rendered last, a project-editing member's text
@@ -63,14 +78,13 @@ public sealed class SocialPromptBuilder : ISocialPromptBuilder
     // copy of the marker that is live for this call.
     private const int BoundaryTokenAttempts = 8;
 
-    private static (string BeginMarker, string EndMarker) BuildBoundaryMarkers(IReadOnlyList<SocialSourceContext> sources) =>
-        BuildBoundaryMarkers(sources, NewBoundaryToken);
-
-    // internal for tests only: lets the collision guard and its exhaustion path be exercised
-    // with a scripted token source instead of waiting for a collision that cannot be provoked.
-    internal static (string BeginMarker, string EndMarker) BuildBoundaryMarkers(
-        IReadOnlyList<SocialSourceContext> sources,
-        Func<string> tokenFactory)
+    // There is deliberately no second entry point: the only way to reach the guard is through
+    // Build(), so the guard tests cannot pass while production bypasses it. A scripted token
+    // source is supplied by tests through the internal constructor above, which lets the
+    // collision path and its exhaustion path be exercised instead of argued about.
+    private static (string BeginMarker, string EndMarker) BuildBoundaryMarkers(
+       IReadOnlyList<SocialSourceContext> sources,
+       Func<string> tokenFactory)
     {
         for (var attempt = 0; attempt < BoundaryTokenAttempts; attempt++)
         {

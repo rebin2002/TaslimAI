@@ -14,13 +14,28 @@ public interface IPresentationPromptBuilder
 
 public sealed class PresentationPromptBuilder : IPresentationPromptBuilder
 {
+    // The token source is a constructor dependency rather than an argument on a side door, so
+    // the collision guard is proven to be the code path that actually runs when a prompt is
+    // built, and not a helper that tests call while production bypasses it.
+    private readonly Func<string> boundaryTokenSource;
+
+    public PresentationPromptBuilder()
+        : this(NewBoundaryToken)
+    {
+    }
+
+    internal PresentationPromptBuilder(Func<string> boundaryTokenSource)
+    {
+        this.boundaryTokenSource = boundaryTokenSource;
+    }
+
     public PresentationGenerationPrompt Build(PresentationGenerationInput input, PresentationProjectContext? project, IReadOnlyList<PresentationSourceContext> sources, PresentationGenerationOptions options)
     {
         var language = input.Language == "auto" ? "the source language unless the user requests another language" : input.Language;
         // The boundary markers are minted inside this call only. They are never persisted,
         // cached, returned to a client, or shared with another request, so uploaded source
         // text cannot predict the marker that would close its own section.
-        var (beginMarker, endMarker) = BuildBoundaryMarkers(sources);
+        var (beginMarker, endMarker) = BuildBoundaryMarkers(sources, boundaryTokenSource);
         var system = $"""
 	You are Taslim Presentation Studio. Create a concise, factual, professional slide deck from the supplied instructions and explicitly selected source material.
 	Return only valid JSON with no Markdown fences, commentary, provider names, model names, storage details, pricing, or internal metadata.
@@ -69,14 +84,13 @@ Preserve source facts, identify uncertainty in notes when needed, and never inve
     // contains, it cannot include a copy of the marker that is live for this call.
     private const int BoundaryTokenAttempts = 8;
 
-    private static (string BeginMarker, string EndMarker) BuildBoundaryMarkers(IReadOnlyList<PresentationSourceContext> sources) =>
-        BuildBoundaryMarkers(sources, NewBoundaryToken);
-
-    // internal for tests only: lets the collision guard and its exhaustion path be exercised
-    // with a scripted token source instead of waiting for a collision that cannot be provoked.
-    internal static (string BeginMarker, string EndMarker) BuildBoundaryMarkers(
-        IReadOnlyList<PresentationSourceContext> sources,
-        Func<string> tokenFactory)
+    // There is deliberately no second entry point: the only way to reach the guard is through
+    // Build(), so the guard tests cannot pass while production bypasses it. A scripted token
+    // source is supplied by tests through the internal constructor above, which lets the
+    // collision path and its exhaustion path be exercised instead of argued about.
+    private static (string BeginMarker, string EndMarker) BuildBoundaryMarkers(
+       IReadOnlyList<PresentationSourceContext> sources,
+       Func<string> tokenFactory)
     {
         for (var attempt = 0; attempt < BoundaryTokenAttempts; attempt++)
         {

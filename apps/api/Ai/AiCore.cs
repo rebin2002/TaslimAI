@@ -190,6 +190,17 @@ public sealed class ChatCompletionService(
 public sealed class AiContextBuilder(IOptions<AiOptions> options)
 {
     private readonly AiOptions settings = options.Value;
+    // The token source is a constructor dependency rather than an argument on a side door, so
+    // the collision guard is proven to be the code path that actually runs when a system
+    // instruction is built, and not a helper that tests call while production bypasses it.
+    private readonly Func<string> boundaryTokenSource = NewBoundaryToken;
+
+    // internal for tests only: drives the guard and its exhaustion path through Build().
+    internal AiContextBuilder(IOptions<AiOptions> options, Func<string> boundaryTokenSource)
+        : this(options)
+    {
+        this.boundaryTokenSource = boundaryTokenSource;
+    }
 
     public AiChatRequest Build(IEnumerable<AiChatMessage> history)
         => Build(history, null, null, []);
@@ -252,7 +263,7 @@ public sealed class AiContextBuilder(IOptions<AiOptions> options)
         var fileTokens = 0;
         if (eligibleFiles.Count > 0)
         {
-            var boundaries = BuildFileBoundaries(eligibleFiles);
+            var boundaries = BuildFileBoundaries(eligibleFiles, boundaryTokenSource);
             for (var index = 0; index < eligibleFiles.Count; index++)
             {
                 var file = eligibleFiles[index];
@@ -277,14 +288,13 @@ public sealed class AiContextBuilder(IOptions<AiOptions> options)
     // instead of a bet on 122 bits of entropy.
     private const int BoundaryTokenAttempts = 8;
 
-    private static IReadOnlyList<(string Header, string Footer)> BuildFileBoundaries(IReadOnlyList<AiFileContext> files) =>
-        BuildFileBoundaries(files, NewBoundaryToken);
-
-    // internal for tests only: lets the per-file collision guard and its exhaustion path be
-    // exercised with a scripted token source instead of waiting for an unprovable collision.
-    internal static IReadOnlyList<(string Header, string Footer)> BuildFileBoundaries(
-        IReadOnlyList<AiFileContext> files,
-        Func<string> tokenFactory)
+    // There is deliberately no second entry point: the only way to reach the guard is through
+    // Build(), so the guard tests cannot pass while production bypasses it. A scripted token
+    // source is supplied by tests through the internal constructor above, which lets the
+    // collision path and its exhaustion path be exercised instead of argued about.
+    private static IReadOnlyList<(string Header, string Footer)> BuildFileBoundaries(
+       IReadOnlyList<AiFileContext> files,
+       Func<string> tokenFactory)
     {
         var boundaries = new List<(string Header, string Footer)>(files.Count);
         for (var index = 0; index < files.Count; index++)
