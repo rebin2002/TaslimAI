@@ -67,7 +67,7 @@ public sealed class GenerationCostGuardrailService(
             row => row.WorkspaceId == workspaceId,
             cancellationToken);
         var userExposure = await ExposureForAsync(
-            row => row.WorkspaceId == workspaceId && row.UserId == userId,
+            row => row.UserId == userId,
             cancellationToken);
         var projectExposure = projectId.HasValue
             ? await ExposureForAsync(
