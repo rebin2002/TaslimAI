@@ -2,6 +2,7 @@ import { createSseParser, type TaslimSseEvent } from "./sse";
 import { API_URL, assetFileUrl, assetRepresentationUrl } from "./apiBase";
 import { awaitWithChatStreamWatchdog, CHAT_STREAM_WATCHDOG_TIMEOUT_MS, ChatStreamTransportError } from "./chatStreamTransport";
 import { collectAllProjectPages } from "./projectListPagination";
+import { isAbortError } from "./requestLifecycle";
 import {
   isIdempotentRead,
   isThrottleRetryStatus,
@@ -779,7 +780,13 @@ async function csrf(forceRefresh = false) {
     // token: an auth transition may have changed the antiforgery user binding
     // while the earlier request was still completing.
     if (forceRefresh && csrfRequest) await csrfRequest.catch(() => undefined);
-    const response = await fetch(`${API_URL}/api/auth/csrf`, { credentials: "include", cache: "no-store" });
+    let response: Response;
+    try {
+      response = await fetch(`${API_URL}/api/auth/csrf`, { credentials: "include", cache: "no-store" });
+    } catch (error) {
+      if (isAbortError(error)) throw error;
+      throw new ApiError(503, "The service is temporarily unavailable. Please try again.", undefined, "NETWORK_ERROR");
+    }
     if (!response.ok) throw new Error("CSRF token unavailable");
     const body = await response.json().catch(() => null) as { token?: unknown } | null;
     if (!body || typeof body.token !== "string" || body.token.length === 0) throw new Error("CSRF token unavailable");
@@ -798,15 +805,35 @@ async function csrf(forceRefresh = false) {
 
 type ErrorBody = { error?: { code?: string; message?: string; fields?: Record<string, string[]> } };
 
+/**
+ * Optional out-parameter for a call that needs the server's `ETag` verbatim.
+ *
+ * The project revision fence uses the published token exactly as the API wrote
+ * it: one UTC designator with seven fractional digits, matching the
+ * `timestamp with time zone` grid the row is stamped on. Re-deriving it from a
+ * JavaScript `Date` would round to milliseconds and produce a token the server
+ * refuses, so the header value is carried through untouched.
+ */
+export type ProjectRevisionSink = { etag: string | null };
+
 async function parseError(response: Response) {
   return await response.json().catch(() => null) as ErrorBody | null;
 }
 
-async function request<T>(path: string, init: RequestInit = {}, withCsrf = false, retryCsrf = true, retryThrottled = true): Promise<T> {
+async function request<T>(path: string, init: RequestInit = {}, withCsrf = false, retryCsrf = true, retryThrottled = true, revision?: ProjectRevisionSink): Promise<T> {
   const headers = new Headers(init.headers);
   headers.set("Content-Type", "application/json");
   if (withCsrf) headers.set("X-CSRF-TOKEN", csrfToken ?? await csrf());
-  const response = await fetch(`${API_URL}${path}`, { ...init, headers, credentials: "include" });
+  let response: Response;
+  try {
+    response = await fetch(`${API_URL}${path}`, { ...init, headers, credentials: "include" });
+  } catch (error) {
+    if (isAbortError(error)) throw error;
+    throw new ApiError(503, "The service is temporarily unavailable. Please try again.", undefined, "NETWORK_ERROR");
+  }
+  // Recorded before any early return, so a caller learns the revision the
+  // server committed even when the answer is a 204 or a 409 rather than a body.
+  if (revision) revision.etag = response.headers.get("ETag");
   if (response.status === 204) return undefined as T;
 
   // Parsed once per response: the same instruction drives the repeat below and
@@ -824,7 +851,7 @@ async function request<T>(path: string, init: RequestInit = {}, withCsrf = false
   if (retryThrottled && isIdempotentRead(init) && retryAfterSeconds !== null && retryAfterSeconds * 1000 <= MAX_THROTTLE_RETRY_WAIT_MS) {
     await response.body?.cancel().catch(() => undefined);
     await waitBeforeRetry(retryAfterSeconds * 1000, init.signal);
-    return request<T>(path, init, withCsrf, retryCsrf, false);
+    return request<T>(path, init, withCsrf, retryCsrf, false, revision);
   }
 
   const body = await response.json().catch(() => null) as T & ErrorBody | null;
@@ -832,9 +859,13 @@ async function request<T>(path: string, init: RequestInit = {}, withCsrf = false
     if (response.status === 400 && withCsrf && retryCsrf && body?.error?.code === "CSRF_VALIDATION_FAILED") {
       csrfToken = null;
       await csrf(true);
-      return request<T>(path, init, true, false);
+      return request<T>(path, init, true, false, true, revision);
     }
-    throw new ApiError(response.status, body?.error?.message ?? "Something went wrong.", body?.error?.fields, body?.error?.code, retryAfterSeconds ?? undefined);
+    const failure = new ApiError(response.status, body?.error?.message ?? "Something went wrong.", body?.error?.fields, body?.error?.code, retryAfterSeconds ?? undefined);
+    // The fence names the revision that actually holds the row on its 409, and
+    // the conflict handling reads it from here rather than racing a second GET.
+    if (revision) failure.revision = revision.etag;
+    throw failure;
   }
   return body as T;
 }
@@ -842,7 +873,13 @@ async function request<T>(path: string, init: RequestInit = {}, withCsrf = false
 async function requestForm<T>(path: string, form: FormData, withCsrf = false, retryCsrf = true): Promise<T> {
   const headers = new Headers();
   if (withCsrf) headers.set("X-CSRF-TOKEN", csrfToken ?? await csrf());
-  const response = await fetch(`${API_URL}${path}`, { method: "POST", headers, credentials: "include", body: form });
+  let response: Response;
+  try {
+    response = await fetch(`${API_URL}${path}`, { method: "POST", headers, credentials: "include", body: form });
+  } catch (error) {
+    if (isAbortError(error)) throw error;
+    throw new ApiError(503, "The service is temporarily unavailable. Please try again.", undefined, "NETWORK_ERROR");
+  }
   const body = await response.json().catch(() => null) as T & ErrorBody | null;
   if (!response.ok) {
     if (response.status === 400 && withCsrf && retryCsrf && body?.error?.code === "CSRF_VALIDATION_FAILED") {
@@ -939,6 +976,12 @@ export class ApiError extends Error {
     public code?: string,
     /** The `Retry-After` instruction the server sent, in whole seconds. */
     public retryAfterSeconds?: number,
+    /**
+     * The `ETag` the server published with this answer. For a revision conflict
+     * it is the revision that actually holds the row, which is what lets the
+     * conflict handling describe the newer version without another read.
+     */
+    public revision?: string | null,
   ) { super(message); }
 }
 
@@ -1217,6 +1260,54 @@ export const api = {
   updateProject: (projectId: string, input: ProjectInput) => request<Project>(`/api/projects/${projectId}`, { method: "PATCH", body: JSON.stringify(input) }, true),
   archiveProject: (projectId: string) => request<Project>(`/api/projects/${projectId}/archive`, { method: "POST" }, true),
   restoreProject: (projectId: string) => request<Project>(`/api/projects/${projectId}/restore`, { method: "POST" }, true),
+  /**
+   * Reads one project together with the exact `ETag` the server published for
+   * it. This is the only supported way to obtain a revision token: the header
+   * is the row's stamp verbatim, while the body's `updatedAt` is a display
+   * value that a JavaScript `Date` cannot round-trip at microsecond precision.
+   */
+  getProjectWithRevision: async (projectId: string): Promise<{ project: Project; revision: string | null }> => {
+    const sink: ProjectRevisionSink = { etag: null };
+    const project = await request<Project>(`/api/projects/${projectId}`, {}, false, true, true, sink);
+    return { project, revision: sink.etag };
+  },
+  /**
+   * Fenced write. `ifMatch` must be a token this client received from
+   * `getProjectWithRevision` or from an earlier write's own answer - never a
+   * value rebuilt from a timestamp. On success the answer carries the revision
+   * that the write committed, so the caller can keep editing without a re-read;
+   * on a `409 PROJECT_REVISION_CONFLICT` the thrown `ApiError.revision` is the
+   * revision that actually holds the row and nothing was written.
+   */
+  updateProjectWithRevision: async (projectId: string, input: ProjectInput, ifMatch: string): Promise<{ project: Project; revision: string | null }> => {
+    const sink: ProjectRevisionSink = { etag: null };
+    const project = await request<Project>(
+      `/api/projects/${projectId}`,
+      { method: "PATCH", headers: { "If-Match": ifMatch }, body: JSON.stringify(input) },
+      true,
+      true,
+      true,
+      sink,
+    );
+    return { project, revision: sink.etag };
+  },
+  /**
+   * Archive/restore publish a new revision but declare none: they intentionally
+   * apply over whatever the row holds (the API's `RevisionFence.LiveRow` path),
+   * so no `If-Match` is sent and no conflict can be raised here. The answer's
+   * revision is still returned so an open edit session can adopt it instead of
+   * being walked into a self-inflicted conflict by its own status change.
+   */
+  archiveProjectWithRevision: async (projectId: string): Promise<{ project: Project; revision: string | null }> => {
+    const sink: ProjectRevisionSink = { etag: null };
+    const project = await request<Project>(`/api/projects/${projectId}/archive`, { method: "POST" }, true, true, true, sink);
+    return { project, revision: sink.etag };
+  },
+  restoreProjectWithRevision: async (projectId: string): Promise<{ project: Project; revision: string | null }> => {
+    const sink: ProjectRevisionSink = { etag: null };
+    const project = await request<Project>(`/api/projects/${projectId}/restore`, { method: "POST" }, true, true, true, sink);
+    return { project, revision: sink.etag };
+  },
   listConversations: (workspaceId: string, status: "Active" | "Archived" = "Active", signal?: AbortSignal) => request<Conversation[]>(`/api/workspaces/${workspaceId}/conversations?status=${status}`, { signal }),
   createConversation: (workspaceId: string, input: { title?: string; projectId?: string } = {}) => request<Conversation>(`/api/workspaces/${workspaceId}/conversations`, { method: "POST", body: JSON.stringify(input) }, true),
   getConversation: (conversationId: string, signal?: AbortSignal) => request<Conversation>(`/api/conversations/${conversationId}`, { signal }),
