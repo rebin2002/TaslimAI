@@ -51,6 +51,7 @@ public sealed class MovieStoryService(TaslimDbContext db, MovieCollaborationAcce
         if (request.ParentRevisionId.HasValue && (story is null || story.Revisions.All(item => item.Id != request.ParentRevisionId.Value)))
             throw new MovieStoryValidationException("The parent revision must belong to this Movie Story.");
         var now = DateTime.UtcNow;
+        var storyWasCreated = false;
         if (story is null)
         {
             story = new MovieStory
@@ -59,6 +60,7 @@ public sealed class MovieStoryService(TaslimDbContext db, MovieCollaborationAcce
                 CreatedAt = now, UpdatedAt = now,
             };
             db.MovieStories.Add(story);
+            storyWasCreated = true;
         }
 
         var revisionParentId = request.ParentRevisionId ?? story.CurrentRevisionId;
@@ -68,9 +70,13 @@ public sealed class MovieStoryService(TaslimDbContext db, MovieCollaborationAcce
             : null;
         // Only the revision this new one actually replaces loses its draft status. Branching from
         // an older parent must never silently supersede an unrelated collaborator's current draft.
+        var supersededPreviousCurrent = false;
         if (previousCurrent is not null && previousCurrent.Id == revisionParentId
             && previousCurrent.Status == MovieStoryRevisionStatuses.Draft)
+        {
             previousCurrent.Status = MovieStoryRevisionStatuses.Superseded;
+            supersededPreviousCurrent = true;
+        }
 
         var revision = new MovieStoryRevision
         {
@@ -90,6 +96,32 @@ public sealed class MovieStoryService(TaslimDbContext db, MovieCollaborationAcce
                 throw new MovieStoryRevisionConflictException(
                     "The Story current revision changed while this revision was being created. Reload the Story and propose again.");
             await transaction.CommitAsync(cancellationToken);
+        }
+        catch (DbUpdateException exception) when (IsRevisionAllocationUniqueViolation(exception))
+        {
+            await transaction.RollbackAsync(cancellationToken);
+            // Documented same-base contention: a racing writer committed between the snapshot
+            // above and this flush, so the loser is stopped by the unique (MovieStoryId,
+            // RevisionNumber) index — or, for two concurrent first revisions, by the unique
+            // story-per-project index — before the guarded advance can decide. Both cases mean
+            // the Story moved under this request: surface the same advertised conflict outcome
+            // (HTTP 409 MOVIE_STORY_REVISION_CONFLICT / DIRECTOR_STORY_BASE_CHANGED) instead of
+            // letting a constraint fault escape as a 500.
+            //
+            // A failed flush leaves this create pending in the request-scoped tracker, and the
+            // Director runner saves this same context afterwards for its action bookkeeping.
+            // ChangeTracker.Clear would detach that bookkeeping too, so undo exactly this
+            // method's own pending writes instead. Removing an Added entity detaches it and
+            // its Added scene graph immediately, cancelling the insert; the rolled-back
+            // supersede marking is parked as Unchanged so a later save persists neither the
+            // never-stored revision nor a Superseded flip the database no longer holds.
+            db.Remove(revision);
+            if (storyWasCreated)
+                db.Remove(story);
+            else if (previousCurrent is not null && supersededPreviousCurrent)
+                db.Entry(previousCurrent).State = EntityState.Unchanged;
+            throw new MovieStoryRevisionConflictException(
+                "The Story current revision changed while this revision was being created. Reload the Story and propose again.");
         }
         catch
         {
@@ -125,6 +157,30 @@ public sealed class MovieStoryService(TaslimDbContext db, MovieCollaborationAcce
                 .SetProperty(item => item.ApprovalState, MovieStoryApprovalStates.Draft)
                 .SetProperty(item => item.UpdatedAt, now), cancellationToken);
         return advanced == 1;
+    }
+
+    /// <summary>
+    /// True when a failed flush was the Story-create allocation contention, and only that: the unique
+    /// (MovieStoryId, RevisionNumber) index behind <see cref="MovieStoryRevision.RevisionNumber"/>,
+    /// which two same-base creators race to claim, or the unique story-per-project index two concurrent
+    /// first revisions race to claim. Every other constraint violation keeps its current fault shape.
+    /// Detector shape follows <c>MovieProductionKitService.IsProductionKitAllocationUniqueViolation</c>
+    /// (message text of the actual violation, then the specific index). Both index names are under
+    /// PostgreSQL's 63-byte identifier limit, so no truncated-name variant is needed here.
+    /// </summary>
+    internal static bool IsRevisionAllocationUniqueViolation(DbUpdateException exception)
+    {
+        var details = exception.ToString();
+        var isUniqueViolation = details.Contains("duplicate key", StringComparison.OrdinalIgnoreCase)
+            || details.Contains("violates unique constraint", StringComparison.OrdinalIgnoreCase)
+            || details.Contains("UNIQUE constraint failed", StringComparison.OrdinalIgnoreCase)
+            || details.Contains("Cannot insert duplicate key", StringComparison.OrdinalIgnoreCase);
+        if (!isUniqueViolation) return false;
+
+        return details.Contains("IX_MovieStoryRevisions_MovieStoryId_RevisionNumber", StringComparison.OrdinalIgnoreCase)
+            || details.Contains("IX_MovieStories_MovieProjectId", StringComparison.OrdinalIgnoreCase)
+            || details.Contains("MovieStoryRevisions.MovieStoryId, MovieStoryRevisions.RevisionNumber", StringComparison.OrdinalIgnoreCase)
+            || details.Contains("MovieStories.MovieProjectId", StringComparison.OrdinalIgnoreCase);
     }
 
     public async Task<MovieStoryRevisionDto?> UpdateDraftAsync(Guid userId, Guid movieProjectId, Guid revisionId, MovieStoryRevisionRequest request, CancellationToken cancellationToken)
