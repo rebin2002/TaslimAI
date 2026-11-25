@@ -35,12 +35,70 @@ public sealed class MoviePropBibleTests
 
         await Assert.ThrowsAsync<MoviePropBibleValidationException>(() => service.AddVariantAsync(userId, propId, new MoviePropBibleVariantRequest("", "", null, null, null, null), CancellationToken.None));
 
-        db.ChangeTracker.Clear();
         Assert.False(await db.MoviePropBibles.AsNoTracking().AnyAsync(item => item.MoviePropId == propId));
 
         var persisted = await service.AddVariantAsync(userId, propId, new MoviePropBibleVariantRequest("hero", "Hero notebook", null, null, null, null), CancellationToken.None);
         Assert.NotNull(persisted);
         Assert.Single(persisted!.Variants);
+        // No ChangeTracker.Clear: the same scoped context must not carry a rejected bible stub
+        // into the retry. A single bible row proves validation ran before entity tracking.
+        Assert.Equal(1, await db.MoviePropBibles.AsNoTracking().CountAsync(item => item.MoviePropId == propId));
+    }
+
+    [Fact]
+    public async Task Rejected_prop_bible_mutation_is_not_flushed_by_unrelated_save_changes()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = new TaslimDbContext(new DbContextOptionsBuilder<TaslimDbContext>().UseSqlite(connection).Options);
+        await db.Database.EnsureCreatedAsync();
+        var userId = Guid.NewGuid();
+        var workspaceId = Guid.NewGuid();
+        var movieId = Guid.NewGuid();
+        var propId = Guid.NewGuid();
+        var now = DateTime.UtcNow;
+        db.Users.Add(new ApplicationUser { Id = userId, UserName = "prop-owner2", NormalizedUserName = "PROP-OWNER2", DisplayName = "Prop Owner", CreatedAt = now, UpdatedAt = now });
+        db.Workspaces.Add(new Workspace { Id = workspaceId, Name = "Prop Workspace", Slug = $"prop-{Guid.NewGuid():N}", Type = WorkspaceType.Personal, CreatedAt = now, UpdatedAt = now });
+        db.WorkspaceMembers.Add(new WorkspaceMember { Id = Guid.NewGuid(), WorkspaceId = workspaceId, UserId = userId, Role = WorkspaceRole.Owner });
+        db.MovieProjects.Add(new MovieProject { Id = movieId, WorkspaceId = workspaceId, CreatedByUserId = userId, Title = "Prop Film", Description = "A prop test.", DurationSeconds = 60, CreatedAt = now, UpdatedAt = now, Guide = new MovieContinuityGuide { Id = Guid.NewGuid(), UpdatedAt = now } });
+        db.MovieTeamMembers.Add(new MovieTeamMember { Id = Guid.NewGuid(), MovieProjectId = movieId, UserId = userId, Role = MovieTeamRoles.Producer, IsProjectOwner = true, CreatedAt = now, UpdatedAt = now });
+        db.MovieProps.Add(new MovieProp { Id = propId, MovieProjectId = movieId, Name = "Red notebook", Description = "The canonical notebook.", CreatedAt = now, UpdatedAt = now });
+        await db.SaveChangesAsync();
+        var service = new MoviePropBibleService(db, new MovieCollaborationAccess(db, new WorkspaceAccessService(db)), new DeterministicMovieRecurringPropDetector());
+        await Assert.ThrowsAsync<MoviePropBibleValidationException>(() => service.AddVariantAsync(userId, propId, new MoviePropBibleVariantRequest("", "", null, null, null, null), CancellationToken.None));
+        var trackedProp = await db.MovieProps.SingleAsync(item => item.Id == propId);
+        trackedProp.Description = "Unrelated edit flushed by a later save.";
+        await db.SaveChangesAsync();
+        Assert.False(await db.MoviePropBibles.AsNoTracking().AnyAsync(item => item.MoviePropId == propId));
+        Assert.Equal("Unrelated edit flushed by a later save.", trackedProp.Description);
+    }
+
+    [Fact]
+    public async Task Invalid_reference_attempt_then_valid_version_retry_on_same_context_persists_single_bible()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = new TaslimDbContext(new DbContextOptionsBuilder<TaslimDbContext>().UseSqlite(connection).Options);
+        await db.Database.EnsureCreatedAsync();
+        var userId = Guid.NewGuid();
+        var workspaceId = Guid.NewGuid();
+        var movieId = Guid.NewGuid();
+        var propId = Guid.NewGuid();
+        var now = DateTime.UtcNow;
+        db.Users.Add(new ApplicationUser { Id = userId, UserName = "prop-owner3", NormalizedUserName = "PROP-OWNER3", DisplayName = "Prop Owner", CreatedAt = now, UpdatedAt = now });
+        db.Workspaces.Add(new Workspace { Id = workspaceId, Name = "Prop Workspace", Slug = $"prop-{Guid.NewGuid():N}", Type = WorkspaceType.Personal, CreatedAt = now, UpdatedAt = now });
+        db.WorkspaceMembers.Add(new WorkspaceMember { Id = Guid.NewGuid(), WorkspaceId = workspaceId, UserId = userId, Role = WorkspaceRole.Owner });
+        db.MovieProjects.Add(new MovieProject { Id = movieId, WorkspaceId = workspaceId, CreatedByUserId = userId, Title = "Prop Film", Description = "A prop test.", DurationSeconds = 60, CreatedAt = now, UpdatedAt = now, Guide = new MovieContinuityGuide { Id = Guid.NewGuid(), UpdatedAt = now } });
+        db.MovieTeamMembers.Add(new MovieTeamMember { Id = Guid.NewGuid(), MovieProjectId = movieId, UserId = userId, Role = MovieTeamRoles.Producer, IsProjectOwner = true, CreatedAt = now, UpdatedAt = now });
+        db.MovieProps.Add(new MovieProp { Id = propId, MovieProjectId = movieId, Name = "Red notebook", Description = "The canonical notebook.", CreatedAt = now, UpdatedAt = now });
+        await db.SaveChangesAsync();
+        var service = new MoviePropBibleService(db, new MovieCollaborationAccess(db, new WorkspaceAccessService(db)), new DeterministicMovieRecurringPropDetector());
+        await Assert.ThrowsAsync<MoviePropBibleValidationException>(() => service.AddReferenceAsync(userId, propId, new MoviePropBibleReferenceRequest(Guid.NewGuid(), "primary", null), CancellationToken.None));
+        Assert.False(await db.MoviePropBibles.AsNoTracking().AnyAsync(item => item.MoviePropId == propId));
+        var versioned = await service.CreateVersionAsync(userId, propId, new MoviePropBibleVersionRequest("Red notebook", null, null, null), CancellationToken.None);
+        Assert.NotNull(versioned);
+        Assert.Equal(1, await db.MoviePropBibles.AsNoTracking().CountAsync(item => item.MoviePropId == propId));
+        Assert.Single(versioned!.Versions);
     }
 
     [Fact]

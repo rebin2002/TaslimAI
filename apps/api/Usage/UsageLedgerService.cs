@@ -152,6 +152,24 @@ public interface IUsageLedgerService
     Task<UsageAdjustmentResult?> ReverseAsync(UsageTransaction transaction, string idempotencyKey, string reason, CancellationToken cancellationToken = default);
 }
 
+/// <summary>
+/// Raised when a request id resolves to a usage transaction owned by a different accounting scope.
+/// Derives from <see cref="InvalidOperationException"/> so every existing handler keeps its current
+/// fail-closed behaviour, while callers gain a stable type and code to map a scoped conflict to a
+/// 409 response instead of presenting it as a provider outage.
+/// </summary>
+public sealed class UsageRequestScopeConflictException : InvalidOperationException
+{
+    public const string ErrorCode = "USAGE_REQUEST_SCOPE_CONFLICT";
+
+    public UsageRequestScopeConflictException()
+        : base("The usage request id belongs to a different accounting scope.")
+    {
+    }
+
+    public string Code { get; } = ErrorCode;
+}
+
 public sealed class UsageLedgerService(
     TaslimDbContext db,
     IAiCostCalculator costCalculator,
@@ -264,7 +282,7 @@ public sealed class UsageLedgerService(
             || existing.ProjectId != projectId
             || existing.ConversationId != conversationId
             || existing.GenerationJobId != generationJobId)
-            throw new InvalidOperationException("The usage request id belongs to a different accounting scope.");
+            throw new UsageRequestScopeConflictException();
     }
 
     public async Task CompleteAsync(UsageTransaction transaction, AiUsageMetadata usage, CancellationToken cancellationToken = default)
