@@ -72,8 +72,10 @@ public sealed class AcademicWorkflowEngineTests
 
         Assert.Equal(AcademicWorkflowRunStatus.AwaitingApproval, started.Status);
         var projectId = started.Snapshot!.ProjectId;
+        var pending = started.Snapshot.PendingApproval!;
         await orchestrator.SubmitApprovalDecisionAsync(
-            projectId, AcademicApprovalKind.Plan, AcademicApprovalDecision.Approved, null, Guid.NewGuid(), CancellationToken.None);
+            projectId, AcademicApprovalKind.Plan, pending.ApprovalKey, pending.CheckpointRevision,
+            AcademicApprovalDecision.Approved, null, Guid.NewGuid(), CancellationToken.None);
         var resumed = await orchestrator.ResumeAsync(projectId, CancellationToken.None);
 
         Assert.Equal(AcademicWorkflowRunStatus.Completed, resumed.Status);
@@ -108,8 +110,7 @@ public sealed class AcademicWorkflowEngineTests
         Assert.Equal(AcademicStageState.NotStarted, plan.Snapshot.Stage(AcademicStage.Discover).State);
         Assert.True(plan.Snapshot.Stage(AcademicStage.Plan).OutputCheckpointRevision > 0);
 
-        await harness.Orchestrator.SubmitApprovalDecisionAsync(
-            harness.ProjectId, AcademicApprovalKind.Plan, AcademicApprovalDecision.Approved, null, Guid.NewGuid(), CancellationToken.None);
+        await harness.ApprovePendingAsync();
         var sourceLibrary = await harness.ResumeUntilGateAsync(AcademicApprovalKind.SourceLibrary);
 
         Assert.Equal(AcademicWorkflowRunStatus.AwaitingApproval, sourceLibrary.Status);
@@ -174,8 +175,10 @@ public sealed class AcademicWorkflowEngineTests
         }, CancellationToken.None);
         Assert.Equal(AcademicWorkflowRunStatus.AwaitingApproval, started.Status);
         var projectId = started.Snapshot!.ProjectId;
+        var pending = started.Snapshot.PendingApproval!;
         await orchestrator.SubmitApprovalDecisionAsync(
-            projectId, AcademicApprovalKind.Plan, AcademicApprovalDecision.Approved, null, Guid.NewGuid(), CancellationToken.None);
+            projectId, AcademicApprovalKind.Plan, pending.ApprovalKey, pending.CheckpointRevision,
+            AcademicApprovalDecision.Approved, null, Guid.NewGuid(), CancellationToken.None);
         // After the student approves the saved Plan, the missing Discover handler fails terminally.
         var result = await orchestrator.ResumeAsync(projectId, CancellationToken.None);
 

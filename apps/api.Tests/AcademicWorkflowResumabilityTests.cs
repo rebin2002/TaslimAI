@@ -10,6 +10,48 @@ namespace Taslim.Api.Tests;
 /// </summary>
 public sealed class AcademicWorkflowResumabilityTests
 {
+    private sealed class ConcurrentApprovalStore(IAcademicWorkflowStateStore inner) : IAcademicWorkflowStateStore
+    {
+        private readonly TaskCompletionSource<bool> bothApprovalLoads = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly SemaphoreSlim commitGate = new(1, 1);
+        private int loadCount;
+
+        public async Task<AcademicWorkflowSnapshot?> LoadAsync(Guid projectId, CancellationToken cancellationToken)
+        {
+            var snapshot = await inner.LoadAsync(projectId, cancellationToken);
+            var arrival = Interlocked.Increment(ref loadCount);
+            if (arrival <= 2)
+            {
+                if (arrival == 2) bothApprovalLoads.TrySetResult(true);
+                await bothApprovalLoads.Task.WaitAsync(cancellationToken);
+            }
+            return snapshot;
+        }
+
+        public Task<AcademicWorkflowSnapshot?> FindByRequestKeyAsync(Guid workspaceId, string requestKey, CancellationToken cancellationToken) =>
+            inner.FindByRequestKeyAsync(workspaceId, requestKey, cancellationToken);
+
+        public Task<bool> TryCreateAsync(AcademicWorkflowSnapshot snapshot, CancellationToken cancellationToken) =>
+            inner.TryCreateAsync(snapshot, cancellationToken);
+
+        public async Task<AcademicCommitOutcome> TryCommitAsync(
+            AcademicWorkflowSnapshot snapshot,
+            long expectedRevision,
+            string checkpointKey,
+            CancellationToken cancellationToken)
+        {
+            await commitGate.WaitAsync(cancellationToken);
+            try
+            {
+                return await inner.TryCommitAsync(snapshot, expectedRevision, checkpointKey, cancellationToken);
+            }
+            finally
+            {
+                commitGate.Release();
+            }
+        }
+    }
+
     [Fact]
     public async Task Fresh_Worker_Resuming_The_Same_Store_Skips_Completed_Stages()
     {
@@ -121,12 +163,16 @@ public sealed class AcademicWorkflowResumabilityTests
     {
         var harness = new AcademicWorkflowHarness();
         await harness.StartAsync("decision-replay");
-        var beforeRevision = (await harness.Store.LoadAsync(harness.ProjectId, CancellationToken.None))!.Revision;
+        var before = await harness.Store.LoadAsync(harness.ProjectId, CancellationToken.None);
+        var beforeRevision = before!.Revision;
+        var pending = before.PendingApproval!;
 
         var first = await harness.Orchestrator.SubmitApprovalDecisionAsync(
-            harness.ProjectId, AcademicApprovalKind.Plan, AcademicApprovalDecision.Approved, "ok", Guid.NewGuid(), CancellationToken.None);
+            harness.ProjectId, AcademicApprovalKind.Plan, pending.ApprovalKey, pending.CheckpointRevision,
+            AcademicApprovalDecision.Approved, "ok", Guid.NewGuid(), CancellationToken.None);
         var replay = await harness.Orchestrator.SubmitApprovalDecisionAsync(
-            harness.ProjectId, AcademicApprovalKind.Plan, AcademicApprovalDecision.Approved, "ok", Guid.NewGuid(), CancellationToken.None);
+            harness.ProjectId, AcademicApprovalKind.Plan, pending.ApprovalKey, pending.CheckpointRevision,
+            AcademicApprovalDecision.Approved, "ok", Guid.NewGuid(), CancellationToken.None);
 
         Assert.Equal(AcademicApprovalSubmissionStatus.Applied, first.Status);
         Assert.Equal(AcademicApprovalSubmissionStatus.AlreadyApplied, replay.Status);
@@ -135,17 +181,53 @@ public sealed class AcademicWorkflowResumabilityTests
     }
 
     [Fact]
+    public async Task Concurrent_different_decisions_report_only_the_durable_winner_as_applied()
+    {
+        var harness = new AcademicWorkflowHarness();
+        await harness.StartAsync("concurrent-approval-decisions");
+        var pending = (await harness.Store.LoadAsync(harness.ProjectId, CancellationToken.None))!.PendingApproval!;
+        var racingStore = new ConcurrentApprovalStore(harness.Store);
+        var firstWorker = new AcademicWorkflowOrchestrator(racingStore, [], TimeProvider.System);
+        var secondWorker = new AcademicWorkflowOrchestrator(racingStore, [], TimeProvider.System);
+
+        var approvedTask = firstWorker.SubmitApprovalDecisionAsync(
+            harness.ProjectId, pending.Kind, pending.ApprovalKey, pending.CheckpointRevision,
+            AcademicApprovalDecision.Approved, "approve", Guid.NewGuid(), CancellationToken.None);
+        var rejectedTask = secondWorker.SubmitApprovalDecisionAsync(
+            harness.ProjectId, pending.Kind, pending.ApprovalKey, pending.CheckpointRevision,
+            AcademicApprovalDecision.Rejected, "reject", Guid.NewGuid(), CancellationToken.None);
+        var results = await Task.WhenAll(approvedTask, rejectedTask);
+
+        var applied = Assert.Single(results.Where(result => result.Status == AcademicApprovalSubmissionStatus.Applied));
+        var conflict = Assert.Single(results.Where(result => result.Status == AcademicApprovalSubmissionStatus.DecisionConflict));
+        var committed = (await harness.Store.LoadAsync(harness.ProjectId, CancellationToken.None))!;
+        var decision = Assert.Single(committed.Approvals);
+
+        Assert.Equal(pending.ApprovalKey, decision.ApprovalKey);
+        Assert.Equal(pending.CheckpointRevision, decision.CheckpointRevision);
+        Assert.Equal(decision.Decision, Assert.Single(applied.Snapshot!.Approvals).Decision);
+        Assert.Equal(committed.Revision, conflict.Snapshot!.Revision);
+        Assert.Equal(decision.Decision == AcademicApprovalDecision.Rejected
+            ? AcademicProjectState.Cancelled
+            : AcademicProjectState.Running, committed.State);
+        Assert.Null(committed.PendingApproval);
+    }
+
+    [Fact]
     public async Task Undefined_numeric_approval_decision_leaves_the_pending_checkpoint_untouched()
     {
         var harness = new AcademicWorkflowHarness();
         await harness.StartAsync("invalid-decision");
         var before = await harness.Store.LoadAsync(harness.ProjectId, CancellationToken.None);
+        var pending = before!.PendingApproval!;
         var invalidDecision = (AcademicApprovalDecision)int.MaxValue;
 
         await Assert.ThrowsAsync<ArgumentOutOfRangeException>(async () =>
             await harness.Orchestrator.SubmitApprovalDecisionAsync(
                 harness.ProjectId,
                 AcademicApprovalKind.Plan,
+                pending.ApprovalKey,
+                pending.CheckpointRevision,
                 invalidDecision,
                 "must not be recorded",
                 Guid.NewGuid(),
@@ -160,6 +242,8 @@ public sealed class AcademicWorkflowResumabilityTests
         var valid = await harness.Orchestrator.SubmitApprovalDecisionAsync(
             harness.ProjectId,
             AcademicApprovalKind.Plan,
+            pending.ApprovalKey,
+            pending.CheckpointRevision,
             AcademicApprovalDecision.Approved,
             "approved after validation",
             Guid.NewGuid(),
@@ -177,9 +261,11 @@ public sealed class AcademicWorkflowResumabilityTests
     {
         var harness = new AcademicWorkflowHarness();
         await harness.StartAsync("wrong-gate");
+        var pending = (await harness.Store.LoadAsync(harness.ProjectId, CancellationToken.None))!.PendingApproval!;
 
         var wrong = await harness.Orchestrator.SubmitApprovalDecisionAsync(
-            harness.ProjectId, AcademicApprovalKind.ChapterDraft, AcademicApprovalDecision.Approved, null, Guid.NewGuid(), CancellationToken.None);
+            harness.ProjectId, AcademicApprovalKind.ChapterDraft, pending.ApprovalKey, pending.CheckpointRevision,
+            AcademicApprovalDecision.Approved, null, Guid.NewGuid(), CancellationToken.None);
 
         Assert.Equal(AcademicApprovalSubmissionStatus.NoPendingApproval, wrong.Status);
         Assert.Equal(AcademicProjectState.AwaitingApproval, wrong.Snapshot!.State);
@@ -191,12 +277,15 @@ public sealed class AcademicWorkflowResumabilityTests
     {
         var harness = new AcademicWorkflowHarness();
         await harness.ResumeUntilGateAsync(AcademicApprovalKind.Synthesis);
+        var pending = (await harness.Store.LoadAsync(harness.ProjectId, CancellationToken.None))!.PendingApproval!;
         var themesBefore = (await harness.Store.LoadAsync(harness.ProjectId, CancellationToken.None))!.Themes.Count;
         Assert.Equal(2, themesBefore);
 
         var submission = await harness.Orchestrator.SubmitApprovalDecisionAsync(
             harness.ProjectId,
             AcademicApprovalKind.Synthesis,
+            pending.ApprovalKey,
+            pending.CheckpointRevision,
             AcademicApprovalDecision.RequestRevision,
             "Fold in the KRG-specific pricing literature and state the gap more precisely.",
             Guid.NewGuid(),
@@ -221,9 +310,11 @@ public sealed class AcademicWorkflowResumabilityTests
     {
         var harness = new AcademicWorkflowHarness();
         await harness.StartAsync("reject");
+        var pending = (await harness.Store.LoadAsync(harness.ProjectId, CancellationToken.None))!.PendingApproval!;
 
         var submission = await harness.Orchestrator.SubmitApprovalDecisionAsync(
-            harness.ProjectId, AcademicApprovalKind.Plan, AcademicApprovalDecision.Rejected, "Scope needs rework first.", Guid.NewGuid(), CancellationToken.None);
+            harness.ProjectId, AcademicApprovalKind.Plan, pending.ApprovalKey, pending.CheckpointRevision,
+            AcademicApprovalDecision.Rejected, "Scope needs rework first.", Guid.NewGuid(), CancellationToken.None);
 
         Assert.Equal(AcademicApprovalSubmissionStatus.Applied, submission.Status);
         Assert.Equal(AcademicProjectState.Cancelled, submission.Snapshot!.State);

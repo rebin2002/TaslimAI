@@ -293,6 +293,8 @@ public sealed class AcademicProjectsService(
         Guid workspaceId,
         Guid projectId,
         AcademicApprovalKind kind,
+        string approvalKey,
+        long checkpointRevision,
         AcademicApprovalDecision decision,
         string? notes,
         Guid userId,
@@ -301,7 +303,8 @@ public sealed class AcademicProjectsService(
         var snapshot = await LoadFencedAsync(workspaceId, projectId, cancellationToken);
         if (snapshot is null) return AcademicProjectServiceResult.NotFound();
 
-        var submission = await engine.SubmitApprovalDecisionAsync(projectId, kind, decision, notes, userId, cancellationToken);
+        var submission = await engine.SubmitApprovalDecisionAsync(
+            projectId, kind, approvalKey, checkpointRevision, decision, notes, userId, cancellationToken);
         var resulting = submission.Snapshot ?? snapshot;
 
         return submission.Status switch
@@ -313,6 +316,20 @@ public sealed class AcademicProjectsService(
                 Snapshot = resulting,
                 Code = "CHECKPOINT_CONFLICT",
                 Detail = "Another writer advanced the project first; reload and retry.",
+            },
+            AcademicApprovalSubmissionStatus.CheckpointMismatch => new AcademicProjectServiceResult
+            {
+                Status = AcademicProjectServiceStatus.Conflict,
+                Snapshot = resulting,
+                Code = "CHECKPOINT_MISMATCH",
+                Detail = "The submitted approval key or revision does not match the pending checkpoint; reload and retry.",
+            },
+            AcademicApprovalSubmissionStatus.DecisionConflict => new AcademicProjectServiceResult
+            {
+                Status = AcademicProjectServiceStatus.Conflict,
+                Snapshot = resulting,
+                Code = "APPROVAL_DECISION_CONFLICT",
+                Detail = "A different decision was already committed for this checkpoint; reload the project.",
             },
             AcademicApprovalSubmissionStatus.NoPendingApproval => new AcademicProjectServiceResult
             {

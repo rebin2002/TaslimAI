@@ -353,7 +353,8 @@ export function AcademicWorkflowPanel({ workspaceId, brief, chapterHeadings, lan
 
   async function approvePlan() {
     const targetProjectId = project?.project.projectId;
-    if (!project || !targetProjectId || project.pendingApproval?.kind !== "Plan" || busy
+    const pendingApproval = project?.pendingApproval;
+    if (!project || !targetProjectId || pendingApproval?.kind !== "Plan" || busy
       || !isSelectedAcademicProject(targetProjectId, selectedId)
       || selectedIdRef.current !== targetProjectId) return;
     const operationWorkspaceId = workspaceId;
@@ -366,7 +367,8 @@ export function AcademicWorkflowPanel({ workspaceId, brief, chapterHeadings, lan
     setBusy(true);
     setError("");
     try {
-      const approved = await api.submitAcademicApproval(targetProjectId, "Plan", "Approved");
+      const approved = await api.submitAcademicApproval(
+        targetProjectId, "Plan", pendingApproval.approvalKey, pendingApproval.checkpointRevision, "Approved");
       if (!isCurrentOperation()) return;
       if (approved.project.projectId === targetProjectId && approved.project.workspaceId === operationWorkspaceId) remember(approved);
       else setError(t("workflow.accessChanged"));

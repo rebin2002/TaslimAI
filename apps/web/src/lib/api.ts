@@ -827,7 +827,7 @@ export type AcademicResearchPlan = {
 export type AcademicProjectDto = {
   project: AcademicProjectSummary;
   stages: AcademicProjectStage[];
-  pendingApproval: { kind: string; checkpointRevision: number; requestedAtUtc: string; reviewerPrompts: string[] } | null;
+  pendingApproval: { kind: string; approvalKey: string; checkpointRevision: number; requestedAtUtc: string; reviewerPrompts: string[] } | null;
   approvals: AcademicProjectApproval[];
   usage: { spentUsd: number; ceilingUsd: number; remainingUsd: number; callsUsed: number; callCeiling: number; callsRemaining: number };
   connectedStages: string[];
@@ -1730,9 +1730,16 @@ export const api = {
   ),
   getAcademicProject: (projectId: string) => request<AcademicProjectDto>(`/api/academic-projects/${encodeURIComponent(projectId)}`),
   runAcademicProject: (projectId: string) => request<AcademicProjectDto>(`/api/academic-projects/${encodeURIComponent(projectId)}/run`, { method: "POST", body: "{}" }, true),
-  submitAcademicApproval: (projectId: string, kind: string, decision: "Approved" | "RequestRevision" | "Rejected", notes?: string | null) => request<AcademicProjectDto>(
+  submitAcademicApproval: (
+    projectId: string,
+    kind: string,
+    approvalKey: string,
+    checkpointRevision: number,
+    decision: "Approved" | "RequestRevision" | "Rejected",
+    notes?: string | null,
+  ) => request<AcademicProjectDto>(
     `/api/academic-projects/${encodeURIComponent(projectId)}/approvals/${encodeURIComponent(kind)}`,
-    { method: "POST", body: JSON.stringify({ decision, notes: notes ?? null }) },
+    { method: "POST", body: JSON.stringify({ approvalKey, checkpointRevision, decision, notes: notes ?? null }) },
     true,
   ),
 };

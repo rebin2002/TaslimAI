@@ -207,20 +207,55 @@ public sealed class AcademicProjectsConnectedFlowTests : IClassFixture<AcademicC
         var (client, workspaceId) = await RegisterAsync();
         var projectId = await CreateAsync(client, workspaceId, "approval-replay", "Approval replay question");
         await RunAsync(client, projectId);
+        var pending = PendingIdentity(await DetailAsync(client, projectId));
 
-        var firstApproval = await ApproveAsync(client, projectId, "Plan");
+        var firstApproval = await ApproveAsync(client, projectId, "Plan",
+            approvalKey: pending.ApprovalKey, checkpointRevision: pending.CheckpointRevision);
         Assert.Equal("APPLIED", firstApproval.GetProperty("code").GetString());
         var revisionAfterApproval = firstApproval.GetProperty("project").GetProperty("revision").GetInt64();
 
         // Replaying the identical decision moves nothing and charges nothing.
-        var replay = await ApproveAsync(client, projectId, "Plan");
+        var replay = await ApproveAsync(client, projectId, "Plan",
+            approvalKey: pending.ApprovalKey, checkpointRevision: pending.CheckpointRevision);
         Assert.Equal("ALREADY_APPLIED", replay.GetProperty("code").GetString());
         Assert.Equal(revisionAfterApproval, replay.GetProperty("project").GetProperty("revision").GetInt64());
         Assert.Single(replay.GetProperty("approvals").EnumerateArray());
 
         // A decision for a checkpoint that is not pending is a conflict, never a silent pass.
-        var tooEarly = await ApproveAsync(client, projectId, "Synthesis");
+        var tooEarly = await ApproveAsync(client, projectId, "Synthesis",
+            approvalKey: pending.ApprovalKey, checkpointRevision: pending.CheckpointRevision);
         Assert.Equal("NO_PENDING_APPROVAL", tooEarly.GetProperty("error").GetProperty("code").GetString());
+    }
+
+    [Fact]
+    public async Task Stale_same_kind_approval_cannot_release_a_newer_plan_checkpoint()
+    {
+        var (client, workspaceId) = await RegisterAsync();
+        var projectId = await CreateAsync(client, workspaceId, "stale-plan-approval", "Stale plan approval question");
+        await RunAsync(client, projectId);
+        var firstPending = PendingIdentity(await DetailAsync(client, projectId));
+
+        var revisionRequested = await ApproveAsync(client, projectId, "Plan", decision: "RequestRevision");
+        Assert.Equal("APPLIED", revisionRequested.GetProperty("code").GetString());
+        var newer = await RunAsync(client, projectId);
+        Assert.Equal("Plan", PendingKind(newer));
+        var newerPending = PendingIdentity(newer);
+        Assert.NotEqual(firstPending.ApprovalKey, newerPending.ApprovalKey);
+        Assert.NotEqual(firstPending.CheckpointRevision, newerPending.CheckpointRevision);
+
+        var stale = await ApproveAsync(client, projectId, "Plan", approvalKey: firstPending.ApprovalKey,
+            checkpointRevision: firstPending.CheckpointRevision);
+        Assert.Equal("CHECKPOINT_MISMATCH", stale.GetProperty("error").GetProperty("code").GetString());
+
+        var afterStale = await DetailAsync(client, projectId);
+        Assert.Equal(newer.GetProperty("project").GetProperty("revision").GetInt64(),
+            afterStale.GetProperty("project").GetProperty("revision").GetInt64());
+        Assert.Equal(newerPending.ApprovalKey,
+            afterStale.GetProperty("pendingApproval").GetProperty("approvalKey").GetString());
+        Assert.Equal(newerPending.CheckpointRevision,
+            afterStale.GetProperty("pendingApproval").GetProperty("checkpointRevision").GetInt64());
+        Assert.DoesNotContain(afterStale.GetProperty("approvals").EnumerateArray(), approval =>
+            approval.GetProperty("checkpointRevision").GetInt64() == newerPending.CheckpointRevision);
     }
 
     [Fact]
@@ -552,11 +587,24 @@ public sealed class AcademicProjectsConnectedFlowTests : IClassFixture<AcademicC
         Guid projectId,
         string kind,
         string decision = "Approved",
-        string? notes = null)
+        string? notes = null,
+        string? approvalKey = null,
+        long? checkpointRevision = null)
     {
+        if (approvalKey is null && checkpointRevision is null)
+        {
+            var identity = PendingIdentity(await DetailAsync(client, projectId));
+            approvalKey = identity.ApprovalKey;
+            checkpointRevision = identity.CheckpointRevision;
+        }
+        else if (approvalKey is null || checkpointRevision is null)
+        {
+            throw new ArgumentException("Approval key and checkpoint revision must be provided together.");
+        }
+
         var response = await PostJsonAsync(client,
             $"/api/academic-projects/{projectId}/approvals/{kind}",
-            new { decision, notes });
+            new { decision, notes, approvalKey, checkpointRevision });
         Assert.True(response.StatusCode is HttpStatusCode.OK or HttpStatusCode.Conflict,
             await response.Content.ReadAsStringAsync());
         return await response.Content.ReadFromJsonAsync<JsonElement>();
@@ -579,6 +627,12 @@ public sealed class AcademicProjectsConnectedFlowTests : IClassFixture<AcademicC
         dto.GetProperty("pendingApproval").ValueKind is JsonValueKind.Null or JsonValueKind.Undefined
             ? null
             : dto.GetProperty("pendingApproval").GetProperty("kind").GetString();
+
+    private static (string ApprovalKey, long CheckpointRevision) PendingIdentity(JsonElement dto)
+    {
+        var pending = dto.GetProperty("pendingApproval");
+        return (pending.GetProperty("approvalKey").GetString()!, pending.GetProperty("checkpointRevision").GetInt64());
+    }
 
     private static int Artifact(JsonElement dto, string property) => dto.GetProperty(property).GetInt32();
 }

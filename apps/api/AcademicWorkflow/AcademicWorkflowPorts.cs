@@ -121,6 +121,8 @@ public enum AcademicApprovalSubmissionStatus
     ProjectNotRunning = 3,
     NotFound = 4,
     RevisionConflict = 5,
+    CheckpointMismatch = 6,
+    DecisionConflict = 7,
 }
 
 public sealed record AcademicApprovalSubmissionResult

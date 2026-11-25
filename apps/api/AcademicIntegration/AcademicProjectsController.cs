@@ -52,7 +52,9 @@ public sealed record AcademicBudgetRequestDto(
 
 public sealed record AcademicApprovalRequest(
     string? Decision,
-    string? Notes);
+    string? Notes,
+    string? ApprovalKey,
+    long? CheckpointRevision);
 
 public sealed record AcademicStageDto(
     string Stage,
@@ -73,6 +75,7 @@ public sealed record AcademicApprovalDto(
 
 public sealed record AcademicPendingApprovalDto(
     string Kind,
+    string ApprovalKey,
     long CheckpointRevision,
     DateTime RequestedAtUtc,
     IReadOnlyList<string> ReviewerPrompts);
@@ -322,9 +325,12 @@ public sealed class AcademicProjectsController(
         if (!Enum.TryParse<AcademicApprovalDecision>(request.Decision, ignoreCase: true, out var decision)
             || !Enum.IsDefined(decision))
             return ApiResults.Validation(this, "Decision must be Approved, RequestRevision, or Rejected.");
+        if (string.IsNullOrWhiteSpace(request.ApprovalKey) || request.CheckpointRevision is null or <= 0)
+            return ApiResults.Validation(this, "ApprovalKey and a positive CheckpointRevision are required.");
 
         var outcome = await service.SubmitApprovalAsync(
-            snapshot!.WorkspaceId, projectId, approvalKind, decision, request.Notes, GetUserId(), cancellationToken);
+            snapshot!.WorkspaceId, projectId, approvalKind, request.ApprovalKey, request.CheckpointRevision.Value,
+            decision, request.Notes, GetUserId(), cancellationToken);
 
         return outcome.Status switch
         {
@@ -492,6 +498,7 @@ public sealed class AcademicProjectsController(
                 stage.CompletedAtUtc))],
             snapshot.PendingApproval is null ? null : new AcademicPendingApprovalDto(
                 snapshot.PendingApproval.Kind.ToString(),
+                snapshot.PendingApproval.ApprovalKey,
                 snapshot.PendingApproval.CheckpointRevision,
                 snapshot.PendingApproval.RequestedAtUtc,
                 [.. snapshot.PendingApproval.ReviewerPrompts.Select(AcademicProjectTextPolicy.Sanitize)]),

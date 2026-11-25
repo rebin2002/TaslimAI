@@ -235,7 +235,8 @@ internal sealed class AcademicWorkflowHarness
         if (pending.Kind != kind)
             throw new InvalidOperationException($"Pending gate is {pending.Kind}, not {kind}.");
         var submission = await Orchestrator.SubmitApprovalDecisionAsync(
-            ProjectId, kind, decision, notes, Guid.Parse("33333333-3333-3333-3333-333333333333"), CancellationToken.None);
+            ProjectId, kind, pending.ApprovalKey, pending.CheckpointRevision, decision, notes,
+            Guid.Parse("33333333-3333-3333-3333-333333333333"), CancellationToken.None);
         if (submission.Status != AcademicApprovalSubmissionStatus.Applied)
             throw new InvalidOperationException("Approval submission failed: " + submission.Status);
     }

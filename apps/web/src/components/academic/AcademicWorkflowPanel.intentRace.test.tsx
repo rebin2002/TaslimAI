@@ -47,6 +47,7 @@ function project(projectId: string): AcademicProjectDto {
     }],
     pendingApproval: {
       kind: "Plan",
+      approvalKey: `${projectId}:Plan:1`,
       checkpointRevision: 1,
       requestedAtUtc: now,
       reviewerPrompts: [`Review the synthetic Plan ${projectId}`],
@@ -175,6 +176,12 @@ describe("Academic workflow latest-intent guard", () => {
       await new Promise((resolve) => setTimeout(resolve, 0));
     });
     expect(submitApproval).toHaveBeenCalledTimes(1);
-    expect(submitApproval).toHaveBeenCalledWith("project-b", "Plan", "Approved");
+    expect(submitApproval).toHaveBeenCalledWith(
+      "project-b",
+      "Plan",
+      "project-b:Plan:1",
+      1,
+      "Approved",
+    );
   });
 });

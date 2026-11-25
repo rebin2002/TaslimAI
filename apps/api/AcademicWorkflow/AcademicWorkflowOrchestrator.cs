@@ -496,6 +496,8 @@ public sealed partial class AcademicWorkflowOrchestrator
     public async Task<AcademicApprovalSubmissionResult> SubmitApprovalDecisionAsync(
         Guid projectId,
         AcademicApprovalKind kind,
+        string approvalKey,
+        long checkpointRevision,
         AcademicApprovalDecision decision,
         string? notes,
         Guid decidedByUserId,
@@ -512,22 +514,46 @@ public sealed partial class AcademicWorkflowOrchestrator
         var pending = working.PendingApproval;
         if (pending is null)
         {
-            // No checkpoint is waiting right now. If this kind was decided before and
-            // no newer checkpoint of the same kind is pending, the call is a replay.
-            if (working.Approvals.Any(record => record.Kind == kind))
-                return new AcademicApprovalSubmissionResult { Status = AcademicApprovalSubmissionStatus.AlreadyApplied, Snapshot = working };
+            // A replay is recognized only for the exact committed checkpoint and decision.
+            // Kind-only matching can mistake an old decision for a new same-kind checkpoint.
+            var recorded = working.Approvals.FirstOrDefault(record =>
+                record.CheckpointRevision == checkpointRevision
+                && string.Equals(record.ApprovalKey, approvalKey, StringComparison.Ordinal));
+            if (recorded is not null)
+            {
+                if (recorded.Kind != kind)
+                    return new AcademicApprovalSubmissionResult { Status = AcademicApprovalSubmissionStatus.NoPendingApproval, Snapshot = working };
+
+                return new AcademicApprovalSubmissionResult
+                {
+                    Status = recorded.Decision == decision
+                        ? AcademicApprovalSubmissionStatus.AlreadyApplied
+                        : AcademicApprovalSubmissionStatus.DecisionConflict,
+                    Snapshot = working,
+                };
+            }
+
+            if (working.State is AcademicProjectState.Completed or AcademicProjectState.Cancelled or AcademicProjectState.Failed)
+                return new AcademicApprovalSubmissionResult
+                {
+                    Status = AcademicApprovalSubmissionStatus.ProjectNotRunning,
+                    Snapshot = working,
+                    Code = working.StateCode,
+                };
+
             return new AcademicApprovalSubmissionResult
             {
-                Status = working.State is AcademicProjectState.Completed or AcademicProjectState.Cancelled or AcademicProjectState.Failed
-                    ? AcademicApprovalSubmissionStatus.ProjectNotRunning
-                    : AcademicApprovalSubmissionStatus.NoPendingApproval,
+                Status = AcademicApprovalSubmissionStatus.CheckpointMismatch,
                 Snapshot = working,
-                Code = working.StateCode,
             };
         }
 
         if (pending.Kind != kind)
             return new AcademicApprovalSubmissionResult { Status = AcademicApprovalSubmissionStatus.NoPendingApproval, Snapshot = working };
+
+        if (!string.Equals(pending.ApprovalKey, approvalKey, StringComparison.Ordinal)
+            || pending.CheckpointRevision != checkpointRevision)
+            return new AcademicApprovalSubmissionResult { Status = AcademicApprovalSubmissionStatus.CheckpointMismatch, Snapshot = working };
 
         working.Approvals.Add(new AcademicApprovalRecord
         {
@@ -559,10 +585,36 @@ public sealed partial class AcademicWorkflowOrchestrator
         }
 
         var commit = await CommitAsync(working, loaded.Revision, $"approval|{pending.ApprovalKey}", cancellationToken);
+        if (commit == AcademicCommitStatus.Committed)
+            return new AcademicApprovalSubmissionResult { Status = AcademicApprovalSubmissionStatus.Applied, Snapshot = working };
+
+        // A CAS loser or duplicate checkpoint is not proof that this request committed.
+        // Reconcile against the durable head and report a replay only if its exact decision
+        // is present there; otherwise return the committed snapshot as a conflict.
+        var committed = await store.LoadAsync(projectId, cancellationToken);
+        if (committed is null)
+            return new AcademicApprovalSubmissionResult { Status = AcademicApprovalSubmissionStatus.NotFound };
+
+        var committedDecision = committed.Approvals.FirstOrDefault(record =>
+            record.CheckpointRevision == checkpointRevision
+            && string.Equals(record.ApprovalKey, approvalKey, StringComparison.Ordinal));
+        if (committedDecision is not null)
+            return new AcademicApprovalSubmissionResult
+            {
+                Status = committedDecision.Kind == kind && committedDecision.Decision == decision
+                    ? AcademicApprovalSubmissionStatus.AlreadyApplied
+                    : AcademicApprovalSubmissionStatus.DecisionConflict,
+                Snapshot = committed,
+            };
+
         return commit switch
         {
-            AcademicCommitStatus.RevisionConflict => new AcademicApprovalSubmissionResult { Status = AcademicApprovalSubmissionStatus.RevisionConflict, Snapshot = loaded },
-            _ => new AcademicApprovalSubmissionResult { Status = AcademicApprovalSubmissionStatus.Applied, Snapshot = working },
+            AcademicCommitStatus.RevisionConflict or AcademicCommitStatus.DuplicateCheckpoint => new AcademicApprovalSubmissionResult
+            {
+                Status = AcademicApprovalSubmissionStatus.RevisionConflict,
+                Snapshot = committed,
+            },
+            _ => throw new ArgumentOutOfRangeException(nameof(commit), commit, "Unknown academic commit outcome."),
         };
     }
 
