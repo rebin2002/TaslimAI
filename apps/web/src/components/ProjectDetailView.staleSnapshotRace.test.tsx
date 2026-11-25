@@ -127,7 +127,7 @@ const h = vi.hoisted(() => {
     active: null as { locale: string; t: (key: string, variables?: Record<string, string>) => string } | null,
     api: {
       getProjectOverview: vi.fn(),
-      archiveProject: vi.fn(),
+      archiveProjectWithRevision: vi.fn(),
       restoreProject: vi.fn(),
       updateProject: vi.fn(),
     },
@@ -286,10 +286,10 @@ beforeEach(() => {
     overviewRequests.push(request);
     return request.promise;
   });
-  h.api.archiveProject.mockReset().mockImplementation(() => {
+  h.api.archiveProjectWithRevision.mockReset().mockImplementation(() => {
     const request = deferred<Project>();
     archiveRequests.push(request);
-    return request.promise;
+    return request.promise.then(project => ({ project, revision: null }));
   });
   h.api.restoreProject.mockReset().mockResolvedValue(makeProject({ status: "Active" }));
   h.api.updateProject.mockReset().mockResolvedValue(makeProject());
