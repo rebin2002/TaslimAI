@@ -47,9 +47,9 @@ test.describe("Presentation Studio failed-job recovery", () => {
   test.skip(!safeTargetsOnly, "Runs only against loopback web/API targets; it must never register against a remote service.");
 
   test("restores a safe failed-job state after reload and lets the authenticated user recover", async ({ authenticatedPage: page }) => {
-    const auth = await apiJson<{ personalWorkspace: { id: string } }>(page.request, "GET", "/api/auth/me");
+    const auth = await apiJson<{ user: { id: string }; personalWorkspace: { id: string } }>(page.request, "GET", "/api/auth/me");
     const workspaceId = auth.personalWorkspace.id;
-    const storageKey = `taslim:presentation-generation:${workspaceId}`;
+    const storageKey = `taslim:presentation-generation:${encodeURIComponent(auth.user.id)}:${encodeURIComponent(workspaceId)}`;
     const blockedExternalRequests: string[] = [];
     let submittedPayload: Record<string, unknown> | undefined;
     let csrfToken: string | undefined;

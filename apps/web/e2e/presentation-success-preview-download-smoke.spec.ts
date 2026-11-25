@@ -230,7 +230,7 @@ test("authenticated Presentation success previews slides and downloads exact PPT
     await expect(workspace.locator(".presentation-active-slide")).toContainText("Private slide content for release QA.");
     await expect(page.locator("body")).not.toContainText(privateProviderMarker);
 
-    const downloadButton = workspace.getByRole("button", { name: "PPTX", exact: true });
+    const downloadButton = workspace.getByRole("button", { name: `Download PPTX: ${fileName}`, exact: true });
     await expect(downloadButton).toBeEnabled();
     const downloadPromise = page.waitForEvent("download");
     await downloadButton.click();
