@@ -13,6 +13,15 @@ const FOCUSABLE_SELECTOR = [
 
 const FORM_CONTROL_TAGS = new Set(["BUTTON", "INPUT", "SELECT", "TEXTAREA"]);
 
+function isDisabledByFieldset(element: HTMLElement): boolean {
+  for (let ancestor = element.parentElement; ancestor !== null; ancestor = ancestor.parentElement) {
+    if (ancestor.tagName !== "FIELDSET" || !ancestor.hasAttribute("disabled")) continue;
+    const firstLegend = Array.from(ancestor.children).find((child) => child.tagName === "LEGEND");
+    if (!firstLegend?.contains(element)) return true;
+  }
+  return false;
+}
+
 type VisibilityStyleReader = (element: Element) => { display: string; visibility: string };
 
 /**
@@ -32,10 +41,10 @@ export function isTabbableElement(element: HTMLElement, readStyle?: VisibilitySt
     const control = element as HTMLButtonElement | HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement;
     if (control.disabled) return false;
     if (element.getAttribute("disabled") !== null) return false;
-    // A disabled fieldset un-focuses every contained form control except the
-    // ones inside its legend (HTML living-standard sequential navigation).
-    const fieldset = element.closest("fieldset[disabled]");
-    if (fieldset && !element.closest("legend")) return false;
+    // Each disabled fieldset applies independently. Only descendants of that
+    // fieldset's first direct legend are exempt; later legends and nested
+    // disabled fieldsets still apply their own disabled state.
+    if (isDisabledByFieldset(element)) return false;
     if (element.tagName === "INPUT" && (element as HTMLInputElement).type === "hidden") return false;
   }
   const tabindex = element.getAttribute("tabindex");

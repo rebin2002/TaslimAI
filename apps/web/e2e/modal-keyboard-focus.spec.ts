@@ -145,6 +145,81 @@ test("project modal keeps keyboard focus contained and returns it to the opener"
   expect(api.unmapped, "unexpected API reads indicate endpoint drift").toEqual([]);
 });
 
+test("project edit restores focus to its opener while the save-triggered list reload is pending", async ({ authenticatedPage: page }) => {
+  let currentProject = { ...projectPayload };
+  let listReads = 0;
+  let updated = false;
+  let refreshHeld = false;
+  const writes: { method: string; path: string; ifMatch: string | null }[] = [];
+  const unmapped: string[] = [];
+  let releaseRefresh!: () => void;
+  const refreshGate = new Promise<void>((resolve) => { releaseRefresh = resolve; });
+  let markRefreshStarted!: () => void;
+  const refreshStarted = new Promise<void>((resolve) => { markRefreshStarted = resolve; });
+
+  await page.route(/\/api\//, async (route) => {
+    const request = route.request();
+    const url = new URL(request.url());
+    const method = request.method().toUpperCase();
+    const path = url.pathname;
+    if (method === "PATCH" && path === `/api/projects/${PROJECT_ID}`) {
+      writes.push({ method, path, ifMatch: request.headers()["if-match"] ?? null });
+      const input = JSON.parse(request.postData() ?? "{}") as Partial<typeof currentProject>;
+      currentProject = { ...currentProject, ...input, updatedAt: "2026-11-25T00:00:00Z" };
+      updated = true;
+      return route.fulfill({ status: 200, contentType: "application/json", headers: { ETag: '"revision-2"', "Access-Control-Expose-Headers": "ETag" }, body: JSON.stringify(currentProject) });
+    }
+    if (method !== "GET" && method !== "HEAD") {
+      writes.push({ method, path, ifMatch: request.headers()["if-match"] ?? null });
+      return route.fulfill({ status: 405, contentType: "application/json", body: "{}" });
+    }
+    if (path.endsWith("/api/auth/me")) return route.fulfill(json(sessionPayload));
+    if (path === `/api/workspaces/${WORKSPACE_ID}/projects`) {
+      listReads += 1;
+      if (updated && !refreshHeld) {
+        refreshHeld = true;
+        markRefreshStarted();
+        await refreshGate;
+      }
+      return route.fulfill(json([currentProject]));
+    }
+    if (path === `/api/projects/${PROJECT_ID}`) {
+      return route.fulfill({ status: 200, contentType: "application/json", headers: { ETag: '"revision-1"', "Access-Control-Expose-Headers": "ETag" }, body: JSON.stringify(currentProject) });
+    }
+    if (path === "/api/workspaces" || /^\/api\/workspaces\/[^/]+$/.test(path)) return route.fulfill(json([sessionPayload.personalWorkspace]));
+    if (path.endsWith("/api/auth/csrf")) return route.fulfill(json({ token: "synthetic-csrf" }));
+    if (path.endsWith("/api/notifications/unread-count") || path.endsWith("/api/activity/unread-count")) return route.fulfill(json({ unreadCount: 0 }));
+    unmapped.push(`${method} ${path}${url.search}`);
+    return route.fulfill({ status: 404, contentType: "application/json", body: "{}" });
+  });
+
+  await page.goto("/projects");
+  const editButton = page.getByRole("button", { name: /^edit$/i }).first();
+  await expect(editButton).toBeVisible();
+  await editButton.focus();
+  await page.keyboard.press("Enter");
+
+  const editDialog = page.getByRole("dialog", { name: /^edit project$/i });
+  await expect(editDialog).toBeVisible();
+  await editDialog.getByLabel(/^project name$/i).fill("Saved Focus Project");
+  await editDialog.getByRole("button", { name: /^save$/i }).click();
+  await expect(editDialog).toBeHidden();
+  try {
+    await refreshStarted;
+    // Keep the server list response pending: focus restoration must not depend
+    // on the replacement list arriving after the edit row was cleared.
+    await expect(editButton).toBeFocused();
+  } finally {
+    releaseRefresh();
+  }
+
+  await expect(page.getByText("Saved Focus Project", { exact: true })).toBeVisible();
+  await expect(editButton).toBeFocused();
+  expect(listReads).toBeGreaterThanOrEqual(2);
+  expect(writes).toEqual([{ method: "PATCH", path: `/api/projects/${PROJECT_ID}`, ifMatch: '"revision-1"' }]);
+  expect(unmapped, "unexpected API reads indicate endpoint drift").toEqual([]);
+});
+
 function writesOf(api: { writes: string[] }) {
   return api.writes;
 }
