@@ -36,7 +36,7 @@ justify emergency change; it justifies a gate.
 The 502 cannot have been produced by the application. The application has no code
 path that returns 502 on `/health`: `/health` and `/health/live` return `Results.Ok`
 unconditionally once routed, and `/health/ready` returns 200 or 503
-(`apps/api/Program.cs:567-599`). A process that has not bound its socket cannot
+(`apps/api/Program.cs:586-608` on `bea15310`; `567-599` on the `1e2cb80a` tree these observations were actually taken from). A process that has not bound its socket cannot
 emit any status line, so a 502 inside the cutover window is the platform proxy
 answering **on behalf of** a container that was not yet listening.
 
@@ -66,6 +66,17 @@ built from `1e2cb80a`:
 | C | `ApplyMigrations=true`, schema already current (the #1245 shape) | **8.1s** | 30 |
 | B | `ApplyMigrations=false`, same database | 7.6s | ~30 |
 | A | `ApplyMigrations=true`, fresh schema, 82 migrations, 148 tables created | **21.6s** | ~100 |
+
+**Chain length has since moved, so 21.6 s is a floor, not a current measurement.**
+The three rows above were measured by building `1e2cb80a`. Current `main`
+(`bea15310`, merged #1268) carries **83** migrations, the chain head being
+`20261124065935_AddAcademicResearchIntegration` rather than
+`20261005112000_AddImageActiveJobGuard`, so case A understates today's cold-start worst
+case by one migration. This lane has no .NET SDK, no PostgreSQL and no Docker, so the
+window was **not re-measured** on `bea15310` and no re-measured figure is claimed here.
+Cases B and C are unaffected in kind: case B shows the window exists with no schema walk
+at all, which is chain-length independent, and case C depends only on the schema already
+being current.
 
 Two conclusions, both measured rather than assumed:
 
@@ -98,8 +109,13 @@ runner against a real `postgres:15` service, plus a further attempt-3 wait in th
 job. This matters for three reasons: it confirms the pre-bind window on infrastructure
 this lane does not control; it shows CI already *expects* that window and absorbs it
 with retries, which is precisely the tolerance production traffic does not get; and it
-places the measured worst case (~20-24 s) comfortably inside the 300 s healthcheck
-timeout proposed in §3.2 rather than near it.
+places the measured worst case (~20-24 s) inside the 60 s API healthcheck floor
+proposed in §3.2 with roughly 2.5x margin on the 82-migration figure. §1.2 of the first
+draft called that 60 s value "300 s": 300 s is the gate script's own total-probe budget
+argument used in §3.3, not the Railway `healthcheckTimeout`, and the two must not be
+conflated — a platform timeout of 300 s would mask a genuinely wedged startup for five
+minutes before failing the deploy. The reconciled value is the §3.2 floor of 60 s, and
+it should be re-measured against the 83-migration chain before it is relied on.
 
 ### 1.3 Unresolved, and how to settle it
 
@@ -120,7 +136,7 @@ observation. Confirm independently before acting on it.
    service `Settings` pane (`Deploy` section) and the deployment detail page, which
    shows a file icon for any value that came from config in code.
 2. **Is the healthcheck port right?** Railway probes the injected `PORT`. The API
-   image pins `ASPNETCORE_HTTP_PORTS=8080` (`apps/api/Dockerfile:19`) and does not
+   image pins `ASPNETCORE_HTTP_PORTS=8080` (`apps/api/Dockerfile:10`, identical on `1e2cb80a` and `bea15310`; the first draft cited `:19`, which was wrong at both) and does not
    read `PORT`. If the service port and the probe port disagree, Railway reports
    `service unavailable`. Confirm `PORT=8080` on the API service, or record the
    target-port setting that makes them agree.
@@ -255,7 +271,8 @@ the moment it exists; nothing here has to change to accept it.
 ### 3.1 Do not add `railway.json`
 
 Railway **Config as Code** (`railway.json` / `railway.toml`) is deprecated and its
-files stop being read on **2026-12-01**, a week from this writing; new services
+files stop being read on **2026-12-01** (six days after this re-verification on
+`2026-11-25`; the first draft's “a week from this writing” was left to drift); new services
 cannot opt into it. Adding one now would buy one deployment of durability and then
 silently stop applying. The supported vehicle is **Infrastructure as Code**,
 `.railway/railway.ts`, evaluated by the CLI as `plan` then `apply`.
@@ -458,7 +475,8 @@ Nothing here duplicates or supersedes an existing owner. Deliberate non-goals:
 | **#1028** (open, `MERGEABLE`, base `0325c2d2`, 6 merges stale) | adds advisory `worker` (`required: false`) to the readiness document | this lane adds **no** check to `ReadinessAsync`, touches no `.cs`, and preserves the non-gating contract the PR depends on; the gate's `advisory-degraded` test pins it |
 | **#249** (open, `MERGEABLE`, base `d3fffca5`) | health rate limit: 2 concurrent and 30/min per client IP on `/health`, `/health/live`, `/health/ready`, `/readiness` | **live interaction, and the budget is per client IP - which matters for who it actually constrains.** The gate is operator-initiated, so it shares the *operator's* allowance: default retry 5s = 12/min per service, 24/min for the pair, with a distinct `throttled` verdict. Platform healthcheck probes come from Railway's own source address, not the operator's, so they do not consume the operator's budget - but they can exhaust **their own** if the interval is tight, which is why section 3.2 sets the API probe interval at 30s or above. CI smoke runs from GitHub runners, a third address. Three independent budgets, not one shared pool |
 | **#7141321366** (independent technical review of this PR's head) | found the identity gap and four unpinned classification edges; recommended the Web-then-API `/health/live` sequence | **accepted, and it changed this document.** Sections 2.1, 3.2 and 3.3 are the reconciliation. One point is refined rather than adopted: the review's item 4 treats platform probes, the operator gate and CI smoke as sharing one anonymous allowance, but the limit is keyed per client IP, so they contend separately - see the #249 row above. The review classifies all four gaps as test-coverage only; **three were also live false greens at the shipped head**, verified by running that head's script against the same responders, and one (MUT-D) is coverage-only exactly as reported - section 7.1 |
-| **#66** (open, **`CONFLICTING`**, base 2026-10-05) | bounds startup migration time via `Database:MigrationTimeoutSeconds` | **not duplicated.** Measurement B shows the window exists without migrations, so bounding migration time is necessary-but-not-sufficient; #66 also edits `Program.cs`, `README.md` and `docs/OPERATIONS_RUNBOOK.md`, so any ordering change here would collide with it |
+| **#858 / #1143 / #1146 / #1147** (four open CI lanes, none owned by a running task; #1143 is the current-main re-cut of #858) | each appends its own steps to the `smoke-contracts` job plus a top-level `concurrency` block | **the collision this revision resolves.** Measured with real three-way merges, not inferred: against head `28946450` each of these four lanes conflicted in `.github/workflows/ci.yml` **in both landing orders**, because all of them insert at the same tail anchor — the end of the `smoke-contracts` step list. The first draft's note that “merge ordering may need a re-cut” was therefore wrong: no ordering avoids a shared insertion point. The step is now anchored directly after `actions/checkout`, four unchanged lines clear of the contested tail, with every contract step preserved verbatim. §7.4 records the merge matrix and the combined-tree proof. |
+| **#66** (open, non-draft, **`MERGEABLE`/`clean`** at head `82e37ca173`, last updated 2026-11-24T22:39Z; the first draft recorded it as `CONFLICTING` against a 2026-10-05 base, which is no longer true) | bounds startup migration time via `Database:MigrationTimeoutSeconds` | **not duplicated.** Measurement B shows the window exists without migrations, so bounding migration time is necessary-but-not-sufficient. #66 edits `Program.cs`, `README.md`, `docs/OPERATIONS_RUNBOOK.md` and one `dotnet run --urls` line in `ci.yml` around line 135; that `ci.yml` hunk does **not** touch the `smoke-contracts` step list, so it never collided with this lane. Its `Program.cs` edits do move the line numbers cited in §1.2, which is why those citations now name the head they were measured on |
 | #726, #284 | staging rollback contract tests, release-governance evidence | rollback steps in section 5 are the operational counterpart; no test-lane files touched |
 | #258, #461 | readiness redaction, provider failure status | untouched |
 
@@ -466,7 +484,12 @@ File footprint of this lane: `scripts/deploy-readiness-gate.sh`,
 `scripts/deploy-readiness-gate.test.sh`, one added step in the `smoke-contracts` job
 of `.github/workflows/ci.yml`, and this document. No `.cs`, no `appsettings*`, no
 Dockerfile, no `Program.cs`, no `README.md`, no `docs/OPERATIONS_RUNBOOK.md`, so the
-diff is disjoint from #1028, #249 and #66.
+payload is disjoint from #1028, #249 and #66 file-for-file. The one shared file is
+`ci.yml`, and the collision it caused is resolved by relocating the anchor, never by
+removing a check: position inside the job changes *where* the step runs, not *whether*
+it runs or gates. A scan of all 354 open PRs, each diffed against its own merge-base,
+found no other lane touching `docs/DEPLOYMENT_CUTOVER.md` or either
+`scripts/deploy-readiness-gate*` file.
 
 ## 7. Verification performed
 
@@ -611,3 +634,67 @@ that exact SHA is recorded there rather than being asserted here in advance.
 Still not done by this lane, deliberately: any `railway config plan` / `apply`, and
 applying the section 3.2 settings to any environment. Those are live changes and are
 the release owner's call, gated on section 3.3.
+
+### 7.4 Re-verification against live main `bea15310` (2026-11-25)
+
+The measurements above were taken at `1e2cb80a`. `main` has since advanced 43 commits
+to `bea15310cdb4a495ef1c47456eaa349d4d3af604` (merged #1268, 2026-11-25T00:32:37Z), so
+this section re-measures what the earlier sections assert, and states plainly what
+could not be re-measured here.
+
+**Uplift.** `origin/main` was merged into this branch append-only (`git merge --no-ff`,
+no rebase, no force-push, no conflict resolution). The branch went from 5 ahead / 43
+behind to **0 behind**, and the merge was clean: `main` touched none of this lane's four
+files since `1e2cb80a`.
+
+**The CI collision, measured.** `git merge-tree` and real scratch three-way merges at
+the pre-resolution head `28946450`:
+
+| Pairing | Before relocation | After relocation |
+| --- | --- | --- |
+| main + #1277 alone | clean | clean |
+| main + #1143 alone | clean | n/a |
+| #1143 then #1277 | **CONFLICT** `ci.yml` | clean |
+| #1277 then #1143 | **CONFLICT** `ci.yml` | clean |
+| #858 either order | **CONFLICT** `ci.yml` | clean |
+| #1146 either order | **CONFLICT** `ci.yml` | clean |
+| #1147 either order | **CONFLICT** `ci.yml` | clean |
+| #1144, #298, #66 either order | clean | clean |
+
+Conflict direction was symmetric, which is what rules out the "re-cut in the right
+order" reading: two lanes inserting at the same point conflict whichever lands first.
+
+**Nothing was weakened to get there.** The combined tree of `main` + #1143 + this branch
+parses as YAML, keeps the `concurrency:` block, and carries all four `smoke-contracts`
+steps (`Validate deployment readiness cutover gate`, `Validate API health smoke helper`,
+`Validate production container smoke helpers`, `Enforce deploy-safe CI/release
+concurrency policy`). The gate count is unchanged at five `ci.yml` jobs plus container
+smoke plus release evidence. The only behavioural difference is precedence: the
+readiness contract now runs before the API health contract instead of after it, so a
+regression in one masks the other's signal in the same job, exactly as it did in the
+opposite direction before. Neither ordering enforces more checks than the other.
+
+**Local suites on the uplifted tree**, offline, loopback only:
+`deploy-readiness-gate.test.sh` **55 passed / 0 failed**; `api-health-smoke.test.sh`,
+`container-health-smoke.test.sh`, `web-container-smoke.test.sh`,
+`release-evidence.test.sh`, `readme-health-contract.test.sh` and `next-wave-refs.test.sh`
+(15/15) all exit 0. `bash -n` clean; `git diff --check` clean; `ci.yml` parses.
+
+**Facts that moved and are now corrected in this document:**
+
+| Claim | At `1e2cb80a` | At `bea15310` |
+| --- | --- | --- |
+| EF migration chain | 82, head `20261005112000_AddImageActiveJobGuard` | **83**, head `20261124065935_AddAcademicResearchIntegration` |
+| `Program.cs` health routes cited | `567-599` | **`586-608`**; migration apply `610-615`, `app.Run()` `621` |
+| `apps/api/Dockerfile` port line | cited as `:19` | **`:10`** — wrong at both heads, a citation defect not a drift |
+| #66 merge state | recorded `CONFLICTING` | **`MERGEABLE`/`clean`** at `82e37ca173` |
+| Revision identity in the readiness body | absent | **still absent**: `OperationalHealthResponse` remains `Status, Service, RequestId, Checks`, and #1028 is still open at `6f6edb9a04`, so §2.1's `identity-unavailable` refusal is still the correct behaviour |
+| `railway.json` / `railway.toml` / `.railway/` in the tree | none | **still none**, so health-check settings remain dashboard-only and unreviewable |
+| Branch protection / rulesets | none | **still none**: `404` on `/branches/main/protection`, `[]` from `/rulesets`, #283 still open |
+
+**Not re-measured here, stated as a limit rather than assumed.** The 8.1 s / 7.6 s /
+21.6 s startup windows of §1.2 were **not** reproduced: this sandbox has no .NET SDK, no
+PostgreSQL and no Docker, so no bind-window figure on `bea15310` is claimed anywhere in
+this document. Because the chain is one migration longer, 21.6 s is a **floor**, and the
+60 s API healthcheck floor in §3.2 should be re-measured against the 83-migration chain
+before it is relied on. Container-backed smoke remains a hosted-runner verification.

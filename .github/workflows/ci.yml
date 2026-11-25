@@ -18,10 +18,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - name: Validate API health smoke helper
-        run: |
-          bash -n scripts/api-health-smoke.sh scripts/api-health-smoke.test.sh
-          bash scripts/api-health-smoke.test.sh
+      # Anchored immediately after checkout rather than at the tail of this step
+      # list: that tail anchor is contested by #858 / #1143 / #1146 / #1147, each of
+      # which appends its own steps there, so an insertion at the tail is a textual
+      # conflict with those lanes in either landing order. This step consumes nothing
+      # produced by the steps below it, so its position changes nothing about what is
+      # enforced - the job still runs every contract and still fails closed.
       # The cutover gate is the deployment-time counterpart of the health smoke
       # helpers, so it is certified by the same contract job against the same
       # standard: a proxy 502 and an application 503 must never collapse into one
@@ -31,6 +33,10 @@ jobs:
         run: |
           bash -n scripts/deploy-readiness-gate.sh scripts/deploy-readiness-gate.test.sh
           bash scripts/deploy-readiness-gate.test.sh
+      - name: Validate API health smoke helper
+        run: |
+          bash -n scripts/api-health-smoke.sh scripts/api-health-smoke.test.sh
+          bash scripts/api-health-smoke.test.sh
 
   frontend:
     name: Frontend checks
