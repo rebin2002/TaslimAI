@@ -14,6 +14,8 @@ env:
 
 jobs:
   release-evidence:
+    env:
+      GOVERNANCE_PYTHON: /usr/bin/python3
     name: Release evidence and safety contract
     runs-on: ubuntu-latest
     steps:
@@ -22,6 +24,12 @@ jobs:
           fetch-depth: 0
       - name: Test release evidence behavior
         run: bash scripts/release-evidence.test.sh
+      - name: Ensure the workflow YAML parser is available
+        run: |
+          if ! "$GOVERNANCE_PYTHON" -c 'import yaml'; then
+            sudo apt-get update -qq
+            sudo apt-get install -y python3-yaml
+          fi
       - name: Test release governance evidence behavior
         run: bash scripts/release-governance-evidence.test.sh
       - name: Generate release evidence manifest

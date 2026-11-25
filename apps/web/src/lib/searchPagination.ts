@@ -8,7 +8,22 @@ export function appendGlobalSearchGroups(existing: GlobalSearchGroup[], incoming
   const merged = new Map(existing.map((group) => [group.type, group]));
   for (const group of incoming) {
     const previous = merged.get(group.type);
-    merged.set(group.type, previous ? { ...group, items: [...previous.items, ...group.items] } : group);
+    if (!previous) {
+      merged.set(group.type, group);
+      continue;
+    }
+    const items = [...previous.items];
+    const indexes = new Map(items.map((item, index) => [item.id, index]));
+    for (const item of group.items) {
+      const index = indexes.get(item.id);
+      if (index === undefined) {
+        indexes.set(item.id, items.length);
+        items.push(item);
+      } else {
+        items[index] = item;
+      }
+    }
+    merged.set(group.type, { ...group, items });
   }
   return [...merged.values()];
 }

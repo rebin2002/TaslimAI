@@ -28,7 +28,7 @@ export GOVERNANCE_COMMIT_DATE="$(git show -s --format=%cI HEAD)"
 export GOVERNANCE_REPOSITORY="${GITHUB_REPOSITORY:-}"
 export GOVERNANCE_REF="${GITHUB_REF:-}"
 export GOVERNANCE_RUN_ID="${GITHUB_RUN_ID:-}"
-python3 - "$output_path" <<'PY'
+"${GOVERNANCE_PYTHON:-python3}" - "$output_path" <<'PY'
 import json
 import os
 import re
@@ -36,44 +36,56 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+import yaml
+
 output_path = Path(sys.argv[1]).resolve()
 repo_root = Path(os.environ["GOVERNANCE_REPO_ROOT"]).resolve()
-workflow_paths = [repo_root / ".github/workflows/ci.yml", repo_root / ".github/workflows/release-evidence.yml"]
 required_checks = [
     ("Frontend checks", ".github/workflows/ci.yml"),
     ("API integration tests", ".github/workflows/ci.yml"),
     ("Browser E2E", ".github/workflows/ci.yml"),
     ("Deployment smoke helper contracts", ".github/workflows/ci.yml"),
+    ("Autopilot next-wave gate", ".github/workflows/ci.yml"),
+    ("Build production images and smoke-test API", ".github/workflows/container-health-smoke.yml"),
     ("Release evidence and safety contract", ".github/workflows/release-evidence.yml"),
 ]
-for workflow in workflow_paths:
-    if not workflow.is_file():
-        raise SystemExit(f"Required workflow is missing: {workflow.relative_to(repo_root)}")
-
-workflow_text = {str(path.relative_to(repo_root)): path.read_text(encoding="utf-8") for path in workflow_paths}
-for relative, text in workflow_text.items():
-    if "pull_request_target" in text:
-        raise SystemExit(f"Unsafe pull_request_target trigger found in {relative}")
-    if not re.search(r"(?m)^permissions:\s*\n\s+contents:\s+read\s*$", text):
+workflow_paths = sorted({relative for _, relative in required_checks})
+workflows = {}
+pinned_action = re.compile(r"[^\s@]+@[0-9a-fA-F]{40}")
+for relative in workflow_paths:
+    path = repo_root / relative
+    if not path.is_file():
+        raise SystemExit(f"Required workflow is missing: {relative}")
+    source_text = path.read_text(encoding="utf-8")
+    # BaseLoader keeps GitHub's 'on' key and expressions as strings.
+    workflow = yaml.load(source_text, Loader=yaml.BaseLoader)
+    workflows[relative] = workflow
+    triggers = workflow.get("on") or {}
+    if "pull_request_target" in triggers or "pull_request" not in triggers:
+        raise SystemExit(f"Expected a pull_request trigger without pull_request_target: {relative}")
+    if workflow.get("permissions") != {"contents": "read"}:
         raise SystemExit(f"Workflow must declare read-only contents permission: {relative}")
-    for line_number, line in enumerate(text.splitlines(), 1):
-        if "uses:" not in line:
-            continue
-        match = re.search(r"uses:\s*([^\s#]+)@([0-9a-fA-F]{40})\s+#\s*\S.*$", line.strip())
-        if match is None:
-            raise SystemExit(f"Unpinned or undocumented action at {relative}:{line_number}")
+    for job_id, job in workflow["jobs"].items():
+        if "permissions" in job and job["permissions"] not in ({}, {"contents": "read"}):
+            raise SystemExit(f"Unexpected job permissions: {relative}, {job_id}")
+        for entry in [job, *job.get("steps", [])]:
+            if "uses" not in entry:
+                continue
+            action = entry["uses"]
+            if not pinned_action.fullmatch(action):
+                raise SystemExit(f"Unpinned action: {relative}, {job_id}")
+            documented_ref = r"(?m)^\s*(?:-\s+)?uses:\s*" + re.escape(action) + r"[ \t]+#[ \t]*\S"
+            if not re.search(documented_ref, source_text):
+                raise SystemExit(f"Missing version comment for {action}: {relative}, {job_id}")
 
-ci = workflow_text[".github/workflows/ci.yml"]
-release = workflow_text[".github/workflows/release-evidence.yml"]
-if not re.search(r"(?m)^\s*pull_request:\s*$", ci):
-    raise SystemExit("CI must run for pull requests")
-if not re.search(r"(?m)^\s*pull_request:\s*$", release):
-    raise SystemExit("Release evidence must run for pull requests")
-if "branches: [main, \"parallel/**\"]" not in release:
+release_triggers = workflows[".github/workflows/release-evidence.yml"]["on"]
+push_branches = release_triggers.get("push", {}).get("branches", [])
+if not {"main", "parallel/**"}.issubset(push_branches):
     raise SystemExit("Release evidence push scope must include main and parallel branches")
 for check_name, relative in required_checks:
-    if check_name not in workflow_text[relative]:
-        raise SystemExit(f"Required check context is missing: {check_name}")
+    matches = [job for job in workflows[relative]["jobs"].values() if job.get("name") == check_name]
+    if len(matches) != 1:
+        raise SystemExit(f"Expected exactly one job named {check_name} in {relative}")
 
 manifest = {
     "schemaVersion": 1,

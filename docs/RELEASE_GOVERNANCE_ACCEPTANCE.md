@@ -6,7 +6,7 @@ This document defines the evidence packet for the `main` release gate. It comple
 
 The remote protection/ruleset acceptance remains tracked by [issue #283](https://github.com/rebin2002/TaslimAI/issues/283). PR #275 is a separate integration candidate and remains subject to explicit human merge/release authorization; green CI is not authorization.
 
-## Current snapshot — 2026-10-24
+## Historical snapshot of October 24, 2026
 
 | Evidence | Result | Boundary |
 | --- | --- | --- |
@@ -26,11 +26,14 @@ The public probe did not send cookies, credentials, CSRF tokens, provider reques
 
 ## Repository-controlled acceptance evidence
 
+The evidence helper uses Python 3 with PyYAML to read GitHub workflow definitions. The Ubuntu runner uses the distribution package `python3-yaml`. For a local run, `GOVERNANCE_PYTHON` can select the Python interpreter.
+
 The governance evidence script must report all of the following:
 
 - Pull requests run the normal CI workflow.
 - Pull requests run release-evidence checks.
-- The CI workflow exposes stable contexts for `Frontend checks`, `API integration tests`, `Browser E2E`, and `Deployment smoke helper contracts`.
+- The CI workflow exposes stable contexts for `Frontend checks`, `API integration tests`, `Browser E2E`, `Deployment smoke helper contracts`, and `Autopilot next-wave gate`.
+- The production container workflow exposes `Build production images and smoke-test API`.
 - The release-evidence workflow exposes `Release evidence and safety contract`.
 - Workflow permissions are limited to `contents: read`.
 - Every referenced GitHub Action is pinned to a full commit SHA and retains a version comment.
@@ -54,7 +57,7 @@ After an authorized repository administrator applies the least-privileged rulese
 
 1. `main` is protected and direct pushes, force pushes, and branch deletion are disallowed.
 2. Pull requests, required review approval, review resolution, and current-head required checks are enforced.
-3. The exact stable check contexts are required: `Taslim CI / Frontend checks`, `Taslim CI / API integration tests`, `Taslim CI / Browser E2E`, `Taslim CI / Deployment smoke helper contracts`, `Production container smoke / Build production container and health smoke`, and `Taslim Release Evidence / Release evidence and safety contract`, as applicable to the final workflow names.
+3. The exact stable check contexts are required: `Taslim CI / Frontend checks`, `Taslim CI / API integration tests`, `Taslim CI / Browser E2E`, `Taslim CI / Deployment smoke helper contracts`, `Taslim CI / Autopilot next-wave gate`, `Production container smoke / Build production images and smoke-test API`, and `Taslim Release Evidence / Release evidence and safety contract`, as applicable to the final workflow names.
 4. Intentionally skipped stacked-PR jobs are not made required for branches where they do not run.
 5. Bypass actors are documented and least-privileged; bypass does not authorize release of PR #275.
 6. A disposable test PR with a deliberately failing required check is rejected, while an approved green path succeeds.

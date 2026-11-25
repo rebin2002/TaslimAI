@@ -24,6 +24,8 @@ assert [item["name"] for item in first["workflowContract"]["requiredChecks"]] ==
     "API integration tests",
     "Browser E2E",
     "Deployment smoke helper contracts",
+    "Autopilot next-wave gate",
+    "Build production images and smoke-test API",
     "Release evidence and safety contract",
 ]
 assert first["remoteGovernance"]["status"] == "pending_admin_attestation"
@@ -53,4 +55,16 @@ if GITHUB_SHA="0000000000000000000000000000000000000000" bash "$script" "$temp_d
   echo 'A mismatched GITHUB_SHA must fail closed.' >&2
   exit 1
 fi
+# An unrelated job title or comment must not satisfy a required check.
+fixture="$temp_dir/workflow-fixture"
+mkdir -p "$fixture/.github"
+cp -R "$repo_root/.github/workflows" "$fixture/.github/"
+git -C "$fixture" init --quiet
+git -C "$fixture" -c user.name=Fixture -c user.email=fixture@example.invalid commit --quiet --allow-empty -m fixture
+sed -i 's/^    name: Build production images and smoke-test API$/    name: Container build # Build production images and smoke-test API/' "$fixture/.github/workflows/container-health-smoke.yml"
+if (cd "$fixture" && env -u GITHUB_SHA bash "$script" "$temp_dir/missing-job.json") >"$temp_dir/missing-job.log" 2>&1; then
+  echo 'A renamed required container job must fail the evidence check.' >&2
+  exit 1
+fi
+grep -F 'Expected exactly one job named Build production images and smoke-test API' "$temp_dir/missing-job.log" >/dev/null
 printf '%s\n' 'release-governance-evidence behavior tests passed.'

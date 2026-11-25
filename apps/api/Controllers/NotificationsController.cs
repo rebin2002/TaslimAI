@@ -12,14 +12,16 @@ public sealed class NotificationsController(INotificationService notifications) 
     [HttpGet("api/notifications")]
     public async Task<IActionResult> List([FromQuery] Guid workspaceId, [FromQuery] int page = 1, [FromQuery] int pageSize = 20, [FromQuery] bool unreadOnly = false, CancellationToken cancellationToken = default)
     {
-        var result = await notifications.ListAsync(GetUserId(), new NotificationFilter(workspaceId, page, pageSize, unreadOnly), cancellationToken);
+        if (!TryGetUserId(out var userId)) return Unauthorized();
+        var result = await notifications.ListAsync(userId, new NotificationFilter(workspaceId, page, pageSize, unreadOnly), cancellationToken);
         return result is null ? Forbid() : Ok(result);
     }
 
     [HttpGet("api/notifications/unread-count")]
     public async Task<IActionResult> UnreadCount([FromQuery] Guid workspaceId, CancellationToken cancellationToken)
     {
-        var result = await notifications.GetUnreadCountAsync(GetUserId(), workspaceId, cancellationToken);
+        if (!TryGetUserId(out var userId)) return Unauthorized();
+        var result = await notifications.GetUnreadCountAsync(userId, workspaceId, cancellationToken);
         return result is null ? Forbid() : Ok(new { unreadCount = result.Value });
     }
 
@@ -27,7 +29,8 @@ public sealed class NotificationsController(INotificationService notifications) 
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> MarkRead(Guid notificationId, NotificationReadRequest request, CancellationToken cancellationToken)
     {
-        var result = await notifications.MarkReadAsync(GetUserId(), notificationId, request.WorkspaceId, cancellationToken);
+        if (!TryGetUserId(out var userId)) return Unauthorized();
+        var result = await notifications.MarkReadAsync(userId, notificationId, request.WorkspaceId, cancellationToken);
         return result ? Ok(new { read = true }) : Forbid();
     }
 
@@ -35,9 +38,10 @@ public sealed class NotificationsController(INotificationService notifications) 
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> MarkAllRead(NotificationReadAllRequest request, CancellationToken cancellationToken)
     {
-        var result = await notifications.MarkAllReadAsync(GetUserId(), request.WorkspaceId, cancellationToken);
+        if (!TryGetUserId(out var userId)) return Unauthorized();
+        var result = await notifications.MarkAllReadAsync(userId, request.WorkspaceId, cancellationToken);
         return result ? Ok(new { read = true }) : Forbid();
     }
 
-    private Guid GetUserId() => Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier) ?? throw new InvalidOperationException("Authenticated user identifier is missing."));
+    private bool TryGetUserId(out Guid userId) => Guid.TryParse(User.FindFirstValue(ClaimTypes.NameIdentifier), out userId);
 }
