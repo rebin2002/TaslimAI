@@ -26,7 +26,7 @@ export function isResearchJob(job: GenerationJob | null) {
   return job?.jobType.trim().toLowerCase() === "research.generate";
 }
 export function isRestorableResearchJob(job: GenerationJob | null, workspaceId: string) {
-  return !!job && job.workspaceId === workspaceId && isResearchJob(job);
+  return !!job && job.workspaceId === workspaceId && isResearchJob(job) && !isResearchTerminal(job);
 }
 
 export function isCurrentResearchJob(job: GenerationJob | null, workspaceId: string, expectedJobId?: string) {
