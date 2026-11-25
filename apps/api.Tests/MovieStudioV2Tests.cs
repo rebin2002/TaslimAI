@@ -1,5 +1,6 @@
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
+using Npgsql;
 using System.Text.Json;
 using Taslim.Api.Authorization;
 using Taslim.Api.Contracts;
@@ -101,6 +102,100 @@ public sealed class MovieStudioV2Tests
         var persistedSecond = await competingDb.MovieTakes.AsNoTracking().SingleAsync(item => item.Id == second.Id);
         Assert.Equal(MovieTakeStatuses.Approved, persistedSecond.Status);
         Assert.Null(persistedSecond.FinalizedAt);
+    }
+
+    [Fact]
+    public async Task Finalization_retries_preserve_the_first_reviewer_and_working_selection()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = CreateDb(connection);
+        var (owner, movie, shotId) = await SeedAsync(db);
+        var reviewer = Guid.NewGuid();
+        var workspace = await db.MovieProjects.Where(item => item.Id == movie).Select(item => item.WorkspaceId).SingleAsync();
+        db.Users.Add(new ApplicationUser { Id = reviewer, UserName = "reviewer", NormalizedUserName = "REVIEWER", DisplayName = "Reviewer" });
+        db.WorkspaceMembers.Add(new WorkspaceMember { Id = Guid.NewGuid(), WorkspaceId = workspace, UserId = reviewer, Role = WorkspaceRole.Member });
+        await db.SaveChangesAsync();
+        var service = new MovieV2Service(db, new WorkspaceAccessService(db));
+        var final = await ApprovedTakeAsync(service, owner, shotId, "Original cut");
+        var working = await ApprovedTakeAsync(service, owner, shotId, "Working cut");
+        await service.SelectTakeAsync(owner, final, true, CancellationToken.None);
+        var original = await db.MovieTakes.AsNoTracking().SingleAsync(item => item.Id == final);
+        var originalShot = await db.MovieShots.AsNoTracking().SingleAsync(item => item.Id == shotId);
+
+        await using var retryDb = CreateDb(connection);
+        var retryService = new MovieV2Service(retryDb, new WorkspaceAccessService(retryDb));
+        await Assert.ThrowsAsync<MovieV2NotFoundException>(() => retryService.SelectTakeAsync(Guid.NewGuid(), final, true, CancellationToken.None));
+        await retryService.SelectTakeAsync(reviewer, final, true, CancellationToken.None);
+        Assert.Equal(original.UpdatedAt, (await retryDb.MovieTakes.AsNoTracking().SingleAsync(item => item.Id == final)).UpdatedAt);
+        Assert.Equal(originalShot.UpdatedAt, (await retryDb.MovieShots.AsNoTracking().SingleAsync(item => item.Id == shotId)).UpdatedAt);
+
+        await retryService.SelectTakeAsync(reviewer, working, false, CancellationToken.None);
+        await service.SelectTakeAsync(owner, final, true, CancellationToken.None);
+        var shot = await db.MovieShots.AsNoTracking().SingleAsync(item => item.Id == shotId);
+        Assert.Equal(final, shot.FinalTakeId);
+        Assert.Equal(working, shot.SelectedTakeId);
+        var canonical = await db.MovieTakes.AsNoTracking().SingleAsync(item => item.Id == final);
+        Assert.Equal(original.FinalizedAt, canonical.FinalizedAt);
+        Assert.Equal(owner, canonical.FinalizedByUserId);
+        Assert.Equal(original.StatusChangedAt, canonical.StatusChangedAt);
+        Assert.Equal(owner, canonical.StatusChangedByUserId);
+        Assert.Equal(MovieTakeStatuses.Selected, canonical.Status);
+        Assert.Null(canonical.SelectedAt);
+    }
+
+    [DisposablePostgresFact]
+    public async Task Postgres_selection_and_finalization_share_one_shot_writer()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("ConnectionStrings__Postgres")!;
+        var schema = $"movie_take_race_{Guid.NewGuid():N}";
+        await using var admin = new NpgsqlConnection(connectionString);
+        await admin.OpenAsync();
+        await using var create = new NpgsqlCommand($"CREATE SCHEMA {schema}", admin);
+        await create.ExecuteNonQueryAsync();
+        try
+        {
+            var scoped = new NpgsqlConnectionStringBuilder(connectionString) { SearchPath = schema, Pooling = false };
+            var options = new DbContextOptionsBuilder<TaslimDbContext>().UseNpgsql(scoped.ConnectionString).Options;
+            await using var db = new TaslimDbContext(options);
+            await db.Database.ExecuteSqlRawAsync(db.Database.GenerateCreateScript());
+            var (owner, _, shotId) = await SeedAsync(db);
+            var service = new MovieV2Service(db, new WorkspaceAccessService(db));
+            var final = await ApprovedTakeAsync(service, owner, shotId, "Canonical candidate");
+            var working = await ApprovedTakeAsync(service, owner, shotId, "Working candidate");
+
+            await using var finalDb = new TaslimDbContext(options);
+            await using var workingDb = new TaslimDbContext(options);
+            // Both sessions start from the same tracked, unfinalized shot.
+            await finalDb.MovieShots.SingleAsync(item => item.Id == shotId);
+            await workingDb.MovieShots.SingleAsync(item => item.Id == shotId);
+            var finalService = new MovieV2Service(finalDb, new WorkspaceAccessService(finalDb));
+            var workingService = new MovieV2Service(workingDb, new WorkspaceAccessService(workingDb));
+            await Task.WhenAll(finalService.SelectTakeAsync(owner, final, true, CancellationToken.None),
+                workingService.SelectTakeAsync(owner, working, false, CancellationToken.None));
+
+            var shot = await db.MovieShots.AsNoTracking().SingleAsync(item => item.Id == shotId);
+            var takes = await db.MovieTakes.AsNoTracking().Where(item => item.MovieShotId == shotId).ToListAsync();
+            Assert.Equal(final, shot.FinalTakeId);
+            var canonical = Assert.Single(takes, item => item.FinalizedAt.HasValue);
+            Assert.Equal(final, canonical.Id);
+            Assert.Equal(MovieTakeStatuses.Selected, canonical.Status);
+            var selected = Assert.Single(takes, item => item.SelectedAt.HasValue);
+            Assert.Equal(shot.SelectedTakeId, selected.Id);
+            Assert.Equal(MovieTakeStatuses.Selected, selected.Status);
+        }
+        finally
+        {
+            await using var drop = new NpgsqlCommand($"DROP SCHEMA {schema} CASCADE", admin);
+            await drop.ExecuteNonQueryAsync();
+        }
+    }
+
+    private static async Task<Guid> ApprovedTakeAsync(MovieV2Service service, Guid user, Guid shot, string label)
+    {
+        var take = await service.AddTakeAsync(user, shot, new MovieV2TakeRequest { Label = label }, CancellationToken.None);
+        await service.ApproveTakeAsync(user, take!.Id, new MovieV2ApprovalRequest { Decision = MovieApprovalDecisions.Approved }, CancellationToken.None);
+        return take.Id;
     }
 
     [Fact]
