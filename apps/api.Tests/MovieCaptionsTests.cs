@@ -1,5 +1,6 @@
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Diagnostics;
 using Taslim.Api.Authorization;
 using Taslim.Api.Contracts;
 using Taslim.Api.Domain;
@@ -47,6 +48,32 @@ public sealed class MovieCaptionFormatTests
 
 public sealed class MovieCaptionServiceTests
 {
+    [Fact]
+    public async Task Import_rolls_back_track_when_cue_persistence_fails()
+    {
+        var failure = new RejectCaptionCueSaveChangesInterceptor();
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = new TaslimDbContext(new DbContextOptionsBuilder<TaslimDbContext>()
+            .UseSqlite(connection)
+            .AddInterceptors(failure)
+            .Options);
+        var (userId, movieId, _, _, _, _) = await SeedAsync(db);
+        var service = CreateService(db);
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => service.ImportAsync(userId, movieId, new MovieCaptionImportRequest
+        {
+            Name = "Atomic captions",
+            Language = "en",
+            TrackType = MovieCaptionTrackTypes.Subtitle,
+            Format = MovieCaptionFormats.Srt,
+            Content = "1\n00:00:00,500 --> 00:00:02,000\nThis must not leave an empty track.\n",
+        }, CancellationToken.None));
+
+        Assert.Empty(await db.MovieCaptionTracks.AsNoTracking().Where(item => item.MovieProjectId == movieId).ToListAsync());
+        Assert.Empty(await db.MovieCaptionCues.AsNoTracking().ToListAsync());
+    }
+
     [Fact]
     public async Task Tracks_import_export_and_timeline_keep_canonical_links_and_rtl_metadata()
     {
@@ -133,6 +160,63 @@ public sealed class MovieCaptionServiceTests
         Assert.Equal("fake-format", export!.Content);
     }
 
+    [Fact]
+    public async Task CreateTrack_rejects_language_tags_that_exceed_the_persisted_bcp47_limit()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = CreateDb(connection);
+        var (userId, movieId, _, _, _, _) = await SeedAsync(db);
+        var service = CreateService(db);
+        // Every subtag is within the per-part limit, but the full tag is 39 characters:
+        // longer than the varchar(35) persisted boundary (RFC 5646 caps a langtag at 35 characters).
+        var tooLong = string.Join('-', Enumerable.Repeat("abcd", 8));
+
+        var exception = await Assert.ThrowsAsync<MovieCaptionValidationException>(() => service.CreateTrackAsync(userId, movieId, new MovieCaptionTrackRequest { Name = "Overlong locale", Language = tooLong }, CancellationToken.None));
+        Assert.Contains("35", exception.Message);
+        Assert.False(await db.MovieCaptionTracks.AnyAsync());
+    }
+
+    [Fact]
+    public async Task CreateTrack_accepts_a_maximal_valid_bcp47_language_tag_at_the_persisted_limit()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = CreateDb(connection);
+        var (userId, movieId, _, _, _, _) = await SeedAsync(db);
+        var service = CreateService(db);
+        var boundary = string.Join('-', Enumerable.Repeat("abcdefgh", 4));
+        Assert.Equal(35, boundary.Length);
+
+        var track = await service.CreateTrackAsync(userId, movieId, new MovieCaptionTrackRequest { Name = "Boundary locale", Language = boundary }, CancellationToken.None);
+
+        Assert.NotNull(track);
+        Assert.Equal(35, track!.Language.Length);
+    }
+
+    [Fact]
+    public async Task Import_rejects_an_overlong_language_tag_before_persisting_tracks_or_cues()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = CreateDb(connection);
+        var (userId, movieId, _, _, _, _) = await SeedAsync(db);
+        var service = CreateService(db);
+        var tooLong = string.Join('-', Enumerable.Repeat("abcd", 8));
+
+        await Assert.ThrowsAsync<MovieCaptionValidationException>(() => service.ImportAsync(userId, movieId, new MovieCaptionImportRequest
+        {
+            Name = "Overlong import",
+            Language = tooLong,
+            TrackType = MovieCaptionTrackTypes.Subtitle,
+            Status = MovieCaptionTrackStatuses.Draft,
+            Format = MovieCaptionFormats.Srt,
+            Content = "1\n00:00:01,000 --> 00:00:02,000\nHello\n",
+        }, CancellationToken.None));
+        Assert.False(await db.MovieCaptionTracks.AnyAsync());
+        Assert.False(await db.MovieCaptionCues.AnyAsync());
+    }
+
     private static MovieCaptionService CreateService(TaslimDbContext db) => new(db, new MovieCollaborationAccess(db, new WorkspaceAccessService(db)), [new SrtMovieCaptionFormatAdapter(), new WebVttMovieCaptionFormatAdapter()]);
     private static TaslimDbContext CreateDb(SqliteConnection connection) => new(new DbContextOptionsBuilder<TaslimDbContext>().UseSqlite(connection).Options);
 
@@ -166,5 +250,18 @@ public sealed class MovieCaptionServiceTests
         public string ContentType => "text/fake";
         public MovieCaptionDocument Parse(string content) => new([]);
         public string Serialize(MovieCaptionDocument document) => "fake-format";
+    }
+
+    private sealed class RejectCaptionCueSaveChangesInterceptor : SaveChangesInterceptor
+    {
+        public override ValueTask<InterceptionResult<int>> SavingChangesAsync(
+            DbContextEventData eventData,
+            InterceptionResult<int> result,
+            CancellationToken cancellationToken = default)
+        {
+            if (eventData.Context?.ChangeTracker.Entries<MovieCaptionCue>().Any(entry => entry.State == EntityState.Added) == true)
+                throw new InvalidOperationException("Synthetic caption cue persistence failure.");
+            return ValueTask.FromResult(result);
+        }
     }
 }

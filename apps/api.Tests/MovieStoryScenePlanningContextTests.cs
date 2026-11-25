@@ -159,6 +159,57 @@ public sealed class MovieStoryScenePlanningContextTests : IClassFixture<TaslimAp
         Assert.Equal("1:1", result.Context.AspectRatio);
     }
 
+    [Fact]
+    public async Task Locked_scene_planning_guide_uses_canonical_revision_fields_over_legacy_columns()
+    {
+        using var client = factory.CreateClient();
+        var auth = await Register(client, "Scene Planning Canonical Guide Owner");
+        var movie = await Send<MovieStudioProjectResponse>(client, HttpMethod.Post, "/api/movie-studio/projects", new
+        {
+            workspaceId = auth.PersonalWorkspace.Id,
+            mode = MovieProjectModes.Full,
+            title = "Canonical Guide Context",
+            description = "A scene planning movie with versioned Guide constraints.",
+            durationSeconds = 60,
+            aspectRatio = "16:9",
+            style = "cinematic",
+            language = "en",
+            visualLanguage = "legacy-visual",
+            cameraLanguage = "legacy-camera",
+            colorAndLighting = "legacy-color",
+            soundAndNarration = "legacy-audio",
+            continuityRules = "legacy-continuity",
+        });
+        var revision = await Send<MovieGuideRevisionResponse>(client, HttpMethod.Post, $"/api/movie-studio/projects/{movie.Project.Id}/guide/revisions", new
+        {
+            storyBibleJson = "{}",
+            characterBibleReferencesJson = "[]",
+            worldBibleReferencesJson = "[]",
+            visualBibleJson = "{\"visualLanguage\":\"revision-visual\",\"colorAndLighting\":\"revision-color\"}",
+            cinematographyBibleJson = "{\"cameraLanguage\":\"revision-camera\"}",
+            audioBibleJson = "{\"soundAndNarration\":\"revision-audio\"}",
+            continuityBibleJson = "{\"continuityRules\":\"revision-continuity\"}",
+        });
+        Assert.Equal(2, revision.Revision.RevisionNumber);
+        await Send<MovieGuideRevisionResponse>(client, HttpMethod.Post, $"/api/movie-studio/projects/{movie.Project.Id}/guide/lock", new { revisionNumber = 2 });
+        var story = await CreateStory(client, movie.Project.Id, [Scene("CANONICAL-1", "INT. GUIDE ROOM - DAY", "The locked Guide shapes the scene.", [Action("A camera holds on the subject.")])]);
+
+        using var scope = factory.Services.CreateScope();
+        var assembler = scope.ServiceProvider.GetRequiredService<MovieDirectorContextAssembler>();
+        var result = await assembler.AssembleStoryScenePlanningAsync(movie.Project.Id, new MovieStoryScenePlanningContextRequest
+        {
+            TargetSceneId = story.CurrentRevision!.Scenes[0].Id,
+        });
+
+        Assert.NotNull(result);
+        Assert.Equal(2, result!.Context.LockedGuide.RevisionNumber);
+        Assert.Equal("revision-visual", result.Context.LockedGuide.VisualLanguage);
+        Assert.Equal("revision-camera", result.Context.LockedGuide.CameraLanguage);
+        Assert.Equal("revision-color", result.Context.LockedGuide.ColorAndLighting);
+        Assert.Equal("revision-audio", result.Context.LockedGuide.SoundAndNarration);
+        Assert.Equal("revision-continuity", result.Context.LockedGuide.ContinuityRules);
+    }
+
     private static object Scene(string identifier, string slugline, string synopsis, IReadOnlyList<object> elements) => new
     {
         sceneIdentifier = identifier,
