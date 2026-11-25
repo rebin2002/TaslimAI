@@ -69,11 +69,18 @@ Preserve source facts, identify uncertainty in notes when needed, and never inve
     // contains, it cannot include a copy of the marker that is live for this call.
     private const int BoundaryTokenAttempts = 8;
 
-    private static (string BeginMarker, string EndMarker) BuildBoundaryMarkers(IReadOnlyList<PresentationSourceContext> sources)
+    private static (string BeginMarker, string EndMarker) BuildBoundaryMarkers(IReadOnlyList<PresentationSourceContext> sources) =>
+        BuildBoundaryMarkers(sources, NewBoundaryToken);
+
+    // internal for tests only: lets the collision guard and its exhaustion path be exercised
+    // with a scripted token source instead of waiting for a collision that cannot be provoked.
+    internal static (string BeginMarker, string EndMarker) BuildBoundaryMarkers(
+        IReadOnlyList<PresentationSourceContext> sources,
+        Func<string> tokenFactory)
     {
         for (var attempt = 0; attempt < BoundaryTokenAttempts; attempt++)
         {
-            var boundaryToken = Guid.NewGuid().ToString("N");
+            var boundaryToken = tokenFactory();
             var beginMarker = $"[BEGIN UNTRUSTED SOURCE:{boundaryToken}]";
             var endMarker = $"[END UNTRUSTED SOURCE:{boundaryToken}]";
             var collides = sources.Any(source => ContainsMarker(source.Text, beginMarker, endMarker)
@@ -88,6 +95,8 @@ Preserve source facts, identify uncertainty in notes when needed, and never inve
         // new provider-facing error contract is introduced by this hardening.
         throw new PresentationContextLimitException();
     }
+
+    private static string NewBoundaryToken() => Guid.NewGuid().ToString("N");
 
     private static bool ContainsMarker(string? value, string beginMarker, string endMarker) =>
         !string.IsNullOrEmpty(value)

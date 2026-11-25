@@ -18,6 +18,17 @@ public sealed class SocialPromptBuilder : ISocialPromptBuilder
         // of a constant the model has to guess about.
         var (beginMarker, endMarker) = BuildBoundaryMarkers(sources);
         var context = new StringBuilder();
+        // Project context is trusted workspace data, so it is emitted ahead of the untrusted
+        // regions and never after them. With it rendered last, a project-editing member's text
+        // would have sat behind the final fence and read as the authoritative tail of the
+        // prompt for every other member's job in that workspace.
+        if (project is not null)
+        {
+            context.AppendLine($"[Authorized project context] {project.Name}");
+            if (!string.IsNullOrWhiteSpace(project.Instructions)) context.AppendLine($"Instructions: {project.Instructions}");
+            if (!string.IsNullOrWhiteSpace(project.ContextNotes)) context.AppendLine($"Notes: {project.ContextNotes}");
+            context.AppendLine();
+        }
         foreach (var source in sources)
         {
             context.AppendLine(beginMarker);
@@ -34,12 +45,6 @@ public sealed class SocialPromptBuilder : ISocialPromptBuilder
             }
             context.AppendLine(endMarker);
             context.AppendLine();
-        }
-        if (project is not null)
-        {
-            context.AppendLine($"[Authorized project context] {project.Name}");
-            if (!string.IsNullOrWhiteSpace(project.Instructions)) context.AppendLine($"Instructions: {project.Instructions}");
-            if (!string.IsNullOrWhiteSpace(project.ContextNotes)) context.AppendLine($"Notes: {project.ContextNotes}");
         }
         if (context.Length > options.MaxContextCharacters) throw new SocialContextLimitException();
 
@@ -58,11 +63,18 @@ public sealed class SocialPromptBuilder : ISocialPromptBuilder
     // copy of the marker that is live for this call.
     private const int BoundaryTokenAttempts = 8;
 
-    private static (string BeginMarker, string EndMarker) BuildBoundaryMarkers(IReadOnlyList<SocialSourceContext> sources)
+    private static (string BeginMarker, string EndMarker) BuildBoundaryMarkers(IReadOnlyList<SocialSourceContext> sources) =>
+        BuildBoundaryMarkers(sources, NewBoundaryToken);
+
+    // internal for tests only: lets the collision guard and its exhaustion path be exercised
+    // with a scripted token source instead of waiting for a collision that cannot be provoked.
+    internal static (string BeginMarker, string EndMarker) BuildBoundaryMarkers(
+        IReadOnlyList<SocialSourceContext> sources,
+        Func<string> tokenFactory)
     {
         for (var attempt = 0; attempt < BoundaryTokenAttempts; attempt++)
         {
-            var boundaryToken = Guid.NewGuid().ToString("N");
+            var boundaryToken = tokenFactory();
             var beginMarker = $"[BEGIN UNTRUSTED SOURCE:{boundaryToken}]";
             var endMarker = $"[END UNTRUSTED SOURCE:{boundaryToken}]";
             var collides = sources.Any(source => ContainsMarker(source.Content, beginMarker, endMarker)
@@ -79,6 +91,8 @@ public sealed class SocialPromptBuilder : ISocialPromptBuilder
         // new provider-facing error contract is introduced by this hardening.
         throw new SocialContextLimitException();
     }
+
+    private static string NewBoundaryToken() => Guid.NewGuid().ToString("N");
 
     private static bool ContainsMarker(string? value, string beginMarker, string endMarker) =>
         !string.IsNullOrEmpty(value)

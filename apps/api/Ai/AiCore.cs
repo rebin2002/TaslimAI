@@ -272,12 +272,19 @@ public sealed class AiContextBuilder(IOptions<AiOptions> options)
         return instruction;
     }
 
-    // The token is regenerated until it provably does not occur in the file it fences, so
-    // "no source contains a live marker" is an invariant the tests can assert instead of a
-    // bet on 122 bits of entropy.
+    // The token is regenerated until it provably occurs in none of the attachments for this
+    // request, so "no file contains a live marker" is an invariant the tests can assert
+    // instead of a bet on 122 bits of entropy.
     private const int BoundaryTokenAttempts = 8;
 
-    private static IReadOnlyList<(string Header, string Footer)> BuildFileBoundaries(IReadOnlyList<AiFileContext> files)
+    private static IReadOnlyList<(string Header, string Footer)> BuildFileBoundaries(IReadOnlyList<AiFileContext> files) =>
+        BuildFileBoundaries(files, NewBoundaryToken);
+
+    // internal for tests only: lets the per-file collision guard and its exhaustion path be
+    // exercised with a scripted token source instead of waiting for an unprovable collision.
+    internal static IReadOnlyList<(string Header, string Footer)> BuildFileBoundaries(
+        IReadOnlyList<AiFileContext> files,
+        Func<string> tokenFactory)
     {
         var boundaries = new List<(string Header, string Footer)>(files.Count);
         for (var index = 0; index < files.Count; index++)
@@ -286,12 +293,15 @@ public sealed class AiContextBuilder(IOptions<AiOptions> options)
             var resolved = false;
             for (var attempt = 0; attempt < BoundaryTokenAttempts && !resolved; attempt++)
             {
-                var boundaryToken = Guid.NewGuid().ToString("N");
+                var boundaryToken = tokenFactory();
                 var header = $"[BEGIN ATTACHED FILE:{boundaryToken} file={index + 1}]";
                 var footer = $"[END ATTACHED FILE:{boundaryToken} file={index + 1}]";
-                if (ContainsMarker(file.ExtractedText, header, footer)
-                    || ContainsMarker(file.FileName, header, footer)
-                    || ContainsMarker(file.ContentType, header, footer))
+                // Scan every attachment, not only the file being fenced: a live marker that a
+                // different file can reproduce would appear twice in one system message, which
+                // leaves "which region is open" ambiguous for any reader of the transcript.
+                if (files.Any(other => ContainsMarker(other.ExtractedText, header, footer)
+                    || ContainsMarker(other.FileName, header, footer)
+                    || ContainsMarker(other.ContentType, header, footer)))
                     continue;
                 boundaries.Add((header, footer));
                 resolved = true;
@@ -301,6 +311,8 @@ public sealed class AiContextBuilder(IOptions<AiOptions> options)
         }
         return boundaries;
     }
+
+    private static string NewBoundaryToken() => Guid.NewGuid().ToString("N");
 
     private static bool ContainsMarker(string? value, string header, string footer) =>
         !string.IsNullOrEmpty(value)
