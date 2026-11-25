@@ -107,6 +107,58 @@ public sealed class ResearchSearchProviderTests
             result.Evidence.Select(item => (item.CitationId, item.Excerpt)));
     }
 
+    [Theory]
+    [InlineData(1, 2, "😀")]
+    [InlineData(2, 4, "BC")]
+    [InlineData(4, 6, "𝄞Z")]
+    [InlineData(5, 6, "Z")]
+    [InlineData(6, 7, null)]
+    public async Task Citation_offsets_count_Unicode_scalars_in_the_message_part(int start, int end, string? expected)
+    {
+        var result = await SearchUnicodePartAsync(start, end, new ResearchGenerationOptions());
+        Assert.Equal(expected, result.Sources[0].Snippet);
+        Assert.Equal(expected, result.Sources[0].ExtractedText);
+        if (expected is null)
+        {
+            Assert.Empty(result.Evidence);
+            Assert.Null(result.Sources[0].MetadataJson);
+            return;
+        }
+        Assert.Equal(expected, Assert.Single(result.Evidence).Excerpt);
+        using var metadata = JsonDocument.Parse(result.Sources[0].MetadataJson!);
+        Assert.Equal(start, metadata.RootElement.GetProperty("citationStartIndex").GetInt32());
+        Assert.Equal(end, metadata.RootElement.GetProperty("citationEndIndex").GetInt32());
+    }
+
+    [Fact]
+    public async Task Source_and_evidence_character_budgets_preserve_scalar_boundaries()
+    {
+        var options = new ResearchGenerationOptions
+        {
+            MaxSourceSnippetCharacters = 2,
+            MaxSourceTextCharacters = 5,
+            MaxEvidenceCharacters = 6,
+            MaxTotalEvidenceCharacters = 5,
+        };
+        var result = await SearchUnicodePartAsync(0, 6, options);
+        Assert.Equal("A", result.Sources[0].Snippet);
+        Assert.Equal("A...", result.Sources[0].ExtractedText);
+        Assert.Equal("A😀...", Assert.Single(result.Evidence).Excerpt);
+        var normalized = new DeterministicResearchEvidenceProcessor().Normalize(result.Sources, result.Evidence, options);
+        Assert.Equal("A...", Assert.Single(normalized).Excerpt);
+    }
+
+    private static async Task<ResearchSearchResult> SearchUnicodePartAsync(int start, int end, ResearchGenerationOptions options)
+    {
+        var response = JsonNode.Parse(ValidResponseJson())!;
+        var part = response["output"]![1]!["content"]![0]!;
+        part["text"] = "A😀BC𝄞Z";
+        part["annotations"]![0]!["start_index"] = start;
+        part["annotations"]![0]!["end_index"] = end;
+        using var client = new HttpClient(new StubHandler(_ => SuccessResponse(response.ToJsonString())));
+        return await CreateProvider(client).SearchAsync(ProductionRequest(), options);
+    }
+
     [Fact]
     public async Task Populated_domain_filters_use_current_allowed_and_blocked_domain_names()
     {

@@ -90,17 +90,17 @@ public sealed class DeterministicResearchEvidenceProcessor : IResearchEvidencePr
             if (!valid.Contains(item.CitationId) || string.IsNullOrWhiteSpace(item.Excerpt)) continue;
             if (maxPerSource == 0 || maxEvidenceCharacters == 0) break;
             if (countsBySource.TryGetValue(item.CitationId, out var sourceCount) && sourceCount >= maxPerSource) continue;
-            var excerpt = Trim(item.Excerpt, maxEvidenceCharacters);
-            var context = string.IsNullOrWhiteSpace(item.Context) ? null : Trim(item.Context, maxEvidenceCharacters);
+            var excerpt = ResearchEvidenceText.Trim(item.Excerpt, maxEvidenceCharacters);
+            var context = string.IsNullOrWhiteSpace(item.Context) ? null : ResearchEvidenceText.Trim(item.Context, maxEvidenceCharacters);
             var identity = $"{item.CitationId}\n{item.Topic}\n{excerpt}\n{context}";
             if (!seen.Add(identity)) continue;
             var remaining = maxTotalCharacters - totalCharacters;
             if (remaining <= 0) break;
-            if (excerpt.Length > remaining) excerpt = Trim(excerpt, remaining);
+            if (excerpt.Length > remaining) excerpt = ResearchEvidenceText.Trim(excerpt, remaining);
             if (string.IsNullOrWhiteSpace(excerpt)) continue;
             remaining -= excerpt.Length;
             if (context is not null)
-                context = remaining > 0 ? Trim(context, Math.Min(maxEvidenceCharacters, remaining)) : null;
+                context = remaining > 0 ? ResearchEvidenceText.Trim(context, Math.Min(maxEvidenceCharacters, remaining)) : null;
             var contribution = excerpt.Length + (context?.Length ?? 0);
             if (contribution == 0) continue;
             evidence.Add(item with
@@ -118,7 +118,7 @@ public sealed class DeterministicResearchEvidenceProcessor : IResearchEvidencePr
             if (maxPerSource == 0 || maxEvidenceCharacters == 0) break;
             var remaining = maxTotalCharacters - totalCharacters;
             if (remaining <= 0) break;
-            var excerpt = Trim(source.ExtractedText ?? source.Snippet!, Math.Min(maxEvidenceCharacters, remaining));
+            var excerpt = ResearchEvidenceText.Trim(source.ExtractedText ?? source.Snippet!, Math.Min(maxEvidenceCharacters, remaining));
             var identity = $"{source.CitationId}\nsource context\n{excerpt}";
             if (string.IsNullOrWhiteSpace(excerpt) || !seen.Add(identity)) continue;
             evidence.Add(new ResearchEvidenceCandidate(source.CitationId, "source context", excerpt, null, source.PublishedAt));
@@ -127,13 +127,17 @@ public sealed class DeterministicResearchEvidenceProcessor : IResearchEvidencePr
         }
         return evidence.ToArray();
     }
+}
 
-    private static string Trim(string value, int max)
+internal static class ResearchEvidenceText
+{
+    public static string Trim(string value, int max)
     {
         if (max <= 0) return string.Empty;
         if (value.Length <= max) return value;
-        if (max <= 3) return value[..max];
-        return value[..(max - 3)].TrimEnd() + "...";
+        var end = max > 3 ? max - 3 : max;
+        if (char.IsSurrogatePair(value, end - 1)) end--;
+        return max > 3 ? value[..end].TrimEnd() + "..." : value[..end];
     }
 }
 
@@ -289,6 +293,11 @@ public sealed class OpenAiResearchSearchProvider(
                     if (!part.TryGetProperty("text", out var textElement) || textElement.ValueKind != JsonValueKind.String) continue;
                     var text = textElement.GetString() ?? string.Empty;
                     if (!part.TryGetProperty("annotations", out var annotationList) || annotationList.ValueKind != JsonValueKind.Array) continue;
+                    // Provider indices slice Unicode code points, while .NET strings use UTF-16 code units.
+                    var positions = new List<int>(text.Length + 1) { 0 };
+                    foreach (var rune in text.EnumerateRunes())
+                        positions.Add(positions[^1] + rune.Utf16SequenceLength);
+
                     foreach (var annotation in annotationList.EnumerateArray())
                     {
                         if (annotation.ValueKind != JsonValueKind.Object) continue;
@@ -297,8 +306,8 @@ public sealed class OpenAiResearchSearchProvider(
                         var title = citation.TryGetProperty("title", out var name) && name.ValueKind == JsonValueKind.String ? name.GetString() : null;
                         var start = ReadInt(citation, "start_index");
                         var end = ReadInt(citation, "end_index");
-                        var excerpt = start is int from && end is int to && from >= 0 && from < to && to <= text.Length
-                            ? text[from..to].Trim()
+                        var excerpt = start is int from && end is int to && from >= 0 && from < to && to < positions.Count
+                            ? text[positions[from]..positions[to]].Trim()
                             : null;
                         annotations.Add((url.GetString()!, title, start, end, excerpt));
                     }
@@ -330,11 +339,11 @@ public sealed class OpenAiResearchSearchProvider(
                 citationStartIndex = citedSpans[0].Start,
                 citationEndIndex = citedSpans[0].End,
             });
-            var snippet = text.Length == 0 ? null : Trim(text, options.MaxSourceSnippetCharacters);
-            var extractedText = text.Length == 0 ? null : Trim(text, options.MaxSourceTextCharacters);
-            sourceByUrl[url] = new ResearchSourceCandidate(citationId, url, canonical, Trim(title, options.MaxSourceTitleCharacters), new Uri(url).Host, null, null, DateTime.UtcNow, "web", snippet, extractedText, null, index + 1, true, citationMetadata);
+            var snippet = text.Length == 0 ? null : ResearchEvidenceText.Trim(text, options.MaxSourceSnippetCharacters);
+            var extractedText = text.Length == 0 ? null : ResearchEvidenceText.Trim(text, options.MaxSourceTextCharacters);
+            sourceByUrl[url] = new ResearchSourceCandidate(citationId, url, canonical, ResearchEvidenceText.Trim(title, options.MaxSourceTitleCharacters), new Uri(url).Host, null, null, DateTime.UtcNow, "web", snippet, extractedText, null, index + 1, true, citationMetadata);
             if (text.Length > 0)
-                evidence.Add(new ResearchEvidenceCandidate(citationId, "web evidence", Trim(text, options.MaxEvidenceCharacters), null, null));
+                evidence.Add(new ResearchEvidenceCandidate(citationId, "web evidence", ResearchEvidenceText.Trim(text, options.MaxEvidenceCharacters), null, null));
         }
         var model = root.TryGetProperty("model", out var modelElement) && modelElement.ValueKind == JsonValueKind.String ? modelElement.GetString()! : options.SearchModel;
         var usage = root.TryGetProperty("usage", out var usageElement) ? usageElement : default;
@@ -362,7 +371,6 @@ public sealed class OpenAiResearchSearchProvider(
     /// would reject.
     /// </summary>
     private static string? StorableCanonicalUrl(string url) { var canonical = Canonicalize(url); return canonical.Length <= MaxCanonicalUrlCharacters ? canonical : null; }
-    private static string Trim(string value, int max) => value.Length <= max ? value : value[..Math.Max(1, max - 3)].TrimEnd() + "...";
     private static int? ReadInt(JsonElement element, string property) => element.ValueKind == JsonValueKind.Object && element.TryGetProperty(property, out var value) && value.ValueKind == JsonValueKind.Number && value.TryGetInt32(out var result) ? result : null;
     private static Uri BuildResponsesUrl(string baseUrl) => new Uri($"{(string.IsNullOrWhiteSpace(baseUrl) ? "https://api.openai.com/v1" : baseUrl.TrimEnd('/'))}/responses", UriKind.Absolute);
 }
