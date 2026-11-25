@@ -33,9 +33,20 @@ export function isTabbableElement(element: HTMLElement, readStyle?: VisibilitySt
     if (control.disabled) return false;
     if (element.getAttribute("disabled") !== null) return false;
     // A disabled fieldset un-focuses every contained form control except the
-    // ones inside its legend (HTML living-standard sequential navigation).
-    const fieldset = element.closest("fieldset[disabled]");
-    if (fieldset && !element.closest("legend")) return false;
+    // ones inside *that fieldset's own* legend (HTML living-standard sequential
+    // navigation). Two subtleties decide the answer. "Its own" is load-bearing:
+    // a legend belonging to a nested fieldset, or a stray second legend child,
+    // is not the element the exemption is written about. And the constraint is
+    // applied per disabled fieldset ancestor, not once for the nearest one: a
+    // control that escapes an inner disabled fieldset by sitting in that
+    // fieldset's legend is still inside an outer disabled fieldset, outside the
+    // outer legend, and Chromium refuses to focus it. Admitting such a control
+    // would let the focus trap enumerate something the browser itself will not
+    // tab into.
+    for (let ancestor = element.parentElement; ancestor !== null; ancestor = ancestor.parentElement) {
+      if (ancestor.tagName !== "FIELDSET" || ancestor.getAttribute("disabled") === null) continue;
+      if (!escapesDisabledFieldset(ancestor, element)) return false;
+    }
     if (element.tagName === "INPUT" && (element as HTMLInputElement).type === "hidden") return false;
   }
   const tabindex = element.getAttribute("tabindex");
@@ -64,6 +75,36 @@ export function isTabbableElement(element: HTMLElement, readStyle?: VisibilitySt
     if (computed.visibility === "hidden" || computed.visibility === "collapse") return false;
   }
   return true;
+}
+
+/**
+ * True when the control escapes `fieldset` because it sits inside that
+ * fieldset's own legend - its first `legend` child. Measured in headless
+ * Chromium by the #1226 lane: a control nested any deeper (a second legend
+ * child, or a legend belonging to a nested fieldset) is skipped by the browser's
+ * sequential-focus walk, and the bar applies once per disabled ancestor, which is
+ * why the caller loops the ancestors instead of consulting `closest` once.
+ *
+ * The walk-up form is deliberate: it is exactly
+ * `fieldset.querySelector(":scope > legend")?.contains(control)` - the shape the
+ * #1226 lane measured - expressed with `parentElement` and `children` only, so it
+ * also runs on the dependency-free DOM stubs this repo's unit tests use (which
+ * implement neither `querySelector` nor `contains`, and whose frozen contract file
+ * must keep passing unchanged).
+ */
+function escapesDisabledFieldset(fieldset: Element, control: Element): boolean {
+  let legend: Element | null = null;
+  for (const child of Array.from(fieldset.children)) {
+    if (child.tagName === "LEGEND") {
+      legend = child;
+      break;
+    }
+  }
+  if (legend === null) return false;
+  for (let node = control.parentElement; node !== null && node !== fieldset; node = node.parentElement) {
+    if (node === legend) return true;
+  }
+  return false;
 }
 
 export type DialogHandle = { readonly token: symbol };
