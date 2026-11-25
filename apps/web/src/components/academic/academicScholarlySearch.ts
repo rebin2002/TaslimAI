@@ -31,6 +31,22 @@ import {
 /** Page size the search UI uses. The server clamps any value, including a crafted one. */
 export const scholarlySearchPageSize = 10;
 
+/**
+ * The workspace a scholarly-search lifecycle belongs to, in the one form the panel compares.
+ *
+ * A result set was fetched under a scope, and a student can lose that scope without the panel
+ * losing its mount: a host may render `AcademicSourcesPanel` directly and hand it a new
+ * `workspaceId` (a workspace switch, or a sign-out that leaves `null`). The panel therefore decides
+ * ownership on a normalized key rather than on the string it was passed - so that padding cannot
+ * make the same workspace look like a new one, which would throw away a student's own results on
+ * every re-render, and so that an absent scope is one clearable value rather than three spellings of
+ * emptiness.
+ */
+export function scholarlySearchScopeKey(workspaceId: string | null | undefined): string | null {
+  const trimmed = workspaceId?.trim();
+  return trimmed ? trimmed : null;
+}
+
 /** The server-bounded browse limit, mirrored here only so paging stops honestly. */
 export const scholarlySearchMaxDepth = 150;
 

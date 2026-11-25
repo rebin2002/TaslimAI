@@ -47,6 +47,7 @@ import {
   scholarlySearchFailureKey,
   scholarlySearchPageSize,
   scholarlySearchPageInfo,
+  scholarlySearchScopeKey,
   scholarlySourceId,
   toScholarlySearchRows,
   type ScholarlySearchFormValues,
@@ -111,17 +112,55 @@ export function AcademicSourcesPanel({
   /** Feedback about what happened to a discovered record in the library; dictionary text only. */
   const [libraryStatus, setLibraryStatus] = useState("");
 
-  const controller = useMemo(() => createScholarlySearchController({ search: searchScholarly, pageSize: searchPageSize }), [searchScholarly]);
+  const scopedWorkspaceId = scholarlySearchScopeKey(workspaceId);
+
+  // --- principal fence for the search lifecycle -------------------------------------------------
+  // The snapshot this panel renders is data a specific student asked for: records found under their
+  // workspace, against a query they typed. In the shipped studio the identity-keyed subtree remounts
+  // the whole workspace when the principal moves, so the panel is replaced rather than re-scoped -
+  // and `e2e/academic-identity-privacy.spec.ts` pins that a search whose answer arrives after the
+  // switch is never shown. That protection lives in the host, though, and the panel's props document
+  // that a host owns it, so the owner is decided here as well: on any change of scope this instance
+  // starts from an empty search, and the controller it leaves behind is disposed, which aborts
+  // whatever the previous student had in flight. Two independent guards, because the data on the
+  // other side of this line belongs to a different reader.
+  const [searchOwner, setSearchOwner] = useState(scopedWorkspaceId);
+  if (searchOwner !== scopedWorkspaceId) {
+    // Render-phase adjustment, not an effect: React restarts this render before committing anything,
+    // so the previous principal's results are never painted at all. An effect could only clear them
+    // one frame after showing them, and one frame is what a late response needs.
+    setSearchOwner(scopedWorkspaceId);
+    // Every buffer below was typed by, or fetched for, the student who is no longer here.
+    setTerm("");
+    setYearFrom("");
+    setYearTo("");
+    setOpenAccessOnly(false);
+    setStatus("");
+    setLibraryStatus("");
+    setFilters({ sourceTypes: [], requireFullText, peerReviewedOnly: false, query: "" });
+  }
+
+  // The lifecycle belongs to an owner, so it is created per owner rather than per mount: a scope
+  // change yields a controller that never saw the previous student's request, and the cleanup below
+  // disposes the one being replaced. The owner is named in the produced value so the dependency
+  // that swaps the instance is visible in the code, not an unused key someone would later "clean up".
+  const controller = useMemo(
+    () => ({
+      forOwner: searchOwner,
+      lifecycle: createScholarlySearchController({ search: searchScholarly, pageSize: searchPageSize }),
+    }),
+    [searchOwner, searchScholarly],
+  ).lifecycle;
   const read = useCallback(() => controller.read(), [controller]);
   const subscribe = useCallback((listener: () => void) => controller.subscribe(listener), [controller]);
   const snapshot = useSyncExternalStore(subscribe, read, read);
 
-  // Leaving the tab, or switching tabs, aborts the in-flight search and detaches the listeners.
+  // Leaving the tab, or switching tabs - or owners - aborts the in-flight search and detaches
+  // the listeners.
   useEffect(() => {
     return () => controller.dispose();
   }, [controller]);
 
-  const scopedWorkspaceId = workspaceId && workspaceId.trim() ? workspaceId.trim() : null;
   const formValues = useCallback(
     (): ScholarlySearchFormValues => ({
       workspaceId: scopedWorkspaceId,

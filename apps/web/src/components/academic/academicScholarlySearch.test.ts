@@ -25,6 +25,7 @@ import {
   scholarlySearchPageInfo,
   scholarlySearchPageSize,
   scholarlySearchQueryParams,
+  scholarlySearchScopeKey,
   searchScholarlySources,
   splitScholarlyIdentifiers,
   toScholarlySearchRows,
@@ -509,5 +510,36 @@ describe("provider link admission at the display edge", () => {
   it("keeps a public landing page while a local full-text address disappears from the same record", () => {
     const [row] = toScholarlySearchRows([source({ landingUrl: "https://journal.example.org/articles/45", fullTextUrl: "http://nas.local:9200/elastic.pdf" })]);
     expect(row.url).toBe("https://journal.example.org/articles/45");
+  });
+});
+
+/**
+ * The comparison the Sources panel fences its search lifecycle on: what counts as "the same
+ * workspace these results were fetched for". Get it wrong in the strict direction and a student
+ * loses their own results on every host re-render; get it wrong in the loose direction and the next
+ * student sees the records the previous one searched for. `e2e/academic-identity-privacy.spec.ts`
+ * pins the outcome in a browser; this pins the rule the fence is built from.
+ */
+describe("search scope ownership", () => {
+  it("names the workspace a search belongs to", () => {
+    expect(scholarlySearchScopeKey(workspaceId)).toBe(workspaceId);
+  });
+
+  it("treats a re-render of the same workspace as the same owner", () => {
+    // Whitespace and repeated renders must not look like a scope change, or the fence would clear a
+    // student's own results every time the host rebuilt its props.
+    expect(scholarlySearchScopeKey(`  ${workspaceId}  `)).toBe(scholarlySearchScopeKey(workspaceId));
+    expect(scholarlySearchScopeKey(scholarlySearchScopeKey(workspaceId))).toBe(scholarlySearchScopeKey(workspaceId));
+  });
+
+  it("separates two workspaces, and separates every spelling of no scope from any workspace", () => {
+    const other = "9a8b7c6d-5e4f-4a1b-9c8d-7e6f5a4b3c2d";
+    expect(scholarlySearchScopeKey(other)).not.toBe(scholarlySearchScopeKey(workspaceId));
+    // One clearable value for "no scope", so going from a workspace to none is a change of owner
+    // rather than a no-op that leaves the old results on screen after a sign-out.
+    for (const empty of [null, undefined, "", "   ", "\t\n"]) {
+      expect(scholarlySearchScopeKey(empty)).toBeNull();
+    }
+    expect(scholarlySearchScopeKey("   ")).not.toBe(scholarlySearchScopeKey(workspaceId));
   });
 });
