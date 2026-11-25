@@ -139,6 +139,7 @@ jobs:
         env:
           E2E_API_URL: http://localhost:5000
           NEXT_PUBLIC_API_URL: http://localhost:5000
+          NEXT_PUBLIC_ACADEMIC_RESEARCH_ENABLED: "true"
           E2E_TEST_PASSWORD: E2eStrongPassword!123
           CI: "true"
         run: npm run test:e2e --workspace @taslim/web

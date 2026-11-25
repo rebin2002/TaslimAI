@@ -18,7 +18,7 @@ test("a signed-in student can save and approve the Academic Plan from Standard R
 
   await expect(page).toHaveURL(/\/create\/research\/academic$/);
   await expect(page.getByRole("heading", { name: "Academic Research Studio" })).toBeVisible();
-  await page.getByLabel("Discipline", { exact: true }).selectOption("law_and_policy");
+  await page.getByLabel(/discipline/i).selectOption("law_and_policy");
   await page.getByRole("button", { name: "Use common practice for this discipline" }).click();
 
   // The plan is constrained to scholarly material; books and journal articles

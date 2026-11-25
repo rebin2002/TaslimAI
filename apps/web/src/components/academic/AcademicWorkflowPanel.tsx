@@ -62,6 +62,26 @@ export function isCurrentAcademicWorkspaceOperation(
   return operationWorkspaceId === currentWorkspaceId && operationGeneration === currentGeneration;
 }
 
+export function isCurrentAcademicProjectIntent(
+  operationWorkspaceId: string | null,
+  operationWorkspaceGeneration: number,
+  operationIntentGeneration: number,
+  currentWorkspaceId: string | null,
+  currentWorkspaceGeneration: number,
+  currentIntentGeneration: number,
+): boolean {
+  return isCurrentAcademicWorkspaceOperation(
+    operationWorkspaceId, operationWorkspaceGeneration, currentWorkspaceId, currentWorkspaceGeneration,
+  ) && operationIntentGeneration === currentIntentGeneration;
+}
+
+export function isSelectedAcademicProject(
+  projectId: string | null | undefined,
+  selectedProjectId: string,
+): boolean {
+  return Boolean(projectId && projectId === selectedProjectId);
+}
+
 export function toCreateInput(brief: AcademicBrief, chapterHeadings: readonly string[], language: string, key: string): AcademicProjectCreateInput {
   const methods = brief.methodologies.map((method) => methodologyCode[method]);
   return {
@@ -126,38 +146,69 @@ export function AcademicWorkflowPanel({ workspaceId, brief, chapterHeadings, lan
   const requestKeyRef = useRef<{ signature: string; key: string } | null>(null);
   const workspaceIdRef = useRef(workspaceId);
   const workspaceGenerationRef = useRef(0);
+  const intentGenerationRef = useRef(0);
+  const selectedIdRef = useRef(selectedId);
+  const translateRef = useRef(t);
+
+  useLayoutEffect(() => {
+    translateRef.current = t;
+  }, [t]);
 
   // The parent keys this panel by workspace, so UI state resets by remount. This
   // also fences any in-flight action if a caller reuses the instance across workspaces.
   useLayoutEffect(() => {
+    const workspaceChanged = workspaceIdRef.current !== workspaceId;
     workspaceIdRef.current = workspaceId;
     workspaceGenerationRef.current += 1;
+    intentGenerationRef.current += 1;
     requestKeyRef.current = null;
+    if (workspaceChanged) {
+      selectedIdRef.current = "";
+      setSelectedId("");
+      setProject(null);
+      setProjects([]);
+      setHasMoreProjects(false);
+      setNextProjectPage(2);
+      setListing(Boolean(workspaceId));
+      setBusy(false);
+      setError("");
+    }
   }, [workspaceId]);
 
   useEffect(() => {
     let active = true;
     if (!workspaceId) return () => { active = false; };
+    const operationWorkspaceGeneration = workspaceGenerationRef.current;
+    const operationIntentGeneration = intentGenerationRef.current;
+    const isCurrentOperation = () => active && isCurrentAcademicProjectIntent(
+      workspaceId, operationWorkspaceGeneration, operationIntentGeneration,
+      workspaceIdRef.current, workspaceGenerationRef.current, intentGenerationRef.current,
+    );
 
     void api.listAcademicProjects(workspaceId, 1, ACADEMIC_PROJECT_PAGE_SIZE).then(async (saved) => {
-      if (!active) return;
+      if (!isCurrentOperation()) return;
       setProjects(saved);
       setHasMoreProjects(saved.length === ACADEMIC_PROJECT_PAGE_SIZE);
       setNextProjectPage(2);
       setListing(false);
       const latest = saved[0];
       if (!latest) return;
+      selectedIdRef.current = latest.projectId;
       setSelectedId(latest.projectId);
+      setProject(null);
       const loaded = await api.getAcademicProject(latest.projectId);
-      if (active && loaded.project.workspaceId === workspaceId) setProject(loaded);
+      if (isCurrentOperation() && selectedIdRef.current === latest.projectId
+        && loaded.project.projectId === latest.projectId && loaded.project.workspaceId === workspaceId) {
+        setProject(loaded);
+      }
     }).catch(() => {
-      if (active) {
+      if (isCurrentOperation()) {
         setListing(false);
-        setError(t("workflow.loadFailure"));
+        setError(translateRef.current("workflow.loadFailure"));
       }
     });
     return () => { active = false; };
-  }, [workspaceId, t]);
+  }, [workspaceId]);
 
   async function loadMoreProjects() {
     if (!workspaceId || !hasMoreProjects || listing || busy) return;
@@ -186,6 +237,7 @@ export function AcademicWorkflowPanel({ workspaceId, brief, chapterHeadings, lan
   }
 
   function remember(next: AcademicProjectDto) {
+    selectedIdRef.current = next.project.projectId;
     setProject(next);
     setSelectedId(next.project.projectId);
     setProjects((current) => [next.project, ...current.filter((item) => item.projectId !== next.project.projectId)]
@@ -193,10 +245,15 @@ export function AcademicWorkflowPanel({ workspaceId, brief, chapterHeadings, lan
   }
 
   async function createAndRun() {
-    if (!workspaceId || !canStart || busy) return;
-    const operationGeneration = workspaceGenerationRef.current;
-    const isCurrentOperation = () => isCurrentAcademicWorkspaceOperation(
-      workspaceId, operationGeneration, workspaceIdRef.current, workspaceGenerationRef.current,
+    if (!workspaceId || !canStart || busy || listing) return;
+    const operationWorkspaceGeneration = workspaceGenerationRef.current;
+    const operationIntentGeneration = ++intentGenerationRef.current;
+    selectedIdRef.current = "";
+    setSelectedId("");
+    setProject(null);
+    const isCurrentOperation = () => isCurrentAcademicProjectIntent(
+      workspaceId, operationWorkspaceGeneration, operationIntentGeneration,
+      workspaceIdRef.current, workspaceGenerationRef.current, intentGenerationRef.current,
     );
     const draft = toCreateInput(brief, chapterHeadings, language, "");
     const signature = JSON.stringify({ ...draft, requestKey: undefined });
@@ -209,9 +266,14 @@ export function AcademicWorkflowPanel({ workspaceId, brief, chapterHeadings, lan
     try {
       const created = await api.createAcademicProject(workspaceId, input);
       if (!isCurrentOperation()) return;
+      if (created.project.workspaceId !== workspaceId) {
+        setError(t("workflow.accessChanged"));
+        return;
+      }
       remember(created);
       const prepared = await api.runAcademicProject(created.project.projectId);
-      if (isCurrentOperation() && prepared.project.workspaceId === workspaceId) remember(prepared);
+      if (isCurrentOperation() && prepared.project.projectId === created.project.projectId
+        && prepared.project.workspaceId === workspaceId) remember(prepared);
     } catch (cause) {
       if (!isCurrentOperation()) return;
       setError(safeAcademicError(cause, t));
@@ -223,7 +285,8 @@ export function AcademicWorkflowPanel({ workspaceId, brief, chapterHeadings, lan
           const match = rows.find((row) => row.requestKey === requestKeyRef.current?.key);
           if (match) {
             const recovered = await api.getAcademicProject(match.projectId);
-            if (isCurrentOperation()) remember(recovered);
+            if (isCurrentOperation() && recovered.project.projectId === match.projectId
+              && recovered.project.workspaceId === workspaceId) remember(recovered);
           }
         } catch { /* Keep the primary action error; the next load can recover from server state. */ }
       }
@@ -233,18 +296,21 @@ export function AcademicWorkflowPanel({ workspaceId, brief, chapterHeadings, lan
   }
 
   async function loadSelected() {
-    if (!selectedId || busy) return;
+    const targetProjectId = selectedIdRef.current;
+    if (!targetProjectId || busy) return;
     const operationWorkspaceId = workspaceId;
-    const operationGeneration = workspaceGenerationRef.current;
-    const isCurrentOperation = () => isCurrentAcademicWorkspaceOperation(
-      operationWorkspaceId, operationGeneration, workspaceIdRef.current, workspaceGenerationRef.current,
-    );
+    const operationWorkspaceGeneration = workspaceGenerationRef.current;
+    const operationIntentGeneration = ++intentGenerationRef.current;
+    const isCurrentOperation = () => isCurrentAcademicProjectIntent(
+      operationWorkspaceId, operationWorkspaceGeneration, operationIntentGeneration,
+      workspaceIdRef.current, workspaceGenerationRef.current, intentGenerationRef.current,
+    ) && selectedIdRef.current === targetProjectId;
     setBusy(true);
     setError("");
     try {
-      const loaded = await api.getAcademicProject(selectedId);
+      const loaded = await api.getAcademicProject(targetProjectId);
       if (!isCurrentOperation()) return;
-      if (loaded.project.workspaceId === operationWorkspaceId) remember(loaded);
+      if (loaded.project.projectId === targetProjectId && loaded.project.workspaceId === operationWorkspaceId) remember(loaded);
       else setError(t("workflow.accessChanged"));
     } catch (cause) {
       if (isCurrentOperation()) setError(safeAcademicError(cause, t));
@@ -254,25 +320,30 @@ export function AcademicWorkflowPanel({ workspaceId, brief, chapterHeadings, lan
   }
 
   async function resume() {
-    if (!project || busy || project.pendingApproval) return;
+    const targetProjectId = project?.project.projectId;
+    if (!project || !targetProjectId || busy || project.pendingApproval
+      || !isSelectedAcademicProject(targetProjectId, selectedId) || selectedIdRef.current !== targetProjectId) return;
     const operationWorkspaceId = workspaceId;
-    const operationGeneration = workspaceGenerationRef.current;
-    const isCurrentOperation = () => isCurrentAcademicWorkspaceOperation(
-      operationWorkspaceId, operationGeneration, workspaceIdRef.current, workspaceGenerationRef.current,
-    );
+    const operationWorkspaceGeneration = workspaceGenerationRef.current;
+    const operationIntentGeneration = ++intentGenerationRef.current;
+    const isCurrentOperation = () => isCurrentAcademicProjectIntent(
+      operationWorkspaceId, operationWorkspaceGeneration, operationIntentGeneration,
+      workspaceIdRef.current, workspaceGenerationRef.current, intentGenerationRef.current,
+    ) && selectedIdRef.current === targetProjectId;
     setBusy(true);
     setError("");
     try {
-      const resumed = await api.runAcademicProject(project.project.projectId);
+      const resumed = await api.runAcademicProject(targetProjectId);
       if (!isCurrentOperation()) return;
-      if (resumed.project.workspaceId === operationWorkspaceId) remember(resumed);
+      if (resumed.project.projectId === targetProjectId && resumed.project.workspaceId === operationWorkspaceId) remember(resumed);
     } catch (cause) {
       if (!isCurrentOperation()) return;
       setError(safeAcademicError(cause, t));
       if (cause instanceof ApiError && cause.status === 501) {
         try {
-          const latest = await api.getAcademicProject(project.project.projectId);
-          if (isCurrentOperation() && latest.project.workspaceId === operationWorkspaceId) remember(latest);
+          const latest = await api.getAcademicProject(targetProjectId);
+          if (isCurrentOperation() && latest.project.projectId === targetProjectId
+            && latest.project.workspaceId === operationWorkspaceId) remember(latest);
         } catch { /* Preserve the clear not-connected status. */ }
       }
     } finally {
@@ -281,18 +352,24 @@ export function AcademicWorkflowPanel({ workspaceId, brief, chapterHeadings, lan
   }
 
   async function approvePlan() {
-    if (!project || project.pendingApproval?.kind !== "Plan" || busy) return;
+    const targetProjectId = project?.project.projectId;
+    if (!project || !targetProjectId || project.pendingApproval?.kind !== "Plan" || busy
+      || !isSelectedAcademicProject(targetProjectId, selectedId)
+      || selectedIdRef.current !== targetProjectId) return;
     const operationWorkspaceId = workspaceId;
-    const operationGeneration = workspaceGenerationRef.current;
-    const isCurrentOperation = () => isCurrentAcademicWorkspaceOperation(
-      operationWorkspaceId, operationGeneration, workspaceIdRef.current, workspaceGenerationRef.current,
-    );
+    const operationWorkspaceGeneration = workspaceGenerationRef.current;
+    const operationIntentGeneration = ++intentGenerationRef.current;
+    const isCurrentOperation = () => isCurrentAcademicProjectIntent(
+      operationWorkspaceId, operationWorkspaceGeneration, operationIntentGeneration,
+      workspaceIdRef.current, workspaceGenerationRef.current, intentGenerationRef.current,
+    ) && selectedIdRef.current === targetProjectId;
     setBusy(true);
     setError("");
     try {
-      const approved = await api.submitAcademicApproval(project.project.projectId, "Plan", "Approved");
+      const approved = await api.submitAcademicApproval(targetProjectId, "Plan", "Approved");
       if (!isCurrentOperation()) return;
-      if (approved.project.workspaceId === operationWorkspaceId) remember(approved);
+      if (approved.project.projectId === targetProjectId && approved.project.workspaceId === operationWorkspaceId) remember(approved);
+      else setError(t("workflow.accessChanged"));
     } catch (cause) {
       if (isCurrentOperation()) setError(safeAcademicError(cause, t));
     } finally {
@@ -300,9 +377,10 @@ export function AcademicWorkflowPanel({ workspaceId, brief, chapterHeadings, lan
     }
   }
 
-  const plan = project?.plan ?? null;
-  const planApproved = Boolean(project?.approvals.some((approval) => approval.kind === "Plan" && approval.decision === "Approved"));
-  const nextStageMissing = Boolean(plan && planApproved && project?.missingStages.includes("Discover"));
+  const displayedProject = project && isSelectedAcademicProject(project.project.projectId, selectedId) ? project : null;
+  const plan = displayedProject?.plan ?? null;
+  const planApproved = Boolean(displayedProject?.approvals.some((approval) => approval.kind === "Plan" && approval.decision === "Approved"));
+  const nextStageMissing = Boolean(plan && planApproved && displayedProject?.missingStages.includes("Discover"));
 
   return (
     <section className={styles.workflowPanel} aria-labelledby="academic-workflow-heading">
@@ -321,7 +399,15 @@ export function AcademicWorkflowPanel({ workspaceId, brief, chapterHeadings, lan
           <div className={styles.workflowControls}>
             <label className={styles.workflowSelectLabel}>
               <span>{t("workflow.savedProjects")}</span>
-              <select value={selectedId} onChange={(event) => setSelectedId(event.target.value)} disabled={listing || busy}>
+              <select value={selectedId} onChange={(event) => {
+                const nextId = event.target.value;
+                if (nextId === selectedIdRef.current) return;
+                intentGenerationRef.current += 1;
+                selectedIdRef.current = nextId;
+                setSelectedId(nextId);
+                setProject(null);
+                setError("");
+              }} disabled={listing || busy}>
                 <option value="">{listing ? t("workflow.loadingProjects") : t("workflow.selectProject")}</option>
                 {projects.map((item) => (
                   <option key={item.projectId} value={item.projectId}>
@@ -341,20 +427,20 @@ export function AcademicWorkflowPanel({ workspaceId, brief, chapterHeadings, lan
           ) : null}
           {!listing && projects.length === 0 ? <p className={styles.workflowSubtle}>{t("workflow.noSavedProjects")}</p> : null}
           {!canStart ? <p className={styles.workflowSubtle}>{t("workflow.briefBlocked")}</p> : null}
-          <button type="button" className={styles.primaryButton} onClick={() => void createAndRun()} disabled={!canStart || busy}>
+          <button type="button" className={styles.primaryButton} onClick={() => void createAndRun()} disabled={!canStart || busy || listing}>
             {busy ? t("workflow.working") : t("workflow.createAction")}
           </button>
           {error ? <p className={styles.workflowError} role="alert">{error}</p> : null}
 
-          {project ? (
+          {displayedProject ? (
             <div className={styles.workflowProject}>
               <div className={styles.workflowProjectHeading}>
                 <div>
                   <p className={styles.workflowKicker}>{t("workflow.savedPlan")}</p>
-                  <h4>{plan?.workingTitle || project.project.researchQuestion}</h4>
-                  <p className={styles.workflowSubtle}>{formatSavedProjectContext(project.project.discipline, project.project.level, project.project.revision, labels, t)}</p>
+                  <h4>{plan?.workingTitle || displayedProject.project.researchQuestion}</h4>
+                  <p className={styles.workflowSubtle}>{formatSavedProjectContext(displayedProject.project.discipline, displayedProject.project.level, displayedProject.project.revision, labels, t)}</p>
                 </div>
-                <span className={styles.workflowState}>{project.project.state}</span>
+                <span className={styles.workflowState}>{displayedProject.project.state}</span>
               </div>
 
               {plan ? <PlanArtifact plan={plan} t={t} labels={labels} /> : (
@@ -364,7 +450,7 @@ export function AcademicWorkflowPanel({ workspaceId, brief, chapterHeadings, lan
               <div>
                 <h5 className={styles.workflowSubheading}>{t("workflow.stages")}</h5>
                 <ol className={styles.workflowStageList}>
-                  {project.stages.map((stage) => (
+                  {displayedProject.stages.map((stage) => (
                     <li key={stage.stage} data-state={stage.state}>
                       <span>{stageLabelKeys[stage.stage] ? t(asKey(stageLabelKeys[stage.stage])) : stage.stage}</span>
                       <strong>{t(asKey(`workflow.stageStatus.${stage.state.toLowerCase()}`))}</strong>
@@ -373,12 +459,12 @@ export function AcademicWorkflowPanel({ workspaceId, brief, chapterHeadings, lan
                 </ol>
               </div>
 
-              {project.pendingApproval?.kind === "Plan" ? (
+              {displayedProject.pendingApproval?.kind === "Plan" ? (
                 <div className={styles.workflowApproval}>
                   <div>
                     <h5 className={styles.workflowSubheading}>{t("workflow.reviewTitle")}</h5>
                     <p className={styles.workflowSubtle}>{t("workflow.reviewPrompt")}</p>
-                    <ul>{project.pendingApproval.reviewerPrompts.map((prompt, index) => <li key={`${index}-${prompt}`}>{prompt}</li>)}</ul>
+                    <ul>{displayedProject.pendingApproval.reviewerPrompts.map((prompt, index) => <li key={`${index}-${prompt}`}>{prompt}</li>)}</ul>
                   </div>
                   <button type="button" className={styles.primaryButton} onClick={() => void approvePlan()} disabled={busy || !plan}>
                     {busy ? t("workflow.working") : t("workflow.approveAction")}
@@ -387,7 +473,7 @@ export function AcademicWorkflowPanel({ workspaceId, brief, chapterHeadings, lan
               ) : null}
 
               {nextStageMissing ? <p className={styles.workflowNotice} role="status">{t("workflow.discoverNotConnected")}</p> : null}
-              {planApproved && !project.pendingApproval && project.project.state === "Running" ? (
+              {planApproved && !displayedProject.pendingApproval && displayedProject.project.state === "Running" ? (
                 <button type="button" className={styles.secondaryButton} onClick={() => void resume()} disabled={busy}>
                   {busy ? t("workflow.working") : t("workflow.resumeAction")}
                 </button>

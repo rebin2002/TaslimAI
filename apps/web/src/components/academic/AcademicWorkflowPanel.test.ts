@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { createDefaultBrief, type AcademicBrief } from "./academicBrief";
-import { isCurrentAcademicWorkspaceOperation, toCreateInput, formatPlanKeywords, formatPlanSourceTargets, formatSavedProjectContext } from "./AcademicWorkflowPanel";
+import { isCurrentAcademicProjectIntent, isCurrentAcademicWorkspaceOperation, isSelectedAcademicProject, toCreateInput, formatPlanKeywords, formatPlanSourceTargets, formatSavedProjectContext } from "./AcademicWorkflowPanel";
 import { createAcademicLabels, createAcademicTranslator } from "./academicStrings";
 import type { AcademicResearchPlan } from "@/lib/api";
 
@@ -86,5 +86,17 @@ describe("Academic workflow workspace fencing", () => {
     expect(isCurrentAcademicWorkspaceOperation("workspace-a", 3, "workspace-b", 4)).toBe(false);
     expect(isCurrentAcademicWorkspaceOperation("workspace-a", 3, "workspace-a", 5)).toBe(false);
     expect(isCurrentAcademicWorkspaceOperation("workspace-b", 4, "workspace-b", 4)).toBe(true);
+  });
+
+  it("rejects project results after a newer selection, load, or create intent", () => {
+    expect(isCurrentAcademicProjectIntent("workspace-a", 3, 7, "workspace-a", 3, 8)).toBe(false);
+    expect(isCurrentAcademicProjectIntent("workspace-a", 3, 7, "workspace-b", 4, 7)).toBe(false);
+    expect(isCurrentAcademicProjectIntent("workspace-a", 3, 7, "workspace-a", 3, 7)).toBe(true);
+  });
+
+  it("allows approval only when the submitted project is both selected and displayed", () => {
+    expect(isSelectedAcademicProject("project-b", "project-b")).toBe(true);
+    expect(isSelectedAcademicProject("project-a", "project-b")).toBe(false);
+    expect(isSelectedAcademicProject(null, "project-b")).toBe(false);
   });
 });

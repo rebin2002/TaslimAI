@@ -194,7 +194,8 @@ Phase B rows under fixed conventions:
 | Extraction over retrieved bodies (full-text) | **Not connected** — body handoff seam deferred (see above) | `WF_FULLTEXT_BODY_ABSENT` flags stored honestly |
 | Chapter drafting / real verification runs | **Not connected** — same handler seam; integrity guard runs on committed artifacts only | verification endpoint is recomputation, not execution |
 | Background execution of long runs (queue/worker) | **Not implemented** — `/run` advances through committed checkpoints within one request budget | stated in API docs |
-| Saved Plan UI from the Academic workspace and Standard Research entry | **Implemented** — create, reload, approve and attempt resume through the existing workspace-fenced API; downstream actions remain unavailable | `AcademicWorkflowPanel`, component tests, and `apps/web/e2e/academic-plan-vertical-slice.spec.ts` (synthetic signed-in browser flow) |
+| Saved Plan UI from the Academic workspace and Standard Research entry | **Implemented** — create, reload, approve and attempt resume through the existing workspace-fenced API; late project responses are fenced by latest intent, and approval requires the selected project to match the displayed project; downstream actions remain unavailable | `AcademicWorkflowPanel`, mounted `AcademicWorkflowPanel.intentRace.test.tsx`, component tests, and the synthetic signed-in Playwright flow |
+| Academic visibility boundary | **Implemented, default OFF** — the exact public build-time value `NEXT_PUBLIC_ACADEMIC_RESEARCH_ENABLED=true` is required for the Standard Research link and authenticated studio/export routes; CI opts in only for synthetic Browser E2E | shared helper, Standard Research view tests, and authenticated route behavior tests |
 | Export re-render on evidence change | Not implemented (template worker owns it) | seam documented above |
 
 No endpoint pretends otherwise: the deterministic Plan stage is real, the user must
@@ -222,16 +223,21 @@ missing and are reported exactly by the API.
   No disposable PostgreSQL/API stack was configured locally; the 20 environment-conditional
   tests did not run here, so hosted API CI must provide the disposable-database evidence.
   The final focused `AcademicPlanStageHandlerTests` run passed 4/4.
-- Web verification: 291 test files / 1,999 tests passed; lint reported 0 errors and 2 existing
-  warnings in `PresentationStudioView.tsx`; TypeScript checking and production build passed.
-  The build used `NEXT_PUBLIC_API_URL=https://api.e2e.invalid` to satisfy the HTTPS production
-  build guard. No dependency manifests changed; the build reported that Next.js 16.4.3 is
-  affected by a known security vulnerability and offered 16.4.6. The optional upgrade was
-  skipped; a dependency security update remains a separate follow-up.
-- Playwright: `apps/web/e2e/academic-plan-vertical-slice.spec.ts` is discoverable with
-  `playwright test --list` and lint-clean, but was not run locally because no disposable
-  PostgreSQL/API environment is configured. The hosted Browser E2E job must provide that
-  browser acceptance evidence on the pushed head.
+- Web verification after the stale-response and visibility repair (2026-11-25): full Vitest
+  passed 294 test files / 2,006 tests, including the mounted deferred-GET race regression and
+  authenticated OFF-route checks; ESLint passed with 0 errors and 2 existing warnings in
+  `PresentationStudioView.tsx`; `npx tsc --noEmit -p apps/web/tsconfig.json` passed. A production
+  build passed with `NEXT_PUBLIC_ACADEMIC_RESEARCH_ENABLED` deliberately unset and
+  `NEXT_PUBLIC_API_URL=https://api.example.test`.
+- Dependency audit: `npm audit --omit=dev --audit-level=high` exits successfully but reports one
+  moderate Next.js 16.4.3 advisory (16.4.6 is available; not upgraded in this repair). The full
+  tree currently reports 12 findings (10 moderate, 2 high), including transitive development-tool
+  findings in Vite and Zod. The new `jsdom` dependency is dev-only and is not named in the audit
+  findings. No broad or automatic dependency fixes were applied.
+- Playwright: `playwright test --list` finds the Academic Plan test and reports 198 tests across
+  42 files. The browser suite was not run locally because no disposable PostgreSQL/API environment
+  is configured; hosted Browser E2E provides that acceptance evidence on the pushed head. The
+  local E2E guide documents the synthetic-only visibility opt-in.
 - Autopilot ref regression: `scripts/next-wave-refs.test.sh` passed 15/15 with the dedicated
   next-wave branch default and 15/15 with this exact feature branch explicitly supplied;
   unrelated and parallel refs remain denied. The full disposable-PostgreSQL safety gate is

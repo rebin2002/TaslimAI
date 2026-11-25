@@ -1,5 +1,5 @@
 import { renderToStaticMarkup } from "react-dom/server";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
   listProjects: vi.fn(),
@@ -32,6 +32,8 @@ vi.mock("@/lib/api", () => ({
 
 import { ResearchStudioView } from "./ResearchStudioView";
 
+afterEach(() => vi.unstubAllEnvs());
+
 describe("Research Studio project selection", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -51,7 +53,18 @@ describe("Research Studio project selection", () => {
     expect(mocks.listProjects).not.toHaveBeenCalledWith("workspace-1", "Archived");
   });
 
-  it("keeps the Standard Research form and adds a reachable Academic Research entry", () => {
+  it("keeps Standard Research available while Academic Research is hidden by default", () => {
+    vi.stubEnv("NEXT_PUBLIC_ACADEMIC_RESEARCH_ENABLED", undefined);
+    const markup = renderToStaticMarkup(ResearchStudioView());
+
+    expect(markup).not.toContain('href="/create/research/academic"');
+    expect(markup).toContain('class="research-studio-layout"');
+    expect(markup).toContain('type="submit"');
+    expect(markup).toContain("research.generate");
+  });
+
+  it("shows the Academic Research entry only when the explicit visibility flag is true", () => {
+    vi.stubEnv("NEXT_PUBLIC_ACADEMIC_RESEARCH_ENABLED", "true");
     const markup = renderToStaticMarkup(ResearchStudioView());
 
     expect(markup).toContain('href="/create/research/academic"');
