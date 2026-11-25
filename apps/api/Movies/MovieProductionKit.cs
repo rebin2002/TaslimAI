@@ -138,6 +138,10 @@ public sealed class MovieProductionKitService(
     TaslimDbContext db,
     MovieAuthorizationService authorization) : IMovieProductionKitService
 {
+    private const int MaximumRevisionAllocationAttempts = 3;
+    private const string KitProjectUniqueIndexName = "IX_MovieProductionKits_MovieProjectId";
+    private const string RevisionNumberUniqueIndexName = "IX_MovieProductionKitRevisions_MovieProductionKitId_RevisionNumber";
+
     public async Task<MovieProductionKitDto?> GetAsync(Guid userId, Guid movieProjectId, CancellationToken cancellationToken)
     {
         var kit = await LoadKitAsync(movieProjectId, cancellationToken);
@@ -158,11 +162,11 @@ public sealed class MovieProductionKitService(
             .SingleOrDefaultAsync(item => item.Id == movieProjectId, cancellationToken);
         if (movie is null) return null;
 
-        var kit = await db.MovieProductionKits
+        var existingKit = await db.MovieProductionKits
             .Include(item => item.Revisions)
             .ThenInclude(item => item.References)
             .SingleOrDefaultAsync(item => item.MovieProjectId == movieProjectId, cancellationToken);
-        if (kit?.LockedRevisionNumber is not null) throw new MovieProductionKitLifecycleException("MOVIE_PRODUCTION_KIT_LOCKED", "The Production Kit is locked; create a new hand-off only after it is unlocked.");
+        if (existingKit?.LockedRevisionNumber is not null) throw new MovieProductionKitLifecycleException("MOVIE_PRODUCTION_KIT_LOCKED", "The Production Kit is locked; create a new hand-off only after it is unlocked.");
 
         var guide = movie.Guide;
         if (guide is null) throw new MovieProductionKitValidationException("MOVIE_PRODUCTION_KIT_GUIDE_MISSING", "A Movie Guide is required before creating a Production Kit.");
@@ -172,49 +176,74 @@ public sealed class MovieProductionKitService(
         if (guide.LockedRevisionNumber is int lockedGuideRevision && lockedGuideRevision != sourceRevisionNumber)
             throw new MovieProductionKitValidationException("MOVIE_PRODUCTION_KIT_GUIDE_REVISION_STALE", "The Production Kit must reference the locked Movie Guide revision.");
 
-        var now = DateTime.UtcNow;
-        kit ??= new MovieProductionKit
-        {
-            Id = Guid.NewGuid(), MovieProjectId = movieProjectId, CurrentRevisionNumber = 0,
-            CreatedAt = now, UpdatedAt = now,
-        };
-        var revisionNumber = kit.CurrentRevisionNumber + 1;
-        var revision = new MovieProductionKitRevision
-        {
-            Id = Guid.NewGuid(), MovieProductionKitId = kit.Id, RevisionNumber = revisionNumber,
-            Status = MovieProductionKitStatuses.Draft, SourceGuideRevisionId = sourceRevision.Id,
-            SourceGuideRevisionNumber = sourceRevision.RevisionNumber,
-            SourceGuideHash = HashGuide(sourceRevision), Notes = Clean(request.Notes, 4_000),
-            CreatedByUserId = userId, CreatedAt = now,
-        };
         var references = request.References ?? [];
         if (references.Count > 128) throw new MovieProductionKitValidationException("MOVIE_PRODUCTION_KIT_TOO_MANY_REFERENCES", "A Production Kit cannot contain more than 128 references.");
-        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        foreach (var (item, index) in references.Select((item, index) => (item, index)))
+
+        for (var attempt = 0; attempt < MaximumRevisionAllocationAttempts; attempt++)
         {
-            var referenceType = (string.IsNullOrWhiteSpace(item.ReferenceType) ? item.SourceType : item.ReferenceType)?.Trim().ToLowerInvariant() ?? string.Empty;
-            if (!MovieProductionKitReferenceTypes.Supported.Contains(referenceType)) throw new MovieProductionKitValidationException("MOVIE_PRODUCTION_KIT_REFERENCE_TYPE_INVALID", $"Unsupported Production Kit reference type '{item.ReferenceType}'.");
-            if (item.SourceId == Guid.Empty) throw new MovieProductionKitValidationException("MOVIE_PRODUCTION_KIT_REFERENCE_INVALID", "Every Production Kit reference must identify a canonical source record.");
-            if (!seen.Add($"{referenceType}:{item.SourceId:N}:{item.SourceRevision}")) throw new MovieProductionKitValidationException("MOVIE_PRODUCTION_KIT_REFERENCE_DUPLICATE", "A Production Kit cannot contain the same source reference twice.");
-            await EnsureReferenceBelongsToMovieAsync(movie, item, referenceType, cancellationToken);
-            var provenance = NormalizeProvenance(item.ProvenanceJson);
-            revision.References.Add(new MovieProductionKitReference
+            // RevisionNumber is allocated from the latest committed kit state.
+            // The existing unique indexes remain the authoritative boundary when
+            // two hand-off requests read the same current revision concurrently.
+            var kit = await db.MovieProductionKits
+                .Include(item => item.Revisions)
+                .ThenInclude(item => item.References)
+                .SingleOrDefaultAsync(item => item.MovieProjectId == movieProjectId, cancellationToken);
+            if (kit?.LockedRevisionNumber is not null) throw new MovieProductionKitLifecycleException("MOVIE_PRODUCTION_KIT_LOCKED", "The Production Kit is locked; create a new hand-off only after it is unlocked.");
+
+            var now = DateTime.UtcNow;
+            kit ??= new MovieProductionKit
             {
-                Id = Guid.NewGuid(), MovieProductionKitRevisionId = revision.Id,
-                ReferenceType = referenceType, SourceId = item.SourceId, SourceRevision = item.SourceRevision,
-                Label = Clean(item.Label, 300), Role = Clean(item.Role, 160), IsRequired = item.IsRequired,
-                SourceHash = HashReference(referenceType, item.SourceId, item.SourceRevision, provenance),
-                ProvenanceJson = provenance, SortOrder = item.SortOrder ?? index,
-            });
+                Id = Guid.NewGuid(), MovieProjectId = movieProjectId, CurrentRevisionNumber = 0,
+                CreatedAt = now, UpdatedAt = now,
+            };
+            var revisionNumber = kit.CurrentRevisionNumber + 1;
+            var revision = new MovieProductionKitRevision
+            {
+                Id = Guid.NewGuid(), MovieProductionKitId = kit.Id, RevisionNumber = revisionNumber,
+                Status = MovieProductionKitStatuses.Draft, SourceGuideRevisionId = sourceRevision.Id,
+                SourceGuideRevisionNumber = sourceRevision.RevisionNumber,
+                SourceGuideHash = HashGuide(sourceRevision), Notes = Clean(request.Notes, 4_000),
+                CreatedByUserId = userId, CreatedAt = now,
+            };
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var (item, index) in references.Select((item, index) => (item, index)))
+            {
+                var referenceType = (string.IsNullOrWhiteSpace(item.ReferenceType) ? item.SourceType : item.ReferenceType)?.Trim().ToLowerInvariant() ?? string.Empty;
+                if (!MovieProductionKitReferenceTypes.Supported.Contains(referenceType)) throw new MovieProductionKitValidationException("MOVIE_PRODUCTION_KIT_REFERENCE_TYPE_INVALID", $"Unsupported Production Kit reference type '{item.ReferenceType}'.");
+                if (item.SourceId == Guid.Empty) throw new MovieProductionKitValidationException("MOVIE_PRODUCTION_KIT_REFERENCE_INVALID", "Every Production Kit reference must identify a canonical source record.");
+                if (!seen.Add($"{referenceType}:{item.SourceId:N}:{item.SourceRevision}")) throw new MovieProductionKitValidationException("MOVIE_PRODUCTION_KIT_REFERENCE_DUPLICATE", "A Production Kit cannot contain the same source reference twice.");
+                await EnsureReferenceBelongsToMovieAsync(movie, item, referenceType, cancellationToken);
+                var provenance = NormalizeProvenance(item.ProvenanceJson);
+                revision.References.Add(new MovieProductionKitReference
+                {
+                    Id = Guid.NewGuid(), MovieProductionKitRevisionId = revision.Id,
+                    ReferenceType = referenceType, SourceId = item.SourceId, SourceRevision = item.SourceRevision,
+                    Label = Clean(item.Label, 300), Role = Clean(item.Role, 160), IsRequired = item.IsRequired,
+                    SourceHash = HashReference(referenceType, item.SourceId, item.SourceRevision, provenance),
+                    ProvenanceJson = provenance, SortOrder = item.SortOrder ?? index,
+                });
+            }
+            revision.RevisionHash = HashRevision(revision, revision.References);
+            kit.CurrentRevisionNumber = revisionNumber;
+            kit.UpdatedAt = now;
+            if (kit.Id == Guid.Empty) throw new InvalidOperationException("Production Kit id was not initialized.");
+            if (db.Entry(kit).State == EntityState.Detached) db.MovieProductionKits.Add(kit);
+            db.MovieProductionKitRevisions.Add(revision);
+            try
+            {
+                await db.SaveChangesAsync(cancellationToken);
+                return await ToDtoAsync(await LoadKitAsync(movieProjectId, cancellationToken) ?? kit, cancellationToken);
+            }
+            catch (DbUpdateException exception) when (attempt + 1 < MaximumRevisionAllocationAttempts && IsProductionKitAllocationUniqueViolation(exception))
+            {
+                // A losing writer can retain stale tracked kit/revision state.
+                // Clear it before re-reading the committed winner and allocating
+                // the next canonical revision number.
+                db.ChangeTracker.Clear();
+            }
         }
-        revision.RevisionHash = HashRevision(revision, revision.References);
-        kit.CurrentRevisionNumber = revisionNumber;
-        kit.UpdatedAt = now;
-        if (kit.Id == Guid.Empty) throw new InvalidOperationException("Production Kit id was not initialized.");
-        if (db.Entry(kit).State == EntityState.Detached) db.MovieProductionKits.Add(kit);
-        db.MovieProductionKitRevisions.Add(revision);
-        await db.SaveChangesAsync(cancellationToken);
-        return await ToDtoAsync(await LoadKitAsync(movieProjectId, cancellationToken) ?? kit, cancellationToken);
+
+        throw new InvalidOperationException("Movie Production Kit revision allocation did not converge after concurrent retries.");
     }
 
     public async Task<MovieProductionKitDto?> SubmitForReviewAsync(Guid userId, Guid movieProjectId, int revisionNumber, CancellationToken cancellationToken)
@@ -286,6 +315,27 @@ public sealed class MovieProductionKitService(
         await db.SaveChangesAsync(cancellationToken);
         return await ToDtoAsync(kit, cancellationToken);
     }
+
+    internal static bool IsProductionKitAllocationUniqueViolation(DbUpdateException exception)
+    {
+        var details = exception.ToString();
+        var isUniqueViolation = details.Contains("duplicate key", StringComparison.OrdinalIgnoreCase)
+            || details.Contains("UNIQUE constraint failed", StringComparison.OrdinalIgnoreCase)
+            || details.Contains("Cannot insert duplicate key", StringComparison.OrdinalIgnoreCase);
+        if (!isUniqueViolation) return false;
+
+        return details.Contains(KitProjectUniqueIndexName, StringComparison.OrdinalIgnoreCase)
+            || details.Contains(RevisionNumberUniqueIndexName, StringComparison.OrdinalIgnoreCase)
+            // PostgreSQL truncates identifiers to 63 bytes and replaces the
+            // final byte with '~' when an EF-generated index name is longer.
+            || details.Contains(PostgresTruncatedIdentifier(KitProjectUniqueIndexName), StringComparison.OrdinalIgnoreCase)
+            || details.Contains(PostgresTruncatedIdentifier(RevisionNumberUniqueIndexName), StringComparison.OrdinalIgnoreCase)
+            || details.Contains("MovieProductionKits.MovieProjectId", StringComparison.OrdinalIgnoreCase)
+            || details.Contains("MovieProductionKitRevisions.MovieProductionKitId, MovieProductionKitRevisions.RevisionNumber", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static string PostgresTruncatedIdentifier(string identifier) =>
+        identifier.Length <= 63 ? identifier : identifier[..62] + "~";
 
     private async Task<MovieProductionKit?> LoadKitAsync(Guid movieProjectId, CancellationToken cancellationToken) =>
         await db.MovieProductionKits

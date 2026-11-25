@@ -365,7 +365,9 @@ public static class DirectVideoRequestNormalizer
     {
         if (values is null || values.Count == 0) return null;
         if (values.Count > maxCount) throw new DirectVideoRequestNormalizationException(DirectVideoErrorCodes.RequestInvalid);
-        var normalized = values.Select(item => new DirectVideoReferenceImage(
+        var normalized = values.Select(item => item is null
+            ? throw new DirectVideoRequestNormalizationException(DirectVideoErrorCodes.RequestInvalid)
+            : new DirectVideoReferenceImage(
             NormalizeMediaUri(item.Uri) ?? throw new DirectVideoRequestNormalizationException(DirectVideoErrorCodes.RequestInvalid),
             string.IsNullOrWhiteSpace(item.Role) ? null : item.Role.Trim()[..Math.Min(item.Role.Trim().Length, 80)])).ToArray();
         return normalized.Length == 0 ? null : normalized;
@@ -382,6 +384,48 @@ public static class DirectVideoRequestNormalizer
 
 public static class DirectVideoResultNormalizer
 {
+    /// <summary>
+    /// The video containers Taslim can actually persist at the private-storage boundary,
+    /// and the MIME type each one declares. A provider output outside this set, or whose
+    /// declared extension disagrees with its declared MIME type, can never become a ready
+    /// clip, so it is rejected here - from transport metadata alone - instead of surfacing
+    /// later as a storage failure after the provider body has already been transferred.
+    /// </summary>
+    private static readonly IReadOnlyDictionary<string, string> SupportedOutputContainers =
+        new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+        {
+            [".mp4"] = "video/mp4",
+            [".mov"] = "video/quicktime",
+            [".webm"] = "video/webm",
+        };
+
+    /// <summary>
+    /// Single source of truth for the output-size ceiling, so the declared-length preflight
+    /// and the final length validation cannot drift apart and buffer an oversized body.
+    /// </summary>
+    public static long NormalizeOutputCeiling(long maxOutputBytes) =>
+        Math.Clamp(maxOutputBytes, 1, 2L * 1024 * 1024 * 1024);
+
+    /// <summary>
+    /// Rejects an output that cannot be stored using only transport metadata, before any
+    /// body byte is read. A missing or non-positive declared length is not itself a
+    /// rejection: it is unknown, so the caller must still bound the bytes it reads.
+    /// </summary>
+    public static void ValidateOutputDeclaration(
+        string? contentType,
+        string? fileName,
+        long? declaredSizeBytes,
+        long maxOutputBytes)
+    {
+        var normalizedContentType = NormalizeContentType(contentType);
+        var normalizedFileName = NormalizeFileName(fileName);
+        if (normalizedContentType is null || normalizedFileName is null
+            || !IsStorableContainer(normalizedContentType, normalizedFileName))
+            throw new DirectVideoOutputNormalizationException();
+        if (declaredSizeBytes is > 0 && declaredSizeBytes.Value > NormalizeOutputCeiling(maxOutputBytes))
+            throw new DirectVideoOutputNormalizationException();
+    }
+
     public static DirectVideoStatus NormalizeStatus(DirectVideoProviderStatusResponse response)
     {
         ArgumentNullException.ThrowIfNull(response);
@@ -426,11 +470,12 @@ public static class DirectVideoResultNormalizer
         ArgumentNullException.ThrowIfNull(openReadAsync);
         var normalizedContentType = NormalizeContentType(contentType);
         var normalizedFileName = NormalizeFileName(fileName);
-        var maximum = Math.Clamp(maxOutputBytes, 1, 2L * 1024 * 1024 * 1024);
-        if (normalizedContentType is null || !normalizedContentType.StartsWith("video/", StringComparison.OrdinalIgnoreCase)
-            || normalizedFileName is null || sizeBytes <= 0 || sizeBytes > maximum)
+        var maximum = NormalizeOutputCeiling(maxOutputBytes);
+        if (normalizedContentType is null || normalizedFileName is null
+            || sizeBytes <= 0 || sizeBytes > maximum || durationSeconds is <= 0)
             throw new DirectVideoOutputNormalizationException();
-        if (durationSeconds is <= 0) throw new DirectVideoOutputNormalizationException();
+        if (!IsStorableContainer(normalizedContentType, normalizedFileName))
+            throw new DirectVideoOutputNormalizationException();
         return new DirectVideoProviderOutput(
             normalizedContentType,
             normalizedFileName,
@@ -450,6 +495,17 @@ public static class DirectVideoResultNormalizer
         if (string.IsNullOrWhiteSpace(value)) return null;
         var normalized = value.Trim().ToLowerInvariant();
         return normalized.StartsWith("video/", StringComparison.OrdinalIgnoreCase) ? normalized : null;
+    }
+
+    /// <summary>
+    /// True when the normalized MIME type and the normalized file name name the same
+    /// container and that container is one the private-storage boundary can persist.
+    /// </summary>
+    private static bool IsStorableContainer(string contentType, string fileName)
+    {
+        var extension = Path.GetExtension(fileName).ToLowerInvariant();
+        return SupportedOutputContainers.TryGetValue(extension, out var containerType)
+            && string.Equals(containerType, contentType, StringComparison.OrdinalIgnoreCase);
     }
 
     private static string? NormalizeFileName(string? value)
