@@ -9,12 +9,16 @@ namespace Taslim.Api.Tests;
 
 public sealed class VoiceGenerationFormatConsistencyTests
 {
-    [Fact]
-    public async Task Mismatched_audio_content_type_and_format_is_rejected_before_publication()
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("   ")]
+    public async Task Null_or_blank_provider_format_is_rejected_with_the_typed_exception(string? format)
     {
+        var provider = new InvalidVoiceFormatProvider(format);
         var handler = new VoiceGenerationJobHandler(
-            [new MismatchedVoiceProvider()],
-            Options.Create(new VoiceGenerationOptions { Enabled = true, ProviderKey = "mismatch" }),
+            [provider],
+            Options.Create(new VoiceGenerationOptions { Enabled = true, ProviderKey = "invalid-format" }),
             NullLogger<VoiceGenerationJobHandler>.Instance);
         var job = new GenerationJob
         {
@@ -26,19 +30,25 @@ public sealed class VoiceGenerationFormatConsistencyTests
 
         await Assert.ThrowsAsync<VoiceOutputInvalidException>(() =>
             handler.ExecuteAsync(job, new Progress<int>(), CancellationToken.None));
+        Assert.Equal(1, provider.Calls);
     }
 
-    private sealed class MismatchedVoiceProvider : IVoiceGenerationProvider
+    private sealed class InvalidVoiceFormatProvider(string? format) : IVoiceGenerationProvider
     {
-        public string Key => "mismatch";
+        public string Key => "invalid-format";
 
-        public Task<VoiceProviderResult> GenerateAsync(VoiceGenerationInput request, CancellationToken cancellationToken = default) =>
-            Task.FromResult(new VoiceProviderResult(
+        public int Calls { get; private set; }
+
+        public Task<VoiceProviderResult> GenerateAsync(VoiceGenerationInput request, CancellationToken cancellationToken = default)
+        {
+            Calls++;
+            return Task.FromResult(new VoiceProviderResult(
                 "ID3"u8.ToArray(),
                 "audio/mpeg",
-                "wav",
+                format!,
                 1000,
                 24000,
                 new VoiceProviderUsage("test", request.Text.Length, 3, 0m, 1)));
+        }
     }
 }

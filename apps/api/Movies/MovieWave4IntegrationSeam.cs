@@ -30,6 +30,7 @@ public static class MovieWave4ExportCodes
     public const string KeyframeRequired = "approved_keyframe_required";
     public const string FinalTakeRequired = "final_take_required";
     public const string VideoSourceRequired = "selected_video_source_required";
+    public const string NonFinalVideoSource = "non_final_video_source";
     public const string TrackAssetRequired = "track_asset_required";
     public const string CaptionTextRequired = "caption_text_required";
     public const string OutputFormatUnsupported = "output_format_unsupported";
@@ -153,6 +154,10 @@ public static class MovieWave4ExportSeam
             && item.AssetId.HasValue);
         if (video is null)
             return Blocked(MovieWave4ExportCodes.VideoSourceRequired, "The export must reference the selected take's video source.");
+        if (request.Timeline.Items.Any(item =>
+            item.TrackKind == MovieWave4TrackKinds.Video
+            && item.SourceTakeId != request.SelectedTakeId))
+            return Blocked(MovieWave4ExportCodes.NonFinalVideoSource, "Every video segment must reference the selected final take.");
         if (request.Timeline.Items.Any(item => item.TrackKind != MovieWave4TrackKinds.Captions && !item.AssetId.HasValue))
             return Blocked(MovieWave4ExportCodes.TrackAssetRequired, "Every non-caption track must reference a media asset.");
         if (request.Timeline.Items.Any(item => item.TrackKind == MovieWave4TrackKinds.Captions && string.IsNullOrWhiteSpace(item.CaptionText)))

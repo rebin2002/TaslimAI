@@ -13,6 +13,8 @@ export class SseProtocolError extends Error {
   }
 }
 
+export const SSE_MAX_EVENT_CHARS = 256 * 1024;
+
 export type SseParser = {
   push(chunk: string): void;
   end(): void;
@@ -23,11 +25,20 @@ export function createSseParser<TData extends Record<string, unknown> = Record<s
   let buffer = "";
   let eventName = "";
   let dataLines: string[] = [];
+  let eventChars = 0;
   let terminal = false;
 
   function resetEvent() {
     eventName = "";
     dataLines = [];
+    eventChars = 0;
+  }
+
+  function accountForEventChars(chars: number) {
+    eventChars += chars;
+    if (eventChars > SSE_MAX_EVENT_CHARS) {
+      throw new SseProtocolError("SSE event exceeded the maximum size.");
+    }
   }
 
   function dispatchEvent() {
@@ -58,6 +69,7 @@ export function createSseParser<TData extends Record<string, unknown> = Record<s
       dispatchEvent();
       return;
     }
+    accountForEventChars(line.length);
     if (line.startsWith(":")) return;
 
     const separator = line.indexOf(":");
@@ -73,7 +85,12 @@ export function createSseParser<TData extends Record<string, unknown> = Record<s
     buffer += chunk;
     while (true) {
       const match = /(\r\n|\n|\r)/.exec(buffer);
-      if (!match || (match[0] === "\r" && match.index + 1 === buffer.length)) return;
+      if (!match || (match[0] === "\r" && match.index + 1 === buffer.length)) {
+        if (buffer.length > SSE_MAX_EVENT_CHARS) {
+          throw new SseProtocolError("SSE event exceeded the maximum size.");
+        }
+        return;
+      }
       const line = buffer.slice(0, match.index);
       buffer = buffer.slice(match.index + match[0].length);
       processLine(line);

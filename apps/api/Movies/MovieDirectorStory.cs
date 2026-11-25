@@ -573,7 +573,7 @@ public sealed class DirectorStoryProposalPlanner(IMovieSynopsisDevelopmentServic
         if (IsGenericBoilerplate(premise) && analysis.SourceFacts.Count > 0)
         {
             var brief = context.MovieBrief.Trim();
-            premise = $"{(brief.Length <= 280 ? brief : brief[..280]).TrimEnd('.')}. {opening} {pressure} {choice}";
+            premise = $"{TakeWholeCharacters(brief, 280).TrimEnd('.')}. {opening} {pressure} {choice}";
         }
         return LimitPremise(premise);
     }
@@ -688,7 +688,39 @@ public sealed class DirectorStoryProposalPlanner(IMovieSynopsisDevelopmentServic
         _ => LanguageCodes.English,
     };
 
-    private static string LimitPremise(string value) => value.Trim().Length <= 1_800 ? value.Trim() : $"{value.Trim()[..1_797]}…";
+    /// <summary>
+    /// Bounds the rendered premise to the same 1_800 code unit ceiling the Story Director columns
+    /// accept, without ever cutting a supplementary character in half. The user-authored brief is
+    /// spliced into the front of the rendered premise, so the last kept code unit of a plain
+    /// <c>[..1_797]</c> slice can be the high half of a surrogate pair. A stranded high surrogate is
+    /// not a character: <see cref="System.Text.Json"/> cannot emit it and PostgreSQL replaces it on
+    /// the way to storage, so the persisted and returned premise stops being the rendered text. The
+    /// ellipsis budget is reserved first, and the gate drops the split pair the same way the
+    /// document, search, social and generated-asset boundaries do.
+    /// </summary>
+    private static string LimitPremise(string value)
+    {
+        const int ceiling = 1_800;
+        const int ellipsisBudget = 3;
+        var trimmed = value.Trim();
+        return trimmed.Length <= ceiling
+            ? trimmed
+            : $"{TakeWholeCharacters(trimmed, ceiling - ellipsisBudget)}…";
+    }
+
+    /// <summary>
+    /// Takes at most <paramref name="maxLength"/> UTF-16 code units, stepping back one unit when the
+    /// boundary would otherwise land between the two halves of a surrogate pair.
+    /// </summary>
+    private static string TakeWholeCharacters(string value, int maxLength)
+    {
+        if (value.Length <= maxLength)
+        {
+            return value;
+        }
+        var length = maxLength > 0 && char.IsHighSurrogate(value[maxLength - 1]) ? maxLength - 1 : maxLength;
+        return value[..Math.Max(0, length)];
+    }
 
     private static string? MatchValue(string value, string pattern)
     {
