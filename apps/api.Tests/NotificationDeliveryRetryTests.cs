@@ -51,4 +51,23 @@ public sealed class NotificationDeliveryRetryTests
             delay: static _ => TimeSpan.Zero,
             cancellationToken: cancellation.Token));
     }
+
+    [Fact]
+    public async Task Does_not_start_delivery_when_already_cancelled()
+    {
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+        var attempts = 0;
+
+        await Assert.ThrowsAsync<OperationCanceledException>(() => NotificationDeliveryRetry.TryExecuteAsync(
+            () =>
+            {
+                attempts++;
+                return Task.CompletedTask;
+            },
+            delay: static _ => TimeSpan.Zero,
+            cancellationToken: cancellation.Token));
+
+        Assert.Equal(0, attempts);
+    }
 }
