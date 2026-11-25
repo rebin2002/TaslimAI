@@ -4,6 +4,7 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
+using Taslim.Api.Authorization;
 using Taslim.Api.Contracts;
 using Taslim.Api.Domain;
 using Taslim.Api.Generation;
@@ -21,6 +22,7 @@ public sealed class ImageGenerationController(
     IOptions<ImageGenerationOptions> options,
     IImagePromptBuilder promptBuilder,
     IUsageCostControl costControl,
+    WorkspaceAccessService access,
     IEnumerable<IImageGenerationProvider> providers) : ControllerBase
 {
     [HttpPost("jobs")]
@@ -30,6 +32,9 @@ public sealed class ImageGenerationController(
     {
         try
         {
+            var userId = GetUserId();
+            if (!await access.IsMemberAsync(userId, request.WorkspaceId, cancellationToken))
+                return Forbid();
             if (!options.Value.Enabled)
                 return ApiResults.Error(this, StatusCodes.Status503ServiceUnavailable, "IMAGE_STUDIO_UNAVAILABLE", "Image generation is not available right now.");
             var input = ImageGenerationContractMapper.ToInput(request);
@@ -42,7 +47,7 @@ public sealed class ImageGenerationController(
             var preflight = await costControl.CheckPreflightAsync(request.WorkspaceId, UsageFeature.Image, estimate, cancellationToken);
             if (!preflight.Allowed)
                 return ApiResults.Error(this, StatusCodes.Status429TooManyRequests, preflight.RejectionCode ?? "COST_GUARDRAIL_REJECTED", preflight.RejectionMessage ?? "This operation exceeds a configured safety limit.");
-            var job = await jobs.CreateAsync(GetUserId(), new CreateGenerationJobRequest
+            var job = await jobs.CreateAsync(userId, new CreateGenerationJobRequest
             {
                 WorkspaceId = request.WorkspaceId,
                 ProjectId = request.ProjectId,
