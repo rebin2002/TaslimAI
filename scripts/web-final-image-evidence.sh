@@ -10,7 +10,8 @@ mock_pid=""
 started=0
 cleanup() {
     if (( started == 1 )); then docker rm --force "$container_name" >/dev/null 2>&1 || true; fi
-    if [[ -n "$mock_pid" ]]; then kill "$mock_pid" >/dev/null 2>&1 || true; wait "$mock_pid" >/dev/null 2>&1 || true; fi
+    if [[ -f "$tmp_dir/mock.pid" ]]; then sudo -n kill "$(cat "$tmp_dir/mock.pid")" >/dev/null 2>&1 || true; fi
+    if [[ -n "$mock_pid" ]]; then wait "$mock_pid" >/dev/null 2>&1 || true; fi
     rm -rf "$tmp_dir"
 }
 trap cleanup EXIT
@@ -70,11 +71,11 @@ NODE
 
 # Local TLS API stub, entirely synthetic. The real Next.js container is configured
 # to proxy its login POST to this stub; no production host/provider/account is used.
-api_port="$(python3 - <<'PY'
-import socket
-s=socket.socket(); s.bind(("0.0.0.0", 0)); print(s.getsockname()[1]); s.close()
-PY
-)"
+api_port=443
+if ! sudo -n python3 -c 'import socket; s=socket.socket(); s.bind(("0.0.0.0",443)); s.close()' >/dev/null 2>&1; then
+    echo 'Hosted runner cannot bind the synthetic HTTPS API stub on the compiled origin port 443.' >&2
+    exit 1
+fi
 openssl req -x509 -newkey rsa:2048 -nodes \
     -keyout "$tmp_dir/api.key" -out "$tmp_dir/api.crt" -days 1 \
     -subj "/CN=api.example.test" \
@@ -82,8 +83,9 @@ openssl req -x509 -newkey rsa:2048 -nodes \
     -addext "basicConstraints=critical,CA:TRUE" >/dev/null 2>&1
 cat > "$tmp_dir/mock_api.py" <<'PY'
 import http.server, json, os, ssl, sys
-port, cert, key, capture = int(sys.argv[1]), sys.argv[2], sys.argv[3], sys.argv[4]
+port, cert, key, capture, pidfile = int(sys.argv[1]), sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5]
 expected = {"email": "image-smoke@example.invalid", "password": "ProxyOnlySynthetic!123"}
+with open(pidfile, "w", encoding="utf-8") as f: f.write(str(os.getpid()))
 class Handler(http.server.BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         # Avoid logging request bodies or synthetic credentials.
@@ -117,15 +119,15 @@ ctx.load_cert_chain(cert, key)
 server.socket = ctx.wrap_socket(server.socket, server_side=True)
 server.serve_forever()
 PY
-python3 "$tmp_dir/mock_api.py" "$api_port" "$tmp_dir/api.crt" "$tmp_dir/api.key" "$tmp_dir/captured-request.json" > "$tmp_dir/mock-api.log" 2>&1 &
+sudo -n python3 "$tmp_dir/mock_api.py" "$api_port" "$tmp_dir/api.crt" "$tmp_dir/api.key" "$tmp_dir/captured-request.json" "$tmp_dir/mock.pid" > "$tmp_dir/mock-api.log" 2>&1 &
 mock_pid=$!
 for _ in $(seq 1 30); do
-    if curl --silent --show-error --fail --cacert "$tmp_dir/api.crt" \
+    if curl --noproxy '*' --silent --show-error --fail --cacert "$tmp_dir/api.crt" \
         --resolve "api.example.test:${api_port}:127.0.0.1" \
         "https://api.example.test:${api_port}/health" >/dev/null 2>&1; then break; fi
     sleep 1
 done
-if ! curl --silent --show-error --fail --cacert "$tmp_dir/api.crt" \
+if ! curl --noproxy '*' --silent --show-error --fail --cacert "$tmp_dir/api.crt" \
     --resolve "api.example.test:${api_port}:127.0.0.1" \
     "https://api.example.test:${api_port}/health" >/dev/null; then
     echo 'Synthetic HTTPS API stub did not become ready.' >&2
@@ -141,7 +143,7 @@ docker run --detach --publish "${web_port}:${web_port}" --name "$container_name"
     --env PORT="$web_port" \
     --env HOSTNAME=0.0.0.0 \
     --env NODE_EXTRA_CA_CERTS=/tmp/final-image-smoke-api.crt \
-    --env "NEXT_PUBLIC_API_URL=https://api.example.test:${api_port}" \
+    --env NEXT_PUBLIC_API_URL=https://api.example.test \
     "$image" >/dev/null
 started=1
 
