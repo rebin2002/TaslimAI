@@ -3,7 +3,7 @@
 /* eslint-disable react-hooks/set-state-in-effect -- loaders synchronize persisted read models. */
 /* eslint-disable react-hooks/exhaustive-deps -- loader identity follows the project route. */
 import Link from "next/link";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { AlertTriangle, ArrowUpRight, CheckCircle2, Image as ImageIcon, LockKeyhole, MapPinned, Package, ShieldCheck, Sparkles, UsersRound } from "lucide-react";
 import { api, type MovieCast, type MovieCharacter, type MovieProp, type MovieWorldWorkspace } from "@/lib/api";
 import { assetFileUrl } from "@/lib/apiBase";
@@ -90,29 +90,52 @@ export function ProductionKitWorkspace({ projectId }: { projectId: string }) {
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
+  const loadGeneration = useRef(0);
+  const selectionGeneration = useRef(0);
+  const currentProjectId = useRef(projectId);
 
   async function load(nextRoom = room, nextId: string | null = selectedId) {
+    const requestProjectId = projectId;
+    if (currentProjectId.current !== requestProjectId) return;
+    const generation = ++loadGeneration.current;
+    const selectionAtStart = selectionGeneration.current;
+    const isCurrentLoad = () => generation === loadGeneration.current && currentProjectId.current === requestProjectId;
+    const isCurrentSelection = () => selectionAtStart === selectionGeneration.current;
     setLoading(true);
     setError("");
     try {
       const [nextCast, nextWorld] = await Promise.all([api.getMovieCast(projectId), api.getMovieWorld(projectId)]);
+      if (!isCurrentLoad()) return;
       setCast(nextCast);
       setWorld(nextWorld);
+      if (!isCurrentSelection()) return;
       const nextRecords = buildKitRecords(nextRoom, nextCast, nextWorld);
       const resolvedId = nextId && nextRecords.some((record) => record.id === nextId) ? nextId : nextRecords[0]?.id ?? null;
       setSelectedId(resolvedId);
       if (nextRoom === "characters" && resolvedId) {
         const detail = await api.getMovieCharacterDetail(resolvedId);
+        if (!isCurrentLoad() || !isCurrentSelection()) return;
         setCharacterDetail(detail.character);
       } else {
         setCharacterDetail(null);
       }
     } catch (cause) {
+      if (!isCurrentLoad() || !isCurrentSelection()) return;
       setError(cause instanceof Error ? cause.message : "The Production Kit could not be loaded.");
     } finally {
-      setLoading(false);
+      if (isCurrentLoad()) setLoading(false);
     }
   }
+
+  useLayoutEffect(() => {
+    currentProjectId.current = projectId;
+    loadGeneration.current += 1;
+    selectionGeneration.current += 1;
+    return () => {
+      loadGeneration.current += 1;
+      selectionGeneration.current += 1;
+    };
+  }, [projectId]);
 
   useEffect(() => {
     void load("characters", null);
@@ -143,6 +166,9 @@ export function ProductionKitWorkspace({ projectId }: { projectId: string }) {
   }, [cast, world]);
 
   async function selectRoom(nextRoom: KitRoom) {
+    const selection = ++selectionGeneration.current;
+    const requestProjectId = projectId;
+    const isCurrentSelection = () => selection === selectionGeneration.current && currentProjectId.current === requestProjectId;
     setRoom(nextRoom);
     const nextRecords = buildKitRecords(nextRoom, cast, world);
     const nextId = nextRecords[0]?.id ?? null;
@@ -151,8 +177,10 @@ export function ProductionKitWorkspace({ projectId }: { projectId: string }) {
     if (nextRoom === "characters" && nextId) {
       try {
         const detail = await api.getMovieCharacterDetail(nextId);
+        if (!isCurrentSelection()) return;
         setCharacterDetail(detail.character);
       } catch (cause) {
+        if (!isCurrentSelection()) return;
         setError(cause instanceof Error ? cause.message : "The character could not be loaded.");
       }
     } else {
@@ -161,13 +189,18 @@ export function ProductionKitWorkspace({ projectId }: { projectId: string }) {
   }
 
   async function selectRecord(id: string) {
+    const selection = ++selectionGeneration.current;
+    const requestProjectId = projectId;
+    const isCurrentSelection = () => selection === selectionGeneration.current && currentProjectId.current === requestProjectId;
     setSelectedId(id);
     setError("");
     if (room !== "characters") return;
     try {
       const detail = await api.getMovieCharacterDetail(id);
+      if (!isCurrentSelection()) return;
       setCharacterDetail(detail.character);
     } catch (cause) {
+      if (!isCurrentSelection()) return;
       setError(cause instanceof Error ? cause.message : "The character could not be loaded.");
     }
   }
