@@ -6,7 +6,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useAuth } from "@/components/AuthProvider";
 import { useLocale } from "@/components/LocaleProvider";
 import { api, type GenerationJob } from "@/lib/api";
-import { canCancelGenerationJob, isTerminalJob, mergeGenerationJob } from "@/lib/generationJobsState";
+import { canCancelGenerationJob, describeGenerationJobsSurface, isCurrentGenerationJobsAlert, isCurrentGenerationJobsWork, isJobReadableInWorkspace, isTerminalJob, mergeGenerationJobIntoRead, readGenerationJobs, resolveGenerationJobsDetail, type GenerationJobsAlert, type GenerationJobsRead, type GenerationJobsSelection, type GenerationJobsWork } from "@/lib/generationJobsState";
 import { nextGenerationJobPollDelay } from "@/lib/generationJobsPolling";
 
 type Translate = (key: string, variables?: Record<string, string>) => string;
@@ -97,130 +97,157 @@ export function GenerationJobList({ jobs, activeJobId, t, onSelect }: Generation
 export function GenerationJobsView() {
   const { workspace } = useAuth();
   const { t } = useLocale();
-  const [jobs, setJobs] = useState<GenerationJob[]>([]);
-  const [current, setCurrent] = useState<GenerationJob | null>(null);
+  // The session's personal workspace can be reassigned while this page stays mounted, so the whole
+  // page is rendered from a read that carries the identity of what it read: the workspace id it
+  // describes and the list attempt that produced it.
+  const workspaceId = workspace?.id ?? null;
+  const [read, setRead] = useState<GenerationJobsRead | null>(null);
+  const [selection, setSelection] = useState<GenerationJobsSelection | null>(null);
+  const [alert, setAlert] = useState<GenerationJobsAlert | null>(null);
   const [loading, setLoading] = useState(true);
-  const [working, setWorking] = useState(false);
-  const [error, setError] = useState("");
-  const [canRetryLoad, setCanRetryLoad] = useState(false);
+  const [workingRequest, setWorkingRequest] = useState<GenerationJobsWork | null>(null);
+  const [attemptEpoch, setAttemptEpoch] = useState(0);
   const requestGeneration = useRef(0);
   const selectionGeneration = useRef(0);
   const [pollRetryGeneration, setPollRetryGeneration] = useState(0);
-
+  // Mirror the request generation in state for render-time busy checks: React refs
+  // must not be read during render, and a workspace change invalidates stale work.
+  const [liveRequestGeneration, setLiveRequestGeneration] = useState(0);
+  // Derive busy synchronously: the old workspace must not keep new controls disabled
+  // while a superseded create/cancel promise is still settling.
+  const working = isCurrentGenerationJobsWork(workingRequest, workspaceId, liveRequestGeneration);
   const loadRecent = useCallback(async () => {
-    if (!workspace) {
+    if (!workspaceId) {
+      // No workspace to read: retire the held read and everything built from it.
       requestGeneration.current += 1;
-      setJobs([]);
-      setCurrent(null);
+      setLiveRequestGeneration(requestGeneration.current);
+      setAttemptEpoch(requestGeneration.current);
+      setRead(null);
+      setSelection(null);
+      setAlert(null);
       setLoading(false);
       return;
     }
     const request = ++requestGeneration.current;
-    const workspaceId = workspace.id;
+    setLiveRequestGeneration(request);
+    setAttemptEpoch(request);
     setLoading(true);
-    setError("");
-    setCanRetryLoad(false);
+    setAlert(null);
     try {
       const result = await api.listGenerationJobs(workspaceId);
       if (request !== requestGeneration.current) return;
-      setJobs(result.items);
+      setRead({ workspaceId, epoch: request, jobs: result.items });
     } catch (caught) {
       if (request !== requestGeneration.current) return;
-      setError(caught instanceof Error ? caught.message : t("jobs.loadError"));
-      setCanRetryLoad(true);
+      setAlert({ workspaceId, epoch: request, message: caught instanceof Error ? caught.message : t("jobs.loadError"), retryable: true });
     } finally {
       if (request === requestGeneration.current) setLoading(false);
     }
-  }, [t, workspace]);
-
-  // The protected page synchronizes its initial state with the server-side job list.
-  // eslint-disable-next-line react-hooks/set-state-in-effect
+  }, [t, workspaceId]);
+  // The protected page synchronizes its initial state with the server-side job list: the load is
+  // started here, and its state is published only while it is still the newest read.
   useEffect(() => { void loadRecent(); }, [loadRecent]);
-
+  // The detail panel, its cancel control and the poll timer are all derived from the current read.
+  // Nothing the view renders or re-arms can be a record from a workspace it no longer serves, nor a
+  // record remembered from a read of the same workspace that the session has since superseded -
+  // the workspace fence alone cannot tell those two apart, the read identity can.
+  const activeJob = resolveGenerationJobsDetail({ read, selection, activeWorkspaceId: workspaceId, attemptEpoch });
   useEffect(() => {
-    const selectedJob = current;
-    const pollDelay = nextGenerationJobPollDelay(selectedJob);
-    if (!selectedJob || pollDelay === null) return;
+    const pollDelay = nextGenerationJobPollDelay(activeJob);
+    if (!activeJob || pollDelay === null) return;
     let active = true;
-    const jobId = selectedJob.id;
+    const jobId = activeJob.id;
+    const epoch = requestGeneration.current;
     const poll = async () => {
       try {
         const next = await api.getGenerationJob(jobId);
         if (!active) return;
-        setCurrent(next);
-        setJobs((previous) => mergeGenerationJob({ jobs: previous, selectedJobId: next.id, error: "" }, next).jobs);
+        // The answer belongs to a read this page has already superseded: retire it with that read.
+        if (epoch !== requestGeneration.current) return;
+        setRead((previous) => mergeGenerationJobIntoRead(previous, next, workspaceId, attemptEpoch));
       } catch (caught) {
-        if (active) {
-          setError(caught instanceof Error ? caught.message : t("jobs.pollError"));
-          setCanRetryLoad(true);
+        if (active && workspaceId && epoch === requestGeneration.current) {
+          setAlert({ workspaceId, epoch: attemptEpoch, message: caught instanceof Error ? caught.message : t("jobs.pollError"), retryable: true });
         }
       }
     };
     const timer = window.setTimeout(() => { void poll(); }, pollDelay);
     return () => { active = false; window.clearTimeout(timer); };
-  }, [current, pollRetryGeneration, t]);
-
+  }, [activeJob, attemptEpoch, pollRetryGeneration, t, workspaceId]);
   function selectJob(job: GenerationJob) {
+    if (!workspaceId || !isJobReadableInWorkspace(job, workspaceId)) return;
     selectionGeneration.current += 1;
-    setCurrent(job);
-    setError("");
-    setCanRetryLoad(false);
+    setSelection({ workspaceId, jobId: job.id });
+    setAlert(null);
   }
-
   function retryLoad() {
-    if (current && !isTerminalJob(current)) {
+    if (activeJob && !isTerminalJob(activeJob)) {
       setPollRetryGeneration((value) => value + 1);
-      setCanRetryLoad(false);
-      setError("");
+      setAlert(null);
       return;
     }
     void loadRecent();
   }
-
   async function createTestJob() {
-    if (!workspace) return;
+    if (!workspaceId) return;
+    // Starting a mutation supersedes the outstanding list request. Remember
+    // whether we interrupted that read so its loading state cannot be stranded.
+    const interruptedListRead = loading;
     const request = ++requestGeneration.current;
+    setLiveRequestGeneration(request);
     const selection = selectionGeneration.current;
-    const workspaceId = workspace.id;
-    setWorking(true);
-    setError("");
-    setCanRetryLoad(false);
+    setWorkingRequest({ workspaceId, request });
+    setAlert(null);
     try {
       const job = await api.createGenerationJob(workspaceId, JSON.stringify({ purpose: "foundation-check" }), t("jobs.testTitle"));
       if (request !== requestGeneration.current) return;
-      setJobs((previous) => mergeGenerationJob({ jobs: previous, selectedJobId: job.id, error: "" }, job).jobs);
-      if (selection === selectionGeneration.current) setCurrent(job);
+      setRead((previous) => mergeGenerationJobIntoRead(previous, job, workspaceId, attemptEpoch));
+      if (selection === selectionGeneration.current && isJobReadableInWorkspace(job, workspaceId)) setSelection({ workspaceId, jobId: job.id });
+      // The first list response can no longer settle after this mutation bumped
+      // the generation. Refresh its authoritative page so older history rows
+      // are not lost behind the newly created job.
+      if (interruptedListRead) void loadRecent();
     } catch (caught) {
       if (request !== requestGeneration.current) return;
-      setError(caught instanceof Error ? caught.message : t("jobs.createError"));
+      // No list completion can clear loading now. Settle the view and allow the
+      // normal Retry to load history, while keeping the Create error visible.
+      if (interruptedListRead) setLoading(false);
+      setAlert({ workspaceId, epoch: attemptEpoch, message: caught instanceof Error ? caught.message : t("jobs.createError"), retryable: interruptedListRead });
     } finally {
-      if (request === requestGeneration.current) setWorking(false);
+      // Retire only this action; a newer workspace's pending request owns its own indicator.
+      setWorkingRequest((previous) => previous?.request === request && previous.workspaceId === workspaceId ? null : previous);
     }
   }
-
   async function cancelJob(job: GenerationJob) {
+    // Fail closed before the mutation is issued: with no workspace bound to the page there is no
+    // read this job could belong to.
+    if (!workspaceId || !isJobReadableInWorkspace(job, workspaceId)) return;
     const request = ++requestGeneration.current;
+    setLiveRequestGeneration(request);
     const selection = selectionGeneration.current;
-    setWorking(true);
-    setError("");
-    setCanRetryLoad(false);
+    setWorkingRequest({ workspaceId, request });
+    setAlert(null);
     try {
       await api.cancelGenerationJob(job.id);
       const next = await api.getGenerationJob(job.id);
       if (request !== requestGeneration.current) return;
-      setJobs((previous) => mergeGenerationJob({ jobs: previous, selectedJobId: next.id, error: "" }, next).jobs);
-      if (selection === selectionGeneration.current) setCurrent(next);
+      setRead((previous) => mergeGenerationJobIntoRead(previous, next, workspaceId, attemptEpoch));
+      if (selection === selectionGeneration.current && isJobReadableInWorkspace(next, workspaceId)) setSelection({ workspaceId, jobId: next.id });
     } catch (caught) {
       if (request !== requestGeneration.current) return;
-      setError(caught instanceof Error ? caught.message : t("jobs.cancelError"));
+      setAlert({ workspaceId, epoch: attemptEpoch, message: caught instanceof Error ? caught.message : t("jobs.cancelError"), retryable: false });
     } finally {
-      if (request === requestGeneration.current) setWorking(false);
+      // Retire only this action; a newer workspace's pending request owns its own indicator.
+      setWorkingRequest((previous) => previous?.request === request && previous.workspaceId === workspaceId ? null : previous);
     }
   }
-
-  const activeJob = current ?? jobs[0] ?? null;
+  // Everything the page can say is derived from that one read, in the same render as the
+  // AuthProvider workspace change. Waiting for loadRecent's effect would leave a retired read -
+  // rows, titles, result payloads, a detail panel or a failure alert - on screen for a render.
+  const visibleJobs = readGenerationJobs(read, workspaceId, attemptEpoch);
+  const currentAlert = isCurrentGenerationJobsAlert(alert, workspaceId, attemptEpoch) ? alert : null;
+  const surface = describeGenerationJobsSurface({ activeWorkspaceId: workspaceId, read, attemptEpoch, loading, alert: currentAlert });
   const canCancel = canCancelGenerationJob(activeJob);
-
   return <div className="account-page generation-jobs-page">
     <div className="account-header">
       <div><p className="section-eyebrow">{t("jobs.eyebrow")}</p><h1>{t("jobs.title")}</h1><p>{t("jobs.subtitle")}</p></div>
@@ -230,13 +257,13 @@ export function GenerationJobsView() {
       <section className="account-card generation-job-card" aria-labelledby="generation-test-job-title">
         <div className="card-title"><span className="card-title-icon teal"><Play size={17} aria-hidden="true" /></span><div><h2 id="generation-test-job-title">{t("jobs.testTitle")}</h2><p>{t("jobs.testSubtitle")}</p></div></div>
         <button type="button" className="primary-button generation-create-button" onClick={() => void createTestJob()} disabled={working} aria-busy={working}><Play size={15} aria-hidden="true" /> {working ? t("jobs.working") : t("jobs.create")}</button>
-        {error && <div className="form-error" role="alert" aria-atomic="true"><span>{error}</span></div>}
-        {error && canRetryLoad && <button type="button" className="secondary-button generation-retry-button" onClick={retryLoad} disabled={loading} aria-busy={loading}>{t("jobs.retry")}</button>}
+        {currentAlert && <div className="form-error" role="alert" aria-atomic="true"><span>{currentAlert.message}</span></div>}
+        {currentAlert?.retryable && <button type="button" className="secondary-button generation-retry-button" onClick={retryLoad} disabled={loading} aria-busy={loading}>{t("jobs.retry")}</button>}
         {activeJob && <GenerationJobDetail job={activeJob} t={t} canCancel={canCancel} working={working} onCancel={() => void cancelJob(activeJob)} />}
       </section>
       <section className="account-card generation-recent-card" aria-labelledby="generation-recent-title">
         <div className="card-title"><span className="card-title-icon"><Clock3 size={17} aria-hidden="true" /></span><div><h2 id="generation-recent-title">{t("jobs.recent")}</h2><p>{t("jobs.recentSubtitle")}</p></div></div>
-        {loading ? <div className="generation-empty" role="status" aria-live="polite">{t("jobs.loading")}</div> : jobs.length === 0 ? <div className="generation-empty" role="status" aria-live="polite">{t("jobs.empty")}</div> : <GenerationJobList jobs={jobs} activeJobId={activeJob?.id ?? null} t={t} onSelect={selectJob} />}
+        {surface === "loading" ? <div className="generation-empty" role="status" aria-live="polite">{t("jobs.loading")}</div> : surface === "empty" ? <div className="generation-empty" role="status" aria-live="polite">{t("jobs.empty")}</div> : <GenerationJobList jobs={visibleJobs} activeJobId={activeJob?.id ?? null} t={t} onSelect={selectJob} />}
       </section>
     </div>
   </div>;

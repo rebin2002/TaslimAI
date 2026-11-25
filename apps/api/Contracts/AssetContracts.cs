@@ -1,4 +1,5 @@
 using System.ComponentModel.DataAnnotations;
+using Taslim.Api.Assets;
 using Taslim.Api.Domain;
 
 namespace Taslim.Api.Contracts;
@@ -40,7 +41,14 @@ public sealed record AssetRepresentationDto(
     string FileName,
     string ContentType,
     long SizeBytes,
-    DateTime CreatedAt);
+    DateTime CreatedAt,
+    // Advertised-download fact: it is computed by AssetService.CanDownloadRepresentation, the very
+    // predicate AssetService.GetDownloadAsync enforces before it answers 409 ASSET_FILE_UNAVAILABLE
+    // (file Ready *and* readable by this member *and*, for documents, representation/file metadata
+    // consistent). The read model therefore never promises a download the route would refuse, on
+    // any of the three branches (#1030 invariant; QA observation A on #1041). Identity and
+    // metadata above are retained regardless, so the format row stays visible.
+    bool CanDownload);
 
 public sealed record AssetListDto(
     IReadOnlyList<AssetDto> Items,
@@ -61,7 +69,7 @@ public sealed record AssetFilter(
 
 public static class AssetContractMapper
 {
-    public static AssetDto ToDto(Asset asset) => new(
+    public static AssetDto ToDto(Asset asset, Guid viewerUserId) => new(
         asset.Id,
         asset.WorkspaceId,
         asset.ProjectId,
@@ -71,18 +79,25 @@ public static class AssetContractMapper
         asset.AssetType,
         asset.MimeType,
         asset.Status.ToString(),
-        asset.StoredFileId.HasValue,
-        asset.StoredFileId.HasValue && (asset.MimeType?.StartsWith("image/", StringComparison.OrdinalIgnoreCase) == true
+        // A rendition is only something the library can show or fetch while its stored file is
+        // Ready. An expired or pruned rendition keeps the asset's StoredFileId — that is exactly
+        // what FileProcessingService.DeleteAsync leaves behind — so availability has to be read
+        // from the file's status, the same fact the download route enforces. Reporting the
+        // identity alone promises a preview and a download that dead-end, and keeps the Assets
+        // library detail view's unavailable fallback from ever firing for a live row.
+        asset.StoredFile is { Status: StoredFileStatus.Ready },
+        asset.StoredFile is { Status: StoredFileStatus.Ready } && (asset.MimeType?.StartsWith("image/", StringComparison.OrdinalIgnoreCase) == true
             || asset.MimeType?.StartsWith("audio/", StringComparison.OrdinalIgnoreCase) == true
             || asset.MimeType?.StartsWith("video/", StringComparison.OrdinalIgnoreCase) == true),
-        asset.StoredFile?.SizeBytes,
+        asset.StoredFile is { Status: StoredFileStatus.Ready } ? asset.StoredFile.SizeBytes : null,
         SourceStudioKey(asset.SourceGenerationJob?.JobType),
         asset.SourceGenerationJob?.Title,
         asset.CreatedAt,
         asset.UpdatedAt,
         asset.ArchivedAt,
         asset.Representations.OrderBy(item => item.RepresentationType)
-            .Select(item => new AssetRepresentationDto(item.Id, item.RepresentationType, item.FileName, item.ContentType, item.SizeBytes, item.CreatedAt))
+            .Select(item => new AssetRepresentationDto(item.Id, item.RepresentationType, item.FileName, item.ContentType, item.SizeBytes, item.CreatedAt,
+                AssetService.CanDownloadRepresentation(asset, item, item.StoredFile, viewerUserId)))
             .ToArray());
 
     private static string? SourceStudioKey(string? jobType) => jobType?.ToLowerInvariant() switch

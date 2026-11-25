@@ -204,7 +204,7 @@ public sealed class VideoGenerationAdapterExecutionSession
             VideoGenerationContract.ValidateStatus(result.CurrentStatus);
             events.TryApplyPolledStatus(result.CurrentStatus);
         }
-        return result with { CurrentStatus = result.CurrentStatus ?? CurrentStatus };
+        return result with { CurrentStatus = CurrentStatus };
     }
 
     public async Task<VideoGenerationArtifact> RetrieveArtifactAsync(CancellationToken cancellationToken = default)
