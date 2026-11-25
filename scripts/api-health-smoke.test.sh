@@ -48,6 +48,8 @@ fi
 mode="${SMOKE_MODE:-retry}"
 if [[ "$mode" == 'cache-control-lookalike' ]]; then
     printf 'HTTP/1.1 200 OK\r\ncache-control: x-no-store\r\npragma: no-cache\r\nx-request-id: smoke-request\r\ncontent-type: application/json\r\n\r\n' > "$headers"
+elif [[ "$mode" == 'cache-control-quoted' ]]; then
+    printf 'HTTP/1.1 200 OK\r\ncache-control: private="X-First, no-store, X-Last"\r\npragma: no-cache\r\nx-request-id: smoke-request\r\ncontent-type: application/json\r\n\r\n' > "$headers"
 elif [[ "$mode" == 'pragma-lookalike' ]]; then
     printf 'HTTP/1.1 200 OK\r\ncache-control: no-store\r\npragma: x-no-cache\r\nx-request-id: smoke-request\r\ncontent-type: application/json\r\n\r\n' > "$headers"
 elif [[ "$mode" == 'redirect-headers' ]]; then
@@ -61,7 +63,7 @@ elif [[ "$mode" == 'redirect-stale-status' ]]; then
 elif [[ "$mode" == 'redirect-valid' ]]; then
     # Redirect hop carries nothing; the terminal 200 satisfies the whole contract.
     printf 'HTTP/1.1 302 Found\r\nlocation: %s/final\r\ncontent-length: 0\r\n\r\n' "$endpoint" > "$headers"
-    printf 'HTTP/1.1 200 OK\r\ncache-control: no-store\r\npragma: no-cache\r\nx-request-id: smoke-request\r\ncontent-type: application/json\r\n\r\n' >> "$headers"
+    printf 'HTTP/1.1 200 OK\r\ncache-control: private="X-First, X-Last", no-store\r\ncache-control: max-age=0\r\npragma: no-cache\r\nx-request-id: smoke-request\r\ncontent-type: application/json\r\n\r\n' >> "$headers"
 elif [[ "$mode" == 'no-block' ]]; then
     : > "$headers"
 else
@@ -162,9 +164,9 @@ grep -F 'returned an invalid response on attempt 1' "$temp_dir/invalid.output" >
 # A 3xx hop must never lend its cache-policy or correlation headers to the terminal
 # health document. curl --dump-header concatenates every response block, so the
 # helper is required to judge the terminal block alone.
-for failing_mode in cache-control-lookalike pragma-lookalike redirect-headers redirect-stale-status no-block; do
+for failing_mode in cache-control-lookalike cache-control-quoted pragma-lookalike redirect-headers redirect-stale-status no-block; do
     case "$failing_mode" in
-        cache-control-lookalike) expected_reason='terminal response is missing Cache-Control: no-store' ;;
+        cache-control-lookalike|cache-control-quoted) expected_reason='terminal response is missing Cache-Control: no-store' ;;
         pragma-lookalike) expected_reason='terminal response is missing Pragma: no-cache' ;;
         redirect-headers) expected_reason='terminal response is missing Cache-Control: no-store' ;;
         redirect-stale-status) expected_reason='terminal HTTP response status is 503, not 200' ;;

@@ -38,6 +38,7 @@ validate_response() {
 import json
 import sys
 from pathlib import Path
+from urllib.request import parse_http_list
 
 headers_path, body_path, endpoint = sys.argv[1:]
 # curl --dump-header appends every response block of a redirect chain to the same
@@ -68,19 +69,23 @@ for position, line in enumerate(blocks[-1]):
     if ":" not in line:
         continue
     name, value = line.split(":", 1)
-    headers[name.lower()] = value.strip()
+    headers.setdefault(name.lower(), []).append(value.strip())
 
 if terminal_status != 200:
     raise SystemExit(f"{endpoint}: terminal HTTP response status is {terminal_status}, not 200")
 
 def has_directive(name, expected):
-    return any(part.strip().lower() == expected for part in headers.get(name, "").split(","))
+    return any(
+        directive.strip().lower() == expected
+        for field_value in headers.get(name, [])
+        for directive in parse_http_list(field_value)
+    )
 
 if not has_directive("cache-control", "no-store"):
     raise SystemExit(f"{endpoint}: terminal response is missing Cache-Control: no-store")
 if not has_directive("pragma", "no-cache"):
     raise SystemExit(f"{endpoint}: terminal response is missing Pragma: no-cache")
-request_id = headers.get("x-request-id", "")
+request_id = headers.get("x-request-id", [""])[-1]
 if not request_id:
     raise SystemExit(f"{endpoint}: terminal response is missing X-Request-ID")
 
