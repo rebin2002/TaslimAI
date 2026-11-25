@@ -29,9 +29,10 @@ public sealed class AssetsController(
         [FromQuery] int pageSize = 24,
         CancellationToken cancellationToken = default)
     {
+        if (!TryGetUserId(out var userId)) return Unauthorized();
         try
         {
-            var result = await assets.ListAsync(GetUserId(), new AssetFilter(workspaceId, projectId, assetType, status, search, sort, page, pageSize), cancellationToken);
+            var result = await assets.ListAsync(userId, new AssetFilter(workspaceId, projectId, assetType, status, search, sort, page, pageSize), cancellationToken);
             return result is null ? Forbid() : Ok(result);
         }
         catch (AssetValidationException exception)
@@ -43,22 +44,24 @@ public sealed class AssetsController(
     [HttpGet("{id:guid}")]
     public async Task<IActionResult> Get(Guid id, CancellationToken cancellationToken)
     {
-        var asset = await assets.GetAsync(GetUserId(), id, cancellationToken);
+        if (!TryGetUserId(out var userId)) return Unauthorized();
+        var asset = await assets.GetAsync(userId, id, cancellationToken);
         return asset is null
             ? ApiResults.Error(this, StatusCodes.Status404NotFound, "ASSET_NOT_FOUND", "Asset not found.")
-            : Ok(AssetContractMapper.ToDto(asset));
+            : Ok(AssetContractMapper.ToDto(asset, userId));
     }
 
     [HttpPatch("{id:guid}")]
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> Update(Guid id, [FromBody] UpdateAssetRequest request, CancellationToken cancellationToken)
     {
+        if (!TryGetUserId(out var userId)) return Unauthorized();
         try
         {
-            var asset = await assets.UpdateAsync(GetUserId(), id, request, cancellationToken);
+            var asset = await assets.UpdateAsync(userId, id, request, cancellationToken);
             return asset is null
                 ? ApiResults.Error(this, StatusCodes.Status404NotFound, "ASSET_NOT_FOUND", "Asset not found.")
-                : Ok(AssetContractMapper.ToDto(asset));
+                : Ok(AssetContractMapper.ToDto(asset, userId));
         }
         catch (AssetValidationException exception)
         {
@@ -77,10 +80,11 @@ public sealed class AssetsController(
     [HttpGet("{id:guid}/download")]
     public async Task<IActionResult> Download(Guid id, [FromQuery] bool inline = false, CancellationToken cancellationToken = default)
     {
+        if (!TryGetUserId(out var userId)) return Unauthorized();
         AssetDownload? download;
         try
         {
-            download = await assets.GetDownloadAsync(GetUserId(), id, cancellationToken: cancellationToken);
+            download = await assets.GetDownloadAsync(userId, id, cancellationToken: cancellationToken);
         }
         catch (AssetValidationException exception)
         {
@@ -94,10 +98,11 @@ public sealed class AssetsController(
     [HttpGet("{id:guid}/representations/{representationId:guid}/download")]
     public async Task<IActionResult> DownloadRepresentation(Guid id, Guid representationId, CancellationToken cancellationToken)
     {
+        if (!TryGetUserId(out var userId)) return Unauthorized();
         AssetDownload? download;
         try
         {
-            download = await assets.GetDownloadAsync(GetUserId(), id, representationId, cancellationToken);
+            download = await assets.GetDownloadAsync(userId, id, representationId, cancellationToken);
         }
         catch (AssetValidationException exception)
         {
@@ -109,6 +114,12 @@ public sealed class AssetsController(
 
     private async Task<IActionResult> StreamDownloadAsync(AssetDownload download, bool inline, CancellationToken cancellationToken)
     {
+        // Private asset bytes, and the Content-Disposition carrying the owner's original file
+        // name, are served from a workspace- and user-independent URL under cookie
+        // authentication. The endpoint claims its own cache fence here instead of inheriting
+        // one from the authentication pipeline, so the privacy property cannot be lost by an
+        // unrelated change to cookie re-issue behaviour.
+        AssetDownloadResponsePolicy.ApplyPrivateNoStore(Response);
         try
         {
             var stream = await storage.OpenReadAsync(download.StoredFile.StorageKey, cancellationToken);
@@ -129,17 +140,25 @@ public sealed class AssetsController(
             logger.LogWarning("Asset download failed because the configured private storage provider rejected the operation. AssetId={AssetId}; WorkspaceId={WorkspaceId}", download.Asset.Id, download.Asset.WorkspaceId);
             return ApiResults.Error(this, StatusCodes.Status503ServiceUnavailable, "FILE_STORAGE_OPERATION_FAILED", "We couldn't open this asset. Please try again.");
         }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidOperationException)
+        {
+            logger.LogWarning("Asset download failed because the local private storage operation could not open the file. AssetId={AssetId}; WorkspaceId={WorkspaceId}", download.Asset.Id, download.Asset.WorkspaceId);
+            return ApiResults.Error(this, StatusCodes.Status503ServiceUnavailable, "FILE_STORAGE_OPERATION_FAILED", "We couldn't open this asset. Please try again.");
+        }
     }
 
     private async Task<IActionResult> SetStatus(Guid id, bool archive, CancellationToken cancellationToken)
     {
+        if (!TryGetUserId(out var userId)) return Unauthorized();
         var asset = archive
-            ? await assets.ArchiveAsync(GetUserId(), id, cancellationToken)
-            : await assets.RestoreAsync(GetUserId(), id, cancellationToken);
+            ? await assets.ArchiveAsync(userId, id, cancellationToken)
+            : await assets.RestoreAsync(userId, id, cancellationToken);
         return asset is null
             ? ApiResults.Error(this, StatusCodes.Status404NotFound, "ASSET_NOT_FOUND", "Asset not found.")
-            : Ok(AssetContractMapper.ToDto(asset));
+            : Ok(AssetContractMapper.ToDto(asset, userId));
     }
 
-    private Guid GetUserId() => Guid.Parse(User.FindFirst(ClaimTypes.NameIdentifier)?.Value ?? throw new InvalidOperationException("Authenticated user identifier is missing."));
+    private bool TryGetUserId(out Guid userId) =>
+        Guid.TryParse(User.FindFirst(ClaimTypes.NameIdentifier)?.Value, out userId)
+        && userId != Guid.Empty;
 }
