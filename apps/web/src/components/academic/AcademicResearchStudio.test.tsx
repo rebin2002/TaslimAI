@@ -139,7 +139,7 @@ describe("AcademicResearchStudio tabs", () => {
   });
 
   it("wires every tab to its own panel", () => {
-    expect(toText(renderTab({ tab: "sources" }))).toContain("Record what you have verified");
+    expect(toText(renderTab({ tab: "sources" }))).toContain("Find records, then verify them");
     expect(toText(renderTab({ tab: "evidence" }))).toContain("Add sources first");
     expect(toText(renderTab({ tab: "chapters" }))).toContain("Word allocation");
   });
@@ -173,6 +173,9 @@ describe("AcademicResearchStudio honesty", () => {
       "Optional",
       "Add to library",
       "Clear form",
+      // #1267 slice 1: the only control that reaches the network. It is a read-only,
+      // workspace-scoped search; it starts no job and spends nothing.
+      "Search",
     ]);
     for (const tab of ["plan", "sources", "evidence", "chapters"] as const) {
       const html = renderTab({ tab });
