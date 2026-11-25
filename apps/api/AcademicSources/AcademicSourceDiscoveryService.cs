@@ -152,6 +152,24 @@ public sealed class AcademicSourceDiscoveryService(
                 deadlineReached = true;
                 validations.Add(new AcademicDoiValidationResult { SubmittedDoi = doi, IsRegistered = false, FailureCategory = AcademicSourceFailureCategories.Timeout });
             }
+            // The caller walking away is still not a result. It propagates, exactly as `RunAsync`
+            // treats it, so an abandoned request stays an abandoned request rather than becoming a
+            // partial answer that looks like a completed one.
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            // And the same last-resort discipline the catalog loop gets from `RunAsync:217`: a check
+            // that failed for a reason nobody predicted — an adapter throwing on a payload it could
+            // not parse, a `UriFormatException` from a header this code has never seen — used to
+            // escape the loop and turn the entire search into an HTTP 500, discarding every catalog
+            // answer that had already arrived. One identifier failing unexpectedly is a partial
+            // result with a reason attached, which is precisely what the `partial` flag exists to say.
+            catch (Exception exception)
+            {
+                logger.LogWarning(exception, "DOI validation attempt failed unexpectedly.");
+                validations.Add(new AcademicDoiValidationResult { SubmittedDoi = doi, IsRegistered = false, FailureCategory = AcademicSourceFailureCategories.Unknown });
+            }
         }
         if (validator is null && normalized.Dois.Count > 0 && !outcomes.Any(outcome => outcome.ProviderKey == "doi-validator"))
             logger.LogWarning("DOI lookups requested but no validator is configured.");

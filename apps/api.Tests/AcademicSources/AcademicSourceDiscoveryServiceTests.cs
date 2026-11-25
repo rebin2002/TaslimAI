@@ -571,4 +571,69 @@ public sealed class AcademicSourceDiscoveryServiceTests
 
         Assert.Equal(1, slow.CallCount);
     }
+
+    [Fact]
+    public async Task A_doi_check_that_fails_unexpectedly_is_labelled_and_keeps_the_answers()
+    {
+        // Reviewer residual R3. Every catalog runs inside `RunAsync`, which ends in a catch-all that
+        // files an unforecast failure as an `unknown` outcome; the DOI loop had only the two
+        // exceptions anyone had thought to name. So an adapter throwing anything else - a
+        // UriFormatException from a header this code has never seen, an InvalidOperationException from
+        // a stub transport, whatever - escaped the loop, and a search whose catalogs had all answered
+        // came back as an HTTP 500 carrying nothing. One identifier failing is a labelled row in a
+        // partial answer, which is exactly what `doiChecks` exists to report.
+        var validator = new FakeValidator(_ => Task.FromException<AcademicDoiValidationResult>(
+            new UriFormatException("stub adapter: unparseable provider header")));
+        var service = Create(
+            [new FakeWorkProvider("openalex", true, _ => Task.FromResult<IReadOnlyList<AcademicSourceRecord>>(
+                [Record("openalex", "W1", "Survivor", doi: "10.5555/survivor")]))],
+            [],
+            [validator]);
+
+        var batch = await service.DiscoverAsync(new AcademicDiscoveryQuery { SearchTerm = "anything", Dois = ["10.5555/boom", "10.5555/boom2"] });
+
+        // The catalog answer survives the identifier failure.
+        Assert.Single(batch.Sources);
+        Assert.Contains(batch.ProviderOutcomes, outcome => outcome.Status == AcademicProviderOutcomeStatus.Ok);
+        // Both checks are reported, in order, as unavailable rather than as unregistered.
+        Assert.Equal(2, batch.DoiValidations.Count);
+        Assert.All(batch.DoiValidations, validation =>
+        {
+            Assert.False(validation.IsRegistered);
+            Assert.Equal("unknown", validation.FailureCategory);
+            Assert.StartsWith("10.5555/boom", validation.SubmittedDoi, StringComparison.Ordinal);
+        });
+        // The exception text stays in the log, not in the answer: nothing from the adapter's message
+        // is carried on the validation result the reader receives.
+        Assert.DoesNotContain("stub adapter", string.Join(' ', batch.DoiValidations.Select(validation => validation.FailureCategory)), StringComparison.OrdinalIgnoreCase);
+        // And the batch does not claim an outage it did not have: the catalogs answered, so the
+        // "some catalogs did not answer" notice is not raised by an identifier's failure alone.
+        Assert.False(batch.PartialResult);
+    }
+
+    [Fact]
+    public async Task A_caller_who_walks_away_mid_doi_loop_is_still_a_cancellation()
+    {
+        // The catch-all above must not become a vacuum. `RunAsync` keeps these two cancellations
+        // apart - the budget running out is a result, the student leaving is not - and the DOI loop
+        // now has to say the same thing, because `catch (Exception)` would otherwise file an
+        // abandoned request as an `unknown` identifier check and hand back a completed-looking
+        // partial result to nobody.
+        var validator = new SlowValidator(TimeSpan.FromSeconds(30));
+        var service = Create(
+            [new FakeWorkProvider("openalex", true, _ => Task.FromResult<IReadOnlyList<AcademicSourceRecord>>([]))],
+            [],
+            [validator],
+            options =>
+            {
+                options.RequestTimeoutSeconds = 2;
+                options.DiscoveryBudgetSeconds = 60;
+            });
+        using var caller = new CancellationTokenSource(TimeSpan.FromMilliseconds(200));
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+            service.DiscoverAsync(new AcademicDiscoveryQuery { Dois = ["10.5555/a"] }, caller.Token));
+
+        Assert.Equal(1, validator.CallCount);
+    }
 }
