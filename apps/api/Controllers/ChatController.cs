@@ -374,7 +374,7 @@ public sealed class ChatController(
             if (!persisted && assistant is not null)
             {
                 await PersistRegenerationFailureAsync(conversation, assistant);
-                if (usageTransaction is not null) await usageLedger.FailAsync(usageTransaction, UsageFailureCodes.FromException(exception), cancellationToken: CancellationToken.None);
+                if (usageTransaction is not null) await usageLedger.FailAsync(usageTransaction, UsageFailureCodes.FromException(exception), usage: (exception as AiProviderException)?.Usage, cancellationToken: CancellationToken.None);
                 LogGenerationFailure(exception, conversation.Id);
             }
             try { await WriteEventAsync("message.failed", new { code = "AI_GENERATION_FAILED", message = "Taslim could not regenerate a response right now." }, CancellationToken.None); } catch { /* client disconnected */ }
@@ -452,7 +452,7 @@ public sealed class ChatController(
         catch (Exception exception) when (exception is not OperationCanceledException)
         {
             await PersistFailureAsync(prepared, exception);
-            if (usage is not null) await usageLedger.FailAsync(usage, UsageFailureCodes.FromException(exception), cancellationToken: CancellationToken.None);
+            if (usage is not null) await usageLedger.FailAsync(usage, UsageFailureCodes.FromException(exception), usage: (exception as AiProviderException)?.Usage, cancellationToken: CancellationToken.None);
             LogGenerationFailure(exception, prepared.Conversation!.Id);
             return GenerationFailure();
         }
@@ -576,7 +576,7 @@ public sealed class ChatController(
             if (!persisted && prepared is not null && prepared.ExistingResult is null)
             {
                 await PersistFailureAsync(prepared, exception);
-                if (usageTransaction is not null) await usageLedger.FailAsync(usageTransaction, UsageFailureCodes.FromException(exception), cancellationToken: CancellationToken.None);
+                if (usageTransaction is not null) await usageLedger.FailAsync(usageTransaction, UsageFailureCodes.FromException(exception), usage: (exception as AiProviderException)?.Usage, cancellationToken: CancellationToken.None);
                 LogGenerationFailure(exception, prepared.Conversation!.Id);
             }
             try { await WriteEventAsync("message.failed", new { code = "AI_GENERATION_FAILED", message = "Taslim could not generate a response right now. Your message was saved." }, CancellationToken.None); } catch { /* client disconnected */ }
