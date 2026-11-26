@@ -18,18 +18,52 @@ namespace Taslim.Api.Tests;
 public sealed class MovieCharacterProductionSheetContractTests
 {
     [Theory]
-    [InlineData("SHEET_STATE_CHANGED", 409)]
-    [InlineData("DUPLICATE_LOOK_KEY", 400)]
-    public async Task Save_production_sheet_maps_retryable_state_conflict_to_409_and_other_validation_to_400(string code, int expectedStatus)
+    [InlineData("save", "SHEET_STATE_CHANGED", 409)]
+    [InlineData("save", "DUPLICATE_LOOK_KEY", 400)]
+    [InlineData("approve", "SHEET_STATE_CHANGED", 409)]
+    [InlineData("approve", "DUPLICATE_LOOK_KEY", 400)]
+    [InlineData("lock", "SHEET_STATE_CHANGED", 409)]
+    [InlineData("lock", "DUPLICATE_LOOK_KEY", 400)]
+    [InlineData("unlock", "SHEET_STATE_CHANGED", 409)]
+    [InlineData("unlock", "DUPLICATE_LOOK_KEY", 400)]
+    public async Task Production_sheet_actions_map_state_conflict_to_409_and_other_validation_to_400(string actionName, string code, int expectedStatus)
+    {
+        var controller = CreateController(new ConflictOnlyProductionSheetService(code, actionName));
+        var id = Guid.NewGuid();
+        var action = actionName switch
+        {
+            "save" => controller.SaveProductionSheet(id, new MovieCharacterProductionSheetRequest(), CancellationToken.None),
+            "approve" => controller.ApproveProductionSheet(id, CancellationToken.None),
+            "lock" => controller.LockProductionSheet(id, CancellationToken.None),
+            "unlock" => controller.UnlockProductionSheet(id, CancellationToken.None),
+            _ => throw new ArgumentOutOfRangeException(nameof(actionName)),
+        };
+        var response = Assert.IsType<ObjectResult>(await action);
+        Assert.Equal(expectedStatus, response.StatusCode);
+        var envelope = Assert.IsType<ErrorEnvelope>(response.Value);
+        Assert.Equal(code, envelope.Error.Code);
+    }
+
+    [Fact]
+    public async Task Production_sheet_locked_exception_keeps_its_existing_409_error_code()
+    {
+        var controller = CreateController(new ConflictOnlyProductionSheetService("unused", "save", lockedException: true));
+        var action = await controller.SaveProductionSheet(Guid.NewGuid(), new MovieCharacterProductionSheetRequest(), CancellationToken.None);
+        var response = Assert.IsType<ObjectResult>(action);
+        Assert.Equal(409, response.StatusCode);
+        var envelope = Assert.IsType<ErrorEnvelope>(response.Value);
+        Assert.Equal("MOVIE_CHARACTER_PRODUCTION_SHEET_LOCKED", envelope.Error.Code);
+    }
+
+    private static MovieStudioController CreateController(IMovieCharacterProductionSheetService productionSheets)
     {
         var userId = Guid.NewGuid();
-        var controller = new MovieStudioController(
+        return new MovieStudioController(
             movies: null!, complexity: null!, durationBudgets: null!, guides: null!, stories: null!, storyCast: null!,
             continuity: null!, worldContinuity: null!, productionContinuity: null!, productionReferences: null!,
             productionPreflight: null!, timeline: null!, transitionEdits: null!, takeSelects: null!, shotExecution: null!,
-            authorization: null!, shotImportance: null!, cinematographyPlanning: null!,
-            productionSheets: new ConflictOnlyProductionSheetService(code), geographySheets: null!, propBible: null!,
-            referenceReadiness: null!, insertPlanner: null!)
+            authorization: null!, shotImportance: null!, cinematographyPlanning: null!, productionSheets: productionSheets,
+            geographySheets: null!, propBible: null!, referenceReadiness: null!, insertPlanner: null!)
         {
             ControllerContext = new ControllerContext
             {
@@ -39,12 +73,6 @@ public sealed class MovieCharacterProductionSheetContractTests
                 },
             },
         };
-
-        var action = await controller.SaveProductionSheet(Guid.NewGuid(), new MovieCharacterProductionSheetRequest(), CancellationToken.None);
-        var response = Assert.IsType<ObjectResult>(action);
-        Assert.Equal(expectedStatus, response.StatusCode);
-        var envelope = Assert.IsType<ErrorEnvelope>(response.Value);
-        Assert.Equal(code, envelope.Error.Code);
     }
 
     [Fact]
@@ -408,21 +436,32 @@ public sealed class MovieCharacterProductionSheetContractTests
 
     private sealed record Seed(Guid UserId, Guid CharacterId);
 
-    private sealed class ConflictOnlyProductionSheetService(string code) : IMovieCharacterProductionSheetService
+    private sealed class ConflictOnlyProductionSheetService(string code, string failingAction, bool lockedException = false) : IMovieCharacterProductionSheetService
     {
         public Task<MovieCharacterProductionSheetDto?> GetAsync(Guid userId, Guid characterId, CancellationToken cancellationToken = default) =>
             Task.FromResult<MovieCharacterProductionSheetDto?>(null);
 
         public Task<MovieCharacterProductionSheetDto?> SaveDraftAsync(Guid userId, Guid characterId, MovieCharacterProductionSheetRequest request, CancellationToken cancellationToken = default) =>
-            Task.FromException<MovieCharacterProductionSheetDto?>(new MovieCharacterProductionSheetValidationException(code, "The production sheet changed while this draft version was being allocated. Retry the save."));
+            FailOrReturnNull("save");
 
         public Task<MovieCharacterProductionSheetDto?> ApproveAsync(Guid userId, Guid sheetId, CancellationToken cancellationToken = default) =>
-            Task.FromResult<MovieCharacterProductionSheetDto?>(null);
+            FailOrReturnNull("approve");
 
         public Task<MovieCharacterProductionSheetDto?> LockAsync(Guid userId, Guid sheetId, CancellationToken cancellationToken = default) =>
-            Task.FromResult<MovieCharacterProductionSheetDto?>(null);
+            FailOrReturnNull("lock");
 
         public Task<MovieCharacterProductionSheetDto?> UnlockAsync(Guid userId, Guid sheetId, CancellationToken cancellationToken = default) =>
-            Task.FromResult<MovieCharacterProductionSheetDto?>(null);
+            FailOrReturnNull("unlock");
+
+        private Task<MovieCharacterProductionSheetDto?> FailOrReturnNull(string action)
+        {
+            if (!string.Equals(action, failingAction, StringComparison.Ordinal))
+                return Task.FromResult<MovieCharacterProductionSheetDto?>(null);
+
+            Exception exception = lockedException
+                ? new MovieCharacterProductionSheetLockedException()
+                : new MovieCharacterProductionSheetValidationException(code, "The production sheet changed while this operation was in progress. Retry the request.");
+            return Task.FromException<MovieCharacterProductionSheetDto?>(exception);
+        }
     }
 }
