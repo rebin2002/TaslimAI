@@ -56,11 +56,11 @@ public sealed class MovieDirectorController(IMovieDirectorService director, IMov
                 throw new MovieIntercutPlanningException(MovieIntercutPlanCodes.ClipRequired, "Intercut coverage candidates are required.");
             if (request.TimelineId is Guid requestedTimelineId && requestedTimelineId != Guid.Empty)
             {
-                var timelineProjectId = await db.MovieTimelines.AsNoTracking()
-                    .Where(item => item.Id == requestedTimelineId)
-                    .Select(item => (Guid?)item.MovieProjectId)
-                    .SingleOrDefaultAsync(cancellationToken);
-                if (timelineProjectId != movieProjectId)
+                // Resolve only within the already-authorized project. Missing and
+                // cross-project identifiers intentionally have the same response.
+                var timelineIsOwned = await db.MovieTimelines.AsNoTracking()
+                    .AnyAsync(item => item.Id == requestedTimelineId && item.MovieProjectId == movieProjectId, cancellationToken);
+                if (!timelineIsOwned)
                     throw new MovieIntercutPlanningException(MovieIntercutPlanCodes.TimelineProjectMismatch, "The intercut timeline must belong to the requested movie project.");
             }
 
