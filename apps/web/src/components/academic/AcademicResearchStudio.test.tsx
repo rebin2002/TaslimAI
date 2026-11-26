@@ -243,6 +243,7 @@ describe("AcademicResearchStudio with a filled brief", () => {
     expect(chaptersHtml).toContain('value="Original Contribution to Knowledge"');
     expect(chaptersHtml).toContain('value="Theoretical Framework"');
     expect(chaptersHtml).toContain("Chapter plan — Doctoral");
+    expect(chaptersHtml).toMatch(/<input\b(?=[^>]*\bid="[^"]+-title")(?=[^>]*\bmaxlength="200")[^>]*>/i);
   });
 
   it("lists the verified source with its own identifier on the Sources tab", () => {
