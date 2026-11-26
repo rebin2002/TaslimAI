@@ -3,7 +3,9 @@ using System.Net.Http.Json;
 using System.Text.Json;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 using Taslim.Api.Authorization;
 using Taslim.Api.Contracts;
 using Taslim.Api.Domain;
@@ -93,6 +95,81 @@ public sealed class AdminUsageTests : IClassFixture<TaslimApiFactory>
     }
 
     [Fact]
+    public async Task Unconfirmed_configured_bootstrap_email_does_not_grant_admin_access()
+    {
+        using var client = factory.CreateClient();
+        var auth = await Register(client, "Unconfirmed Bootstrap Candidate");
+        var email = auth.User.Email!;
+
+        using var scope = factory.Services.CreateScope();
+        var userManager = scope.ServiceProvider.GetRequiredService<UserManager<ApplicationUser>>();
+        var user = await userManager.FindByEmailAsync(email);
+        Assert.NotNull(user);
+        Assert.False(user!.EmailConfirmed);
+
+        try
+        {
+            await BootstrapAsync(scope.ServiceProvider, email);
+            using var response = await client.GetAsync("/api/admin/usage/summary");
+            Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+            Assert.False(await userManager.IsInRoleAsync(user, AdminPolicies.Role));
+        }
+        finally
+        {
+            if (await userManager.IsInRoleAsync(user, AdminPolicies.Role))
+                await userManager.RemoveFromRoleAsync(user, AdminPolicies.Role);
+        }
+    }
+
+    [Fact]
+    public async Task Existing_unconfirmed_role_member_keeps_ordinary_access_and_has_no_admin_capability()
+    {
+        using var client = factory.CreateClient();
+        var auth = await Register(client, "Legacy Administrator");
+        using var scope = factory.Services.CreateScope();
+        var users = scope.ServiceProvider.GetRequiredService<UserManager<ApplicationUser>>();
+        var roles = scope.ServiceProvider.GetRequiredService<RoleManager<IdentityRole<Guid>>>();
+        var user = await users.FindByIdAsync(auth.User.Id.ToString());
+        Assert.NotNull(user);
+        Assert.False(user.EmailConfirmed);
+        if (!await roles.RoleExistsAsync(AdminPolicies.Role))
+            Assert.True((await roles.CreateAsync(new IdentityRole<Guid>(AdminPolicies.Role))).Succeeded);
+        Assert.True((await users.AddToRoleAsync(user, AdminPolicies.Role)).Succeeded);
+
+        await BootstrapAsync(scope.ServiceProvider, auth.User.Email!);
+
+        Assert.True(await users.IsInRoleAsync(user, AdminPolicies.Role));
+        var current = await client.GetFromJsonAsync<AuthResponse>("/api/auth/me");
+        Assert.NotNull(current);
+        Assert.False(current.User.IsAdmin);
+        using var report = await client.GetAsync("/api/admin/usage/summary");
+        Assert.Equal(HttpStatusCode.Forbidden, report.StatusCode);
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task Confirmed_account_receives_admin_access_only_when_designated(bool designated)
+    {
+        using var client = factory.CreateClient();
+        var auth = await Register(client, "Verified Bootstrap Candidate");
+        using var scope = factory.Services.CreateScope();
+        var users = scope.ServiceProvider.GetRequiredService<UserManager<ApplicationUser>>();
+        var user = await users.FindByIdAsync(auth.User.Id.ToString());
+        Assert.NotNull(user);
+        await AdminTestUsers.ConfirmEmailAsync(users, user);
+
+        await BootstrapAsync(scope.ServiceProvider, designated ? auth.User.Email! : "other@example.invalid");
+
+        Assert.Equal(designated, await users.IsInRoleAsync(user, AdminPolicies.Role));
+        var current = await client.GetFromJsonAsync<AuthResponse>("/api/auth/me");
+        Assert.NotNull(current);
+        Assert.Equal(designated, current.User.IsAdmin);
+        using var report = await client.GetAsync("/api/admin/usage/summary");
+        Assert.Equal(designated ? HttpStatusCode.OK : HttpStatusCode.Forbidden, report.StatusCode);
+    }
+
+    [Fact]
     public async Task Existing_user_can_login_after_administrator_role_assignment()
     {
         using var client = factory.CreateClient();
@@ -142,16 +219,19 @@ public sealed class AdminUsageTests : IClassFixture<TaslimApiFactory>
         return (await response.Content.ReadFromJsonAsync<AuthResponse>())!;
     }
 
+    private static Task BootstrapAsync(IServiceProvider services, string email)
+    {
+        var configuration = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?> { ["Admin:BootstrapEmails:0"] = email })
+            .Build();
+        var logger = services.GetRequiredService<ILoggerFactory>().CreateLogger(nameof(AdminRoleBootstrapper));
+        return AdminRoleBootstrapper.EnsureConfiguredAdministratorsAsync(services, configuration, logger);
+    }
+
     private async Task AddAdminRole(string email)
     {
         using var scope = factory.Services.CreateScope();
-        var roleManager = scope.ServiceProvider.GetRequiredService<RoleManager<IdentityRole<Guid>>>();
-        var userManager = scope.ServiceProvider.GetRequiredService<UserManager<ApplicationUser>>();
-        if (!await roleManager.RoleExistsAsync(AdminPolicies.Role))
-            Assert.True((await roleManager.CreateAsync(new IdentityRole<Guid>(AdminPolicies.Role))).Succeeded);
-        var user = await userManager.FindByEmailAsync(email);
-        Assert.NotNull(user);
-        Assert.True((await userManager.AddToRoleAsync(user!, AdminPolicies.Role)).Succeeded);
+        await AdminTestUsers.GrantConfirmedRoleAsync(scope.ServiceProvider, email);
     }
 
     private static async Task Logout(HttpClient client)

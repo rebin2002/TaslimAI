@@ -6,7 +6,6 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging.Abstractions;
 using Taslim.Api.Autopilot;
-using Taslim.Api.Authorization;
 using Taslim.Api.Contracts;
 using Taslim.Api.Persistence;
 using Xunit;
@@ -876,13 +875,7 @@ public sealed class AutopilotNextWaveEndpointTests : IClassFixture<TaslimApiFact
     private async Task AddAdminRole(string email)
     {
         using var scope = factory.Services.CreateScope();
-        var roleManager = scope.ServiceProvider.GetRequiredService<Microsoft.AspNetCore.Identity.RoleManager<Microsoft.AspNetCore.Identity.IdentityRole<Guid>>>();
-        var userManager = scope.ServiceProvider.GetRequiredService<Microsoft.AspNetCore.Identity.UserManager<Taslim.Api.Domain.ApplicationUser>>();
-        if (!await roleManager.RoleExistsAsync(AdminPolicies.Role))
-            Assert.True((await roleManager.CreateAsync(new Microsoft.AspNetCore.Identity.IdentityRole<Guid>(AdminPolicies.Role))).Succeeded);
-        var user = await userManager.FindByEmailAsync(email);
-        Assert.NotNull(user);
-        Assert.True((await userManager.AddToRoleAsync(user!, AdminPolicies.Role)).Succeeded);
+        await AdminTestUsers.GrantConfirmedRoleAsync(scope.ServiceProvider, email);
     }
 
     private static async Task<HttpResponseMessage> SendWithCsrf(HttpClient client, HttpMethod method, string path, object? payload)

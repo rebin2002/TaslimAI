@@ -3,12 +3,10 @@ using System.Net.Http.Json;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
-using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Http;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Taslim.Api.Autopilot;
-using Taslim.Api.Authorization;
 using Taslim.Api.Contracts;
 using Taslim.Api.Domain;
 using Taslim.Api.Persistence;
@@ -312,13 +310,7 @@ public sealed class AutopilotEndpointTests : IClassFixture<TaslimApiFactory>
     private async Task AddAdminRole(string email)
     {
         using var scope = factory.Services.CreateScope();
-        var roleManager = scope.ServiceProvider.GetRequiredService<RoleManager<IdentityRole<Guid>>>();
-        var userManager = scope.ServiceProvider.GetRequiredService<UserManager<ApplicationUser>>();
-        if (!await roleManager.RoleExistsAsync(AdminPolicies.Role))
-            Assert.True((await roleManager.CreateAsync(new IdentityRole<Guid>(AdminPolicies.Role))).Succeeded);
-        var user = await userManager.FindByEmailAsync(email);
-        Assert.NotNull(user);
-        Assert.True((await userManager.AddToRoleAsync(user!, AdminPolicies.Role)).Succeeded);
+        await AdminTestUsers.GrantConfirmedRoleAsync(scope.ServiceProvider, email);
     }
 
     private static async Task<HttpResponseMessage> SendWithCsrf(HttpClient client, HttpMethod method, string path, object? payload)

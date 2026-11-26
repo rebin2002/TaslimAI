@@ -3,7 +3,6 @@ using System.Net.Http.Json;
 using System.Text;
 using System.Text.Json;
 using Microsoft.AspNetCore.Hosting;
-using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
@@ -14,7 +13,6 @@ using Taslim.Api.AcademicEvidence.Persistence;
 using Taslim.Api.AcademicIntegration;
 using Taslim.Api.AcademicIntegration.Persistence;
 using Taslim.Api.AcademicWorkflow;
-using Taslim.Api.Authorization;
 using Taslim.Api.Contracts;
 using Taslim.Api.Domain;
 using Taslim.Api.Persistence;
@@ -724,13 +722,7 @@ public sealed class AcademicProjectsConnectedFlowTests : IClassFixture<AcademicC
         Assert.NotNull(auth);
 
         using var scope = _factory.Services.CreateScope();
-        var roleManager = scope.ServiceProvider.GetRequiredService<RoleManager<IdentityRole<Guid>>>();
-        var userManager = scope.ServiceProvider.GetRequiredService<UserManager<ApplicationUser>>();
-        if (!await roleManager.RoleExistsAsync(AdminPolicies.Role))
-            Assert.True((await roleManager.CreateAsync(new IdentityRole<Guid>(AdminPolicies.Role))).Succeeded);
-        var user = await userManager.FindByEmailAsync(email);
-        Assert.NotNull(user);
-        Assert.True((await userManager.AddToRoleAsync(user!, AdminPolicies.Role)).Succeeded);
+        await AdminTestUsers.GrantConfirmedRoleAsync(scope.ServiceProvider, email);
         return (client, auth.PersonalWorkspace.Id, auth.User.Id);
     }
 
