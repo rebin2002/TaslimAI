@@ -46,6 +46,9 @@ public static class GenerationFailureClassifier
             or GenerationJobErrorCodes.MusicCancelledUnconfirmedSubmission)
             return new(normalized, "provider", false);
 
+        if (normalized == GenerationJobErrorCodes.ResearchSearchUnavailable)
+            return new(normalized, "provider", true);
+
         if (normalized.Contains("STORAGE", StringComparison.Ordinal))
             return new(normalized, "storage", true);
 
