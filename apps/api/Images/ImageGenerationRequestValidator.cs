@@ -24,6 +24,15 @@ public static class ImageGenerationRequestValidator
             throw new ImageRequestValidationException(GenerationJobErrorCodes.ImageRequestInvalid, "The selected image configuration is unavailable.");
         if (request.Title?.Length > Math.Max(1, options.MaxTitleCharacters))
             throw new ImageRequestValidationException(GenerationJobErrorCodes.ImageRequestInvalid, "The image title is too long.");
+        ValidateOptionalLength(request.Mood, 120, "mood");
+        ValidateOptionalLength(request.Background, 240, "background");
+        ValidateOptionalLength(request.TextInImage, 500, "text in image");
+    }
+
+    private static void ValidateOptionalLength(string? value, int maxLength, string field)
+    {
+        if (value?.Length > maxLength)
+            throw new ImageRequestValidationException(GenerationJobErrorCodes.ImageRequestInvalid, $"The image {field} is too long.");
     }
 
     private static void ValidateChoice(string? value, IReadOnlySet<string> supported, string field, string code)

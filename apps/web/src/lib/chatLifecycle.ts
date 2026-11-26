@@ -40,7 +40,7 @@ export function createChatRequestId() {
 }
 
 export function isAbortError(error: unknown) {
-  return error instanceof DOMException && error.name === "AbortError";
+  return typeof error === "object" && error !== null && "name" in error && error.name === "AbortError";
 }
 
 export type RetrySubmission = { content: string; conversationId: string; requestId: string; attachmentIds: string[] };

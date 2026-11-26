@@ -188,7 +188,12 @@ public static class MovieLocationGeographySheetSerialization
     public static IReadOnlyList<MovieLocationGeographyPath> ReadPaths(string? value) => Read<MovieLocationGeographyPath>(value);
 
     private static string Serialize<T>(IEnumerable<T> value) => JsonSerializer.Serialize(value.Take(MovieLocationGeographyLimits.MaxEntriesPerGroup).ToArray(), JsonOptions);
-    private static IReadOnlyList<T> Read<T>(string? value) => string.IsNullOrWhiteSpace(value) ? [] : JsonSerializer.Deserialize<List<T>>(value, JsonOptions) ?? [];
+    private static IReadOnlyList<T> Read<T>(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return [];
+        try { return JsonSerializer.Deserialize<List<T>>(value, JsonOptions) ?? []; }
+        catch (JsonException) { return []; }
+    }
 }
 
 public static class MovieLocationGeographySheetMapper
