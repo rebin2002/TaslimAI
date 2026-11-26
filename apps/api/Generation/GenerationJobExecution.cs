@@ -14,7 +14,6 @@ using Taslim.Api.Documents;
 using Taslim.Api.Files;
 using Taslim.Api.Infrastructure;
 using Taslim.Api.Images;
-using Taslim.Api.Infrastructure;
 using Taslim.Api.Music;
 using Taslim.Api.Movies;
 using Taslim.Api.Notifications;
@@ -493,10 +492,9 @@ public sealed class GenerationJobService(
         // its outcome was never observed. Each family also covers the cancellation that proves the very
         // same state (F-36): cancelling after the provider reported completion leaves an undelivered
         // finished track, exactly like a delivery timeout, and cancelling an accepted generation that
-        // was never observed leaves an unknown outcome, exactly like a polling timeout. Every other
-        // terminal state - the provider-outage classes, a provider-declared rejection, and a
-        // cancellation before anything was accepted - keeps its existing retry behaviour, because those
-        // states are evidence that nothing is in flight.
+        // was never observed leaves an unknown outcome, exactly like a polling timeout. Other terminal
+        // states are eligible only when the attempt row proves the create request was never dispatched
+        // or a provider explicitly declared the result no-charge; error codes alone establish neither.
         if (string.Equals(source.JobType, GenerationJobTypes.MusicGenerate, StringComparison.OrdinalIgnoreCase)
             && source.ErrorCode is GenerationJobErrorCodes.MusicOutputRetrievalFailed or GenerationJobErrorCodes.MusicCancelledUndeliveredOutput)
         {
@@ -519,6 +517,19 @@ public sealed class GenerationJobService(
             throw new GenerationJobValidationException(
                 GenerationJobErrorCodes.MusicSubmissionRetryBlocked,
                 "This retry was blocked because the first attempt may already have reached the provider and its outcome has not been reconciled yet. Starting another would risk a duplicate paid generation.");
+        }
+        if (string.Equals(source.JobType, GenerationJobTypes.MusicGenerate, StringComparison.OrdinalIgnoreCase))
+        {
+            var attempts = await db.GenerationProviderAttempts.AsNoTracking()
+                .Where(item => item.GenerationJobId == source.Id)
+                .Select(item => new { item.ProviderExecutionId, item.SafeMetadataJson })
+                .ToListAsync(cancellationToken);
+            if (attempts.Any(item => !GenerationJobWorker.IsSafeMusicRetryEvidence(item.ProviderExecutionId, item.SafeMetadataJson)))
+            {
+                throw new GenerationJobValidationException(
+                    GenerationJobErrorCodes.MusicSubmissionRetryBlocked,
+                    "This retry was blocked because the persisted provider-attempt evidence does not prove that the previous music request was unsubmitted or explicitly not charged.");
+            }
         }
         if (string.Equals(source.JobType, GenerationJobTypes.ImageGenerate, StringComparison.OrdinalIgnoreCase) && !imageOptions.Value.Enabled)
             throw new GenerationJobValidationException(GenerationJobErrorCodes.ImageStudioUnavailable, "Image generation is not available right now.");
@@ -1415,6 +1426,13 @@ await RecoverExpiredClaimsAsync(db, usage, movieExecutions, notifications, scope
                         _ => GenerationJobErrorCodes.MusicCancelledUnconfirmedSubmission,
                     };
                 }
+                else if (evidence.AmbiguousAttempt)
+                {
+                    // An older attempt may predate the durable dispatch protocol. A missing marker on
+                    // that row cannot prove that no POST left the process, so do not present the
+                    // ordinary retryable cancellation posture.
+                    cancellationCode = GenerationJobErrorCodes.MusicCancelledUnconfirmedSubmission;
+                }
                 else
                 {
                     cancellationCode = CancellationCode(job);
@@ -1970,6 +1988,12 @@ var qualityFailure = exception as GenerationQualityControlException ?? exception
                     SafeMetadataJson = qualityMetadata,
                 };
             }
+            if (providerAttempt is not null
+                && string.Equals(claimedJob.JobType, GenerationJobTypes.MusicGenerate, StringComparison.OrdinalIgnoreCase)
+                && exception is MusicProviderRejectedException { ProviderDeclaresNoCharge: true })
+            {
+                await RecordMusicProviderNoChargeAsync(db, providerAttempt, CancellationToken.None);
+            }
             if (providerAttempt is not null)
                 await budget.CompleteAttemptAsync(providerAttempt, failureUsage?.ActualCost, failureUsage?.ActualCost.HasValue == true, GenerationProviderAttemptStatus.Failed, failureCode, CancellationToken.None);
             if (string.Equals(claimedJob.JobType, GenerationJobTypes.DocumentGenerate, StringComparison.OrdinalIgnoreCase))
@@ -2360,17 +2384,18 @@ var qualityFailure = exception as GenerationQualityControlException ?? exception
     }
 
     /// <summary>
+    /// F-36.1b: sentinel recorded on the attempt row between "the paid request is about to leave this
+    /// process" and "the provider answered with an operation id". Prefixed so it cannot collide with a
+    /// vendor id and is never sent to either provider's reconciliation endpoint.
+    /// </summary>
+    private const string MusicDispatchMarker = "taslim:dispatch-pending";
+    private const string MusicDispatchProtocol = "durable_marker_v1";
+
+    /// <summary>
     /// F-36.1: the cancellation terminal an accepted-and-completed music generation must carry when
     /// the worker lost the delivery race rather than the generation itself. Every other job type keeps
     /// its existing per-type code and its existing retry behaviour, because for them a cancellation is
     /// evidence that nothing billable is in flight.
-    /// <summary>
-    /// F-36.1b: sentinel recorded on the attempt row between "the paid request is about to leave this
-    /// process" and "the provider answered with an operation id". Prefixed so it can never collide
-    /// with a vendor id, and refused by both providers' reconciliation paths.
-    /// </summary>
-    private const string MusicDispatchMarker = "taslim:dispatch-pending";
-
     /// </summary>
     private static (string Code, string Message) AcceptedOutputCancellationContract(GenerationJob job) =>
         string.Equals(job.JobType, GenerationJobTypes.MusicGenerate, StringComparison.OrdinalIgnoreCase)
@@ -2379,37 +2404,88 @@ var qualityFailure = exception as GenerationQualityControlException ?? exception
             : (CancellationCode(job), "The job was cancelled.");
 
     /// <summary>
-    /// F-36.1: durable acceptance evidence for the claim generation that died. Keyed on the job's
-    /// concurrency token, which the worker rotates at every claim, so evidence from a superseded
-    /// attempt can never hold this recovery's cancellation closed.
-    /// <summary>
-    /// F-36.1b: the durable submission state of the claim generation that died, read from the
-    /// provider-attempt row. Three states, not two: nothing stamped (a cancellation that never
-    /// reached a provider, still retryable), a dispatch marker with no operation id (a paid request
-    /// may have left this process and cannot be reconciled, closed), and an operation id (closed,
-    /// but reconcilable against the provider's own status endpoint). Keyed on the job's concurrency
-    /// token, which the worker rotates at every claim, so evidence from a superseded attempt can
-    /// never hold this recovery's cancellation closed.
+    /// Reads the dispatch/acceptance evidence for the claim that died. A claim with no attempt or with
+    /// the current protocol and no marker is proven pre-dispatch; a marker without an id is closed but
+    /// not reconcilable; an operation id is closed but can be checked with the provider's status GET.
+    /// Legacy or malformed attempt evidence is ambiguous and stays closed. Evidence is scoped to the
+    /// claim concurrency token so a superseded attempt cannot hold this recovery's cancellation closed.
     /// </summary>
-    private static async Task<(bool DispatchMarkerOnly, string? OperationId, string? Provider)> ReadMusicSubmissionEvidenceAsync(
+    private static async Task<(bool DispatchMarkerOnly, string? OperationId, string? Provider, bool AmbiguousAttempt)> ReadMusicSubmissionEvidenceAsync(
         TaslimDbContext db,
         GenerationJob job,
         Guid claimConcurrencyToken,
         CancellationToken cancellationToken)
     {
         if (!string.Equals(job.JobType, GenerationJobTypes.MusicGenerate, StringComparison.OrdinalIgnoreCase))
-            return (false, null, null);
-        var stamped = await db.GenerationProviderAttempts.AsNoTracking()
+            return (false, null, null, false);
+        var attempts = await db.GenerationProviderAttempts.AsNoTracking()
             .Where(item => item.GenerationJobId == job.Id
-                && item.JobConcurrencyToken == claimConcurrencyToken
-                && item.ProviderExecutionId != null)
-            .Select(item => new { item.ProviderExecutionId, item.Provider })
-            .FirstOrDefaultAsync(cancellationToken);
-        if (stamped is null || string.IsNullOrWhiteSpace(stamped.ProviderExecutionId))
-            return (false, null, null);
-        return string.Equals(stamped.ProviderExecutionId, MusicDispatchMarker, StringComparison.Ordinal)
-            ? (true, null, stamped.Provider)
-            : (false, stamped.ProviderExecutionId, stamped.Provider);
+                && item.JobConcurrencyToken == claimConcurrencyToken)
+            .Select(item => new { item.ProviderExecutionId, item.Provider, item.SafeMetadataJson })
+            .ToListAsync(cancellationToken);
+        if (attempts.Count == 0) return (false, null, null, false);
+
+        var markerRows = attempts.Where(item => string.Equals(item.ProviderExecutionId, MusicDispatchMarker, StringComparison.Ordinal)).ToList();
+        var operationRows = attempts.Where(item => !string.IsNullOrWhiteSpace(item.ProviderExecutionId)
+            && !string.Equals(item.ProviderExecutionId, MusicDispatchMarker, StringComparison.Ordinal)).ToList();
+        var unmarkedRows = attempts.Where(item => string.IsNullOrWhiteSpace(item.ProviderExecutionId)).ToList();
+        if (markerRows.Count > 0 || operationRows.Count > 1)
+            return (true, null, null, true);
+        if (operationRows.Count == 1 && unmarkedRows.Count == 0)
+            return (false, operationRows[0].ProviderExecutionId, operationRows[0].Provider, false);
+        if (operationRows.Count == 0 && markerRows.Count == 0)
+            return (false, null, null, unmarkedRows.Any(item => !HasMusicDispatchProtocol(item.SafeMetadataJson)));
+        return (true, null, null, true);
+    }
+
+    internal static bool IsSafeMusicRetryEvidence(string? providerExecutionId, string? safeMetadataJson)
+    {
+        if (HasExplicitMusicNoChargeProof(safeMetadataJson)) return true;
+
+        // A current-protocol attempt with no marker could not have sent its create POST: both built-in
+        // adapters await the durable marker callback before the transport. An attempt from an older
+        // protocol (or one whose metadata was lost) is ambiguous and must fail closed.
+        return string.IsNullOrWhiteSpace(providerExecutionId)
+            && HasMusicDispatchProtocol(safeMetadataJson);
+    }
+
+    private static bool HasMusicDispatchProtocol(string? safeMetadataJson)
+    {
+        if (string.IsNullOrWhiteSpace(safeMetadataJson)) return false;
+        try
+        {
+            using var document = JsonDocument.Parse(safeMetadataJson);
+            return document.RootElement.ValueKind == JsonValueKind.Object
+                && document.RootElement.TryGetProperty("musicDispatchProtocol", out var protocol)
+                && protocol.ValueKind == JsonValueKind.String
+                && string.Equals(protocol.GetString(), MusicDispatchProtocol, StringComparison.Ordinal);
+        }
+        catch (JsonException) { return false; }
+    }
+
+    private static bool HasExplicitMusicNoChargeProof(string? safeMetadataJson)
+    {
+        if (string.IsNullOrWhiteSpace(safeMetadataJson)) return false;
+        try
+        {
+            using var document = JsonDocument.Parse(safeMetadataJson);
+            var root = document.RootElement;
+            if (root.ValueKind != JsonValueKind.Object) return false;
+            if (root.TryGetProperty("musicSubmissionSafety", out var safety)
+                && safety.ValueKind == JsonValueKind.Object
+                && safety.TryGetProperty("state", out var state)
+                && state.ValueKind == JsonValueKind.String
+                && string.Equals(state.GetString(), "provider_declared_no_charge", StringComparison.Ordinal))
+                return true;
+            return root.TryGetProperty("musicSubmissionReconcile", out var reconciliation)
+                && reconciliation.ValueKind == JsonValueKind.Object
+                && reconciliation.TryGetProperty("outcome", out var outcome)
+                && outcome.ValueKind == JsonValueKind.String
+                && string.Equals(outcome.GetString(), nameof(MusicSubmissionOutcome.ProviderDeclaredFailure), StringComparison.Ordinal)
+                && reconciliation.TryGetProperty("providerDeclaresNoCharge", out var noCharge)
+                && noCharge.ValueKind == JsonValueKind.True;
+        }
+        catch (JsonException) { return false; }
     }
 
     private static IMusicGenerationProvider? MatchMusicProvider(
@@ -2482,6 +2558,29 @@ var qualityFailure = exception as GenerationQualityControlException ?? exception
             .ExecuteUpdateAsync(setters => setters
                 .SetProperty(item => item.SafeMetadataJson, bounded),
                 cancellationToken);
+    }
+
+    private async Task RecordMusicProviderNoChargeAsync(
+        TaslimDbContext db,
+        GenerationProviderAttempt attempt,
+        CancellationToken cancellationToken)
+    {
+        const string proof = "{\"musicSubmissionSafety\":{\"state\":\"provider_declared_no_charge\"}}";
+        try
+        {
+            var stamped = await db.GenerationProviderAttempts
+                .Where(item => item.Id == attempt.Id
+                    && item.JobConcurrencyToken == attempt.JobConcurrencyToken
+                    && item.ProviderExecutionId != null)
+                .ExecuteUpdateAsync(setters => setters.SetProperty(item => item.SafeMetadataJson, proof), cancellationToken);
+            if (stamped == 0)
+                logger.LogWarning("Music provider no-charge evidence found no dispatch-stamped attempt row; a retry will remain fail-closed. AttemptId={AttemptId}", attempt.Id);
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
+        {
+            db.ChangeTracker.Clear();
+            logger.LogWarning(exception, "Music provider no-charge evidence could not be persisted; a retry will remain fail-closed. AttemptId={AttemptId}", attempt.Id);
+        }
     }
 
     /// <summary>

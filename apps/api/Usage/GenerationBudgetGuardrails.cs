@@ -114,6 +114,9 @@ public sealed class GenerationBudgetService(
             EstimatedProviderCostUsd = estimate.AmountUsd,
             EstimatedProviderCostKnown = estimate.IsKnown && estimate.AmountUsd.HasValue,
             CostEstimateJson = estimate.ToJson(),
+            SafeMetadataJson = string.Equals(job.JobType, GenerationJobTypes.MusicGenerate, StringComparison.OrdinalIgnoreCase)
+                ? "{\"musicDispatchProtocol\":\"durable_marker_v1\"}"
+                : null,
             PricingVersion = estimate.PricingVersion,
             Currency = estimate.Currency,
             FinalizationKey = $"generation:{job.Id:N}:attempt:{snapshot.ProviderAttempts + 1}",

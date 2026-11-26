@@ -69,9 +69,9 @@ public sealed class MubertMusicGenerationProvider(
         // nothing here establishes that. Until the provider exposes a way to enumerate accepted tracks
         // by our own request id, the policy is to stop the machine from submitting again (the terminal
         // MUSIC_PROVIDER_SUBMISSION_UNCONFIRMED code, whose automatic re-dispatch is suppressed) and to
-        // leave the track id in the log so the pending generation can be reconciled by hand. A customer
-        // who is told the outcome is unknown may still choose to retry once deliberately, which is the
-        // shipped policy for that code.
+        // leave the track id in the log so the pending generation can be reconciled by hand. Both
+        // automatic and customer retries stay blocked until a provider outcome explicitly proves no
+        // charge; Mubert does not currently make that billing promise for a failed track.
         var providerSubmissionAccepted = false;
         string? providerTrackId = null;
 
@@ -80,9 +80,8 @@ public sealed class MubertMusicGenerationProvider(
             // F-36.1b: make the dispatch itself durable before the request leaves this process. The
             // provider's operation id does not exist yet (neither vendor lets us supply one), so this
             // marker is the only evidence that a paid submission may have been accepted. A failure to
-            // write it is logged, not fatal: refusing the customer's generation because a telemetry
-            // write hiccuped would be the wrong direction of error, and the acceptance stamp below
-            // still fails closed.
+            // write it aborts before the transport is called, so a later retry cannot duplicate a
+            // request that never left this process.
             if (onDispatchSubmitting is not null) await onDispatchSubmitting();
 
             var createdBody = await SendJsonWithRetryAsync(

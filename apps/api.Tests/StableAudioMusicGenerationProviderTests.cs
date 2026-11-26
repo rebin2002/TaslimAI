@@ -42,18 +42,36 @@ public sealed class StableAudioMusicGenerationProviderTests
         Assert.Contains("output_format", handler.RequestBodies[0]);
     }
 
-    [Fact]
-    public async Task Maps_rejected_prompt_without_exposing_upstream_body()
+    [Theory]
+    [InlineData(HttpStatusCode.Forbidden, "{\"message\":\"private moderation payload\",\"category\":\"safety\"}")]
+    [InlineData(HttpStatusCode.UnprocessableEntity, "{\"message\":\"private moderation payload\",\"category\":\"safety\"}")]
+    public async Task Documents_preacceptance_rejection_as_no_charge_without_exposing_upstream_body(HttpStatusCode status, string body)
     {
-        var handler = new StableAudioHandler((_, requestNumber) => requestNumber == 1
-            ? Json(HttpStatusCode.Accepted, "{\"id\":\"generation-rejected\"}")
-            : Json(HttpStatusCode.UnprocessableEntity, "{\"message\":\"private moderation payload\",\"category\":\"safety\"}"));
+        var handler = new StableAudioHandler((_, _) => Json(status, body));
         var provider = CreateProvider(handler);
 
         var exception = await Assert.ThrowsAsync<MusicProviderRejectedException>(() => provider.GenerateAsync(Input()));
 
+        Assert.True(exception.ProviderDeclaresNoCharge);
+        Assert.Single(handler.Requests);
+        Assert.Equal(HttpMethod.Post, handler.Requests[0].Method);
         Assert.DoesNotContain("private moderation payload", exception.Message, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("secret-api-key", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Accepted_result_get_with_rejection_words_stays_unconfirmed()
+    {
+        var handler = new StableAudioHandler((_, requestNumber) => requestNumber == 1
+            ? Json(HttpStatusCode.Accepted, "{\"id\":\"generation-poll-rejection\"}")
+            : Json(HttpStatusCode.UnprocessableEntity, "{\"message\":\"moderation rejected for safety\"}"));
+        var provider = CreateProvider(handler);
+
+        var failure = await Assert.ThrowsAsync<MusicProviderSubmissionUnconfirmedException>(() => provider.GenerateAsync(Input()));
+
+        Assert.IsAssignableFrom<MusicProviderUnavailableException>(failure);
+        Assert.Equal(2, handler.Requests.Count);
+        Assert.Single(handler.Requests, request => request.Method == HttpMethod.Post);
     }
 
     [Fact]
@@ -582,18 +600,18 @@ public sealed class StableAudioMusicGenerationProviderTests
     }
 
     [Theory]
-    [InlineData("{\"errors\":[\"prompt rejected by moderation\"],\"moderation\":\"blocked\"}")]
-    [InlineData("{\"errors\":[\"invalid prompt parameters\"]}")]
-    public async Task Result_lookup_declaring_a_terminal_failure_carries_the_vendors_no_charge_promise(string body)
+    [InlineData(HttpStatusCode.BadRequest, "{\"errors\":[\"prompt rejected by moderation\"],\"moderation\":\"blocked\"}")]
+    [InlineData(HttpStatusCode.UnprocessableEntity, "{\"errors\":[\"invalid prompt parameters\"],\"category\":\"safety\"}")]
+    public async Task Result_lookup_error_words_do_not_release_a_post_acceptance_retry(HttpStatusCode status, string body)
     {
-        // The only branch allowed to release a retry: Stability documents "you will not be charged for
-        // failed generations", and a 400/422 is that vendor declaring this generation failed - so the no-charge
-        // bit is set from the contract, not inferred.
-        var handler = new StableAudioHandler((_, _) => Json(HttpStatusCode.BadRequest, body));
+        // A create POST already returned 202 and a generation id. Error text on a later results GET is
+        // not a documented structured terminal status and cannot prove this accepted generation was
+        // not charged, even when it contains moderation/rejection vocabulary.
+        var handler = new StableAudioHandler((_, _) => Json(status, body));
         var provider = CreateProvider(handler);
         var result = await provider.ReconcileAcceptedSubmissionAsync("result-declined");
-        Assert.Equal(MusicSubmissionOutcome.ProviderDeclaredFailure, result.Outcome);
-        Assert.True(result.ProviderDeclaresNoCharge);
+        Assert.Equal(MusicSubmissionOutcome.Unknown, result.Outcome);
+        Assert.False(result.ProviderDeclaresNoCharge);
     }
 
     [Theory]

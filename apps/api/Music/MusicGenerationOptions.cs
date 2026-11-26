@@ -59,7 +59,10 @@ public sealed class MusicProviderAuthenticationException() : MusicProviderUnavai
 public sealed class MusicProviderQuotaException() : MusicProviderUnavailableException;
 public sealed class MusicProviderTimeoutException() : Exception("The music provider timed out.");
 public sealed class MusicProviderRateLimitException() : Exception("The music provider request was rate limited.");
-public sealed class MusicProviderRejectedException() : Exception("The music provider rejected the music request.");
+public sealed class MusicProviderRejectedException(bool providerDeclaresNoCharge = false) : Exception("The music provider rejected the music request.")
+{
+    public bool ProviderDeclaresNoCharge { get; } = providerDeclaresNoCharge;
+}
 public sealed class MusicProviderInvalidRequestException() : Exception("The music provider rejected the music request as invalid.");
 public sealed class MusicProviderFailureException() : Exception("The music provider failed.");
 public sealed class MusicOutputInvalidException() : Exception("The music provider returned an invalid music file.");

@@ -21,8 +21,8 @@ namespace Taslim.Api.Tests;
 /// provider outage. It must not read as "please try again", because RetryAsync replays the original
 /// input as a fresh billable submission and would orphan the track that already exists. These tests
 /// pin the whole chain - distinct exception type, own public error code, copy that does not invite a
-/// retry, and a mechanical refusal at the retry endpoint - while proving that ordinary music
-/// provider outages keep their existing retry behaviour.
+/// retry, and a mechanical refusal at the retry endpoint - while proving that only persisted
+/// pre-dispatch or explicit provider no-charge evidence keeps a retry available.
 /// </summary>
 public sealed class MusicPostBillingRetrievalIsolationTests : IClassFixture<MusicRetrievalFailureApiFactory>
 {
@@ -458,18 +458,18 @@ public sealed class MusicSubmissionUnconfirmedIsolationTests : IClassFixture<Mus
         Assert.Equal(before, UnconfirmedProvider().Submissions);
     }
     [Fact]
-    public async Task Other_music_failure_states_keep_their_existing_recovery_and_are_not_refused_as_unconfirmed()
+    public void Other_music_failure_states_keep_their_existing_recovery_and_are_not_refused_as_unconfirmed()
     {
         // Scope control for the fail-closed refusal: it must apply to the two states that are evidence
         // a submission exists (post-billing retrieval failure, accepted-but-unconfirmed) and not to a
-        // provider-declared terminal rejection, which proves nothing was created and so stays retryable.
+        // provider-declared terminal rejection, which remains retryable only with an explicit no-charge proof.
         // The provider-declared arm is exercised here at the classification level; the job-level form,
         // including a member-asked cancellation, is MusicRetryPostureIsolationTests.
         Assert.Equal("provider", GenerationFailureClassifier.Classify(GenerationJobErrorCodes.MusicProviderSubmissionUnconfirmed).Category);
         Assert.False(GenerationFailureClassifier.Classify(GenerationJobErrorCodes.MusicProviderSubmissionUnconfirmed).Retryable);
         Assert.Equal("provider", GenerationFailureClassifier.Classify(GenerationJobErrorCodes.MusicSubmissionRetryBlocked).Category);
         Assert.False(GenerationFailureClassifier.Classify(GenerationJobErrorCodes.MusicSubmissionRetryBlocked).Retryable);
-        // A declared rejection is a validation outcome, not an unknown submission: retryable stays as shipped.
+        // The public classification is not proof of no charge; RetryAsync separately requires durable evidence.
         var rejected = GenerationFailureClassifier.Classify(GenerationJobErrorCodes.MusicPromptRejected);
         Assert.Equal("validation", rejected.Category);
         // And the refusal never re-uses the unconfirmed code, so clients can tell the states apart.
@@ -656,10 +656,10 @@ internal sealed class UnconfirmedSubmissionMusicProvider : IMusicGenerationProvi
     }
 }
 /// <summary>
-/// The music postures that the fail-closed refusal must NOT capture, plus the one it must. A generation
-/// the provider itself declared finished-nothing (a prompt rejection) and a cancellation the member asked
-/// for BEFORE the provider accepted anything are both evidence that no paid submission is in flight, so
-/// their retry path stays open (the delay outcome waits on the caller's token, which is how a
+/// The music postures that the fail-closed refusal must NOT capture, plus the one it must. A prompt
+/// rejection with a provider-declared no-charge promise and a cancellation the member asked for BEFORE
+/// the provider dispatch marker are both evidence that no paid submission is in flight, so their retry
+/// path stays open (the delay outcome waits on the caller's token, which is how a
 /// cancellation reaches a running music job). The third posture is F-36: the member cancels AFTER the
 /// provider accepted the paid generation, which the real providers signal with
 /// MusicProviderCancellationWithAcceptedSubmissionException and which the retry endpoint must refuse.
@@ -672,16 +672,28 @@ internal sealed class PostureMusicProvider : IMusicGenerationProvider
     public volatile bool DeclareRejected;
     public volatile bool DelayUntilCancelled;
     public volatile bool AcceptThenCancel;
-    public async Task<MusicProviderResult> GenerateAsync(MusicGenerationInput request, CancellationToken cancellationToken = default)
+    public volatile bool AmbiguousCreateFault;
+    public volatile bool AcceptThenRejectWithoutNoCharge;
+
+    public Task<MusicProviderResult> GenerateAsync(MusicGenerationInput request, CancellationToken cancellationToken = default)
+        => GenerateAsync(request, cancellationToken, null, null);
+
+    public async Task<MusicProviderResult> GenerateAsync(
+        MusicGenerationInput request,
+        CancellationToken cancellationToken,
+        Func<string, Task>? onSubmissionAccepted,
+        Func<Task>? onDispatchSubmitting = null)
     {
+        if (DelayUntilCancelled)
+        {
+            await Task.Delay(Timeout.Infinite, cancellationToken);
+            throw new MusicProviderUnavailableException();
+        }
+        if (onDispatchSubmitting is not null) await onDispatchSubmitting();
         Interlocked.Increment(ref submissions);
         if (AcceptThenCancel)
         {
-            // Mirrors the real providers exactly: the billable submission above was accepted, the
-            // provider then waits on the caller's token, and the member's cancellation arrives while it
-            // is still waiting - so the provider rethrows the TYPED cancellation instead of letting a
-            // plain one escape. The worker must therefore terminalize the job as a cancellation whose
-            // outcome is unreconciled, and RetryAsync must refuse the second paid submission.
+            if (onSubmissionAccepted is not null) await onSubmissionAccepted("posture-accepted-operation");
             try
             {
                 await Task.Delay(Timeout.Infinite, cancellationToken);
@@ -692,12 +704,13 @@ internal sealed class PostureMusicProvider : IMusicGenerationProvider
             }
             throw new MusicProviderUnavailableException();
         }
-        if (DelayUntilCancelled)
+        if (AcceptThenRejectWithoutNoCharge)
         {
-            await Task.Delay(Timeout.Infinite, cancellationToken);
-            throw new MusicProviderUnavailableException();
+            if (onSubmissionAccepted is not null) await onSubmissionAccepted("posture-rejected-after-acceptance");
+            throw new MusicProviderRejectedException();
         }
-        if (DeclareRejected) throw new MusicProviderRejectedException();
+        if (DeclareRejected) throw new MusicProviderRejectedException(providerDeclaresNoCharge: true);
+        if (AmbiguousCreateFault) throw new MusicProviderTimeoutException();
         throw new MusicProviderSubmissionUnconfirmedException();
     }
 }
@@ -720,9 +733,9 @@ public sealed class MusicPostureApiFactory : GenerationJobsApiFactory
 /// <summary>
 /// Pins the SCOPE of the fail-closed music retry refusal. The billing-fairness policy blocks a second
 /// paid submission only while an earlier submission's outcome is unknown; it must not strand the
-/// states that prove nothing is in flight. A provider-declared prompt rejection and a cancellation the
-/// member asked for are both retryable at the endpoint today, and this class fails if the refusal is
-/// widened past the two submission-evidence codes.
+/// states that prove nothing is in flight. A provider-declared no-charge prompt rejection and a
+/// cancellation before dispatch remain retryable, while an ambiguous dispatch is blocked even with a
+/// transient error code.
 /// </summary>
 public sealed class MusicRetryPostureIsolationTests : IClassFixture<MusicPostureApiFactory>
 {
@@ -733,6 +746,104 @@ public sealed class MusicRetryPostureIsolationTests : IClassFixture<MusicPosture
         using var scope = factory.Services.CreateScope();
         scope.ServiceProvider.GetRequiredService<TaslimDbContext>().Database.EnsureCreated();
     }
+
+    [Fact]
+    public async Task Ambiguous_create_timeout_is_refused_from_persisted_dispatch_evidence()
+    {
+        var provider = Provider();
+        provider.AmbiguousCreateFault = true;
+        var submissionsBefore = provider.Submissions;
+        try
+        {
+            using var client = factory.CreateClient();
+            var auth = await Register(client, $"music-ambiguous-{Guid.NewGuid():N}@example.com");
+            var created = await SendWithCsrf(client, HttpMethod.Post, "/api/music-generation/jobs", MusicBody(auth));
+            Assert.Equal(HttpStatusCode.Accepted, created.StatusCode);
+            var submitted = (await created.Content.ReadFromJsonAsync<CreateMusicGenerationResponse>(PostureJson))!.Job;
+            var failed = await WaitForTerminal(client, submitted.Id);
+            Assert.Equal(GenerationJobErrorCodes.MusicProviderTimeout, failed.ErrorCode);
+            Assert.Equal(submissionsBefore + 1, provider.Submissions);
+
+            using (var scope = factory.Services.CreateScope())
+            {
+                var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+                var attempt = await db.GenerationProviderAttempts.AsNoTracking().SingleAsync(item => item.GenerationJobId == submitted.Id);
+                Assert.Equal("taslim:dispatch-pending", attempt.ProviderExecutionId);
+                Assert.Contains("musicDispatchProtocol", attempt.SafeMetadataJson, StringComparison.Ordinal);
+                var usage = await db.UsageTransactions.AsNoTracking().SingleAsync(item => item.RequestId == $"generation:{submitted.Id:N}");
+                Assert.Equal(UsageTransactionStatus.Failed, usage.Status);
+                Assert.Equal(0m, usage.ChargedAmount);
+            }
+
+            var retry = await SendWithCsrf(client, HttpMethod.Post, $"/api/generation/jobs/{submitted.Id}/retry", null, $"music-ambiguous-retry-{Guid.NewGuid():N}");
+            Assert.Equal(HttpStatusCode.BadRequest, retry.StatusCode);
+            using (var refusal = JsonDocument.Parse(await retry.Content.ReadAsStringAsync()))
+                Assert.Equal(GenerationJobErrorCodes.MusicSubmissionRetryBlocked, refusal.RootElement.GetProperty("error").GetProperty("code").GetString());
+            Assert.Equal(submissionsBefore + 1, provider.Submissions);
+
+            // A pre-marker attempt from an older worker is not proof of non-dispatch. Erasing the
+            // current marker/protocol in this isolated SQLite database models that legacy record and
+            // verifies that missing evidence fails closed rather than relying on the timeout code.
+            using (var scope = factory.Services.CreateScope())
+            {
+                var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+                var attempt = await db.GenerationProviderAttempts.SingleAsync(item => item.GenerationJobId == submitted.Id);
+                attempt.ProviderExecutionId = null;
+                attempt.SafeMetadataJson = null;
+                await db.SaveChangesAsync();
+            }
+            var legacyRetry = await SendWithCsrf(client, HttpMethod.Post, $"/api/generation/jobs/{submitted.Id}/retry", null, $"music-ambiguous-legacy-{Guid.NewGuid():N}");
+            Assert.Equal(HttpStatusCode.BadRequest, legacyRetry.StatusCode);
+            Assert.Equal(submissionsBefore + 1, provider.Submissions);
+            using var finalScope = factory.Services.CreateScope();
+            Assert.Equal(0, await finalScope.ServiceProvider.GetRequiredService<TaslimDbContext>().GenerationJobs.AsNoTracking().CountAsync(item => item.RetryOfJobId == submitted.Id));
+        }
+        finally
+        {
+            provider.AmbiguousCreateFault = false;
+        }
+    }
+
+    [Fact]
+    public async Task Rejection_after_provider_acceptance_without_no_charge_proof_does_not_unlock_retry()
+    {
+        var provider = Provider();
+        provider.AcceptThenRejectWithoutNoCharge = true;
+        var submissionsBefore = provider.Submissions;
+        try
+        {
+            using var client = factory.CreateClient();
+            var auth = await Register(client, $"music-accepted-rejection-{Guid.NewGuid():N}@example.com");
+            var created = await SendWithCsrf(client, HttpMethod.Post, "/api/music-generation/jobs", MusicBody(auth));
+            Assert.Equal(HttpStatusCode.Accepted, created.StatusCode);
+            var submitted = (await created.Content.ReadFromJsonAsync<CreateMusicGenerationResponse>(PostureJson))!.Job;
+            var failed = await WaitForTerminal(client, submitted.Id);
+            Assert.Equal(GenerationJobErrorCodes.MusicPromptRejected, failed.ErrorCode);
+            Assert.Equal(submissionsBefore + 1, provider.Submissions);
+
+            using (var scope = factory.Services.CreateScope())
+            {
+                var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+                var attempt = await db.GenerationProviderAttempts.AsNoTracking().SingleAsync(item => item.GenerationJobId == submitted.Id);
+                Assert.Equal("posture-rejected-after-acceptance", attempt.ProviderExecutionId);
+                Assert.DoesNotContain("provider_declared_no_charge", attempt.SafeMetadataJson ?? string.Empty, StringComparison.Ordinal);
+                var usage = await db.UsageTransactions.AsNoTracking().SingleAsync(item => item.RequestId == $"generation:{submitted.Id:N}");
+                Assert.Equal(UsageTransactionStatus.Failed, usage.Status);
+                Assert.Equal(0m, usage.ChargedAmount);
+            }
+
+            var retry = await SendWithCsrf(client, HttpMethod.Post, $"/api/generation/jobs/{submitted.Id}/retry", null, $"music-accepted-rejection-retry-{Guid.NewGuid():N}");
+            Assert.Equal(HttpStatusCode.BadRequest, retry.StatusCode);
+            using (var refusal = JsonDocument.Parse(await retry.Content.ReadAsStringAsync()))
+                Assert.Equal(GenerationJobErrorCodes.MusicSubmissionRetryBlocked, refusal.RootElement.GetProperty("error").GetProperty("code").GetString());
+            Assert.Equal(submissionsBefore + 1, provider.Submissions);
+        }
+        finally
+        {
+            provider.AcceptThenRejectWithoutNoCharge = false;
+        }
+    }
+
     [Fact]
     public async Task Provider_declared_rejection_is_still_retryable_after_the_unconfirmed_refusal_landed()
     {
@@ -753,8 +864,8 @@ public sealed class MusicRetryPostureIsolationTests : IClassFixture<MusicPosture
             var child = (await retry.Content.ReadFromJsonAsync<GenerationJobDto>(PostureJson))!;
             Assert.Equal(submitted.Id, child.RetryOfJobId);
             // The retried job runs asynchronously; wait for it, then prove the provider was
-            // re-approached - which is correct here, because a declared rejection is evidence that
-            // nothing billable is in flight.
+            // re-approached - which is correct here because the provider's explicit no-charge outcome
+            // proves that no paid generation is in flight.
             var retried = await WaitForTerminal(client, child.Id);
             Assert.Equal(GenerationJobErrorCodes.MusicPromptRejected, retried.ErrorCode);
             Assert.Equal(before + 1, provider.Submissions);

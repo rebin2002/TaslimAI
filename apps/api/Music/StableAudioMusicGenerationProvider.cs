@@ -60,10 +60,9 @@ public sealed class StableAudioMusicGenerationProvider(
         // middle stage is deliberately distinct from "nothing was submitted": the retryable timeout
         // code makes the job layer re-run CreateAsync, which posts a second generation while the
         // accepted one may still be running and billing. It is equally not the retrieval class, whose
-        // customer copy asserts the music was generated. The policy is to stop the machine from
-        // submitting again (terminal MUSIC_PROVIDER_SUBMISSION_UNCONFIRMED, whose automatic
-        // re-dispatch is suppressed) and keep the generation id in the log so the pending result can
-        // be reconciled by hand; an informed customer may still choose to retry once deliberately.
+        // customer copy asserts the music was generated. Both automatic and customer retries stay
+        // blocked until reconciliation establishes a provider-declared no-charge outcome; the
+        // generation id remains in the log so the pending result can be reconciled by hand.
         var providerSubmissionAccepted = false;
         string? providerGenerationId = null;
 
@@ -77,9 +76,8 @@ public sealed class StableAudioMusicGenerationProvider(
             // F-36.1b: make the dispatch itself durable before the request leaves this process. The
             // provider's operation id does not exist yet (neither vendor lets us supply one), so this
             // marker is the only evidence that a paid submission may have been accepted. A failure to
-            // write it is logged, not fatal: refusing the customer's generation because a telemetry
-            // write hiccuped would be the wrong direction of error, and the acceptance stamp below
-            // still fails closed.
+            // write it aborts before the transport is called, so a later retry cannot duplicate a
+            // request that never left this process.
             if (onDispatchSubmitting is not null) await onDispatchSubmitting();
 
             var stopwatch = Stopwatch.StartNew();
@@ -139,16 +137,11 @@ public sealed class StableAudioMusicGenerationProvider(
 
                     if (!result.IsSuccessStatusCode)
                     {
-                        var declared = await MapFailureAsync(result);
-                        // A moderation rejection or an invalid-request answer is the provider declaring
-                        // that this submission will not produce a track, so its own terminal class and
-                        // the normal retry behaviour stay correct. Every other non-success answer on the
-                        // polling path - persistent 5xx, 408, 401/403, 402, 429, 404, or the generic
-                        // fault - leaves an ACCEPTED generation's outcome unknown, and its retryable
-                        // code would instruct a second paid submission.
-                        throw IsProviderDeclaredTerminal(declared)
-                            ? declared
-                            : CreateSubmissionUnconfirmed("result status", declared, providerGenerationId, pollAttempts);
+                        var failure = MapFailure(result);
+                        // This GET follows a 202 create response with a durable generation id. No generic
+                        // result-status error or body text can prove that the accepted generation was
+                        // not charged, so every non-success remains unconfirmed and retry-blocked.
+                        throw CreateSubmissionUnconfirmed("result status", failure, providerGenerationId, pollAttempts);
                     }
 
                     billableResultReceived = true;
@@ -320,7 +313,7 @@ public sealed class StableAudioMusicGenerationProvider(
             using (response)
             {
                 if (response.StatusCode != HttpStatusCode.Accepted)
-                    throw await MapFailureAsync(response);
+                    throw MapFailure(response, preSubmissionCreateResponse: true);
                 return await response.Content.ReadAsStringAsync(cancellationToken);
             }
         }
@@ -434,19 +427,23 @@ public sealed class StableAudioMusicGenerationProvider(
         return (buffer.ToArray(), response.Content.Headers.ContentType?.MediaType);
     }
 
-    private async Task<Exception> MapFailureAsync(HttpResponseMessage response)
+    private Exception MapFailure(HttpResponseMessage response, bool preSubmissionCreateResponse = false)
     {
         var status = response.StatusCode;
-        var body = string.Empty;
-        try { body = await response.Content.ReadAsStringAsync(); } catch { }
-        logger.LogWarning("Stable Audio request returned a provider status. StatusCode={StatusCode}; FailureCategory={FailureCategory}", (int)status, ClassifyFailure(status, body));
+        logger.LogWarning("Stable Audio request returned a provider status. StatusCode={StatusCode}; FailureCategory={FailureCategory}", (int)status, ClassifyFailure(status, preSubmissionCreateResponse));
+
+        // Stability documents 403 moderation blocks and 422 classifier rejections as failed
+        // pre-audio requests, with no credits charged. Scope this proof to the create POST response;
+        // a 4xx result GET after a 202 acceptance says nothing reliable about the accepted job's cost.
+        if (preSubmissionCreateResponse
+            && (status == HttpStatusCode.Forbidden || status == HttpStatusCode.UnprocessableEntity))
+            return new MusicProviderRejectedException(providerDeclaresNoCharge: true);
 
         return status switch
         {
             HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden => new MusicProviderAuthenticationException(),
             HttpStatusCode.PaymentRequired => new MusicProviderQuotaException(),
             HttpStatusCode.TooManyRequests => new MusicProviderRateLimitException(),
-            HttpStatusCode.BadRequest or HttpStatusCode.UnprocessableEntity when IsRejected(body) => new MusicProviderRejectedException(),
             HttpStatusCode.BadRequest or HttpStatusCode.UnprocessableEntity => new MusicProviderInvalidRequestException(),
             _ when status == HttpStatusCode.RequestTimeout || (int)status >= 500 => new MusicProviderUnavailableException(),
             _ => new MusicProviderFailureException(),
@@ -464,26 +461,14 @@ public sealed class StableAudioMusicGenerationProvider(
         throw new MusicProviderFailureException();
     }
 
-    private static bool IsRejected(string body)
-    {
-        if (string.IsNullOrWhiteSpace(body)) return false;
-        try
-        {
-            using var document = JsonDocument.Parse(body);
-            return document.RootElement.ToString().Contains("moderation", StringComparison.OrdinalIgnoreCase)
-                || document.RootElement.ToString().Contains("rejected", StringComparison.OrdinalIgnoreCase)
-                || document.RootElement.ToString().Contains("safety", StringComparison.OrdinalIgnoreCase);
-        }
-        catch (JsonException) { return false; }
-    }
-
-    private static string ClassifyFailure(HttpStatusCode status, string body) =>
+    private static string ClassifyFailure(HttpStatusCode status, bool preSubmissionCreateResponse) =>
         status switch
         {
+            HttpStatusCode.Forbidden when preSubmissionCreateResponse => "moderation_blocked_pre_submission",
+            HttpStatusCode.UnprocessableEntity when preSubmissionCreateResponse => "classifier_rejected_pre_submission",
             HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden => "authentication",
             HttpStatusCode.PaymentRequired => "quota",
             HttpStatusCode.TooManyRequests => "rate_limit",
-            HttpStatusCode.BadRequest or HttpStatusCode.UnprocessableEntity when IsRejected(body) => "rejected_prompt",
             HttpStatusCode.BadRequest or HttpStatusCode.UnprocessableEntity => "invalid_request",
             _ when (int)status >= 500 => "provider_unavailable",
             _ => "provider_failure",
@@ -532,12 +517,11 @@ public sealed class StableAudioMusicGenerationProvider(
                 return new MusicSubmissionReconciliation(MusicSubmissionOutcome.InProgress, false);
             if (result.IsSuccessStatusCode)
                 return new MusicSubmissionReconciliation(MusicSubmissionOutcome.Completed, false);
-            var declared = await MapFailureAsync(result);
-            return IsProviderDeclaredTerminal(declared)
-                // The only contract-supported release: Stability declaring this generation failed
-                // means its own documentation says the credits were not spent.
-                ? new MusicSubmissionReconciliation(MusicSubmissionOutcome.ProviderDeclaredFailure, true)
-                : MusicSubmissionReconciliation.Unknown;
+            _ = MapFailure(result);
+            // Stability's public error documentation covers rejected create requests, not a
+            // structured terminal-failure response from the results endpoint. The accepted generation
+            // remains financially unresolved until that endpoint returns a documented safe outcome.
+            return MusicSubmissionReconciliation.Unknown;
         }
         catch (Exception exception) when (exception is not OperationCanceledException)
         {
@@ -545,9 +529,6 @@ public sealed class StableAudioMusicGenerationProvider(
             return MusicSubmissionReconciliation.Unknown;
         }
     }
-
-    private static bool IsProviderDeclaredTerminal(Exception exception) =>
-        exception is MusicProviderRejectedException or MusicProviderInvalidRequestException;
 
     /// <summary>
     /// Builds the exception for a generation Stability accepted but whose outcome was never observed,

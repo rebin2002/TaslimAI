@@ -508,6 +508,63 @@ public sealed class MusicAcceptedCancellationLeaseRecoveryTests : IClassFixture<
     }
 
     [Fact]
+    public async Task Legacy_cancellation_attempt_without_dispatch_protocol_is_unknown_and_not_retryable()
+    {
+        var provider = Provider();
+        var submissionsBefore = provider.SubmittedGenerations;
+        provider.Reset(AcceptedCancellationMode.HangWithoutReporting);
+        using var client = factory.CreateClient();
+        var auth = await Register(client, $"f361-legacy-{Guid.NewGuid():N}@example.com");
+        var created = await SendWithCsrf(client, HttpMethod.Post, "/api/music-generation/jobs", MusicBody(auth));
+        Assert.Equal(HttpStatusCode.Accepted, created.StatusCode);
+        var job = (await created.Content.ReadFromJsonAsync<CreateMusicGenerationResponse>(Json))!.Job;
+        var claimToken = Guid.Empty;
+
+        // Model a worker attempt written before the durable dispatch protocol existed. A blank provider
+        // id in that record is not proof that the POST never left the process, so recovery must close it.
+        using (var stage = factory.Services.CreateScope())
+        {
+            var db = stage.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            var row = await db.GenerationJobs.SingleAsync(item => item.Id == job.Id);
+            row.Status = GenerationJobStatus.Running;
+            row.StartedAt = DateTime.UtcNow.AddMinutes(-5);
+            row.ClaimExpiresAt = DateTime.UtcNow.AddMinutes(-1);
+            row.CancellationRequested = true;
+            claimToken = row.ConcurrencyToken;
+            db.GenerationProviderAttempts.Add(new GenerationProviderAttempt
+            {
+                Id = Guid.NewGuid(),
+                GenerationJobId = job.Id,
+                JobConcurrencyToken = claimToken,
+                IdempotencyKey = $"f361-legacy-{Guid.NewGuid():N}",
+                FinalizationKey = $"f361-legacy-finalization-{Guid.NewGuid():N}",
+                Capability = GenerationJobTypes.MusicGenerate,
+                Provider = "test",
+                Status = GenerationProviderAttemptStatus.Started,
+                SafeMetadataJson = null,
+            });
+            await db.SaveChangesAsync();
+        }
+
+        using var recoveryProcess = new CancellationTokenSource();
+        var recoveryWorker = CreateWorker(cancellationPollMilliseconds: 10);
+        await ((IHostedService)recoveryWorker).StartAsync(recoveryProcess.Token);
+        var cancelled = await WaitForStatusAsync(client, job.Id, "Cancelled");
+        recoveryProcess.Cancel();
+        await ((IHostedService)recoveryWorker).StopAsync(CancellationToken.None);
+
+        Assert.Equal(GenerationJobErrorCodes.MusicCancelledUnconfirmedSubmission, cancelled.ErrorCode);
+        Assert.Equal(submissionsBefore, provider.SubmittedGenerations);
+        await AssertRetryRefusedAsync(client, job.Id, GenerationJobErrorCodes.MusicSubmissionRetryBlocked);
+        Assert.Equal(0, await CountChildrenAsync(job.Id));
+        using var finalScope = factory.Services.CreateScope();
+        var usage = await finalScope.ServiceProvider.GetRequiredService<TaslimDbContext>().UsageTransactions
+            .AsNoTracking().SingleAsync(item => item.RequestId == $"generation:{job.Id:N}");
+        Assert.Equal(UsageTransactionStatus.Cancelled, usage.Status);
+        Assert.Equal(0m, usage.ChargedAmount);
+    }
+
+    [Fact]
     public async Task Acceptance_evidence_from_a_different_claim_does_not_hold_this_cancellation_closed()
     {
         // The consult is claim-scoped: the durable record answers "what did the process that owned this
