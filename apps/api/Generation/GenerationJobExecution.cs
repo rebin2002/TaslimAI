@@ -640,6 +640,9 @@ public sealed class GenerationJobService(
             && item.GenerationJobId == job.RetryOfJobId);
         if (!job.RetryOfJobId.HasValue)
             target = target.Where(item => item.Status == MovieAssemblyStatuses.Planned);
+        else
+            target = target.Where(item => item.GenerationJob != null
+                && (item.GenerationJob.Status == GenerationJobStatus.Failed || item.GenerationJob.Status == GenerationJobStatus.Cancelled));
         var checkpoint = JsonSerializer.Serialize(new { phase = job.RetryOfJobId.HasValue ? "retry_resume" : "queued", progressPercent = 0 });
         var updated = await target.ExecuteUpdateAsync(setters => setters
             .SetProperty(item => item.GenerationJobId, job.Id)
@@ -1458,7 +1461,7 @@ public sealed class GenerationJobWorker(
         }
     }
 
-    private async Task<GenerationJob?> ClaimAsync(TaslimDbContext db, CancellationToken cancellationToken)
+    internal async Task<GenerationJob?> ClaimAsync(TaslimDbContext db, CancellationToken cancellationToken)
     {
         var isSqlite = db.Database.ProviderName?.Contains("Sqlite", StringComparison.OrdinalIgnoreCase) == true;
         if (isSqlite)

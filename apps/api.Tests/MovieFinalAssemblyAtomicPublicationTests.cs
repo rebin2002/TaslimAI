@@ -5,11 +5,13 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Diagnostics;
 using Microsoft.EntityFrameworkCore.Storage;
 using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using Npgsql;
 using Taslim.Api.Ai;
 using Taslim.Api.Authorization;
+using Taslim.Api.Documents;
 using Taslim.Api.Domain;
 using Taslim.Api.Generation;
 using Taslim.Api.Images;
@@ -87,6 +89,8 @@ public sealed partial class MovieFinalAssemblyQueueRedrive696Tests
         // Losing the connection at this point must roll back both links and the usage reservation.
         async Task BeforeCommit(Guid jobId)
         {
+            await using var workerBeforeCommit = new TaslimDbContext(options);
+            Assert.Null(await RunClaimAsync(workerBeforeCommit));
             Assert.False(await observer.GenerationJobs.AsNoTracking().AnyAsync(job => job.Id == jobId));
             Assert.False(await observer.UsageTransactions.AsNoTracking().AnyAsync(row => row.GenerationJobId == jobId));
             Assert.Null(await observer.MovieAssemblies.AsNoTracking().Select(row => row.GenerationJobId).SingleAsync());
@@ -151,6 +155,7 @@ public sealed partial class MovieFinalAssemblyQueueRedrive696Tests
 
         // An ordinary failed/cancelled execution can only transfer to an explicit retry.
         // Run a worker checkpoint after the database commits but before the retry returns.
+        var originalWorkerClaim = await RaceClaimAsync(options, initialJob.Id);
         await observer.GenerationJobs.Where(job => job.Id == initialJob.Id)
             .ExecuteUpdateAsync(set => set.SetProperty(job => job.Status, GenerationJobStatus.Failed));
         await observer.MovieAssemblies.Where(row => row.Id == target.Id)
@@ -163,10 +168,8 @@ public sealed partial class MovieFinalAssemblyQueueRedrive696Tests
             Assert.Equal(jobId, queued.GenerationJobId);
             Assert.Contains("retry_resume", queued.CheckpointJson);
             Assert.Equal(MovieAssemblyStatuses.Queued, queued.Status);
-            var token = Guid.NewGuid();
-            Assert.Equal(1, await observer.GenerationJobs.Where(job => job.Id == jobId && job.Status == GenerationJobStatus.Queued)
-                .ExecuteUpdateAsync(set => set.SetProperty(job => job.Status, GenerationJobStatus.Running)
-                    .SetProperty(job => job.ConcurrencyToken, token)));
+            var claimed = await RaceClaimAsync(options, jobId);
+            var token = claimed.ConcurrencyToken;
             var store = new MovieFinalAssemblyExecutionStore(observer);
             await store.MarkRunningAsync(jobId, token, CancellationToken.None);
             await store.TouchCheckpointAsync(target.Id, jobId, token, "rendering", 20, CancellationToken.None);
@@ -195,9 +198,8 @@ public sealed partial class MovieFinalAssemblyQueueRedrive696Tests
         var secondKey = Key + "-lost-ack";
         commit.AfterCommit = async jobId =>
         {
-            var token = Guid.NewGuid();
-            await observer.GenerationJobs.Where(job => job.Id == jobId).ExecuteUpdateAsync(set => set
-                .SetProperty(job => job.Status, GenerationJobStatus.Running).SetProperty(job => job.ConcurrencyToken, token));
+            var claimed = await RaceClaimAsync(options, jobId);
+            var token = claimed.ConcurrencyToken;
             await new MovieFinalAssemblyExecutionStore(observer).MarkRunningAsync(jobId, token, CancellationToken.None);
             throw new IOException("Synthetic lost initial commit acknowledgement");
         };
@@ -213,6 +215,73 @@ public sealed partial class MovieFinalAssemblyQueueRedrive696Tests
         Assert.Equal(3, await observer.GenerationJobs.CountAsync());
         Assert.Equal(3, await observer.UsageTransactions.CountAsync());
         Assert.False(await observer.CreditLedgerEntries.AnyAsync());
+
+        const string cancellationKey = "independent-cancel-then-retry";
+        using var cancel = new CancellationTokenSource();
+        enqueue.AfterEnqueue = _ => { cancel.Cancel(); cancel.Token.ThrowIfCancellationRequested(); return Task.CompletedTask; };
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+            service.RequestAsync(world.UserId, world.MovieId, AssemblyRequest(), cancellationKey, cancel.Token));
+        var cancelled = await observer.MovieAssemblies.AsNoTracking().SingleAsync(row => row.IdempotencyKey == cancellationKey);
+        Assert.Null(cancelled.GenerationJobId);
+        Assert.Equal(MovieAssemblyStatuses.Failed, cancelled.Status);
+        Assert.Equal(3, await observer.GenerationJobs.CountAsync());
+        Assert.Equal(3, await observer.UsageTransactions.CountAsync());
+        enqueue.AfterEnqueue = null;
+        commit.AfterCommit = async jobId =>
+        {
+            var active = await RaceClaimAsync(options, jobId);
+            await new MovieFinalAssemblyExecutionStore(observer).MarkRunningAsync(jobId, active.ConcurrencyToken, CancellationToken.None);
+        };
+        var recovered = await service.RequestAsync(world.UserId, world.MovieId, AssemblyRequest(), cancellationKey, CancellationToken.None);
+        commit.AfterCommit = null;
+        Assert.NotNull(recovered!.GenerationJobId);
+        Assert.Equal(MovieAssemblyStatuses.Assembling, recovered.Status);
+        Assert.Equal(GenerationJobStatus.Running.ToString(), recovered.Job!.Status);
+        Assert.Equal(4, await observer.GenerationJobs.CountAsync());
+        Assert.Equal(4, await observer.UsageTransactions.CountAsync());
+
+        // Legacy rows can have a missing link while their original job has already failed and
+        // a replacement job exists. A delayed callback from the old worker must not reclaim it.
+        await observer.MovieAssemblies.Where(row => row.Id == target.Id).ExecuteUpdateAsync(set => set
+            .SetProperty(row => row.GenerationJobId, (Guid?)null)
+            .SetProperty(row => row.Status, MovieAssemblyStatuses.Planned));
+        await using var delayedDb = new TaslimDbContext(options);
+        var delayed = new MovieFinalAssemblyJobHandler(delayedDb, new UnavailableMovieFinalAssemblyExecutor(),
+            new MovieFinalAssemblyExecutionStore(delayedDb), new MovieFinalAssemblyQualityControl(),
+            new Taslim.Api.Files.UnconfiguredFileStorageService(Options.Create(new Taslim.Api.Files.FileOptions())));
+        var rejected = await Assert.ThrowsAsync<MovieFinalAssemblyExecutionException>(() =>
+            delayed.ExecuteAsync(originalWorkerClaim, new Progress<int>(), CancellationToken.None));
+        Assert.Equal(GenerationJobErrorCodes.MovieAssemblyTargetInvalid, rejected.Code);
+        Assert.Null((await observer.MovieAssemblies.AsNoTracking().SingleAsync(row => row.Id == target.Id)).GenerationJobId);
+
+        // An active original claim can recover its own historical target before rendering.
+        var active = await observer.GenerationJobs.AsNoTracking().SingleAsync(job => job.Id == recovered.GenerationJobId);
+        await observer.MovieAssemblies.Where(row => row.Id == recovered.Id).ExecuteUpdateAsync(set => set
+            .SetProperty(row => row.GenerationJobId, (Guid?)null).SetProperty(row => row.Status, MovieAssemblyStatuses.Planned));
+        await Assert.ThrowsAsync<MovieFinalAssemblyUnavailableException>(() => delayed.ExecuteAsync(active, new Progress<int>(), CancellationToken.None));
+        Assert.Equal(active.Id, (await observer.MovieAssemblies.AsNoTracking().SingleAsync(row => row.Id == recovered.Id)).GenerationJobId);
+    }
+
+    private static async Task<GenerationJob> RaceClaimAsync(DbContextOptions<TaslimDbContext> options, Guid expectedJobId)
+    {
+        await using var first = new TaslimDbContext(options);
+        await using var second = new TaslimDbContext(options);
+        var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        async Task<GenerationJob?> Contend(TaslimDbContext db) { await gate.Task; return await RunClaimAsync(db); }
+        var tasks = new[] { Contend(first), Contend(second) };
+        gate.SetResult();
+        var claims = await Task.WhenAll(tasks);
+        var winner = Assert.Single(claims.Where(claim => claim is not null))!;
+        Assert.Equal(expectedJobId, winner.Id);
+        return winner;
+    }
+
+    private static async Task<GenerationJob?> RunClaimAsync(TaslimDbContext db)
+    {
+        using var services = new ServiceCollection().BuildServiceProvider();
+        using var worker = new GenerationJobWorker(services.GetRequiredService<IServiceScopeFactory>(),
+            Options.Create(new GenerationJobOptions()), NullLogger<GenerationJobWorker>.Instance);
+        return await worker.ClaimAsync(db, CancellationToken.None);
     }
 
     private sealed class RejectAssemblyLinkOnce : DbCommandInterceptor
@@ -240,7 +309,7 @@ public sealed partial class MovieFinalAssemblyQueueRedrive696Tests
         var access = new WorkspaceAccessService(db);
         return new GenerationJobService(db, access, queue, new GenerationJobUsageService(ledger),
             new GenerationCostGuardrailService(db, Options.Create(new GenerationBudgetOptions())), new HttpContextAccessor(),
-            Options.Create(new ImageGenerationOptions()), movieCollaboration: new MovieCollaborationAccess(db, access));
+            Options.Create(new ImageGenerationOptions()), Options.Create(new DocumentGenerationOptions()), movieCollaboration: new MovieCollaborationAccess(db, access));
     }
 
     private sealed class ObservedAssemblyQueue(TaslimDbContext db, PublicationCommit commit) : IGenerationJobQueue
