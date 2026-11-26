@@ -740,6 +740,36 @@ public sealed class MovieFinalAssemblyTests
     }
 
     [Fact]
+    public void Local_assembly_resolves_bare_tool_names_and_refuses_missing_commands()
+    {
+        var present = OperatingSystem.IsWindows() ? "cmd" : "sh";
+        var absent = $"missing-assembly-tool-{Guid.NewGuid():N}";
+        bool Available(string encoder, string probe) => new FfmpegMovieFinalAssemblyExecutor(
+            Microsoft.Extensions.Options.Options.Create(new MovieFinalAssemblyOptions
+            {
+                Enabled = true, FfmpegPath = encoder, FfprobePath = probe,
+            })).IsAvailable;
+        Assert.True(Available(present, present));
+        Assert.False(Available(present, absent));
+        Assert.False(Available(absent, present));
+    }
+
+    [Fact]
+    public void Local_assembly_refuses_a_nonexecutable_unix_tool_file()
+    {
+        if (OperatingSystem.IsWindows()) return;
+        var path = Path.GetTempFileName();
+        try
+        {
+            File.SetUnixFileMode(path, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+            var executor = new FfmpegMovieFinalAssemblyExecutor(Microsoft.Extensions.Options.Options.Create(
+                new MovieFinalAssemblyOptions { Enabled = true, FfmpegPath = path, FfprobePath = path }));
+            Assert.False(executor.IsAvailable);
+        }
+        finally { File.Delete(path); }
+    }
+
+    [Fact]
     public async Task Local_assembly_is_unavailable_when_ffprobe_is_not_configured()
     {
         // Availability gates must reject the job before a worker attempts to

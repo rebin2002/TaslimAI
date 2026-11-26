@@ -1299,9 +1299,30 @@ public sealed class FfmpegMovieFinalAssemblyExecutor(IOptions<MovieFinalAssembly
 
     // Both programs are required. Claiming availability with a missing
     // ffprobe executable queues a job that cannot pass source-media preflight.
-    private static bool IsConfiguredExecutable(string? path) =>
-        !string.IsNullOrWhiteSpace(path)
-        && (!Path.IsPathRooted(path) || File.Exists(path));
+    private static bool IsConfiguredExecutable(string? path)
+    {
+        if (string.IsNullOrWhiteSpace(path)) return false;
+        if (Path.IsPathRooted(path) || path.Contains(Path.DirectorySeparatorChar) || path.Contains(Path.AltDirectorySeparatorChar))
+            return IsExecutableFile(path);
+
+        var searchPath = Environment.GetEnvironmentVariable("PATH");
+        return searchPath?.Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries)
+            .Any(directory => IsExecutableFile(Path.Combine(directory, path))) == true;
+    }
+
+    private static bool IsExecutableFile(string path)
+    {
+        if (OperatingSystem.IsWindows())
+            return File.Exists(Path.HasExtension(path) ? path : path + ".exe");
+        if (!File.Exists(path)) return false;
+        try
+        {
+            const UnixFileMode executeBits = UnixFileMode.UserExecute | UnixFileMode.GroupExecute | UnixFileMode.OtherExecute;
+            return (File.GetUnixFileMode(path) & executeBits) != 0;
+        }
+        catch (UnauthorizedAccessException) { return false; }
+        catch (IOException) { return false; }
+    }
 
     public async Task<MovieFinalAssemblyExecutionResult> ExecuteAsync(MovieFinalAssemblyExecutionRequest request, IProgress<int> progress, CancellationToken cancellationToken)
     {
