@@ -119,10 +119,15 @@ public sealed class OpenAiProvider(
 
                 using var json = ParseProviderJson(body, selection, structuredOutputRequested, request.EnableStreaming);
                 var content = ReadOutputText(json.RootElement);
+                var incompleteUsage = IsIncompleteResponse(json.RootElement)
+                    ? ReadUsage(json.RootElement, selection, stopwatch.ElapsedMilliseconds)
+                    : null;
+                if (incompleteUsage is not null && string.IsNullOrWhiteSpace(content))
+                    throw IncompleteResponseWithoutOutput(incompleteUsage, selection, structuredOutputRequested, request.EnableStreaming);
                 if (content is null)
                     throw new AiProviderException(failureCategory: AiProviderFailureCategories.MalformedResponse, modelKey: selection.ModelKey, structuredOutputRequested: structuredOutputRequested, streamingRequested: request.EnableStreaming);
                 yield return new AiMessageDelta(content);
-                yield return new AiMessageCompleted(ReadUsage(json.RootElement, selection, stopwatch.ElapsedMilliseconds));
+                yield return new AiMessageCompleted(incompleteUsage ?? ReadUsage(json.RootElement, selection, stopwatch.ElapsedMilliseconds));
                 yield break;
             }
 
@@ -130,6 +135,7 @@ public sealed class OpenAiProvider(
             using var reader = new StreamReader(stream, Encoding.UTF8);
             var data = new StringBuilder();
             AiUsageMetadata? usage = null;
+            var sawUsefulOutputDelta = false;
             AiStreamEvent? ParseStreamPayload(string payload)
             {
                 if (payload.Length == 0 || payload == "[DONE]") return null;
@@ -137,17 +143,24 @@ public sealed class OpenAiProvider(
                 var root = json.RootElement;
                 var type = root.TryGetProperty("type", out var typeElement) ? typeElement.GetString() : null;
                 if (type == "response.output_text.delta" && root.TryGetProperty("delta", out var delta) && delta.ValueKind == JsonValueKind.String)
-                    return new AiMessageDelta(delta.GetString() ?? string.Empty);
+                {
+                    var text = delta.GetString() ?? string.Empty;
+                    if (!string.IsNullOrWhiteSpace(text)) sawUsefulOutputDelta = true;
+                    return new AiMessageDelta(text);
+                }
                 if (type == "response.completed")
                     return new AiMessageCompleted(ReadUsage(root, selection, stopwatch.ElapsedMilliseconds));
                 if (type == "response.incomplete")
                 {
                     // The Responses API terminates a stream with response.incomplete when the output
-                    // budget (max_output_tokens) or a content filter cuts generation short. The deltas
-                    // already streamed are valid content, so the turn is completed as truncated rather
-                    // than surfacing AI_GENERATION_FAILED for an ordinary long reply.
+                    // budget (max_output_tokens) or a content filter cuts generation short. Preserve
+                    // useful deltas as a truncated completion, but do not report an empty/whitespace-only
+                    // stream as a delivered answer.
                     logger.LogWarning("OpenAI provider emitted an incomplete response event. FinishReason={FinishReason}; ProviderKey={ProviderKey}; ModelKey={ModelKey}; StructuredOutput={StructuredOutput}; Streaming=true", ReadFinishReason(root), selection.ProviderKey, selection.ModelKey, structuredOutputRequested);
-                    return new AiMessageCompleted(ReadUsage(root, selection, stopwatch.ElapsedMilliseconds));
+                    var incompleteUsage = ReadUsage(root, selection, stopwatch.ElapsedMilliseconds);
+                    if (!sawUsefulOutputDelta)
+                        throw IncompleteResponseWithoutOutput(incompleteUsage, selection, structuredOutputRequested, request.EnableStreaming);
+                    return new AiMessageCompleted(incompleteUsage);
                 }
                 if (type is "error" or "response.failed")
                 {
@@ -260,6 +273,29 @@ public sealed class OpenAiProvider(
         return new AiUsageMetadata(selection.ProviderKey, selection.ModelKey, input, cached, output, null, null, (int)Math.Min(int.MaxValue, latencyMs), ReadFinishReason(root), false);
     }
 
+    private static bool IsIncompleteResponse(JsonElement root)
+    {
+        if (root.TryGetProperty("type", out var typeElement)
+            && typeElement.ValueKind == JsonValueKind.String
+            && string.Equals(typeElement.GetString(), "response.incomplete", StringComparison.Ordinal))
+            return true;
+        var response = root.TryGetProperty("response", out var responseElement) ? responseElement : root;
+        return response.TryGetProperty("status", out var statusElement)
+            && statusElement.ValueKind == JsonValueKind.String
+            && string.Equals(statusElement.GetString(), "incomplete", StringComparison.Ordinal);
+    }
+
+    private static AiProviderException IncompleteResponseWithoutOutput(
+        AiUsageMetadata usage,
+        AiProviderSelection selection,
+        bool structuredOutputRequested,
+        bool streamingRequested) => new(
+            failureCategory: AiProviderFailureCategories.MalformedResponse,
+            modelKey: selection.ModelKey,
+            structuredOutputRequested: structuredOutputRequested,
+            streamingRequested: streamingRequested,
+            usage: usage);
+
     /// <summary>
     /// Maps the Responses API terminal status to a safe finish-reason token. An incomplete response
     /// records which allowlisted incomplete_details.reason cut it short (max_output_tokens budget
@@ -269,10 +305,13 @@ public sealed class OpenAiProvider(
     private static string ReadFinishReason(JsonElement root)
     {
         var response = root.TryGetProperty("response", out var responseElement) ? responseElement : root;
+        var isIncompleteEvent = root.TryGetProperty("type", out var typeElement)
+            && typeElement.ValueKind == JsonValueKind.String
+            && string.Equals(typeElement.GetString(), "response.incomplete", StringComparison.Ordinal);
         var status = response.TryGetProperty("status", out var statusElement) && statusElement.ValueKind == JsonValueKind.String
             ? statusElement.GetString()
             : null;
-        if (!string.Equals(status, "incomplete", StringComparison.Ordinal))
+        if (!isIncompleteEvent && !string.Equals(status, "incomplete", StringComparison.Ordinal))
             return status ?? "completed";
         if (response.TryGetProperty("incomplete_details", out var incompleteDetails)
             && incompleteDetails.ValueKind == JsonValueKind.Object
@@ -343,7 +382,8 @@ public sealed class AiProviderException : Exception
         string? modelKey = null,
         bool structuredOutputRequested = false,
         bool streamingRequested = false,
-        Exception? innerException = null) : base("The configured AI provider failed.", innerException)
+        Exception? innerException = null,
+        AiUsageMetadata? usage = null) : base("The configured AI provider failed.", innerException)
     {
         HttpStatusCode = httpStatusCode;
         ProviderErrorCode = providerErrorCode;
@@ -351,6 +391,7 @@ public sealed class AiProviderException : Exception
         ModelKey = modelKey;
         StructuredOutputRequested = structuredOutputRequested;
         StreamingRequested = streamingRequested;
+        Usage = usage;
     }
 
     public int? HttpStatusCode { get; }
@@ -359,6 +400,7 @@ public sealed class AiProviderException : Exception
     public string? ModelKey { get; }
     public bool StructuredOutputRequested { get; }
     public bool StreamingRequested { get; }
+    public AiUsageMetadata? Usage { get; }
 }
 
 public sealed class AiProviderTimeoutException() : Exception("The configured AI provider timed out.");

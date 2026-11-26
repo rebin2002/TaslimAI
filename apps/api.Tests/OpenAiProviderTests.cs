@@ -185,7 +185,7 @@ public sealed class OpenAiProviderTests
     {
         var handler = new StubHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
         {
-            Content = new StringContent("data: {\"type\":\"response.output_text.delta\",\"delta\":\"Partial\"}\n\ndata: {\"type\":\"response.incomplete\",\"response\":{\"status\":\"incomplete\",\"incomplete_details\":{\"reason\":\"private provider detail text\"},\"usage\":{\"input_tokens\":3,\"output_tokens\":4}}}\n\n"),
+            Content = new StringContent("data: {\"type\":\"response.output_text.delta\",\"delta\":\"Partial\"}\n\ndata: {\"type\":\"response.incomplete\",\"response\":{\"status\":\"unapproved raw provider status\",\"incomplete_details\":{\"reason\":\"private provider detail text\"},\"usage\":{\"input_tokens\":3,\"output_tokens\":4}}}\n\n"),
         });
         using var client = new HttpClient(handler);
         var provider = new OpenAiProvider(client, Options.Create(new AiOptions { OpenAI = new OpenAiOptions { Enabled = true, ApiKey = "test-key", BaseUrl = "https://example.test/v1" } }), Microsoft.Extensions.Logging.Abstractions.NullLogger<OpenAiProvider>.Instance);
@@ -196,6 +196,39 @@ public sealed class OpenAiProviderTests
         var completed = Assert.IsType<AiMessageCompleted>(Assert.Single(events.OfType<AiMessageCompleted>()));
         Assert.Equal("incomplete", completed.Usage.FinishReason);
         Assert.DoesNotContain("private", completed.Usage.FinishReason, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("unapproved", completed.Usage.FinishReason, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("   ")]
+    public async Task Adapter_fails_an_incomplete_stream_without_useful_output_and_keeps_only_safe_usage(string delta)
+    {
+        var deltaEvent = delta.Length == 0 ? string.Empty : $"data: {{\"type\":\"response.output_text.delta\",\"delta\":\"{delta}\"}}\n\n";
+        var handler = new StubHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent($"{deltaEvent}data: {{\"type\":\"response.incomplete\",\"response\":{{\"status\":\"unapproved raw provider status\",\"incomplete_details\":{{\"reason\":\"private provider detail text\"}},\"usage\":{{\"input_tokens\":10,\"output_tokens\":20}}}}}}\n\n"),
+        });
+        using var client = new HttpClient(handler);
+        var provider = new OpenAiProvider(client, Options.Create(new AiOptions { OpenAI = new OpenAiOptions { Enabled = true, ApiKey = "test-key", BaseUrl = "https://example.test/v1" } }), Microsoft.Extensions.Logging.Abstractions.NullLogger<OpenAiProvider>.Instance);
+        var events = new List<AiStreamEvent>();
+
+        var exception = await Assert.ThrowsAsync<AiProviderException>(async () =>
+        {
+            await foreach (var item in provider.StreamAsync(new AiChatRequest([new("user", "filtered answer")], "instruction", "Smart", EnableStreaming: true, MaxOutputTokens: 2048), new AiProviderSelection("openai", "gpt-5.6-terra", "Taslim Smart", "Smart", false))) events.Add(item);
+        });
+
+        Assert.DoesNotContain(events, item => item is AiMessageCompleted);
+        Assert.All(events, item => Assert.IsType<AiMessageDelta>(item));
+        Assert.Equal(AiProviderFailureCategories.MalformedResponse, exception.FailureCategory);
+        Assert.NotNull(exception.Usage);
+        Assert.Equal(10, exception.Usage.InputTokens);
+        Assert.Equal(20, exception.Usage.OutputTokens);
+        Assert.Equal("incomplete", exception.Usage.FinishReason);
+        Assert.DoesNotContain("private", exception.Usage.FinishReason, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("unapproved", exception.Usage.FinishReason, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("private", exception.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Null(exception.ProviderErrorCode);
     }
 
     [Fact]
@@ -232,6 +265,28 @@ public sealed class OpenAiProviderTests
         Assert.Equal("Partial draft", ((AiMessageDelta)events[0]).Delta);
         var completed = Assert.IsType<AiMessageCompleted>(events[1]);
         Assert.Equal("incomplete:max_output_tokens", completed.Usage.FinishReason);
+    }
+
+    [Fact]
+    public async Task Adapter_fails_a_non_stream_incomplete_response_without_useful_output_and_preserves_usage()
+    {
+        var handler = new StubHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent("{\"status\":\"incomplete\",\"incomplete_details\":{\"reason\":\"content_filter\"},\"output_text\":\"  \",\"usage\":{\"input_tokens\":7,\"output_tokens\":2}}"),
+        });
+        using var client = new HttpClient(handler);
+        var provider = new OpenAiProvider(client, Options.Create(new AiOptions { OpenAI = new OpenAiOptions { Enabled = true, ApiKey = "test-key", BaseUrl = "https://example.test/v1" } }), Microsoft.Extensions.Logging.Abstractions.NullLogger<OpenAiProvider>.Instance);
+
+        var exception = await Assert.ThrowsAsync<AiProviderException>(async () =>
+        {
+            await foreach (var _ in provider.StreamAsync(new AiChatRequest([new("user", "filtered draft")], "instruction", "Smart", EnableStreaming: false, MaxOutputTokens: 2048), new AiProviderSelection("openai", "gpt-5.6-terra", "Taslim Smart", "Smart", false))) { }
+        });
+
+        Assert.Equal(AiProviderFailureCategories.MalformedResponse, exception.FailureCategory);
+        Assert.NotNull(exception.Usage);
+        Assert.Equal(7, exception.Usage.InputTokens);
+        Assert.Equal(2, exception.Usage.OutputTokens);
+        Assert.Equal("incomplete:content_filter", exception.Usage.FinishReason);
     }
 
     private sealed class StubHandler(Func<HttpRequestMessage, HttpResponseMessage> responseFactory) : HttpMessageHandler
