@@ -210,6 +210,14 @@ echo "--- usage guards"
 CASE_ENV=""
 expect "missing API url is a usage error" 2 "" "" 5
 expect_out "usage guard" "API base URL is required"
+CASE_ENV="GATE_SKIP_WEB=1"
+expect "credential-bearing API URL is rejected" 2 "https://operator:secret-sentinel@example.test" "" 5
+expect_out "credential-bearing API URL" "credential-free"
+expect_absent "credential-bearing API URL" "secret-sentinel"
+expect "path and query API URL is rejected" 2 "https://api.example.test/deploy?token=secret-sentinel" "" 5
+expect_out "path and query API URL" "credential-free"
+expect_absent "path and query API URL" "secret-sentinel"
+CASE_ENV=""
 
 echo "--- both services healthy"
 api="$(free_port)"; web="$(free_port)"

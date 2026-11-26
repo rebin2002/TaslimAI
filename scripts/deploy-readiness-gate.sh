@@ -86,7 +86,34 @@ fi
 for base in "$API_BASE_URL" "$WEB_BASE_URL"; do
     [[ -n "$base" ]] || continue
     [[ "$base" == *$'\n'* || "$base" == *$'\r'* ]] && die "a base URL contains a control character"
-    [[ "$base" =~ ^https?://[^[:space:]]+$ ]] || die "base URLs must be http(s) origins: $base"
+    if ! python3 - "$base" <<'PY'
+import sys
+from urllib.parse import urlsplit
+
+value = sys.argv[1]
+try:
+    parsed = urlsplit(value)
+    port = parsed.port
+    valid = (
+        parsed.scheme in ("http", "https")
+        and parsed.hostname is not None
+        and parsed.username is None
+        and parsed.password is None
+        and parsed.path in ("", "/")
+        and not parsed.query
+        and not parsed.fragment
+        and "?" not in value
+        and "#" not in value
+        and (port is None or 1 <= port <= 65535)
+        and not any(ch.isspace() or ord(ch) < 0x20 or ord(ch) == 0x7f for ch in value)
+    )
+except ValueError:
+    valid = False
+sys.exit(0 if valid else 1)
+PY
+    then
+        die "base URLs must be credential-free http(s) origins (scheme, host, optional port; no userinfo, path, query, or fragment)"
+    fi
 done
 
 API_BASE_URL="${API_BASE_URL%/}"
@@ -299,8 +326,10 @@ run_gate() {
     return 1
 }
 
-printf '[cutover-gate] budget %ss, retry %ss, API %s, Web %s\n' \
-    "$BUDGET_SECONDS" "$GATE_RETRY_SECONDS" "$API_BASE_URL" "${WEB_BASE_URL:-skipped}"
+web_scope="enabled"
+[[ "$GATE_SKIP_WEB" == "1" ]] && web_scope="skipped"
+printf '[cutover-gate] budget %ss, retry %ss, API enabled, Web %s\n' \
+    "$BUDGET_SECONDS" "$GATE_RETRY_SECONDS" "$web_scope"
 
 rc=0
 run_gate "api" "$API_BASE_URL" "/health/ready" || rc=1
