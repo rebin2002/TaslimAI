@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Net;
+using System.Net.Sockets;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using Microsoft.Extensions.Options;
@@ -44,13 +45,24 @@ public sealed class RunwayMovieVideoProvider(
         // A reference image is addressed by an object-store URL whose scope is
         // enforced by the shared download policy. A refusal there is an admission
         // decision about this request, so it has to surface as the same
-        // non-transient unsupported-request outcome as every other validation in
-        // this adapter; letting the policy's InvalidDataException escape would
-        // record a policy rejection as a generic generation failure downstream.
+        // established unsupported-request outcome for permanent policy rejection.
+        // Temporary resolver failures are not request rejection: preserve their
+        // transient provider-unavailable classification and never submit the POST.
         if (Uri.TryCreate(request.SourceImageUri, UriKind.Absolute, out var sourceUri) && sourceUri.Scheme == Uri.UriSchemeHttps)
         {
             try { await urlPolicy.EnsureSafeAsync(sourceUri, cancellationToken); }
-            catch (InvalidDataException) { throw new MovieVideoProviderException(GenerationJobErrorCodes.MovieProviderUnsupportedRequest, false); }
+            catch (InvalidDataException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw new OperationCanceledException(cancellationToken);
+            }
+            catch (InvalidDataException exception) when (IsTransientReferenceUrlResolutionFailure(exception))
+            {
+                throw new MovieVideoProviderException(GenerationJobErrorCodes.MovieProviderUnavailable, true);
+            }
+            catch (InvalidDataException)
+            {
+                throw new MovieVideoProviderException(GenerationJobErrorCodes.MovieProviderUnsupportedRequest, false);
+            }
         }
         var payload = BuildPayload(request, out var endpoint);
         var response = await SendJsonWithRetryAsync(HttpMethod.Post, endpoint, payload, cancellationToken);
@@ -399,6 +411,10 @@ public sealed class RunwayMovieVideoProvider(
         try { return JsonSerializer.Deserialize<T>(body, JsonOptions); }
         catch (JsonException) { throw Failure(); }
     }
+
+    private static bool IsTransientReferenceUrlResolutionFailure(InvalidDataException exception) =>
+        exception.InnerException is SocketException socketException
+        && socketException.SocketErrorCode is SocketError.TryAgain or SocketError.TimedOut;
 
     private static MovieVideoProviderException Failure() => new(GenerationJobErrorCodes.MovieGenerationFailed, false);
     private static string GenerationJobCodes() => GenerationJobErrorCodes.MovieGenerationFailed;

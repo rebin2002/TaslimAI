@@ -222,6 +222,52 @@ public sealed class RunwayMovieVideoProviderTests
         Assert.Empty(handler.Requests);
     }
 
+    [Theory]
+    [InlineData(System.Net.Sockets.SocketError.TryAgain)]
+    [InlineData(System.Net.Sockets.SocketError.TimedOut)]
+    public async Task Temporary_reference_url_resolution_failures_are_transient_provider_unavailable_without_post(
+        System.Net.Sockets.SocketError socketError)
+    {
+        var handler = new RecordingHandler(_ => throw new InvalidOperationException("a resolver failure must never reach Runway"));
+        var provider = CreateProvider(handler, EnabledOptions(), new ProviderUrlPolicy(new SocketErrorProviderHostResolver(socketError)));
+
+        var exception = await Assert.ThrowsAsync<MovieVideoProviderException>(
+            () => provider.SubmitAsync(Request(sourceImageUri: "https://assets.example.test/frame.png"), CancellationToken.None));
+
+        Assert.Equal(GenerationJobErrorCodes.MovieProviderUnavailable, exception.Code);
+        Assert.True(exception.IsTransient);
+        Assert.Empty(handler.Requests);
+    }
+
+    [Fact]
+    public async Task Private_reference_url_resolution_is_unsupported_without_post()
+    {
+        var handler = new RecordingHandler(_ => throw new InvalidOperationException("a private resolver answer must never reach Runway"));
+        var policy = new ProviderUrlPolicy(new FixedAddressResolver(IPAddress.Parse("10.0.0.8")));
+        var provider = CreateProvider(handler, EnabledOptions(), policy);
+
+        var exception = await Assert.ThrowsAsync<MovieVideoProviderException>(
+            () => provider.SubmitAsync(Request(sourceImageUri: "https://assets.example.test/frame.png"), CancellationToken.None));
+
+        Assert.Equal(GenerationJobErrorCodes.MovieProviderUnsupportedRequest, exception.Code);
+        Assert.False(exception.IsTransient);
+        Assert.Empty(handler.Requests);
+    }
+
+    [Fact]
+    public async Task Reference_url_resolution_cancellation_is_propagated_without_post()
+    {
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+        var handler = new RecordingHandler(_ => throw new InvalidOperationException("a canceled resolver must never reach Runway"));
+        var provider = CreateProvider(handler, EnabledOptions(), new ProviderUrlPolicy(new CancelledProviderHostResolver()));
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            () => provider.SubmitAsync(Request(sourceImageUri: "https://assets.example.test/frame.png"), cancellation.Token));
+
+        Assert.Empty(handler.Requests);
+    }
+
     [Fact]
     public async Task Non_https_reference_url_is_reported_as_an_unsupported_request()
     {
@@ -326,6 +372,25 @@ public sealed class RunwayMovieVideoProviderTests
     {
         public Task<IReadOnlyList<IPAddress>> ResolveAsync(string host, CancellationToken cancellationToken) =>
             Task.FromResult<IReadOnlyList<IPAddress>>([IPAddress.Parse("8.8.8.8")]);
+    }
+
+    private sealed class FixedAddressResolver(IPAddress address) : IProviderHostResolver
+    {
+        public Task<IReadOnlyList<IPAddress>> ResolveAsync(string host, CancellationToken cancellationToken) =>
+            Task.FromResult<IReadOnlyList<IPAddress>>([address]);
+    }
+
+    private sealed class SocketErrorProviderHostResolver(System.Net.Sockets.SocketError socketError) : IProviderHostResolver
+    {
+        public Task<IReadOnlyList<IPAddress>> ResolveAsync(string host, CancellationToken cancellationToken) =>
+            Task.FromException<IReadOnlyList<IPAddress>>(
+                new System.Net.Sockets.SocketException((int)socketError));
+    }
+
+    private sealed class CancelledProviderHostResolver : IProviderHostResolver
+    {
+        public Task<IReadOnlyList<IPAddress>> ResolveAsync(string host, CancellationToken cancellationToken) =>
+            Task.FromCanceled<IReadOnlyList<IPAddress>>(cancellationToken);
     }
 
     private static MovieVideoOptions EnabledOptions() => new()
