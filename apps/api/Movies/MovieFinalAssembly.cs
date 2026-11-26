@@ -152,7 +152,8 @@ public sealed class MovieFinalAssemblyService(
     TaslimDbContext db,
     MovieCollaborationAccess collaboration,
     IGenerationJobService jobs,
-    IMovieTimelineTransitionService transitionEdits) : IMovieFinalAssemblyService
+    IMovieTimelineTransitionService transitionEdits,
+    IOptions<GenerationJobOptions>? generationOptions = null) : IMovieFinalAssemblyService
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web) { WriteIndented = false };
     private const string AssemblyIdempotencyUniqueIndexName = "IX_MovieAssemblies_MovieProjectId_IdempotencyKey";
@@ -272,6 +273,7 @@ public sealed class MovieFinalAssemblyService(
             normalizedIdempotencyKey,
             expectedDuration,
             persistedTransitions);
+        var jobTitle = MovieExportManifestNaming.ComposeExportLabel(movie.Title);
         var existing = await db.MovieAssemblies
             .Include(item => item.GenerationJob).ThenInclude(item => item!.Outputs)
             .FirstOrDefaultAsync(item => item.MovieProjectId == movieProjectId && item.IdempotencyKey == normalizedIdempotencyKey, cancellationToken);
@@ -287,7 +289,7 @@ public sealed class MovieFinalAssemblyService(
                 // Issue #696 scenario (a): nothing was durably committed, so this terminal row is
                 // a transient pre-publication failure rather than a finished job. Re-drive it
                 // under the same key; anything not safely re-drivable falls through unchanged.
-                var redriven = await TryRedriveQueueAsync(existing, userId, movie.WorkspaceId, movie.ProjectId, $"{movie.Title} master export", normalizedIdempotencyKey, fingerprint, () => BuildCanonicalInput(existing.Id), cancellationToken);
+                var redriven = await TryRedriveQueueAsync(existing, userId, movie.WorkspaceId, movie.ProjectId, jobTitle, normalizedIdempotencyKey, fingerprint, () => BuildCanonicalInput(existing.Id), cancellationToken);
                 if (redriven is not null) return ToDto(existing, redriven);
                 await ReconcileTerminalJobAsync(existing, cancellationToken);
             }
@@ -356,7 +358,7 @@ public sealed class MovieFinalAssemblyService(
                 // ... and the same bounded re-drive: the winner may have been stranded by a
                 // pre-publication failure that committed nothing, which is exactly the case
                 // issue #696 reports as permanently unrecoverable by retry.
-                var redriven = await TryRedriveQueueAsync(winner, userId, movie.WorkspaceId, movie.ProjectId, $"{movie.Title} master export", normalizedIdempotencyKey, fingerprint, () => BuildCanonicalInput(winner.Id), cancellationToken);
+                var redriven = await TryRedriveQueueAsync(winner, userId, movie.WorkspaceId, movie.ProjectId, jobTitle, normalizedIdempotencyKey, fingerprint, () => BuildCanonicalInput(winner.Id), cancellationToken);
                 if (redriven is not null) return ToDto(winner, redriven);
                 await ReconcileTerminalJobAsync(winner, cancellationToken);
             }
@@ -387,7 +389,9 @@ public sealed class MovieFinalAssemblyService(
                 WorkspaceId = movie.WorkspaceId,
                 ProjectId = movie.ProjectId,
                 JobType = GenerationJobTypes.MovieAssembly,
-                Title = $"{movie.Title} master export",
+                // The manifest export label is bounded to the persisted job-title column,
+                // so a project admitted at the full title bound still queues.
+                Title = jobTitle,
                 // Movie generation job payloads use the default System.Text.Json contract.
                 // Every worker-side reader (GenerationJobExecution target validation and
                 // MovieFinalAssemblyJobHandler) deserializes with default options, so the
@@ -713,17 +717,23 @@ public sealed class MovieFinalAssemblyService(
         Func<MovieFinalAssemblyInput> buildInput,
         CancellationToken cancellationToken)
     {
-        if (assembly.Status != MovieAssemblyStatuses.Failed
-            || !string.Equals(assembly.LastErrorCode, GenerationJobErrorCodes.MovieAssemblyQueueFailed, StringComparison.Ordinal)
-            || assembly.GenerationJobId is not null)
-        {
-            return null;
-        }
-        // Only the requester whose row was stranded may re-drive it, and only while the
-        // durable budget holds.
-        if (assembly.RequestedByUserId is not Guid requesterId || requesterId != userId) return null;
+        if (assembly.GenerationJobId is not null || assembly.RequestedByUserId != userId) return null;
+        var requesterId = userId;
         var attempts = ReadQueueRedriveAttempts(assembly.CheckpointJson);
-        if (attempts >= MaxQueueRedriveAttempts) return null;
+        if (assembly.Status == MovieAssemblyStatuses.Planned && attempts > 0
+            && assembly.CheckpointJson == WriteQueueRedriveCheckpoint(attempts))
+        {
+            // A process may stop after reserving a retry but before publishing the job.
+            // Preserve an active owner's window and fence an expired owner's compensation.
+            var leaseMinutes = Math.Max(2, (generationOptions?.Value ?? new GenerationJobOptions()).ClaimLeaseMinutes);
+            if (assembly.UpdatedAt > DateTime.UtcNow.AddMinutes(-leaseMinutes)) return null;
+            await RestoreQueueFailureAsync(assembly, fingerprint, attempts);
+            attempts = ReadQueueRedriveAttempts(assembly.CheckpointJson);
+        }
+        if (assembly.Status != MovieAssemblyStatuses.Failed
+            || assembly.GenerationJobId is not null
+            || assembly.LastErrorCode != GenerationJobErrorCodes.MovieAssemblyQueueFailed
+            || attempts >= MaxQueueRedriveAttempts) return null;
         // The distinguishing evidence of scenario (a): the fault happened before anything was
         // durable. One candidate is #807's reconcile case, and anything else is ambiguous.
         var durable = await db.GenerationJobs.AsNoTracking()
@@ -737,11 +747,13 @@ public sealed class MovieFinalAssemblyService(
         // simultaneous identical retries exactly one owner.
         var checkpoint = WriteQueueRedriveCheckpoint(attempts + 1);
         var claimedAt = DateTime.UtcNow;
+        var previousCheckpoint = assembly.CheckpointJson;
         var claimed = await db.MovieAssemblies
             .Where(item => item.Id == assembly.Id
                 && item.Status == MovieAssemblyStatuses.Failed
                 && item.LastErrorCode == GenerationJobErrorCodes.MovieAssemblyQueueFailed
                 && item.GenerationJobId == null
+                && item.CheckpointJson == previousCheckpoint
                 && item.RequestFingerprint == fingerprint)
             .ExecuteUpdateAsync(setters => setters
                 .SetProperty(item => item.Status, MovieAssemblyStatuses.Planned)
@@ -755,10 +767,7 @@ public sealed class MovieFinalAssemblyService(
             await db.Entry(assembly).ReloadAsync(cancellationToken);
             return null;
         }
-        assembly.Status = MovieAssemblyStatuses.Planned;
-        assembly.LastErrorCode = null;
-        assembly.CheckpointJson = checkpoint;
-        assembly.UpdatedAt = claimedAt;
+        await db.Entry(assembly).ReloadAsync(CancellationToken.None);
         GenerationJob job;
         try
         {
@@ -812,6 +821,7 @@ public sealed class MovieFinalAssemblyService(
     private async Task RestoreQueueFailureAsync(MovieAssembly assembly, string fingerprint, int attempts)
     {
         var checkpoint = WriteQueueRedriveCheckpoint(attempts);
+        var claimedAt = assembly.UpdatedAt;
         var now = DateTime.UtcNow;
         try
         {
@@ -821,6 +831,8 @@ public sealed class MovieFinalAssemblyService(
                 .Where(item => item.Id == assembly.Id
                     && item.Status == MovieAssemblyStatuses.Planned
                     && item.GenerationJobId == null
+                    && item.CheckpointJson == checkpoint
+                    && item.UpdatedAt == claimedAt
                     && item.RequestFingerprint == fingerprint)
                 .ExecuteUpdateAsync(setters => setters
                     .SetProperty(item => item.Status, MovieAssemblyStatuses.Failed)
@@ -835,8 +847,8 @@ public sealed class MovieFinalAssemblyService(
         }
         catch (Exception)
         {
-            // A dead database is outside what this compensation can promise; fall through so the
-            // caller reports the terminal state it saw for this request only.
+            // Keep the last observed state when the durable write could not be confirmed.
+            return;
         }
         assembly.Status = MovieAssemblyStatuses.Failed;
         assembly.LastErrorCode = GenerationJobErrorCodes.MovieAssemblyQueueFailed;
@@ -1287,9 +1299,30 @@ public sealed class FfmpegMovieFinalAssemblyExecutor(IOptions<MovieFinalAssembly
 
     // Both programs are required. Claiming availability with a missing
     // ffprobe executable queues a job that cannot pass source-media preflight.
-    private static bool IsConfiguredExecutable(string? path) =>
-        !string.IsNullOrWhiteSpace(path)
-        && (!Path.IsPathRooted(path) || File.Exists(path));
+    private static bool IsConfiguredExecutable(string? path)
+    {
+        if (string.IsNullOrWhiteSpace(path)) return false;
+        if (Path.IsPathRooted(path) || path.Contains(Path.DirectorySeparatorChar) || path.Contains(Path.AltDirectorySeparatorChar))
+            return IsExecutableFile(path);
+
+        var searchPath = Environment.GetEnvironmentVariable("PATH");
+        return searchPath?.Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries)
+            .Any(directory => IsExecutableFile(Path.Combine(directory, path))) == true;
+    }
+
+    private static bool IsExecutableFile(string path)
+    {
+        if (OperatingSystem.IsWindows())
+            return File.Exists(Path.HasExtension(path) ? path : path + ".exe");
+        if (!File.Exists(path)) return false;
+        try
+        {
+            const UnixFileMode executeBits = UnixFileMode.UserExecute | UnixFileMode.GroupExecute | UnixFileMode.OtherExecute;
+            return (File.GetUnixFileMode(path) & executeBits) != 0;
+        }
+        catch (UnauthorizedAccessException) { return false; }
+        catch (IOException) { return false; }
+    }
 
     public async Task<MovieFinalAssemblyExecutionResult> ExecuteAsync(MovieFinalAssemblyExecutionRequest request, IProgress<int> progress, CancellationToken cancellationToken)
     {

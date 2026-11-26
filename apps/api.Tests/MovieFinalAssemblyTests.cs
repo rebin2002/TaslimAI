@@ -9,6 +9,91 @@ namespace Taslim.Api.Tests;
 public sealed class MovieFinalAssemblyTests
 {
     [Fact]
+    public void Mixed_timeline_silences_only_the_probed_silent_clip_and_keeps_real_audio()
+    {
+        var withAudio = Guid.NewGuid();
+        var silent = Guid.NewGuid();
+        var profile = new MovieFinalAssemblyProfile(MovieFinalAssemblyProfiles.Uhd4K, 3_840, 2_160);
+        var input = new MovieFinalAssemblyInput(
+            "final_assembly",
+            Guid.NewGuid(),
+            Guid.NewGuid(),
+            profile.Key,
+            profile,
+            [
+                new MovieAssemblyTimelineItem(Guid.NewGuid(), withAudio, 0, 0m, 2.5m, "continuity-hash"),
+                new MovieAssemblyTimelineItem(Guid.NewGuid(), silent, 1, 0m, 2.5m, "continuity-hash"),
+            ],
+            [],
+            new MovieAssemblyCaptions(MovieAssemblyCaptionModes.None, null, "en"),
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            "assembly:mixed-timeline",
+            3);
+        var probes = new Dictionary<Guid, MovieFinalAssemblyVideoProbe>
+        {
+            [withAudio] = new(600m, true),
+            [silent] = new(600m, false),
+        };
+
+        var arguments = FfmpegMovieFinalAssemblyCommandBuilder.Build(
+            new MovieFinalAssemblyExecutionRequest(input, new Dictionary<Guid, string>
+            {
+                [withAudio] = "/tmp/sounded.mp4",
+                [silent] = "/tmp/silent.mp4",
+            }, probes),
+            "/tmp/master.mp4").ToArray();
+
+        var graph = arguments[Array.IndexOf(arguments, "-filter_complex") + 1];
+        Assert.Contains("[0:a]", graph);
+        Assert.DoesNotContain("[1:a]", graph);
+        Assert.Equal(1, graph.Split("anullsrc").Length - 1);
+    }
+
+    [Fact]
+    public void Silent_source_gets_bounded_synthesised_silence_instead_of_an_audio_pad()
+    {
+        var videoAsset = Guid.NewGuid();
+        var input = Contract(videoAsset, null, MovieAssemblyCaptionModes.None);
+        var probes = new Dictionary<Guid, MovieFinalAssemblyVideoProbe> { [videoAsset] = new(600m, false) };
+
+        var arguments = FfmpegMovieFinalAssemblyCommandBuilder.Build(
+            new MovieFinalAssemblyExecutionRequest(input, new Dictionary<Guid, string> { [videoAsset] = "/tmp/clip.mp4" }, probes),
+            "/tmp/master.mp4").ToArray();
+
+        var graph = arguments[Array.IndexOf(arguments, "-filter_complex") + 1];
+        // A probed-silent clip must never address a pad that does not exist, and the
+        // replacement silence has to be bounded to the clip instead of running free.
+        Assert.DoesNotContain("[0:a]", graph);
+        Assert.Contains("anullsrc=r=48000:cl=stereo", graph);
+        Assert.Contains("atrim=duration=", graph);
+    }
+
+    [Fact]
+    public void Ffmpeg_builder_fails_closed_without_per_source_probe_evidence()
+    {
+        var videoAsset = Guid.NewGuid();
+        var input = Contract(videoAsset, null, MovieAssemblyCaptionModes.None);
+        var paths = new Dictionary<Guid, string> { [videoAsset] = "/tmp/clip.mp4" };
+
+        // Only the real executor probes each input before rendering, so the builder
+        // must never infer that a source carries an audio stream and emit [i:a]
+        // blindly. Absent evidence (null table), an empty table and a table that is
+        // missing this asset all have to fail closed with the same code.
+        foreach (var probes in new IReadOnlyDictionary<Guid, MovieFinalAssemblyVideoProbe>?[]
+        {
+            null,
+            new Dictionary<Guid, MovieFinalAssemblyVideoProbe>(),
+            new Dictionary<Guid, MovieFinalAssemblyVideoProbe> { [Guid.NewGuid()] = new(600m, true) },
+        })
+        {
+            var error = Assert.Throws<MovieFinalAssemblyExecutionException>(() =>
+                FfmpegMovieFinalAssemblyCommandBuilder.Build(
+                    new MovieFinalAssemblyExecutionRequest(input, paths, probes), "/tmp/master.mp4"));
+            Assert.Equal("ASSEMBLY_SOURCE_PROBE_MISSING", error.Code);
+        }
+    }
+
+    [Fact]
     public void Profiles_are_bounded_and_provider_neutral()
     {
         Assert.True(MovieFinalAssemblyProfiles.TryGet(MovieFinalAssemblyProfiles.Uhd4K, out var profile));
@@ -652,6 +737,36 @@ public sealed class MovieFinalAssemblyTests
             new MovieFinalAssemblyExecutionRequest(Contract(Guid.NewGuid(), null, MovieAssemblyCaptionModes.None), new Dictionary<Guid, string>()),
             new Progress<int>(),
             CancellationToken.None));
+    }
+
+    [Fact]
+    public void Local_assembly_resolves_bare_tool_names_and_refuses_missing_commands()
+    {
+        var present = OperatingSystem.IsWindows() ? "cmd" : "sh";
+        var absent = $"missing-assembly-tool-{Guid.NewGuid():N}";
+        bool Available(string encoder, string probe) => new FfmpegMovieFinalAssemblyExecutor(
+            Microsoft.Extensions.Options.Options.Create(new MovieFinalAssemblyOptions
+            {
+                Enabled = true, FfmpegPath = encoder, FfprobePath = probe,
+            })).IsAvailable;
+        Assert.True(Available(present, present));
+        Assert.False(Available(present, absent));
+        Assert.False(Available(absent, present));
+    }
+
+    [Fact]
+    public void Local_assembly_refuses_a_nonexecutable_unix_tool_file()
+    {
+        if (OperatingSystem.IsWindows()) return;
+        var path = Path.GetTempFileName();
+        try
+        {
+            File.SetUnixFileMode(path, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+            var executor = new FfmpegMovieFinalAssemblyExecutor(Microsoft.Extensions.Options.Options.Create(
+                new MovieFinalAssemblyOptions { Enabled = true, FfmpegPath = path, FfprobePath = path }));
+            Assert.False(executor.IsAvailable);
+        }
+        finally { File.Delete(path); }
     }
 
     [Fact]

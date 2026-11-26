@@ -1,5 +1,6 @@
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Diagnostics;
 using Taslim.Api.Authorization;
 using Taslim.Api.Contracts;
 using Taslim.Api.Domain;
@@ -127,6 +128,9 @@ public sealed class MovieFinalAssemblyQueueRedrive696Tests
         await using var connection = await OpenConnectionAsync();
         await using var db = CreateDb(connection);
         var world = await SeedAsync(db);
+        var movie = await db.MovieProjects.SingleAsync();
+        movie.Title = new string('m', MovieExportManifestNaming.JobTitleMaxLength);
+        await db.SaveChangesAsync();
         var queue = new RedriveSeam(db, SeamFault.RejectsBeforeCommit);
         var service = CreateService(db, queue);
 
@@ -139,6 +143,9 @@ public sealed class MovieFinalAssemblyQueueRedrive696Tests
         var recovered = await service.RequestAsync(world.UserId, world.MovieId, AssemblyRequest(), Key, CancellationToken.None);
         Assert.NotNull(recovered);
 
+        var label = MovieExportManifestNaming.ComposeExportLabel(movie.Title);
+        Assert.Equal(MovieExportManifestNaming.JobTitleMaxLength, label.Length);
+        Assert.Equal(new[] { label, label }, queue.Calls.Select(call => call.Title));
         var published = await db.GenerationJobs.SingleAsync();
         // The payload is what the worker executes, so it must describe this exact stranded
         // assembly and nothing else: the re-drive rebuilds the original canonical request.
@@ -206,6 +213,119 @@ public sealed class MovieFinalAssemblyQueueRedrive696Tests
 
     // ------------------------------------------------------------------- plumbing ---
     private const string Key = "issue-696-queue-redrive";
+
+    [Fact]
+    public async Task Stale_request_cannot_spend_the_same_queue_attempt_again()
+    {
+        await using var connection = await OpenConnectionAsync();
+        await using var db = CreateDb(connection);
+        var world = await SeedAsync(db);
+        var queue = new RedriveSeam(db, SeamFault.RejectsBeforeCommit);
+        var service = CreateService(db, queue);
+        await Assert.ThrowsAnyAsync<Exception>(() =>
+            service.RequestAsync(world.UserId, world.MovieId, AssemblyRequest(), Key, CancellationToken.None));
+
+        await using var stale = CreateDb(connection);
+        await stale.MovieAssemblies.SingleAsync();
+        for (var retry = 0; retry < ExpectedRedriveBudget; retry++)
+            await service.RequestAsync(world.UserId, world.MovieId, AssemblyRequest(), Key, CancellationToken.None);
+
+        var staleQueue = new RedriveSeam(stale, SeamFault.RejectsBeforeCommit);
+        var result = await CreateService(stale, staleQueue)
+            .RequestAsync(world.UserId, world.MovieId, AssemblyRequest(), Key, CancellationToken.None);
+        Assert.Equal(MovieAssemblyStatuses.Failed, result!.Status);
+        Assert.Empty(staleQueue.Calls);
+        var checkpoint = await db.MovieAssemblies.AsNoTracking().Select(row => row.CheckpointJson).SingleAsync();
+        using var document = System.Text.Json.JsonDocument.Parse(checkpoint!);
+        Assert.Equal(ExpectedRedriveBudget, document.RootElement.GetProperty("queueRedriveAttempts").GetInt32());
+        AssertNoCustomerCharge(db);
+    }
+
+    [Theory]
+    [InlineData(1, true)]
+    [InlineData(ExpectedRedriveBudget, false)]
+    public async Task Interrupted_queue_claim_preserves_its_live_window_and_spent_attempts(int attempts, bool canRetry)
+    {
+        await using var connection = await OpenConnectionAsync();
+        await using var db = CreateDb(connection);
+        var world = await SeedAsync(db);
+        var queue = new RedriveSeam(db, SeamFault.RejectsBeforeCommit);
+        var service = CreateService(db, queue);
+        await Assert.ThrowsAnyAsync<Exception>(() =>
+            service.RequestAsync(world.UserId, world.MovieId, AssemblyRequest(), Key, CancellationToken.None));
+
+        var row = await db.MovieAssemblies.SingleAsync();
+        row.Status = MovieAssemblyStatuses.Planned;
+        row.LastErrorCode = null;
+        row.CheckpointJson = System.Text.Json.JsonSerializer.Serialize(new { phase = "queue_redrive", progressPercent = 0, queueRedriveAttempts = attempts });
+        row.UpdatedAt = DateTime.UtcNow;
+        await db.SaveChangesAsync();
+        queue.Fault = SeamFault.CommitsDurableJob;
+        var pending = await service.RequestAsync(world.UserId, world.MovieId, AssemblyRequest(), Key, CancellationToken.None);
+        Assert.Equal(MovieAssemblyStatuses.Planned, pending!.Status);
+        Assert.Single(queue.Calls);
+
+        row.UpdatedAt = DateTime.UtcNow.AddHours(-1);
+        await db.SaveChangesAsync();
+        var recovered = await service.RequestAsync(world.UserId, world.MovieId, AssemblyRequest(), Key, CancellationToken.None);
+        Assert.Equal(canRetry ? MovieAssemblyStatuses.Queued : MovieAssemblyStatuses.Failed, recovered!.Status);
+        Assert.Equal(canRetry ? 2 : 1, queue.Calls.Count);
+        Assert.Equal(canRetry ? 1 : 0, await db.GenerationJobs.CountAsync());
+        AssertNoCustomerCharge(db);
+    }
+
+    [Fact]
+    public async Task Concurrent_first_submissions_replay_the_same_service_result_and_only_publish_once()
+    {
+        await using var connection = await OpenConnectionAsync();
+        await using var winner = CreateDb(connection);
+        var world = await SeedAsync(winner);
+        var pause = new PauseFirstAssemblyInsert();
+        await using var delayed = new TaslimDbContext(new DbContextOptionsBuilder<TaslimDbContext>()
+            .UseSqlite(connection).AddInterceptors(pause).Options);
+        var winnerQueue = new RedriveSeam(winner, SeamFault.CommitsDurableJob);
+        var delayedQueue = new RedriveSeam(delayed, SeamFault.CommitsDurableJob);
+        var firstRequest = CreateService(delayed, delayedQueue)
+            .RequestAsync(world.UserId, world.MovieId, AssemblyRequest(), Key, CancellationToken.None);
+        MovieFinalAssemblyDto? published;
+        try
+        {
+            await pause.Reached.Task.WaitAsync(TimeSpan.FromSeconds(10));
+            published = await CreateService(winner, winnerQueue)
+                .RequestAsync(world.UserId, world.MovieId, AssemblyRequest(), Key, CancellationToken.None);
+        }
+        finally
+        {
+            pause.Resume.TrySetResult();
+        }
+        var replay = await firstRequest;
+        Assert.NotNull(published);
+        Assert.NotNull(replay);
+        Assert.Equal(published.Id, replay.Id);
+        Assert.Equal(published.GenerationJobId, replay.GenerationJobId);
+        Assert.NotNull(replay.GenerationJobId);
+        Assert.Equal(MovieAssemblyStatuses.Queued, replay.Status);
+        Assert.Single(winnerQueue.Calls);
+        Assert.Empty(delayedQueue.Calls);
+        Assert.Equal(1, await winner.MovieAssemblies.CountAsync());
+        Assert.Equal(1, await winner.GenerationJobs.CountAsync());
+        AssertNoCustomerCharge(winner);
+    }
+
+    private sealed class PauseFirstAssemblyInsert : SaveChangesInterceptor
+    {
+        public TaskCompletionSource Reached { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource Resume { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public override async ValueTask<InterceptionResult<int>> SavingChangesAsync(
+            DbContextEventData eventData, InterceptionResult<int> result, CancellationToken cancellationToken = default)
+        {
+            if (eventData.Context?.ChangeTracker.Entries<MovieAssembly>().Any(entry => entry.State == EntityState.Added) == true
+                && Reached.TrySetResult())
+                await Resume.Task.WaitAsync(cancellationToken);
+            return result;
+        }
+    }
 
     private static MovieFinalAssemblyRequest AssemblyRequest() => new()
     {
@@ -369,6 +489,8 @@ public sealed class MovieFinalAssemblyQueueRedrive696Tests
 
         private static NotSupportedException OutOfScope(string member) =>
             new($"issue #696 scenario (a) re-drive tests only reach the pre-publication queue seam; {member} is out of scope");
+
+        public Task<GenerationJob> CreatePendingMovieProductionAsync(Guid userId, CreateGenerationJobRequest request, string idempotencyKey, CancellationToken cancellationToken = default, string? requestId = null) => throw OutOfScope(nameof(CreatePendingMovieProductionAsync));
 
         public Task<GenerationJob?> PublishPendingMovieProductionAsync(Guid userId, Guid jobId, CancellationToken cancellationToken = default) => throw OutOfScope(nameof(PublishPendingMovieProductionAsync));
         public Task<bool> AbortPendingMovieProductionAsync(Guid userId, Guid jobId, CancellationToken cancellationToken = default) => throw OutOfScope(nameof(AbortPendingMovieProductionAsync));

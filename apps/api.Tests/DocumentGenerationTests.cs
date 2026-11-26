@@ -77,7 +77,7 @@ public sealed class DocumentGenerationTests : IClassFixture<DocumentGenerationAp
             outputFormat = "both",
             tone = "professional",
             includeTableOfContents = true,
-        });
+        }, DocumentTestRequests.NewKey());
         Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
         var body = await response.Content.ReadFromJsonAsync<CreateDocumentGenerationResponse>();
         Assert.NotNull(body);
@@ -120,7 +120,7 @@ public sealed class DocumentGenerationTests : IClassFixture<DocumentGenerationAp
             language = "en",
             attachmentIds = Array.Empty<Guid>(),
             outputFormat = "both",
-        });
+        }, DocumentTestRequests.NewKey());
         Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
         var created = (await response.Content.ReadFromJsonAsync<CreateDocumentGenerationResponse>())!;
         var job = await WaitForTerminal(client, created.Job.Id);
@@ -149,7 +149,7 @@ public sealed class DocumentGenerationTests : IClassFixture<DocumentGenerationAp
             language = "en",
             attachmentIds = Array.Empty<Guid>(),
             outputFormat = "docx",
-        });
+        }, DocumentTestRequests.NewKey());
         Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
         var created = (await response.Content.ReadFromJsonAsync<CreateDocumentGenerationResponse>())!;
         var job = await WaitForTerminal(client, created.Job.Id);
@@ -177,7 +177,7 @@ public sealed class DocumentGenerationTests : IClassFixture<DocumentGenerationAp
             prompt = "Create a useful brief.",
             attachmentIds = new[] { Guid.NewGuid() },
             outputFormat = "html",
-        });
+        }, DocumentTestRequests.NewKey());
         Assert.Equal(HttpStatusCode.BadRequest, unsupported.StatusCode);
         Assert.Equal(GenerationJobErrorCodes.DocumentRequestInvalid, (await unsupported.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("error").GetProperty("code").GetString());
     }
@@ -197,7 +197,7 @@ public sealed class DocumentGenerationTests : IClassFixture<DocumentGenerationAp
             language = "en",
             outputFormat = "pdf",
             attachmentIds = (Guid[]?)null,
-        });
+        }, DocumentTestRequests.NewKey());
 
         Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
         var created = (await response.Content.ReadFromJsonAsync<CreateDocumentGenerationResponse>())!;
@@ -236,7 +236,7 @@ public sealed class DocumentGenerationTests : IClassFixture<DocumentGenerationAp
             prompt = "Create a short document.",
             attachmentIds = new[] { source.Id },
             outputFormat = "pdf",
-        });
+        }, DocumentTestRequests.NewKey());
         Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
         var created = (await response.Content.ReadFromJsonAsync<CreateDocumentGenerationResponse>())!;
         var terminal = await WaitForTerminal(member, created.Job.Id);
@@ -255,7 +255,7 @@ public sealed class DocumentGenerationTests : IClassFixture<DocumentGenerationAp
         var auth = await Register(owner);
         var upload = await Upload(owner, auth.PersonalWorkspace.Id, "notes.txt", "A short source note.");
         var source = (await upload.Content.ReadFromJsonAsync<StoredFileDto>())!;
-        var response = await SendWithCsrf(owner, HttpMethod.Post, "/api/document-generation/jobs", new { workspaceId = auth.PersonalWorkspace.Id, title = "Notes", prompt = "Create a short document.", attachmentIds = new[] { source.Id }, outputFormat = "pdf" });
+        var response = await SendWithCsrf(owner, HttpMethod.Post, "/api/document-generation/jobs", new { workspaceId = auth.PersonalWorkspace.Id, title = "Notes", prompt = "Create a short document.", attachmentIds = new[] { source.Id }, outputFormat = "pdf" }, DocumentTestRequests.NewKey());
         var created = await response.Content.ReadFromJsonAsync<CreateDocumentGenerationResponse>();
         var job = await WaitForTerminal(owner, created!.Job.Id);
         using var scope = factory.Services.CreateScope();
@@ -304,11 +304,15 @@ public sealed class DocumentGenerationTests : IClassFixture<DocumentGenerationAp
         throw new TimeoutException($"Document job {id} did not reach a terminal state. Status={final?.Status}; Progress={final?.ProgressPercent}; Code={final?.ErrorCode}; Message={final?.ErrorMessage}");
     }
 
-    private static async Task<HttpResponseMessage> SendWithCsrf(HttpClient client, HttpMethod method, string path, object? payload)
+    // Callers that are not exercising the create route's retry-safety boundary still have to send a
+    // unique key, exactly like apps/web/src/lib/api.ts does for every browser submission
+    // (createDocumentGenerationJob(..., idempotencyKey = requestId())).
+    private static async Task<HttpResponseMessage> SendWithCsrf(HttpClient client, HttpMethod method, string path, object? payload, string? idempotencyKey = null)
     {
         var csrf = await client.GetFromJsonAsync<JsonElement>("/api/auth/csrf");
         using var request = new HttpRequestMessage(method, path);
         request.Headers.Add("X-CSRF-TOKEN", csrf.GetProperty("token").GetString()!);
+        if (idempotencyKey is not null) request.Headers.Add("Idempotency-Key", idempotencyKey);
         if (payload is not null) request.Content = JsonContent.Create(payload);
         return await client.SendAsync(request);
     }
@@ -340,6 +344,7 @@ public sealed class DocumentGenerationFailureTests : IClassFixture<DocumentRende
         csrf = await client.GetFromJsonAsync<JsonElement>("/api/auth/csrf");
         using var create = new HttpRequestMessage(HttpMethod.Post, "/api/document-generation/jobs");
         create.Headers.Add("X-CSRF-TOKEN", csrf.GetProperty("token").GetString());
+        create.Headers.Add("Idempotency-Key", DocumentTestRequests.NewKey());
         create.Content = JsonContent.Create(new { workspaceId = auth.PersonalWorkspace.Id, description = "Create a concise report.", documentType = "report", length = "standard", tone = "professional", language = "en", outputFormat = "both", attachmentIds = Array.Empty<Guid>() });
         var createdResponse = await client.SendAsync(create);
         Assert.Equal(HttpStatusCode.Accepted, createdResponse.StatusCode);
@@ -387,4 +392,23 @@ internal sealed class FailingPdfDocumentRenderer : IDocumentRenderer
 
     public RenderedDocument RenderPdf(DocumentDraft draft, DocumentGenerationInput input, DocumentGenerationOptions options) =>
         throw new InvalidOperationException("intentional renderer test failure");
+}
+
+/// <summary>
+/// Shared request plumbing for the Document Studio HTTP facts.
+/// </summary>
+/// <remarks>
+/// <c>POST /api/document-generation/jobs</c> is an expensive AI route, so admission requires a unique
+/// <c>Idempotency-Key</c> header - the retry-safe boundary docs/DOCUMENT_STUDIO_ARCHITECTURE.md
+/// describes for document retries and the boundary the Presentation and Social creation routes already
+/// enforce. Facts that are not testing that boundary still have to present a valid request, and the
+/// shipped browser client always sends a fresh key (apps/web/src/lib/api.ts
+/// createDocumentGenerationJob(..., idempotencyKey = requestId())), which is what this helper mirrors.
+/// Keys must stay under the 80-character ceiling enforced by the job service.
+/// </remarks>
+internal static class DocumentTestRequests
+{
+    public const string IdempotencyHeader = "Idempotency-Key";
+
+    public static string NewKey() => $"document-test-{Guid.NewGuid():N}";
 }
