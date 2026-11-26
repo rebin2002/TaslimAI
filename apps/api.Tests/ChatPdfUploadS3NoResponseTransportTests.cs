@@ -50,7 +50,7 @@ namespace Taslim.Api.Tests;
 ///    (the transport class must not degrade into a 500 or a validation rejection), and no
 ///    successful asset identity may persist (no Ready row, no retained object).
 /// 2. The sanitized storage log line must record the incident's diagnostic shape
-///    (<c>StatusCode=0</c>, empty <c>ErrorCode</c>/<c>RequestId</c>,
+///    (<c>StatusCode=0</c>, <c>HasRequestId=False</c>, no raw provider identifiers,
 ///    <c>FailureClass=transport</c>) while the bucket, endpoint, credentials and PUT token
 ///    riding inside the exception text never surface in the log or in any HTTP body.
 /// 3. A Chat message referencing the failed upload must be refused with 422
@@ -129,7 +129,7 @@ public sealed class ChatPdfUploadS3NoResponseTransportTests
         }
 
         // 4. The sanitized log line records the incident's diagnostic shape — status 0,
-        //    empty ErrorCode/RequestId, transport failure class — so the no-response class
+        //    no request ID or raw provider identifiers, transport failure class — so the no-response class
         //    stays distinguishable from an answered 503 for incident response.
         var putLogs = api.CapturedLogs.Lines.Where(line =>
             line.Contains("S3-compatible storage operation failed", StringComparison.Ordinal) &&
@@ -137,8 +137,9 @@ public sealed class ChatPdfUploadS3NoResponseTransportTests
         Assert.Single(putLogs);
         var putLog = putLogs[0];
         Assert.Contains("StatusCode=0", putLog, StringComparison.Ordinal);
-        Assert.Contains("ErrorCode=(null)", putLog, StringComparison.Ordinal);
-        Assert.Contains("RequestId=(null)", putLog, StringComparison.Ordinal);
+        Assert.Contains("HasRequestId=False", putLog, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("; ErrorCode=", putLog, StringComparison.Ordinal);
+        Assert.DoesNotContain("; RequestId=", putLog, StringComparison.Ordinal);
         Assert.Contains("ErrorType=AmazonS3Exception", putLog, StringComparison.Ordinal);
         Assert.Contains("FailureClass=transport", putLog, StringComparison.Ordinal);
         // The diagnostic fields above are the only provider detail allowed into the log:
