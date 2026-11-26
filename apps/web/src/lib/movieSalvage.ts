@@ -231,10 +231,35 @@ export function buildSalvageTimelineRevision(
   };
 }
 
-export function formatSalvageTime(milliseconds: number): string {
+const HOUR_MILLISECONDS = 3_600_000;
+
+/**
+ * The movie timeline's shared wall-clock timecode (#685 client lane).
+ *
+ * Below one hour the output stays byte-identical to the long-standing
+ * per-clip readout - `MM:SS.mmm`, or `MM:SS` with `showMilliseconds: false` -
+ * because that is what customers already read for a single provider-capped
+ * clip and source range. A whole-film plan may legitimately total up to
+ * 120 minutes while each clip stays inside its own short cap, so at or above
+ * one hour the timecode rolls into `HH:MM:SS(.mmm)` instead of letting the
+ * minutes field run past 59. Presentation scale only: this changes no
+ * duration bound, provider cap, or billing value.
+ */
+export function formatMovieTimecode(
+  milliseconds: number,
+  options: { showMilliseconds?: boolean } = {},
+): string {
   const safe = Math.max(0, Math.round(milliseconds));
-  const minutes = Math.floor(safe / 60_000);
+  const hours = Math.floor(safe / HOUR_MILLISECONDS);
+  const minutes = Math.floor((safe % HOUR_MILLISECONDS) / 60_000);
   const seconds = Math.floor((safe % 60_000) / 1000);
   const frames = safe % 1000;
-  return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}.${String(frames).padStart(3, "0")}`;
+  const clock = hours > 0
+    ? `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`
+    : `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+  return options.showMilliseconds === false ? clock : `${clock}.${String(frames).padStart(3, "0")}`;
+}
+
+export function formatSalvageTime(milliseconds: number): string {
+  return formatMovieTimecode(milliseconds);
 }
