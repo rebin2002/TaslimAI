@@ -71,7 +71,11 @@ public static class PresentationOutputIntegrityValidator
                 _ = archive.GetEntry(part) ?? throw new PresentationOutputIntegrityException($"The presentation package is missing required part '{part}'.");
 
             RequireRoot(ParseRequiredXml(archive, "[Content_Types].xml"), "Types", ContentTypesNamespace, "[Content_Types].xml");
-            RequireRoot(ParseRequiredXml(archive, "_rels/.rels"), "Relationships", RelationshipsNamespace, "_rels/.rels");
+            var packageRelationships = RequireRoot(ParseRequiredXml(archive, "_rels/.rels"), "Relationships", RelationshipsNamespace, "_rels/.rels");
+            if (!packageRelationships.Elements(XName.Get("Relationship", RelationshipsNamespace)).Any(item =>
+                    string.Equals(item.Attribute("Type")?.Value, OfficeRelationshipNamespace + "/officeDocument", StringComparison.Ordinal)
+                    && string.Equals(item.Attribute("Target")?.Value, "ppt/presentation.xml", StringComparison.Ordinal)))
+                throw new PresentationOutputIntegrityException("The presentation package is missing a relationship to 'ppt/presentation.xml' in '_rels/.rels'.");
             var themeRoot = RequireRoot(ParseRequiredXml(archive, "ppt/theme/theme1.xml"), "theme", DrawingNamespace, "ppt/theme/theme1.xml");
             RequireFormatScheme(themeRoot);
             var slideMasterRoot = RequireRoot(ParseRequiredXml(archive, "ppt/slideMasters/slideMaster1.xml"), "sldMaster", PresentationNamespace, "ppt/slideMasters/slideMaster1.xml");
