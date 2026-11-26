@@ -1,8 +1,13 @@
 using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
+using Microsoft.Data.Sqlite;
+using Microsoft.EntityFrameworkCore;
+using Taslim.Api.Authorization;
 using Taslim.Api.Contracts;
+using Taslim.Api.Domain;
 using Taslim.Api.Movies;
+using Taslim.Api.Persistence;
 using Xunit;
 
 namespace Taslim.Api.Tests;
@@ -173,4 +178,74 @@ public sealed class MovieShotImportanceApiTests : IClassFixture<GenerationJobsNo
         if (payload is not null) request.Content = JsonContent.Create(payload);
         return await client.SendAsync(request);
     }
+}
+
+public sealed class MovieShotImportanceCanonicalGuideTests
+{
+    [Fact]
+    public async Task Importance_uses_locked_canonical_guide_instead_of_stale_legacy_fields()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = new TaslimDbContext(new DbContextOptionsBuilder<TaslimDbContext>().UseSqlite(connection).Options);
+        var fixture = await SeedAsync(db);
+        var access = new MovieCollaborationAccess(db, new WorkspaceAccessService(db));
+        var service = new MovieShotImportanceService(db, access, new MovieShotImportanceClassifier());
+
+        var result = await service.GetAsync(fixture.UserId, fixture.ShotId, CancellationToken.None);
+
+        Assert.NotNull(result);
+        Assert.Equal(MovieShotImportanceLevels.Standard, result!.Classification);
+        Assert.DoesNotContain(result.Evidence, item => item.Source == "guide" && item.Signal == "hero_narrative");
+    }
+
+    private static async Task<ImportanceFixture> SeedAsync(TaslimDbContext db)
+    {
+        db.Database.EnsureCreated();
+        var now = DateTime.UtcNow;
+        var userId = Guid.NewGuid();
+        var workspaceId = Guid.NewGuid();
+        var movieId = Guid.NewGuid();
+        var sceneId = Guid.NewGuid();
+        var shotId = Guid.NewGuid();
+        var guide = new MovieContinuityGuide
+        {
+            Id = Guid.NewGuid(),
+            VisualLanguage = "legacy visual",
+            CameraLanguage = "legacy camera",
+            ColorAndLighting = "legacy color",
+            SoundAndNarration = "legacy sound",
+            ContinuityRules = "The final confrontation is decisive.",
+            CurrentRevisionNumber = 2,
+            LockedRevisionNumber = 2,
+            LockedAt = now,
+            UpdatedAt = now,
+        };
+        guide.Revisions.Add(new MovieGuideRevision
+        {
+            Id = Guid.NewGuid(),
+            RevisionNumber = 2,
+            Status = MovieGuideRevisionStatuses.Locked,
+            StoryBibleJson = "{}",
+            VisualBibleJson = "{\"visualLanguage\":\"canonical visual\"}",
+            CinematographyBibleJson = "{\"cameraLanguage\":\"canonical camera\"}",
+            AudioBibleJson = "{\"soundAndNarration\":\"canonical sound\"}",
+            ContinuityBibleJson = "{\"continuityRules\":\"The hand remains steady.\"}",
+            CreatedByUserId = userId,
+            CreatedAt = now,
+            LockedAt = now,
+            LockedByUserId = userId,
+        });
+        db.Users.Add(new ApplicationUser { Id = userId, UserName = "importance-canonical-owner", NormalizedUserName = "IMPORTANCE-CANONICAL-OWNER", DisplayName = "Importance Owner", CreatedAt = now, UpdatedAt = now });
+        db.Workspaces.Add(new Workspace { Id = workspaceId, Name = "Importance Workspace", Slug = $"importance-{Guid.NewGuid():N}", Type = WorkspaceType.Personal, CreatedAt = now, UpdatedAt = now });
+        db.WorkspaceMembers.Add(new WorkspaceMember { Id = Guid.NewGuid(), WorkspaceId = workspaceId, UserId = userId, Role = WorkspaceRole.Owner, JoinedAt = now });
+        db.MovieProjects.Add(new MovieProject { Id = movieId, WorkspaceId = workspaceId, CreatedByUserId = userId, Title = "Importance Movie", Description = "Canonical Guide fixture.", DurationSeconds = 60, CreatedAt = now, UpdatedAt = now, Guide = guide });
+        db.MovieTeamMembers.Add(new MovieTeamMember { Id = Guid.NewGuid(), MovieProjectId = movieId, UserId = userId, Role = MovieTeamRoles.Producer, IsProjectOwner = true, CreatedAt = now, UpdatedAt = now });
+        db.MovieScenes.Add(new MovieScene { Id = sceneId, MovieProjectId = movieId, Sequence = 1, Title = "Opening", Summary = "A quiet room.", CreatedAt = now, UpdatedAt = now });
+        db.MovieShots.Add(new MovieShot { Id = shotId, MovieSceneId = sceneId, Sequence = 1, Description = "Mara waits in the room.", CreatedAt = now, UpdatedAt = now });
+        await db.SaveChangesAsync();
+        return new ImportanceFixture(userId, shotId);
+    }
+
+    private sealed record ImportanceFixture(Guid UserId, Guid ShotId);
 }
