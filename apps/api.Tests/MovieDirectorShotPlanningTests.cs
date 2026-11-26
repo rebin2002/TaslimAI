@@ -168,6 +168,107 @@ public sealed class MovieDirectorShotPlanningMalformedTests : IClassFixture<Movi
     }
 }
 
+public sealed class MovieDirectorShotPlanningEmptyPropsTests : IClassFixture<MovieDirectorShotPlanningEmptyPropsApiFactory>
+{
+    private readonly MovieDirectorShotPlanningEmptyPropsApiFactory factory;
+    public MovieDirectorShotPlanningEmptyPropsTests(MovieDirectorShotPlanningEmptyPropsApiFactory factory)
+    {
+        this.factory = factory;
+        using var scope = factory.Services.CreateScope();
+        scope.ServiceProvider.GetRequiredService<TaslimDbContext>().Database.EnsureCreated();
+    }
+
+    [Fact]
+    public async Task Applied_director_plan_without_props_does_not_create_a_false_prop_requirement()
+    {
+        using var client = factory.CreateClient();
+        var auth = await MovieDirectorStoryTests.Register(client, "Empty Props Shot Director");
+        var movie = await MovieDirectorStoryTests.CreateMovie(client, auth.PersonalWorkspace.Id, 30);
+        await MovieDirectorStoryTests.LockGuide(client, movie.Project.Id);
+        var scene = await MovieDirectorStoryTests.SendWithCsrf<MovieSceneDto>(client, HttpMethod.Post, $"/api/movie-studio/projects/{movie.Project.Id}/scenes", new { title = "Harbor", summary = "Mara guards the red lantern at the harbor.", durationSeconds = 12 });
+        var proposal = await MovieDirectorStoryTests.SendWithCsrf<DirectorProposalResponse>(client, HttpMethod.Post, $"/api/movie-director/projects/{movie.Project.Id}/proposals", new { shotPlanningAction = DirectorShotPlanningActionTypes.ProposeShots, targetSceneId = scene.Id, requestedShotCount = 2 });
+        var approved = await MovieDirectorStoryTests.SendWithCsrf<DirectorProposalDto>(client, HttpMethod.Post, $"/api/movie-director/proposals/{proposal.Proposal.Id}/approve", null);
+        var applied = await MovieDirectorStoryTests.SendWithCsrf<DirectorActionExecutionResponse>(client, HttpMethod.Post, $"/api/movie-director/actions/{approved.Actions[0].Id}/execute", null);
+        Assert.Equal(DirectorActionStatuses.Succeeded, applied.Action.Status);
+
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        var shots = await db.MovieShots.Where(item => item.MovieSceneId == scene.Id).OrderBy(item => item.Sequence).ToListAsync();
+        Assert.Equal(2, shots.Count);
+        Assert.All(shots, shot =>
+        {
+            // The apply executor emits the empty header placeholder; readiness for an
+            // otherwise prop-free shot with a canonical project prop named "key" must
+            // not treat it as a real requirement (forced important, as Primary/Critical
+            // shots are evaluated).
+            Assert.Contains("Important props: .", shot.ProductionRequirements ?? string.Empty, StringComparison.Ordinal);
+            var shotText = string.Join(" ", shot.Description, shot.Subjects, shot.Purpose, shot.ProductionRequirements);
+            var result = MovieReferenceReadinessPolicy.EvaluatePropReference(shotText, [Prop("key")], important: true);
+            Assert.Equal(MovieReferenceReadinessItemStates.Complete, result.State);
+            Assert.False(result.BlocksGeneration);
+            Assert.Null(result.SourceId);
+        });
+    }
+
+    private static MovieProductionPropReferenceDto Prop(string name) =>
+        new(
+            Guid.NewGuid(),
+            name,
+            $"A {name} used in the shot.",
+            null,
+            null,
+            null,
+            null,
+            new MovieProductionReferenceProvenanceDto("test", null, null, "test-hash", "test", DateTime.UnixEpoch));
+}
+
+public sealed class MovieDirectorShotPlanningEmptyPropsApiFactory : TaslimApiFactory
+{
+    protected override void ConfigureWebHost(IWebHostBuilder builder)
+    {
+        base.ConfigureWebHost(builder);
+        builder.ConfigureServices(services =>
+        {
+            services.RemoveAll<IChatCompletionService>();
+            services.AddSingleton<IChatCompletionService, EmptyPropsMovieShotCompletionService>();
+        });
+    }
+}
+
+internal sealed class EmptyPropsMovieShotCompletionService : IChatCompletionService
+{
+    public async IAsyncEnumerable<AiStreamEvent> StreamAsync(AiChatRequest request, [EnumeratorCancellation] CancellationToken cancellationToken = default) { await Task.CompletedTask; yield break; }
+    public Task<AiGenerationResult> CompleteAsync(AiChatRequest request, CancellationToken cancellationToken = default)
+    {
+        if (request.StructuredOutput?.Name != "taslim_movie_director_shot_planning") return Task.FromResult(new AiGenerationResult("{}", Usage()));
+        var content = JsonSerializer.Serialize(new
+        {
+            summary = "A grounded two-shot plan follows Mara's guarded watch over the red lantern at the harbor.",
+            rationale = new[] { "Uses the selected Harbor scene without canonical prop anchors." },
+            shots = new[] { Shot(1, 5, "Mara's watch turns the harbor tension into a readable visual beat."), Shot(2, 5, "The harbor darkness becomes the transition hinge into the next scene.") },
+        });
+        return Task.FromResult(new AiGenerationResult(content, Usage()));
+    }
+    private static AiUsageMetadata Usage() => new("test-shot", "test-shot", 100, null, 300, 0m, 0m, 1, "test-shot", true);
+    private static object Shot(int number, int duration, string purpose) => new
+    {
+        shotNumber = number, narrativePurpose = purpose, estimatedDurationSeconds = duration,
+        shotSize = number == 1 ? "medium" : "close-up", framing = "Mara held on the harbor axis against the dark water", cameraAngle = "eye level",
+        cameraMovement = number == 1 ? "measured lateral drift" : "controlled push-in", subject = "Mara alone on the harbor wall",
+        characterAction = number == 1 ? "Mara scans the harbor from the wall." : "Mara steps back as the harbor falls quiet.",
+        expressionEmotionalState = number == 1 ? "guarded vigilance" : "quiet resolve", environment = "the harbor", importantProps = Array.Empty<string>(),
+        composition = "Mara anchors the foreground while open harbor depth fills the frame.",
+        lightingIntent = "cool ambient harbor light from the moonlit water",
+        depthBackgroundIntent = "keep the harbor readable in layered background depth without inventing a new location",
+        transitionRelationship = number == 1 ? "establishes the scene's watchful rhythm" : "hands visual emphasis to the next scene through the darkening harbor.",
+        dialogueAudioDependency = "No dialogue; preserve harbor ambience.",
+        continuityRequirements = "Keep Mara and the harbor relationship consistent with the selected scene.",
+        vfxRequirements = "No VFX required.",
+        productionNotes = "Proposed shot-plan detail; verify harbor ambience before approval.",
+        groundingEvidence = new[] { "Mara guards the red lantern at the harbor." },
+    };
+}
+
 public abstract class MovieDirectorShotPlanningFactoryBase : TaslimApiFactory
 {
     protected override void ConfigureWebHost(IWebHostBuilder builder)

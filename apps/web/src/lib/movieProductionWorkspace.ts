@@ -11,6 +11,38 @@ export type ProductionWorkspaceFilter = "all" | "needs-review" | "ready" | "bloc
 export type ProductionReadiness = "blocked" | "needs-review" | "in-progress" | "ready";
 export type ProductionWorkspaceStage = "shot-plan" | "keyframe" | "candidates" | "review" | "select" | "finish" | "timeline";
 
+/**
+ * The one honest word a persisted pass is allowed about a terminal execution.
+ * The worker treats Succeeded, Failed, and Cancelled as final: a job in one
+ * of these states never advances again — workspace polling stops for it — so
+ * nothing in the room may keep promising that it will. Non-terminal
+ * executions return null so the caller keeps describing the live progress
+ * instead of inventing an outcome the worker has not published.
+ */
+export function movieProductionExecutionState(status: string | null | undefined): string | null {
+  switch (status) {
+    case "Succeeded":
+      return "Ready";
+    case "Failed":
+      return "Needs attention";
+    case "Cancelled":
+      return "Cancelled";
+    default:
+      return null;
+  }
+}
+
+/**
+ * Progress is rendered as a durable presentable value: rounded to a whole
+ * percent and clamped to the 0-100 range so a malformed or out-of-range
+ * stored number can never render an impossible bar or a moving-looking
+ * label. A non-finite value presents as 0, same policy as the export queue.
+ */
+export function movieProductionProgressPercent(value: number | null | undefined): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) return 0;
+  return Math.max(0, Math.min(100, Math.round(value)));
+}
+
 export type ProductionWorkspaceShot = {
   sceneId: string;
   sceneSequence: number;
@@ -85,6 +117,7 @@ function buildShot(scene: MovieProject["scenes"][number], shot: ProductionWorksp
   const selectedTake = takes.find((take) => Boolean(take.selectedAt)) ?? null;
   const finalTake = takes.find((take) => Boolean(take.finalizedAt)) ?? null;
   const failedRender = render?.execution?.status === "Failed";
+  const cancelledRender = render?.execution?.status === "Cancelled";
 
   let readiness: ProductionReadiness = "blocked";
   let readinessLabel = "Shot plan needed";
@@ -101,6 +134,10 @@ function buildShot(scene: MovieProject["scenes"][number], shot: ProductionWorksp
     readiness = "needs-review";
     readinessLabel = "Take needs review";
     nextAction = "Save the render as a candidate take";
+  } else if (cancelledRender) {
+    readiness = "needs-review";
+    readinessLabel = "Pass was cancelled";
+    nextAction = "Review the cancelled pass and start a new pass when ready";
   } else if (motion?.status === "PendingApproval") {
     readiness = "needs-review";
     readinessLabel = "Motion check needs review";
@@ -171,7 +208,7 @@ export function buildMovieProductionWorkspaceModel(project: MovieProject): Produ
   const candidates = shots.reduce((total, item) => total + item.takes.length, 0);
   const stageUnits = shots.length * 4;
   const completedUnits = shots.reduce((total, item) => total + (shotPlanReady(item.shot) ? 1 : 0) + (item.keyframe ? 1 : 0) + (item.takes.length ? 1 : 0) + (item.readiness === "ready" ? 1 : 0), 0);
-  const progressPercent = stageUnits === 0 ? 0 : Math.round((completedUnits / stageUnits) * 100);
+  const progressPercent = movieProductionProgressPercent(stageUnits === 0 ? 0 : (completedUnits / stageUnits) * 100);
   const currentStage: ProductionWorkspaceStage = shots.length === 0 ? "shot-plan" : blocked > 0 && shotPlanReadyCount < shots.length ? "shot-plan" : keyframesReady < shots.length ? "keyframe" : candidates === 0 ? "candidates" : needsReview > 0 ? "review" : selectedTakes < shots.length ? "select" : readyForTimeline === shots.length ? "timeline" : "finish";
   const timelineReady = shots.length > 0 && readyForTimeline === shots.length;
   return {

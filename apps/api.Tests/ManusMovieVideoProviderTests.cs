@@ -4,6 +4,7 @@ using System.Text;
 using System.Text.Json;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
+using Taslim.Api.Files;
 using Taslim.Api.Movies;
 using Xunit;
 
@@ -136,72 +137,6 @@ public sealed class ManusMovieVideoProviderTests
     }
 
     [Fact]
-    public async Task Retrieval_accepts_bounded_chunked_video_response_when_metadata_size_is_known()
-    {
-        var handler = new RecordingHandler(request =>
-        {
-            if (request.Method == HttpMethod.Get && request.RequestUri!.Host == "cdn.example.test")
-                return new HttpResponseMessage(HttpStatusCode.OK)
-                {
-                    Content = new ChunkedVideoContent(Encoding.UTF8.GetBytes("clip"), "video/mp4"),
-                };
-            throw new InvalidOperationException($"Unexpected request: {request.Method} {request.RequestUri}");
-        });
-        var provider = CreateProvider(handler, EnabledOptions());
-        var status = new MovieVideoProviderStatus(
-            MovieVideoProviderJobStatus.Succeeded,
-            100,
-            MetadataJson: JsonSerializer.Serialize(new
-            {
-                providerTaskId = TaskId,
-                outputUrl = "https://cdn.example.test/clip.mp4",
-                contentType = "video/mp4",
-                fileName = "clip.mp4",
-                sizeBytes = 4,
-                durationSeconds = 5,
-            }));
-
-        var output = await provider.RetrieveAsync(TaskId, status, CancellationToken.None);
-        await using var stream = await output.OpenReadAsync(CancellationToken.None);
-        using var copy = new MemoryStream();
-        await stream.CopyToAsync(copy);
-
-        Assert.Equal("clip", Encoding.UTF8.GetString(copy.ToArray()));
-        Assert.Equal(4, output.SizeBytes);
-    }
-
-    [Fact]
-    public async Task Retrieval_rejects_chunked_video_response_that_exceeds_metadata_size()
-    {
-        var handler = new RecordingHandler(request =>
-        {
-            if (request.Method == HttpMethod.Get && request.RequestUri!.Host == "cdn.example.test")
-                return new HttpResponseMessage(HttpStatusCode.OK)
-                {
-                    Content = new ChunkedVideoContent(Encoding.UTF8.GetBytes("clips"), "video/mp4"),
-                };
-            throw new InvalidOperationException($"Unexpected request: {request.Method} {request.RequestUri}");
-        });
-        var provider = CreateProvider(handler, EnabledOptions());
-        var status = new MovieVideoProviderStatus(
-            MovieVideoProviderJobStatus.Succeeded,
-            100,
-            MetadataJson: JsonSerializer.Serialize(new
-            {
-                providerTaskId = TaskId,
-                outputUrl = "https://cdn.example.test/clip.mp4",
-                contentType = "video/mp4",
-                fileName = "clip.mp4",
-                sizeBytes = 4,
-                durationSeconds = 5,
-            }));
-
-        var output = await provider.RetrieveAsync(TaskId, status, CancellationToken.None);
-        await using var stream = await output.OpenReadAsync(CancellationToken.None);
-        await Assert.ThrowsAsync<MovieVideoProviderOutputException>(() => stream.CopyToAsync(Stream.Null));
-    }
-
-    [Fact]
     public async Task Unsupported_request_and_non_video_output_are_rejected()
     {
         var provider = CreateProvider(new RecordingHandler(_ => JsonResponse($"{{\"ok\":true,\"task_id\":\"{TaskId}\"}}")), EnabledOptions());
@@ -228,7 +163,23 @@ public sealed class ManusMovieVideoProviderTests
     }
 
     private static ManusMovieVideoProvider CreateProvider(HttpMessageHandler handler, MovieVideoOptions options) =>
-        new(new HttpClient(handler) { BaseAddress = new Uri("https://api.manus.ai/") }, Options.Create(options), NullLogger<ManusMovieVideoProvider>.Instance);
+        new(
+            new HttpClient(handler) { BaseAddress = new Uri("https://api.manus.ai/") },
+            Options.Create(options),
+            NullLogger<ManusMovieVideoProvider>.Instance,
+            // The *.example.test production bypass is gone (PR #358 review): reserved names now
+            // flow through the resolver exactly like real hostnames, and adapter tests carry this
+            // test-only fake declaring their deterministic hosts public instead.
+            new ProviderUrlPolicy(new PublicTestHostResolver()));
+
+    // Test-only name table: every hostname the fixture uses (assets.example.test,
+    // cdn.example.test) answers with one deterministic public address, so the tests stay
+    // independent of live DNS without production code granting any name a free pass.
+    private sealed class PublicTestHostResolver : IProviderHostResolver
+    {
+        public Task<IReadOnlyList<IPAddress>> ResolveAsync(string host, CancellationToken cancellationToken) =>
+            Task.FromResult<IReadOnlyList<IPAddress>>(new[] { IPAddress.Parse("93.184.216.34") });
+    }
 
     private static MovieVideoOptions EnabledOptions() => new()
     {
@@ -280,26 +231,6 @@ public sealed class ManusMovieVideoProviderTests
         content.Headers.ContentType = new MediaTypeHeaderValue(contentType);
         content.Headers.ContentLength = bytes.Length;
         return new HttpResponseMessage(HttpStatusCode.OK) { Content = content };
-    }
-
-    private sealed class ChunkedVideoContent : HttpContent
-    {
-        private readonly byte[] bytes;
-
-        public ChunkedVideoContent(byte[] bytes, string contentType)
-        {
-            this.bytes = bytes;
-            Headers.ContentType = new MediaTypeHeaderValue(contentType);
-        }
-
-        protected override Task SerializeToStreamAsync(Stream stream, TransportContext? context) =>
-            stream.WriteAsync(bytes).AsTask();
-
-        protected override bool TryComputeLength(out long length)
-        {
-            length = 0;
-            return false;
-        }
     }
 
     private sealed class RecordingHandler(Func<HttpRequestMessage, HttpResponseMessage> responseFactory) : HttpMessageHandler

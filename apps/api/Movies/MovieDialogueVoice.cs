@@ -216,7 +216,10 @@ public sealed class DeterministicMovieDialogueVoiceProvider : IMovieDialogueVoic
 }
 
 public sealed class MovieDialogueVoiceProviderUnavailableException() : Exception("Movie dialogue voice execution is disabled.");
-public sealed class MovieDialogueVoiceOutputInvalidException() : Exception("The dialogue voice adapter returned invalid audio.");
+public sealed class MovieDialogueVoiceOutputInvalidException(AiUsageMetadata? usage = null) : Exception("The dialogue voice adapter returned invalid audio.")
+{
+    public AiUsageMetadata? Usage { get; } = usage;
+}
 public sealed class MovieDialogueVoiceRequestValidationException(string code, string message) : Exception(message)
 {
     public string Code { get; } = code;
@@ -252,7 +255,21 @@ public sealed class MovieDialogueVoiceGenerationJobHandler(
             input.MovieDialogueLineId, input.MovieClipId, input.MovieCharacterId, input.SpeakerName, input.Text, input.Language,
             input.StartMilliseconds, input.EndMilliseconds, input.DeliveryNotes, input.MovieProjectId), cancellationToken);
         cancellationToken.ThrowIfCancellationRequested();
-        ValidateOutput(generated);
+        var usage = new AiUsageMetadata(
+            provider.Key,
+            generated.Usage.ModelKey,
+            generated.Usage.InputCharacters,
+            null,
+            generated.Usage.OutputBytes,
+            generated.Usage.EstimatedCostUsd,
+            generated.Usage.ActualCostUsd,
+            Math.Max(1, generated.Usage.LatencyMilliseconds > 0 ? generated.Usage.LatencyMilliseconds : (int)Math.Min(int.MaxValue, (DateTime.UtcNow - started).TotalMilliseconds)),
+            "completed",
+            false,
+            Currency: generated.Usage.Currency,
+            CostBasis: generated.Usage.CostBasis,
+            SafeMetadataJson: generated.Usage.SafeMetadataJson);
+        ValidateOutput(generated, usage);
         progress.Report(85);
         var metadata = JsonSerializer.Serialize(new
         {
@@ -270,20 +287,6 @@ public sealed class MovieDialogueVoiceGenerationJobHandler(
             sizeBytes = generated.Content.Length,
         });
         var artifact = new GeneratedFileArtifact($"dialogue-{job.Id:N}.{generated.Format.Trim().ToLowerInvariant()}", generated.ContentType.Trim().ToLowerInvariant(), generated.Content, metadata);
-        var usage = new AiUsageMetadata(
-            provider.Key,
-            generated.Usage.ModelKey,
-            generated.Usage.InputCharacters,
-            null,
-            generated.Usage.OutputBytes,
-            generated.Usage.EstimatedCostUsd,
-            generated.Usage.ActualCostUsd,
-            Math.Max(1, generated.Usage.LatencyMilliseconds > 0 ? generated.Usage.LatencyMilliseconds : (int)Math.Min(int.MaxValue, (DateTime.UtcNow - started).TotalMilliseconds)),
-            "completed",
-            false,
-            Currency: generated.Usage.Currency,
-            CostBasis: generated.Usage.CostBasis,
-            SafeMetadataJson: generated.Usage.SafeMetadataJson);
         var result = JsonSerializer.Serialize(new
         {
             assetType = AssetTypes.Audio,
@@ -317,13 +320,15 @@ public sealed class MovieDialogueVoiceGenerationJobHandler(
             throw new MovieDialogueVoiceRequestValidationException(GenerationJobErrorCodes.MovieDialogueVoiceRequestInvalid, "The dialogue voice request is invalid.");
     }
 
-    private void ValidateOutput(MovieDialogueVoiceProviderResult output)
+    private void ValidateOutput(MovieDialogueVoiceProviderResult output, AiUsageMetadata usage)
     {
         var maximum = Math.Min(10 * 1_048_576, Math.Max(1, settings.MaxOutputBytes));
+        var maximumDuration = Math.Max(1, settings.MaxDurationMilliseconds);
         if (output.Content.Length <= 0 || output.Content.Length > maximum || output.DurationMilliseconds <= 0
+            || output.DurationMilliseconds > maximumDuration
             || string.IsNullOrWhiteSpace(output.ContentType) || !output.ContentType.StartsWith("audio/", StringComparison.OrdinalIgnoreCase)
             || string.IsNullOrWhiteSpace(output.Format) || output.Format.Length > 12)
-            throw new MovieDialogueVoiceOutputInvalidException();
+            throw new MovieDialogueVoiceOutputInvalidException(usage);
     }
 }
 

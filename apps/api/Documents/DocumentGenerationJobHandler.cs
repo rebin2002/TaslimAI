@@ -23,8 +23,12 @@ public sealed class DocumentGenerationJobHandler(
 
     public async Task<GenerationHandlerResult> ExecuteAsync(GenerationJob job, IProgress<int> progress, CancellationToken cancellationToken)
     {
+        // A job can already be Queued when an operator pulls the Document Studio
+        // kill switch, and cooperative cancellation does not cover a job that has
+        // not been claimed yet. Re-checking the switch here, before any read or
+        // provider call, is what makes the switch actually stop provider spend.
         if (!settings.Enabled)
-            throw new DocumentGenerationStageException(DocumentGenerationStages.Validation, "DOCUMENT_STUDIO_UNAVAILABLE", "Document generation is not available right now.");
+            throw DocumentStudioAvailability.Unavailable();
 
         DocumentGenerationInput input;
         try
