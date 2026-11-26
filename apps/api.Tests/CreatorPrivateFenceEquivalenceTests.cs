@@ -7,14 +7,14 @@ using Xunit;
 namespace Taslim.Api.Tests;
 
 /// <summary>
-/// GATE-PRIV-01 drift guard. The two creator-private fences live in different lanes
-/// (<c>ActivityCenterService.VisibleToMember</c> for the Activity Center and
-/// <c>GenerationJobService.IsPrivateExecutionRecord</c> for the job read model) and nothing in the
-/// suite tied them together, which is exactly how one could fence Research only while the other
-/// fenced Research plus unscoped Presentation plus unscoped Social and both lanes stayed green.
-/// This test asserts the two predicates accept the same records over the category matrix, so any
-/// future narrowing on either side fails closed here instead of shipping a disclosure seam.
-/// Pure in-memory reflection: no database, no provider, no paid path.
+/// GATE-PRIV-01 drift guard. Activity Center, project overview and the generation-job list share
+/// one provider-aware SQL predicate (<c>CreatorPrivacyFence.VisibleToMember</c>); direct reads use
+/// the in-memory <c>GenerationJobService.IsPrivateExecutionRecord</c> rule. This test asserts that
+/// the shared query predicate and direct-read rule accept the same records over the category matrix,
+/// so future narrowing cannot ship a disclosure seam. The in-memory invocation uses SQLite's
+/// ASCII-folding branch; provider-specific SQL behavior is exercised by the SQLite and PostgreSQL
+/// integration tests.
+/// Pure in-memory evaluation: no database connection or paid path.
 /// </summary>
 public sealed class CreatorPrivateFenceEquivalenceTests
 {
@@ -106,20 +106,13 @@ public sealed class CreatorPrivateFenceEquivalenceTests
     }
 
     [Fact]
-    public void Both_translatable_fences_rely_on_job_types_being_stored_in_canonical_form()
+    public void Shared_translatable_fence_uses_canonical_job_type_constants()
     {
-        // Since GATE-PRIV-05 the two queryable fences (CreatorPrivacyFence.VisibleToMember, which
-        // ActivityCenterService.VisibleToMember delegates to, and the job read model's mirrored
-        // predicate in GenerationJobExecution.ListAsync) fold the stored JobType with ToLower()
-        // before comparing it to the canonical lowercase constants, so they accept exactly the
-        // mixed-case rows the in-memory IsPrivateExecutionRecord (OrdinalIgnoreCase) already hid.
-        // That equivalence is now the primary guarantee and is pinned by the mixed-case theory
-        // above; this fact stays as the second line of defence: the fold is only semantically
-        // equivalent to OrdinalIgnoreCase while the constants themselves are declared in canonical
-        // lowercase form, so if a canonical constant is ever declared in a form that is not its
-        // own trimmed lower-case value, this fails and the fences must be revisited together. The
-        // enqueue path additionally guarantees every normally-created row is persisted canonical by
-        // resolving the request through Supported.First(...) before saving.
+        // The shared SQL predicate folds persisted JobType values using PostgreSQL C collation or
+        // SQLite's ASCII lower(); both compare against these canonical lowercase constants. The
+        // mixed-case equivalence theory above and provider integration tests pin the behavior. The
+        // enqueue path additionally persists canonical values by resolving requests through
+        // Supported.First(...) before saving.
         foreach (var jobType in GenerationJobTypes.Supported)
         {
             Assert.Equal(jobType, jobType.Trim());
@@ -135,7 +128,7 @@ public sealed class CreatorPrivateFenceEquivalenceTests
     }
 
     private static List<GenerationJob> ApplyActivityFence(List<GenerationJob> jobs, Guid userId) =>
-        ((IQueryable<GenerationJob>)Invoke(typeof(ActivityCenterService), "VisibleToMember", jobs.AsQueryable(), userId)!).ToList();
+        CreatorPrivacyFence.VisibleToMember(jobs.AsQueryable(), userId, CreatorPrivacyFence.SqliteProviderName).ToList();
 
     private static List<GenerationJob> ApplyExecutionFence(List<GenerationJob> jobs, Guid userId) =>
         jobs.Where(job => !(bool)Invoke(typeof(GenerationJobService), "IsPrivateExecutionRecord", job, userId)!).ToList();

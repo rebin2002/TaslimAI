@@ -9,21 +9,13 @@ using Taslim.Api.Persistence;
 using Xunit;
 namespace Taslim.Api.Tests;
 /// <summary>
-/// GATE-PRIV-05 seam regression (independent review finding on the round-17 head): the translatable
-/// creator-private fences (<c>CreatorPrivacyFence.VisibleToMember</c>, feeding the Activity Center,
-/// the unread badge and the project overview, and the mirrored predicate inside
-/// <c>GenerationJobExecution.ListAsync</c> for the job list) compared <c>JobType</c> with ordinal SQL
-/// <c>!=</c>, while the canonical in-memory rule <c>IsPrivateExecutionRecord</c> they must agree with
-/// compares <c>OrdinalIgnoreCase</c>. On any case-sensitive database comparison — SQLite's ASCII
-/// equality and PostgreSQL's default collation both — a row persisted with a mixed-case
-/// <c>JobType</c> ("Research.Generate", "RESEARCH.GENERATE", "SOCIAL.GENERATE", …) stopped matching
-/// the SQL fence and stayed visible to co-members on the activity feed, the project overview and the
-/// job list, even though direct job retrieval kept it private. The enqueue path normalises the
-/// persisted value today, so no production exposure is claimed; the fence exists precisely for rows
-/// that bypass it, so it must fail closed on case variants rather than fail open. These tests seed
-/// mixed-case rows straight through the persistence context (simulating such a bypassing writer) and
-/// pin that every member-facing surface hides them exactly like the canonical lowercase twins, while
-/// the intentionally shared classes stay visible under any casing.
+/// GATE-PRIV-05 seam regression: the shared queryable creator-privacy predicate feeds the Activity
+/// Center, unread badge, project overview, and generation-job list. It must agree with the canonical
+/// in-memory <c>IsPrivateExecutionRecord</c> rule, which compares JobType using
+/// <c>OrdinalIgnoreCase</c>. Mixed-case persisted rows are seeded directly (simulating a legacy or
+/// external writer that bypasses enqueue normalization); every member-facing surface must hide the
+/// private classes from co-members while retaining project-scoped sharing and ordinary shared jobs.
+/// PostgreSQL collation determinism is pinned separately by the disposable Turkish-column fixture.
 /// </summary>
 public sealed class CreatorPrivacyFenceMixedCaseHttpTests : IClassFixture<ProjectOverviewCreatorPrivacyHttpApiFactory>
 {

@@ -6,6 +6,7 @@ using System.Text.Json.Nodes;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 using Taslim.Api.Ai;
+using Taslim.Api.Activity;
 using Taslim.Api.Assets;
 using Taslim.Api.Authorization;
 using Taslim.Api.Contracts;
@@ -850,14 +851,12 @@ public sealed class GenerationJobService(
         if (!await access.IsMemberAsync(userId, filter.WorkspaceId, cancellationToken)) return null;
         var page = ApiPagination.NormalizePage(filter.Page);
         var pageSize = ApiPagination.NormalizePageSize(filter.PageSize);
-        // Mirrors IsPrivateExecutionRecord: Research, unscoped Presentation, and unscoped Social
-        // records stay with their creator. Fold JobType before comparing to canonical constants so
-        // persisted case variants follow the same fail-closed policy as the in-memory rule.
-        var query = db.GenerationJobs.AsNoTracking().Where(job => job.WorkspaceId == filter.WorkspaceId &&
-            (job.CreatedByUserId == userId
-                || (job.JobType.ToLower() != GenerationJobTypes.ResearchGenerate
-                    && (job.JobType.ToLower() != GenerationJobTypes.PresentationGenerate || job.ProjectId != null)
-                    && (job.JobType.ToLower() != GenerationJobTypes.SocialGenerate || job.ProjectId != null))));
+        // Keep list visibility on the same SQL-translatable policy as the Activity Center and
+        // project overview, including provider-specific deterministic JobType folding.
+        var query = CreatorPrivacyFence.VisibleToMember(
+            db.GenerationJobs.AsNoTracking().Where(job => job.WorkspaceId == filter.WorkspaceId),
+            userId,
+            db.Database.ProviderName);
         if (filter.Status.HasValue) query = query.Where(job => job.Status == filter.Status.Value);
         if (filter.ProjectId.HasValue) query = query.Where(job => job.ProjectId == filter.ProjectId.Value);
         if (!string.IsNullOrWhiteSpace(filter.JobType)) query = query.Where(job => job.JobType == filter.JobType);

@@ -158,6 +158,6 @@ public sealed class ActivityCenterService(TaslimDbContext db, WorkspaceAccessSer
     }
 
     // Apply the same item-level policy before filtering, counting, paging or acknowledging rows.
-    private static IQueryable<GenerationJob> VisibleToMember(IQueryable<GenerationJob> jobs, Guid userId) =>
-        CreatorPrivacyFence.VisibleToMember(jobs, userId);
+    private IQueryable<GenerationJob> VisibleToMember(IQueryable<GenerationJob> jobs, Guid userId) =>
+        CreatorPrivacyFence.VisibleToMember(jobs, userId, db.Database.ProviderName);
 }

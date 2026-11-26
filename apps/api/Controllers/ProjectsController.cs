@@ -99,7 +99,8 @@ public sealed class ProjectsController(TaslimDbContext db, WorkspaceAccessServic
         var activity = CreatorPrivacyFence.VisibleToMember(
             db.GenerationJobs.AsNoTracking()
                 .Where(job => job.ProjectId == projectId && job.WorkspaceId == project.WorkspaceId),
-            userId);
+            userId,
+            db.Database.ProviderName);
 
         var counts = new ProjectOverviewCountsDto(
             await files.CountAsync(cancellationToken),
