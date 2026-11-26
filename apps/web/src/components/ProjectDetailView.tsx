@@ -116,7 +116,8 @@ export function ProjectDetailView() {
   }, [loadAttempt, params.projectId, t]);
 
   function replaceProject(project: Project) {
-    setOverview((current) => current ? { ...current, project } : current);
+    if (project.id !== routeProjectId.current) return;
+    setOverview((current) => current?.project.id === project.id ? { ...current, project } : current);
   }
 
   async function archive() {
