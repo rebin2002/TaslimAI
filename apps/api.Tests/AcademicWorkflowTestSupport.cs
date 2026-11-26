@@ -36,7 +36,31 @@ internal sealed class InMemoryAcademicWorkflowStateStore : IAcademicWorkflowStat
         AcademicWorkflowSnapshot snapshot,
         long expectedRevision,
         string checkpointKey,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken) =>
+        TryCommitCoreAsync(snapshot, expectedRevision, checkpointKey, expectedAttemptId: null, enforceAttemptFence: false);
+
+    public Task<AcademicCommitOutcome> TryCommitAttemptAsync(
+        AcademicWorkflowSnapshot snapshot,
+        long expectedRevision,
+        string checkpointKey,
+        Guid expectedAttemptId,
+        CancellationToken cancellationToken) =>
+        TryCommitCoreAsync(snapshot, expectedRevision, checkpointKey, expectedAttemptId, enforceAttemptFence: true);
+
+    public Task<AcademicCommitOutcome> TryRecoverAttemptAsync(
+        AcademicWorkflowSnapshot snapshot,
+        long expectedRevision,
+        string checkpointKey,
+        Guid? expectedAttemptId,
+        CancellationToken cancellationToken) =>
+        TryCommitCoreAsync(snapshot, expectedRevision, checkpointKey, expectedAttemptId, enforceAttemptFence: true);
+
+    private Task<AcademicCommitOutcome> TryCommitCoreAsync(
+        AcademicWorkflowSnapshot snapshot,
+        long expectedRevision,
+        string checkpointKey,
+        Guid? expectedAttemptId,
+        bool enforceAttemptFence)
     {
         commitLog.Add(checkpointKey);
         AcademicCommitStatus status;
@@ -48,7 +72,10 @@ internal sealed class InMemoryAcademicWorkflowStateStore : IAcademicWorkflowStat
         {
             status = AcademicCommitStatus.DuplicateCheckpoint;
         }
-        else if (stored.Revision != expectedRevision || snapshot.Revision != expectedRevision + 1)
+        else if (stored.Revision != expectedRevision || snapshot.Revision != expectedRevision + 1
+            || (enforceAttemptFence
+                ? stored.ActiveAttempt?.AttemptId != expectedAttemptId || snapshot.ActiveAttempt is not null
+                : stored.ActiveAttempt is not null))
         {
             status = AcademicCommitStatus.RevisionConflict;
         }
@@ -235,7 +262,8 @@ internal sealed class AcademicWorkflowHarness
         if (pending.Kind != kind)
             throw new InvalidOperationException($"Pending gate is {pending.Kind}, not {kind}.");
         var submission = await Orchestrator.SubmitApprovalDecisionAsync(
-            ProjectId, kind, decision, notes, Guid.Parse("33333333-3333-3333-3333-333333333333"), CancellationToken.None);
+            ProjectId, kind, pending.ApprovalKey, pending.CheckpointRevision, decision, notes,
+            Guid.Parse("33333333-3333-3333-3333-333333333333"), CancellationToken.None);
         if (submission.Status != AcademicApprovalSubmissionStatus.Applied)
             throw new InvalidOperationException("Approval submission failed: " + submission.Status);
     }

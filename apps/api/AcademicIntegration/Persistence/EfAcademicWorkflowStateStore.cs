@@ -113,10 +113,35 @@ public sealed class EfAcademicWorkflowStateStore(DbContext db) : IAcademicWorkfl
         }
     }
 
-    public async Task<AcademicCommitOutcome> TryCommitAsync(
+    public Task<AcademicCommitOutcome> TryCommitAsync(
         AcademicWorkflowSnapshot snapshot,
         long expectedRevision,
         string checkpointKey,
+        CancellationToken cancellationToken) =>
+        TryCommitCoreAsync(snapshot, expectedRevision, checkpointKey, expectedAttemptId: null, enforceAttemptFence: false, cancellationToken);
+
+    public Task<AcademicCommitOutcome> TryCommitAttemptAsync(
+        AcademicWorkflowSnapshot snapshot,
+        long expectedRevision,
+        string checkpointKey,
+        Guid expectedAttemptId,
+        CancellationToken cancellationToken) =>
+        TryCommitCoreAsync(snapshot, expectedRevision, checkpointKey, expectedAttemptId, enforceAttemptFence: true, cancellationToken);
+
+    public Task<AcademicCommitOutcome> TryRecoverAttemptAsync(
+        AcademicWorkflowSnapshot snapshot,
+        long expectedRevision,
+        string checkpointKey,
+        Guid? expectedAttemptId,
+        CancellationToken cancellationToken) =>
+        TryCommitCoreAsync(snapshot, expectedRevision, checkpointKey, expectedAttemptId, enforceAttemptFence: true, cancellationToken);
+
+    private async Task<AcademicCommitOutcome> TryCommitCoreAsync(
+        AcademicWorkflowSnapshot snapshot,
+        long expectedRevision,
+        string checkpointKey,
+        Guid? expectedAttemptId,
+        bool enforceAttemptFence,
         CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(snapshot);
@@ -141,6 +166,23 @@ public sealed class EfAcademicWorkflowStateStore(DbContext db) : IAcademicWorkfl
             {
                 await transaction.RollbackAsync(cancellationToken);
                 return new AcademicCommitOutcome(AcademicCommitStatus.DuplicateCheckpoint);
+            }
+
+            var storedJson = await _db.Set<AcademicWorkflowProjectEntity>()
+                .AsNoTracking()
+                .Where(e => e.ProjectId == snapshot.ProjectId && e.WorkspaceId == snapshot.WorkspaceId)
+                .Select(e => e.SnapshotJson)
+                .FirstOrDefaultAsync(cancellationToken);
+            var currentAttemptId = storedJson is null
+                ? null
+                : AcademicWorkflowSerialization.Deserialize(storedJson).ActiveAttempt?.AttemptId;
+            if (storedJson is null
+                || (enforceAttemptFence && currentAttemptId != expectedAttemptId)
+                || (!enforceAttemptFence && currentAttemptId is not null)
+                || (enforceAttemptFence && snapshot.ActiveAttempt is not null))
+            {
+                await transaction.RollbackAsync(cancellationToken);
+                return new AcademicCommitOutcome(AcademicCommitStatus.RevisionConflict);
             }
 
             var now = DateTime.UtcNow;

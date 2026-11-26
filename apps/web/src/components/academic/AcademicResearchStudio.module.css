@@ -1124,3 +1124,218 @@
     transition: none;
   }
 }
+
+
+/* ---------- saved Academic workflow ---------- */
+.workflowPanel,
+.workflowProject {
+  display: grid;
+  gap: 14px;
+  padding: 16px;
+  border: 1px solid #dce7f0;
+  border-radius: 14px;
+  background: #fff;
+}
+.workflowPanel {
+  background: linear-gradient(180deg, #fbfdff 0%, #fff 100%);
+}
+.workflowHeader,
+.workflowProjectHeading {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+.workflowHeader .sectionHeading {
+  margin: 0;
+}
+.workflowHeader .sectionIntro {
+  margin-top: 5px;
+}
+.workflowScope,
+.workflowState {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 9px;
+  border: 1px solid #dfe7ef;
+  border-radius: 20px;
+  color: #526273;
+  background: #f5f8fb;
+  font-size: 10.5px;
+  font-weight: 750;
+}
+.workflowControls {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: end;
+}
+.workflowSelectLabel {
+  display: grid;
+  gap: 5px;
+  color: #526273;
+  font-size: 11.5px;
+  font-weight: 750;
+}
+.workflowSelectLabel select {
+  width: 100%;
+  min-height: 38px;
+  padding: 8px 10px;
+  border: 1px solid #dfe7ef;
+  border-radius: 8px;
+  color: var(--ink, #172639);
+  background: #fff;
+  font: inherit;
+  font-weight: 500;
+}
+.workflowControls button,
+.workflowPanel > .primaryButton,
+.workflowApproval > .primaryButton,
+.workflowProject > .secondaryButton {
+  justify-content: center;
+}
+.workflowSubtle,
+.workflowNotice,
+.workflowError {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+.workflowSubtle {
+  color: #69798a;
+}
+.workflowNotice {
+  padding: 11px 13px;
+  border-inline-start: 3px solid #d2a347;
+  border-radius: 8px;
+  color: #604b1c;
+  background: #fdf7ec;
+}
+.workflowError {
+  color: #a63e43;
+  font-weight: 700;
+}
+.workflowProject {
+  padding: 15px;
+  background: #fbfcfe;
+}
+.workflowProjectHeading h4 {
+  margin: 3px 0;
+  color: var(--navy-900, #0b1829);
+  font-size: 15px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+.workflowProjectHeading p {
+  margin: 0;
+}
+.workflowKicker {
+  color: #317c79;
+  font-size: 10.5px;
+  font-weight: 800;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+}
+.workflowArtifact {
+  display: grid;
+  gap: 10px;
+  padding: 14px;
+  border: 1px solid #e6edf3;
+  border-radius: 11px;
+  background: #fff;
+}
+.workflowArtifact p {
+  margin: 0;
+  color: var(--ink, #172639);
+  font-size: 12px;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+.workflowArtifact p strong {
+  color: #526273;
+}
+.workflowSubheading {
+  margin: 0;
+  color: var(--navy-900, #0b1829);
+  font-size: 12.5px;
+}
+.workflowArtifact h6,
+.workflowListBlock h6 {
+  margin: 0;
+  color: #526273;
+  font-size: 11.5px;
+}
+.workflowListBlock {
+  display: grid;
+  gap: 5px;
+}
+.workflowListBlock ul,
+.workflowApproval ul {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+  padding-inline-start: 18px;
+  color: var(--ink, #172639);
+  font-size: 11.5px;
+  line-height: 1.55;
+}
+.workflowSearchList,
+.workflowStageList {
+  display: grid;
+  gap: 7px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.workflowSearchList li {
+  display: grid;
+  gap: 3px;
+  padding: 9px 10px;
+  border-radius: 8px;
+  background: #f5f8fb;
+  font-size: 11px;
+}
+.workflowSearchList li span {
+  color: #526273;
+  overflow-wrap: anywhere;
+}
+.workflowStageList li {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 6px;
+  padding: 7px 9px;
+  border-bottom: 1px solid #edf2f6;
+  color: #526273;
+  font-size: 11.5px;
+}
+.workflowStageList li strong {
+  color: var(--navy-900, #0b1829);
+  font-size: 10.5px;
+}
+.workflowApproval {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid #d7e8e5;
+  border-radius: 10px;
+  background: #f5faf9;
+}
+.workflowApproval > div {
+  display: grid;
+  gap: 6px;
+}
+@media (max-width: 620px) {
+  .workflowControls {
+    grid-template-columns: 1fr;
+  }
+  .workflowHeader,
+  .workflowProjectHeading {
+    flex-direction: column;
+  }
+  .workflowProject {
+    padding: 12px;
+  }
+}

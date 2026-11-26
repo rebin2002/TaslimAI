@@ -81,9 +81,10 @@ describe("workflow stages", () => {
     ]);
   });
 
-  it("shows only the plan stage as running today, because no job runner is wired for the others", () => {
+  it("shows only the persisted Plan stage as available today", () => {
     const views = academicWorkflowViews();
     expect(views.filter((stage) => stage.status === "available").map((stage) => stage.id)).toEqual(["plan"]);
+    expect(views.find((stage) => stage.id === "plan")!.executor).toBe("planApi");
     expect(availableWorkflowStageCount(views)).toBe(1);
     expect(views.every((stage) => stage.status === "planned" || stage.status === "available")).toBe(true);
     // Everything the staged job would run — discovery onward — is still a
@@ -106,11 +107,11 @@ describe("workflow stages", () => {
     // The downgraded stage reports the phase in which its runner arrives, not
     // the phase in which the underlying capability shipped.
     expect(discovery!.phase).toBe(academicCapabilities.academicJob.phase);
-    // General invariant: nothing shows as running unless the surface itself
-    // executes it or the job engine is wired.
+    // General invariant: nothing shows as available unless its local/API
+    // executor exists or the downstream job engine is wired.
     for (const stage of academicWorkflowViews()) {
       if (stage.status === "available") {
-        expect(stage.executor === "ui" || isCapabilityAvailable("academicJob"), stage.id).toBe(true);
+        expect(stage.executor === "ui" || stage.executor === "planApi" || isCapabilityAvailable("academicJob"), stage.id).toBe(true);
       }
     }
   });
