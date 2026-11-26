@@ -436,7 +436,9 @@ if (builder.Configuration.GetValue("GenerationJobs:WorkerEnabled", !builder.Envi
     builder.Services.AddHostedService<GenerationJobWorker>();
 }
 builder.Services.Configure<AiOptions>(builder.Configuration.GetSection("Ai"));
-builder.Services.Configure<ImageGenerationOptions>(builder.Configuration.GetSection("ImageGeneration"));
+builder.Services.AddOptions<ImageGenerationOptions>()
+    .Bind(builder.Configuration.GetSection("ImageGeneration"))
+    .ValidateOnStart();
 builder.Services.Configure<DocumentGenerationOptions>(builder.Configuration.GetSection("DocumentGeneration"));
 builder.Services.AddOptions<PresentationGenerationOptions>()
     .Bind(builder.Configuration.GetSection("PresentationGeneration"))
