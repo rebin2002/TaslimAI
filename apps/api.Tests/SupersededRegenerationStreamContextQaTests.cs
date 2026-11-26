@@ -31,10 +31,10 @@ namespace Taslim.Api.Tests;
 /// stay immutable while the model context is filtered.
 ///
 /// This file is the deterministic cross-request negative control for that uncovered leg: request
-/// one sends a message over the stream route, the assistant answer is superseded through the real
-/// regeneration endpoint, and request two — a second stream send — must present a model prompt
-/// that carries the live replacement alone, while the persisted transcript keeps every row,
-/// unedited, in sequence order. Synthetic fixture with a recording fake provider: no real prompts,
+/// one sends an ordinary JSON message, the assistant answer is superseded through the real
+/// regeneration endpoint, and request two — a later stream send — must present a model prompt that
+/// carries the live replacement alone, while the persisted transcript keeps every row, unedited,
+/// in sequence order. Synthetic fixture with a recording fake provider: no real prompts,
 /// no personal chats, no provider spend, no attachments, no shared-file edits.
 /// </summary>
 public sealed class SupersededRegenerationStreamContextQaTests : IClassFixture<StreamQaRecordingFactory>
@@ -56,7 +56,7 @@ public sealed class SupersededRegenerationStreamContextQaTests : IClassFixture<S
         var conversation = await CreateConversation(client, auth.PersonalWorkspace.Id);
         var recorder = factory.Services.GetRequiredService<StreamQaRecordingChatCompletionService>();
 
-        // Request one: an ordinary turn delivered over the stream route.
+        // Request one: an ordinary JSON turn establishes the assistant answer to supersede.
         var firstTurn = await SendWithCsrf<SendMessageResponse>(client, HttpMethod.Post, $"/api/conversations/{conversation.Id}/messages", new
         {
             content = "STREAMQA_FIRST_USER",
