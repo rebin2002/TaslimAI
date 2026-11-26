@@ -57,6 +57,10 @@ public static class MusicReferenceAssetAuthorizationCodes
     public const string FileRetentionExpired = "MUSIC_REFERENCE_AUTH_FILE_EXPIRED";
     public const string FileDeletionRecorded = "MUSIC_REFERENCE_AUTH_FILE_DELETED";
     public const string FileLineageMismatch = "MUSIC_REFERENCE_AUTH_FILE_LINEAGE_MISMATCH";
+    // Readability parity with the shared download rule (see AssetService.GetDownloadAsync):
+    // an asset the requester may still *see* is not automatically a file the requester may
+    // *read*. Added after review of 6aaf29c1; the constant list only ever grows, never renumbers.
+    public const string FileNotReadable = "MUSIC_REFERENCE_AUTH_FILE_NOT_READABLE";
     public const string MediaKindMismatch = "MUSIC_REFERENCE_AUTH_MEDIA_KIND_MISMATCH";
 
     /// <summary>
@@ -136,7 +140,14 @@ public interface IMusicReferenceAssetAuthorizer
 /// visibility expression and workspace-membership check the asset library and every other studio
 /// already use — so this slice cannot invent a weaker rule, and it reads no bytes and calls no
 /// provider. Everything beyond the lookup (workspace fence, lifecycle state, storage lineage,
-/// recorded media kind) is then verified against the server's own rows.
+/// recorded media kind) is then verified against the server's own rows. The last file-level gate
+/// re-applies <c>AssetService.CanReadStoredFile</c> — the exact predicate
+/// <c>AssetService.GetDownloadAsync</c> enforces with ASSET_FILE_UNAVAILABLE — so this path can
+/// never mark a reference verified while the server's own download rule refuses that file to the
+/// same requester: the creator short-circuit in the asset visibility expression can otherwise
+/// resolve an asset whose backing StoredFile belongs to another member personally (independent
+/// review of #805; the row state is unwired in production, this is fail-closed integrity, not a
+/// deployed-exposure claim).
 /// </summary>
 public sealed class MusicReferenceAssetAuthorizer(IAssetService assets) : IMusicReferenceAssetAuthorizer
 {
@@ -257,6 +268,24 @@ public sealed class MusicReferenceAssetAuthorizer(IAssetService assets) : IMusic
             {
                 denials.Add(Deny(MusicReferenceAssetAuthorizationCodes.FileLineageMismatch,
                     "A reference asset's file does not belong to the asset's workspace."));
+                continue;
+            }
+
+            // Fail-closed readability parity (independent review of head 6aaf29c1, 2026-11-24).
+            // IAssetService.GetAsync routes visibility through AssetVisibility.ForWorkspaceMember,
+            // whose second clause admits an asset's own creator regardless of the backing file's
+            // user/project linkage, while AssetService.GetDownloadAsync additionally requires
+            // CanReadStoredFile: the file owned by the requester, or project-shared inside this
+            // workspace and not bound to a conversation. Without this gate the two server rules
+            // could contradict each other - "all authorized" here, ASSET_FILE_UNAVAILABLE there.
+            // No deployed creation path is known to produce such a row (GeneratedAssetPublisher
+            // binds a job's asset to a file the job itself stored), so this denies an integrity
+            // contradiction, not an observed leak, and it reuses the single download predicate
+            // instead of restating it, so the rules cannot drift apart.
+            if (!AssetService.CanReadStoredFile(file, userId, asset.WorkspaceId))
+            {
+                denials.Add(Deny(MusicReferenceAssetAuthorizationCodes.FileNotReadable,
+                    "A reference asset's file is not readable by the requesting account."));
                 continue;
             }
 

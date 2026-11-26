@@ -88,6 +88,7 @@ public sealed class MusicReferenceEligibilityApiTests : IClassFixture<Generation
         Assert.Equal(before.Usage, after.Usage);
         Assert.Equal(before.Credits, after.Credits);
         Assert.Equal(before.Assets, after.Assets);
+        Assert.Equal(before.StoredFiles, after.StoredFiles);
     }
 
     [Fact]
@@ -202,6 +203,44 @@ public sealed class MusicReferenceEligibilityApiTests : IClassFixture<Generation
         Assert.DoesNotContain("MUSIC_REFERENCE_AUTH_ASSET_NOT_AVAILABLE", codes);
         Assert.Contains(assetId, VerifiedFactIds(body));
         Assert.False(body.GetProperty("isEligible").GetBoolean());
+    }
+
+    [Fact]
+    public async Task Workspace_asset_with_another_members_personal_file_is_refused_without_mutation()
+    {
+        using var ownerClient = factory.CreateClient();
+        var owner = await Register(ownerClient, "Reference Unreadable Owner");
+        var (teamWorkspaceId, _) = await SeedTeamWorkspaceAsync(owner.User.Id);
+
+        using var fileOwnerClient = factory.CreateClient();
+        var fileOwner = await Register(fileOwnerClient, "Reference Backing File Owner");
+        await AddWorkspaceMemberAsync(teamWorkspaceId, fileOwner.User.Id);
+
+        // AssetVisibility's creator rule resolves the asset, but the backing file is personal to a
+        // different workspace member. The read-only endpoint must agree with GetDownloadAsync and
+        // refuse the file rather than report its server facts as verified.
+        var assetId = await SeedReferenceAssetAsync(
+            teamWorkspaceId, owner.User.Id, "audio/mpeg", "mp3", 42,
+            storedFileOwnerUserId: fileOwner.User.Id);
+        var before = await SnapshotSideEffectCountsAsync();
+
+        var body = await EvaluateAsync(ownerClient, teamWorkspaceId, assetId.ToString(), "audio");
+
+        var codes = BlockerCodes(body);
+        Assert.False(body.GetProperty("isEligible").GetBoolean());
+        Assert.Contains("MUSIC_REFERENCE_AUTH_FILE_NOT_READABLE", codes);
+        Assert.DoesNotContain("MUSIC_REFERENCE_AUTH_ASSET_NOT_AVAILABLE", codes);
+        Assert.DoesNotContain("MUSIC_REFERENCE_RIGHTS_MISSING", codes);
+        Assert.DoesNotContain("MUSIC_REFERENCE_PROVIDER_CAPABILITY_MISSING", codes);
+        Assert.Empty(body.GetProperty("verifiedFacts").EnumerateArray());
+        AssertNoSentinelLeak(body, assetId);
+
+        var after = await SnapshotSideEffectCountsAsync();
+        Assert.Equal(before.Jobs, after.Jobs);
+        Assert.Equal(before.Usage, after.Usage);
+        Assert.Equal(before.Credits, after.Credits);
+        Assert.Equal(before.Assets, after.Assets);
+        Assert.Equal(before.StoredFiles, after.StoredFiles);
     }
 
     [Fact]
@@ -357,7 +396,8 @@ public sealed class MusicReferenceEligibilityApiTests : IClassFixture<Generation
         string? containerFormat,
         double? durationSeconds,
         AssetStatus status = AssetStatus.Active,
-        Guid? projectId = null)
+        Guid? projectId = null,
+        Guid? storedFileOwnerUserId = null)
     {
         var now = DateTime.UtcNow;
         var storedFileId = Guid.NewGuid();
@@ -369,7 +409,7 @@ public sealed class MusicReferenceEligibilityApiTests : IClassFixture<Generation
             {
                 Id = storedFileId,
                 WorkspaceId = workspaceId,
-                UserId = userId,
+                UserId = storedFileOwnerUserId ?? userId,
                 ProjectId = projectId,
                 OriginalFileName = SentinelFileName,
                 StoredFileName = SentinelFileName,
@@ -462,12 +502,13 @@ public sealed class MusicReferenceEligibilityApiTests : IClassFixture<Generation
         await db.SaveChangesAsync();
     }
 
-    private async Task<(int Jobs, int Usage, int Credits, int Assets)> SnapshotSideEffectCountsAsync()
+    private async Task<(int Jobs, int Usage, int Credits, int Assets, int StoredFiles)> SnapshotSideEffectCountsAsync()
     {
         using var scope = factory.Services.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
         return (await db.GenerationJobs.CountAsync(), await db.UsageTransactions.CountAsync(),
-            await db.CreditLedgerEntries.CountAsync(), await db.Assets.CountAsync());
+            await db.CreditLedgerEntries.CountAsync(), await db.Assets.CountAsync(),
+            await db.StoredFiles.CountAsync());
     }
 
     private static async Task<AuthResponse> Register(HttpClient client, string displayName)
