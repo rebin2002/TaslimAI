@@ -2379,6 +2379,9 @@ namespace Taslim.Api.Persistence.Migrations
                         .HasMaxLength(80)
                         .HasColumnType("character varying(80)");
 
+                    b.Property<Guid?>("RegenerationTargetMessageId")
+                        .HasColumnType("uuid");
+
                     b.Property<string>("RequestId")
                         .HasMaxLength(80)
                         .HasColumnType("character varying(80)");
