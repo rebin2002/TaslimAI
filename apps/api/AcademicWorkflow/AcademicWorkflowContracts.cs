@@ -247,11 +247,10 @@ public sealed record AcademicWorkflowRequest
             throw Invalid(nameof(SubQuestions), "A project may contain up to 4 sub-questions of 1 to 300 characters each.");
         if (Keywords.Count > 12 || Keywords.Any(keyword => string.IsNullOrWhiteSpace(keyword) || keyword.Length > 120))
             throw Invalid(nameof(Keywords), "A project may contain up to 12 keywords of 1 to 120 characters each.");
-        if (MinimumSources is < 0 or > 1_000)
-            throw Invalid(nameof(MinimumSources), "The minimum source count must be between 0 and 1,000.");
-        if (MinimumPeerReviewed is < 0 or > 1_000 ||
-            MinimumSources is int minimum && MinimumPeerReviewed is int peerMinimum && peerMinimum > minimum)
-            throw Invalid(nameof(MinimumPeerReviewed), "The peer-reviewed minimum must be between 0 and the total source minimum.");
+        if (MinimumSources is int minimum && (minimum < 0 || minimum > MaxDiscoverySources))
+            throw Invalid(nameof(MinimumSources), $"The minimum source count must be between 0 and the discovery limit of {MaxDiscoverySources}.");
+        if (MinimumPeerReviewed is int peerMinimum && (peerMinimum < 0 || peerMinimum > (MinimumSources ?? MaxDiscoverySources)))
+            throw Invalid(nameof(MinimumPeerReviewed), $"The peer-reviewed minimum must be between 0 and {MinimumSources ?? MaxDiscoverySources}.");
         if (AllowedSourceTypes.Count > 20 || AllowedSourceTypes.Distinct(StringComparer.Ordinal).Count() != AllowedSourceTypes.Count ||
             AllowedSourceTypes.Any(type => string.IsNullOrWhiteSpace(type) || !KnownSourceTypes.Contains(type)))
             throw Invalid(nameof(AllowedSourceTypes), "The allowed source-type list is invalid or too large.");

@@ -763,17 +763,16 @@ public sealed class AcademicProjectsController(
             TargetChapterHeadings = (request.TargetChapterHeadings ?? [])
                 .Where(h => !string.IsNullOrWhiteSpace(h))
                 .Select(h => h.Trim())
-                .Take(24)
                 .ToArray(),
             WorkingTitle = request.WorkingTitle?.Trim(),
             GeographicScope = request.GeographicScope?.Trim(),
             PopulationOrContext = request.PopulationOrContext?.Trim(),
             TimePeriod = request.TimePeriod?.Trim(),
-            SubQuestions = (request.SubQuestions ?? []).Where(value => !string.IsNullOrWhiteSpace(value)).Select(value => value.Trim()).Take(4).ToArray(),
+            SubQuestions = (request.SubQuestions ?? []).Where(value => !string.IsNullOrWhiteSpace(value)).Select(value => value.Trim()).ToArray(),
             Keywords = (request.Keywords ?? []).Where(value => !string.IsNullOrWhiteSpace(value)).Select(value => value.Trim()).ToArray(),
             MinimumSources = request.MinimumSources,
             MinimumPeerReviewed = request.MinimumPeerReviewed,
-            AllowedSourceTypes = (request.AllowedSourceTypes ?? []).Where(value => !string.IsNullOrWhiteSpace(value)).Select(value => value.Trim()).Take(20).ToArray(),
+            AllowedSourceTypes = (request.AllowedSourceTypes ?? []).Where(value => !string.IsNullOrWhiteSpace(value)).Select(value => value.Trim()).ToArray(),
             RequireFullText = request.RequireFullText ?? false,
             ProgrammeRequirements = request.ProgrammeRequirements?.Trim(),
             RequiredApprovals = approvals ??

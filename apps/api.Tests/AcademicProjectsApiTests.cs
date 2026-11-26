@@ -278,6 +278,76 @@ public class AcademicProjectsApiTests : IClassFixture<TaslimApiFactory>
         Assert.Equal(HttpStatusCode.Forbidden, foreignCreate.StatusCode);
     }
 
+    [Theory]
+    [InlineData(40, 40, true)]
+    [InlineData(41, null, false)]
+    [InlineData(null, 40, true)]
+    [InlineData(null, 41, false)]
+    [InlineData(10, 11, false)]
+    public async Task Source_targets_must_fit_the_projects_discovery_limit(int? total, int? peerReviewed, bool accepted)
+    {
+        var (client, workspaceId) = await RegisterAsync();
+        var response = await PostCreateAsync(client, workspaceId, new
+        {
+            requestKey = $"targets-{Guid.NewGuid():N}",
+            researchQuestion = "Which sources discuss the research question?",
+            discipline = "History",
+            maxDiscoverySources = 40,
+            minimumSources = total,
+            minimumPeerReviewed = peerReviewed,
+        });
+
+        Assert.Equal(accepted ? HttpStatusCode.Created : HttpStatusCode.BadRequest, response.StatusCode);
+        if (!accepted)
+        {
+            Assert.Contains("ACADEMIC_REQUEST_INVALID", await response.Content.ReadAsStringAsync());
+            var projects = await client.GetFromJsonAsync<JsonElement[]>($"/api/workspaces/{workspaceId}/academic-projects");
+            Assert.Empty(projects!);
+        }
+    }
+
+    [Fact]
+    public async Task Plan_lists_reject_overflow_and_preserve_every_accepted_entry_after_reload()
+    {
+        var (client, workspaceId) = await RegisterAsync();
+        var questions = Enumerable.Range(1, 4).Select(i => $"Research sub-question {i}?").ToArray();
+        var longHeading = new string('h', 200);
+        var headings = Enumerable.Range(1, 23).Select(i => $"Chapter {i}").Append(longHeading).ToArray();
+        var request = new
+        {
+            requestKey = $"plan-lists-{Guid.NewGuid():N}",
+            researchQuestion = "How are records used in historical research?",
+            discipline = "History",
+            subQuestions = questions,
+            targetChapterHeadings = headings,
+        };
+
+        foreach (var invalid in new[]
+        {
+            request with { subQuestions = [.. questions, "Which additional sources are needed?"] },
+            request with { targetChapterHeadings = [.. headings, "One chapter too many"] },
+        })
+        {
+            var rejected = await PostCreateAsync(client, workspaceId, invalid);
+            Assert.Equal(HttpStatusCode.BadRequest, rejected.StatusCode);
+            Assert.Contains("ACADEMIC_REQUEST_INVALID", await rejected.Content.ReadAsStringAsync());
+        }
+        var projects = await client.GetFromJsonAsync<JsonElement[]>($"/api/workspaces/{workspaceId}/academic-projects");
+        Assert.Empty(projects!);
+
+        var accepted = await PostCreateAsync(client, workspaceId, request);
+        Assert.Equal(HttpStatusCode.Created, accepted.StatusCode);
+        var projectId = (await accepted.Content.ReadFromJsonAsync<JsonElement>())
+            .GetProperty("project").GetProperty("projectId").GetGuid();
+        var path = $"/api/academic-projects/{projectId}";
+        var run = await PostJsonAsync(client, $"{path}/run", new { });
+        Assert.Equal(HttpStatusCode.OK, run.StatusCode);
+        var reloaded = await client.GetFromJsonAsync<JsonElement>(path);
+        var plan = reloaded.GetProperty("plan");
+        Assert.Equal(questions, plan.GetProperty("subQuestions").Deserialize<string[]>());
+        Assert.Equal(headings, plan.GetProperty("chapterOutline").Deserialize<string[]>());
+    }
+
     [Fact]
     public async Task Run_saves_and_gates_the_plan_then_reports_missing_discovery_as_resumable()
     {

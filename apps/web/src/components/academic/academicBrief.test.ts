@@ -137,6 +137,18 @@ describe("validation", () => {
     expect(validateAcademicBrief(brief)).toContainEqual(expect.objectContaining({ messageKey: "error.peerReviewed.exceedsTotal", severity: "error" }));
   });
 
+  it("bounds total and peer-only targets by the studio's discovery limit", () => {
+    for (const field of ["minimumSources", "minimumPeerReviewed"] as const) {
+      const requirements = { ...briefFixture().requirements, minimumSources: null, minimumPeerReviewed: null };
+      const atLimit = briefFixture({ requirements: { ...requirements, [field]: 120 } });
+      const aboveLimit = briefFixture({ requirements: { ...requirements, [field]: 121 } });
+      expect(hasBlockingIssue(validateAcademicBrief(atLimit))).toBe(false);
+      expect(validateAcademicBrief(aboveLimit)).toContainEqual(
+        expect.objectContaining({ field, severity: "error", messageKey: "error.sourceCount.range" }),
+      );
+    }
+  });
+
   it("rejects out-of-range word counts and non-integers", () => {
     for (const wordCount of [12, briefLimits.wordCount.max + 1, 1500.5]) {
       expect(validateAcademicBrief(briefFixture({ requirements: { ...briefFixture().requirements, wordCount } })), String(wordCount)).toContainEqual(

@@ -9,7 +9,6 @@ namespace Taslim.Api.AcademicWorkflow;
 public sealed class AcademicPlanStageHandler : IAcademicStageHandler
 {
     private const int MaxQueryLength = 500;
-    private const int MaxOutlineTitleLength = 160;
 
     public AcademicStage Stage => AcademicStage.Plan;
 
@@ -91,9 +90,7 @@ public sealed class AcademicPlanStageHandler : IAcademicStageHandler
         }
 
         var outline = request.TargetChapterHeadings
-            .Select(heading => BoundText(heading.Trim(), MaxOutlineTitleLength))
-            .Where(heading => heading.Length > 0)
-            .Take(24)
+            .Select(heading => heading.Trim())
             .ToArray();
         if (outline.Length == 0)
         {
@@ -164,9 +161,6 @@ public sealed class AcademicPlanStageHandler : IAcademicStageHandler
 
         return queries;
     }
-
-    private static string BoundText(string value, int maximumLength) =>
-        value.Length <= maximumLength ? value : value[..maximumLength].TrimEnd();
 
     private static string DescribeSourceTypes(IReadOnlyList<string> sourceTypes) => string.Join(", ", sourceTypes.Select(sourceType => sourceType switch
     {

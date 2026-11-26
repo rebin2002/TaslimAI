@@ -262,7 +262,8 @@ export const briefLimits = {
   maxKeywords: 12,
   keyword: { max: 120 },
   wordCount: { min: 1000, max: 200000 },
-  sourceCount: { min: 0, max: 1000 },
+  // The studio creates projects with the API's default discovery limit.
+  sourceCount: { min: 0, max: 120 },
 } as const;
 
 export function createDefaultBrief(level: AcademicLevel = "masters"): AcademicBrief {

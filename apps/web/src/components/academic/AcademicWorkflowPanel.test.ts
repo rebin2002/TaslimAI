@@ -57,6 +57,15 @@ describe("Academic workflow panel request projection", () => {
     expect(toCreateInput(brief, [], "en", "keyword-limit-test").keywords).toEqual(keywords);
   });
 
+  it("passes complete question and chapter lists to intake for validation", () => {
+    const questions = Array.from({ length: 5 }, (_, i) => `Question ${i + 1}?`);
+    const headings = Array.from({ length: 25 }, (_, i) => `Chapter ${i + 1}`);
+    const brief = { ...createDefaultBrief(), reviewQuestions: questions };
+    const input = toCreateInput(brief, headings, "en", "plan-list-limits");
+    expect(input.subQuestions).toEqual(questions);
+    expect(input.targetChapterHeadings).toEqual(headings);
+  });
+
   it("renders saved discipline IDs through the localized labeler", () => {
     const t = createAcademicTranslator("en");
     const labels = createAcademicLabels(t);
