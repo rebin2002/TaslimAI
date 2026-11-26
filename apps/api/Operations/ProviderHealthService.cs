@@ -228,20 +228,23 @@ public sealed class ProviderHealthService(
         // Both last-failure fields describe one observed failure, so they are either both
         // present or both absent. A code is never emitted for a failure whose evidence is
         // missing, because the bounded fallback code would read as an observed failure code.
-        var lastFailureAt = hasLastFailure
-            ? lastJobFailure?.FailedAt ?? lastJobFailure?.CreatedAt
-                ?? lastUsageFailure?.CompletedAt ?? lastUsageFailure?.CreatedAt
-            : null;
+        var lastJobFailureAt = lastJobFailure?.FailedAt ?? lastJobFailure?.CreatedAt;
+        var lastUsageFailureAt = lastUsageFailure?.CompletedAt ?? lastUsageFailure?.CreatedAt;
+        var lastFailureAt = hasLastFailure ? lastJobFailureAt ?? lastUsageFailureAt : null;
         var lastFailureCode = hasLastFailure && (lastJobFailure is not null || lastUsageFailure is not null)
             ? lastJobFailure is not null
                 ? SanitizeErrorCode(lastJobFailure.ErrorCode)
                 : SanitizeErrorCode(lastUsageFailure!.FailureCode)
             : null;
+        // Status follows the newest event from either source. The displayed failure
+        // timestamp and code keep their job-first evidence precedence.
+        var latestEventIsFailure = hasLastFailure
+            && (!hasLastSuccess || lastJobFailureAt > lastSuccessAt || lastUsageFailureAt > lastSuccessAt);
         var status = !definition.Enabled
             ? "disabled"
             : !definition.Configured
                 ? "unconfigured"
-                : hasLastFailure && !hasLastSuccess
+                : latestEventIsFailure
                     ? "recent_operational_failure"
                     : hasLastSuccess
                         ? "operational"
