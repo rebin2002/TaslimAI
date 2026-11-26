@@ -1,3 +1,4 @@
+using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
 using Taslim.Api.Contracts;
 using Taslim.Api.Persistence;
@@ -102,11 +103,11 @@ public sealed class MovieShotImportanceService(
                     screenplayScene?.Synopsis,
                     screenplayScene is null ? null : string.Join(" ", screenplayScene.Elements.OrderBy(item => item.Ordinal).Select(item => item.Content))),
             new MovieShotImportanceGuideContext(
-                guide.VisualLanguage,
-                guide.CameraLanguage,
-                guide.ColorAndLighting,
-                guide.SoundAndNarration,
-                guide.ContinuityRules,
+                ReadString(guideRevision?.VisualBibleJson, "visualLanguage") ?? guide.VisualLanguage,
+                ReadString(guideRevision?.CinematographyBibleJson, "cameraLanguage") ?? guide.CameraLanguage,
+                ReadString(guideRevision?.VisualBibleJson, "colorAndLighting") ?? guide.ColorAndLighting,
+                ReadString(guideRevision?.AudioBibleJson, "soundAndNarration") ?? guide.SoundAndNarration,
+                ReadString(guideRevision?.ContinuityBibleJson, "continuityRules") ?? guide.ContinuityRules,
                 guideRevision?.StoryBibleJson,
                 guideRevision?.VisualBibleJson,
                 guideRevision?.CinematographyBibleJson,
@@ -122,5 +123,23 @@ public sealed class MovieShotImportanceService(
             ? director.Reasoning
             : $"User override selected '{shot.ImportanceOverride}'. Director assessment was '{director.Classification}': {director.Reasoning}";
         return new(shot.Id, effective, director.Classification, shot.ImportanceOverride, source, reasoning, director.Confidence, director.Evidence);
+    }
+
+    private static string? ReadString(string? json, string propertyName)
+    {
+        if (string.IsNullOrWhiteSpace(json)) return null;
+        try
+        {
+            using var document = JsonDocument.Parse(json);
+            return document.RootElement.ValueKind == JsonValueKind.Object
+                && document.RootElement.TryGetProperty(propertyName, out var value)
+                && value.ValueKind == JsonValueKind.String
+                ? value.GetString()
+                : null;
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
     }
 }

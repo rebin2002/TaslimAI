@@ -138,7 +138,14 @@ export function AssetDetail({ asset, locale, labels, onClose, onEdit }: {
             <div><dt><ShieldCheck size={14} /> {labels.source}</dt><dd>{asset.sourceStudio ? `${labels.studios[asset.sourceStudio] ?? asset.sourceStudio}${asset.sourceJobTitle ? ` · ${asset.sourceJobTitle}` : ""}` : labels.manual}</dd></div>
           </dl>
           {asset.description && <div className="asset-detail-description"><strong>{labels.description}</strong><p>{asset.description}</p></div>}
-          {asset.representations.length > 0 && <div className="asset-representations"><div className="asset-subheading"><FileText size={15} /><strong>{labels.representations}</strong></div>{asset.representations.map((representation) => <a key={representation.id} className="asset-representation" href={assetRepresentationUrl(asset.id, representation.id)}><span><strong>{representation.fileName}</strong><small>{representation.representationType.toUpperCase()} · {formatAssetSize(representation.sizeBytes, labels.notAvailable)}</small></span><Download size={15} /></a>)}</div>}
+          {/* A representation row links out only while the read model advertises it as downloadable
+              (#1030): its own stored file is Ready. The route answers 409 ASSET_FILE_UNAVAILABLE for
+              every other state, so an anchor there would promise bytes that can never arrive. The
+              row keeps its identity and metadata — an absent flag (older payload) still links, and
+              the section renders whenever any representation exists. */}
+          {asset.representations.length > 0 && <div className="asset-representations"><div className="asset-subheading"><FileText size={15} /><strong>{labels.representations}</strong></div>{asset.representations.map((representation) => representation.canDownload === false
+            ? <span key={representation.id} className="asset-representation is-unavailable"><span><strong>{representation.fileName}</strong><small>{representation.representationType.toUpperCase()} · {formatAssetSize(representation.sizeBytes, labels.notAvailable)} · {labels.notAvailable}</small></span></span>
+            : <a key={representation.id} className="asset-representation" href={assetRepresentationUrl(asset.id, representation.id)}><span><strong>{representation.fileName}</strong><small>{representation.representationType.toUpperCase()} · {formatAssetSize(representation.sizeBytes, labels.notAvailable)}</small></span><Download size={15} /></a>)}</div>}
         </div>
       </div>
     </section>
