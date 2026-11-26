@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import { HealthCareScopedConsentJourney } from "@/components/HealthCareScopedConsentJourney";
 import { HealthPlaceholderPage } from "@/components/HealthPlaceholderPage";
 import { ProtectedPage } from "@/components/ProtectedPage";
 import { requireAuthenticatedPage } from "@/lib/serverAuth";
@@ -15,5 +16,5 @@ export const metadata: Metadata = {
 
 export default async function HealthCarePage() {
   await requireAuthenticatedPage("/create/health");
-  return <ProtectedPage><HealthPlaceholderPage entry="create" /></ProtectedPage>;
+  return <ProtectedPage><HealthPlaceholderPage entry="create" /><HealthCareScopedConsentJourney /></ProtectedPage>;
 }

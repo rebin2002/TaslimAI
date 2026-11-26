@@ -6,6 +6,7 @@ using System.Text.Json.Nodes;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 using Taslim.Api.Ai;
+using Taslim.Api.Activity;
 using Taslim.Api.Assets;
 using Taslim.Api.Authorization;
 using Taslim.Api.Contracts;
@@ -359,6 +360,7 @@ public sealed class GenerationJobService(
     IGenerationCostGuardrailService costGuardrails,
     IHttpContextAccessor httpContextAccessor,
     IOptions<ImageGenerationOptions> imageOptions,
+    IOptions<DocumentGenerationOptions> documentOptions,
     MovieCollaborationAccess? movieCollaboration = null) : IGenerationJobService
 {
     public async Task<GenerationJob> CreateAsync(Guid userId, CreateGenerationJobRequest request, CancellationToken cancellationToken = default, string? idempotencyKey = null, string? requestId = null, Guid? retryOfJobId = null)
@@ -486,6 +488,11 @@ public sealed class GenerationJobService(
             throw new GenerationJobValidationException("RETRY_IDEMPOTENCY_REQUIRED", "A retry idempotency key is required.");
         if (string.Equals(source.JobType, GenerationJobTypes.ImageGenerate, StringComparison.OrdinalIgnoreCase) && !imageOptions.Value.Enabled)
             throw new GenerationJobValidationException(GenerationJobErrorCodes.ImageStudioUnavailable, "Image generation is not available right now.");
+        // Same fail-closed boundary as the Image gate above. Every retry entry
+        // point inherits it, so a caller that bypasses the Document Studio route
+        // still cannot resume provider spend while the studio is disabled.
+        if (string.Equals(source.JobType, GenerationJobTypes.DocumentGenerate, StringComparison.OrdinalIgnoreCase) && !documentOptions.Value.Enabled)
+            throw new GenerationJobValidationException(DocumentStudioAvailability.UnavailableCode, DocumentStudioAvailability.UnavailableMessage);
 
         var retryInputJson = source.InputJson;
         MovieDialogueTake? pendingDialogueTake = null;
@@ -850,14 +857,12 @@ public sealed class GenerationJobService(
         if (!await access.IsMemberAsync(userId, filter.WorkspaceId, cancellationToken)) return null;
         var page = ApiPagination.NormalizePage(filter.Page);
         var pageSize = ApiPagination.NormalizePageSize(filter.PageSize);
-        // Mirrors IsPrivateExecutionRecord: research records and unscoped presentation export
-        // records stay with their creator because their result JSON references assets that other
-        // workspace members cannot read. Expressed as a translatable predicate so paging and the
-        // total count stay consistent with the hidden records.
-        var query = db.GenerationJobs.AsNoTracking().Where(job => job.WorkspaceId == filter.WorkspaceId &&
-            (job.CreatedByUserId == userId
-                || (job.JobType != GenerationJobTypes.ResearchGenerate
-                    && (job.JobType != GenerationJobTypes.PresentationGenerate || job.ProjectId != null))));
+        // Keep list visibility on the same SQL-translatable policy as the Activity Center and
+        // project overview, including provider-specific deterministic JobType folding.
+        var query = CreatorPrivacyFence.VisibleToMember(
+            db.GenerationJobs.AsNoTracking().Where(job => job.WorkspaceId == filter.WorkspaceId),
+            userId,
+            db.Database.ProviderName);
         if (filter.Status.HasValue) query = query.Where(job => job.Status == filter.Status.Value);
         if (filter.ProjectId.HasValue) query = query.Where(job => job.ProjectId == filter.ProjectId.Value);
         if (!string.IsNullOrWhiteSpace(filter.JobType)) query = query.Where(job => job.JobType == filter.JobType);
@@ -913,18 +918,21 @@ public sealed class GenerationJobService(
     }
 
     // Execution records that describe creator-private output must not disclose the output's
-    // identifiers. Research records embed report text derived from private uploads, and a
-    // presentation job without a project publishes an asset that AssetVisibility keeps private
-    // to its creator, so the asset id, representation ids and exported file name carried in the
-    // presentation result JSON are private to that creator as well. Project-scoped jobs keep the
-    // intentional workspace sharing surface for both the record and the asset.
+    // identifiers. Research records embed report text derived from private uploads; unscoped
+    // Presentation exports and Social posts also carry creator-private result data. Project-scoped
+    // Presentation and Social jobs keep the intentional workspace-sharing surface.
     private static bool IsPrivateExecutionRecord(GenerationJob job, Guid userId) =>
         job.CreatedByUserId != userId
         && (string.Equals(job.JobType, GenerationJobTypes.ResearchGenerate, StringComparison.OrdinalIgnoreCase)
-            || IsUnscopedPresentationExportRecord(job));
+            || IsUnscopedPresentationExportRecord(job)
+            || IsUnscopedSocialRecord(job));
 
     private static bool IsUnscopedPresentationExportRecord(GenerationJob job) =>
         string.Equals(job.JobType, GenerationJobTypes.PresentationGenerate, StringComparison.OrdinalIgnoreCase)
+        && job.ProjectId is null;
+
+    private static bool IsUnscopedSocialRecord(GenerationJob job) =>
+        string.Equals(job.JobType, GenerationJobTypes.SocialGenerate, StringComparison.OrdinalIgnoreCase)
         && job.ProjectId is null;
 
     private async Task CancelUsageAsync(GenerationJob job, string code, CancellationToken cancellationToken)
