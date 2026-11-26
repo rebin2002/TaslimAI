@@ -1,7 +1,7 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { MovieLocation, MovieWorldReference, MovieWorldWorkspace as WorldData } from "@/lib/api";
+import type { MovieLocation, MovieLocationGeographySheet, MovieSetVariation, MovieWorldReference, MovieWorldWorkspace as WorldData } from "@/lib/api";
 import { MovieWorldWorkspace } from "./MovieWorldWorkspace";
 
 // Synthetic DOM harness, in the style established by AssetsViewListing.test (#849) and
@@ -11,7 +11,9 @@ import { MovieWorldWorkspace } from "./MovieWorldWorkspace";
 // the user switched to project B appended A's returned record into B's world and moved B's
 // selection/edit state, and a delayed failure painted an error onto B. These cases hold the real
 // component against deferred mutation and GET promises and pin the fence on both success and
-// failure arms. Every value below is a synthetic fixture; no real project data is used.
+// failure arms. Follow-up review also found that a held or failed B load could expose A's old
+// error/view when A was revisited; the keyed-view cases pin that transition until fresh A succeeds.
+// Every value below is a synthetic fixture; no real project data is used.
 
 class TestNode {
   nodeType: number;
@@ -183,7 +185,7 @@ function worldFor(projectId: string): WorldData {
     language: "en",
     world: {
       locations: [{ id: `loc-${projectId}`, name: `Alpha ${projectId}`, description: "Anchor location", visualContinuityNotes: null, referenceAssetId: null }],
-      sets: [],
+      sets: [{ id: `set-${projectId}`, movieLocationId: null, name: `Set ${projectId}`, description: "Synthetic set", environmentType: "practical", visualDescription: null, timeOfDay: null, weather: null, continuityNotes: null, referenceAssetId: null, variations: [] }],
       props: [],
       references: [],
       usages: [],
@@ -195,6 +197,48 @@ function worldFor(projectId: string): WorldData {
   };
 }
 
+function geographySheetFor(projectId: string): MovieLocationGeographySheet {
+  return {
+    id: `sheet-${projectId}`,
+    movieLocationId: `loc-${projectId}`,
+    versionNumber: 1,
+    status: "Draft",
+    establishingReferenceAssetId: null,
+    establishingReferenceNotes: null,
+    wideThreeQuarterReferenceAssetId: null,
+    wideThreeQuarterReferenceNotes: null,
+    entrancesExits: [],
+    windows: [],
+    paths: [],
+    majorObjects: [],
+    lightSources: [],
+    orientationAnchors: [],
+    guideRevisionNumber: 1,
+    worldBibleJson: "synthetic captured bible",
+    visualBibleJson: null,
+    continuitySnapshotHash: null,
+    createdAt: "2026-01-01T00:00:00Z",
+    updatedAt: "2026-01-01T00:00:01Z",
+    approvedAt: null,
+    variants: [],
+  };
+}
+
+function setVariationFor(projectId: string, name: string): MovieSetVariation {
+  return {
+    id: `variation-${projectId}`,
+    movieSetId: `set-${projectId}`,
+    name,
+    visualDescription: null,
+    timeOfDay: null,
+    weather: null,
+    lighting: null,
+    continuityNotes: null,
+    referenceAssetId: null,
+    isDefault: true,
+  };
+}
+
 let document: TestDocument;
 let root: Root;
 let container: TestNode;
@@ -202,6 +246,8 @@ let loads: { projectId: string; deferred: Deferred<WorldData>; settled: boolean 
 let creates: Deferred<MovieLocation>[];
 let updates: Deferred<MovieLocation>[];
 let referenceAdds: Deferred<MovieWorldReference>[];
+let geographySaves: Deferred<MovieLocationGeographySheet>[];
+let variationAdds: Deferred<MovieSetVariation>[];
 
 async function mountWorld(projectId: string) {
   await act(async () => {
@@ -217,6 +263,13 @@ async function switchToProject(projectId: string) {
     await drain();
   });
   await settleLoad(loads.length - 1);
+}
+async function switchToProjectPending(projectId: string) {
+  await act(async () => {
+    root.render(<MovieWorldWorkspace projectId={projectId} />);
+    await drain();
+  });
+  return loads.at(-1)!;
 }
 async function settleLoad(index: number) {
   const entry = loads[index];
@@ -272,6 +325,11 @@ function selectedListEntryName(): string | null {
   const item = findByClass(container, "movie-world-list-item").find((node) => textOf(node) && (node.getAttribute("class") ?? "").includes("is-selected"));
   return item ? textOf(item) : null;
 }
+async function openSetsRoom() {
+  const nav = requireNode(findByClass(container, "movie-world-room-nav")[0], "World room navigation");
+  const button = findByTag(nav, "BUTTON").find((node) => textOf(node).includes("movieBody.world.sets"));
+  await click(requireNode(button, "sets room button"));
+}
 
 async function startCreateInA() {
   await click(requireNode(findByClass(container, "movie-world-add")[0], "new record button"));
@@ -288,6 +346,29 @@ async function startUpdate(name: string) {
   await typeText(requireNode(findByTag(editor, "INPUT")[0], "name input"), name);
   await typeText(requireNode(findByTag(editor, "TEXTAREA")[0], "description field"), `updated as ${name}`);
   await click(editorSaveButton());
+}
+async function prepareAWithErrorAndEditedForm() {
+  await mountWorld(PROJECT_A);
+  await startUpdate("Unsaved A form");
+  expect(updates).toHaveLength(1);
+  await settle(() => updates[0]!.reject(new Error("A-only prior error")));
+  await flush();
+  expect(textOf(container)).toContain("A-only prior error");
+  const editor = requireNode(findByClass(container, "movie-world-editor")[0], "old A editor");
+  expect(findByTag(editor, "INPUT")[0]?.value).toBe("Unsaved A form");
+  expect(selectedListEntryName()).toContain("Alpha movie-A");
+}
+function expectFreshProjectLoading() {
+  const loading = findByClass(container, "movie-world-loading");
+  expect(loading).toHaveLength(1);
+  expect(textOf(loading[0]!)).toBe("movieBody.loading");
+  expect(findByClass(container, "movie-world-list-item")).toHaveLength(0);
+  expect(findByClass(container, "movie-world-editor")).toHaveLength(0);
+  expect(findByClass(container, "movie-workspace-error-inline")).toHaveLength(0);
+  expect(selectedListEntryName()).toBeNull();
+  expect(textOf(container)).not.toContain("World movie-A");
+  expect(textOf(container)).not.toContain("Unsaved A form");
+  expect(textOf(container)).not.toContain("A-only prior error");
 }
 
 beforeEach(() => {
@@ -313,6 +394,8 @@ beforeEach(() => {
   creates = [];
   updates = [];
   referenceAdds = [];
+  geographySaves = [];
+  variationAdds = [];
   harness.api.getMovieWorld.mockReset().mockImplementation((projectId: string) => {
     const entry = { projectId, deferred: deferred<WorldData>(), settled: false };
     loads.push(entry);
@@ -331,6 +414,16 @@ beforeEach(() => {
   harness.api.addMovieWorldReference.mockReset().mockImplementation(() => {
     const entry = deferred<MovieWorldReference>();
     referenceAdds.push(entry);
+    return entry.promise;
+  });
+  harness.api.upsertMovieLocationGeographySheet.mockReset().mockImplementation(() => {
+    const entry = deferred<MovieLocationGeographySheet>();
+    geographySaves.push(entry);
+    return entry.promise;
+  });
+  harness.api.addMovieSetVariation.mockReset().mockImplementation(() => {
+    const entry = deferred<MovieSetVariation>();
+    variationAdds.push(entry);
     return entry.promise;
   });
 });
@@ -484,6 +577,90 @@ describe("MovieWorldWorkspace project-switch continuation fence", () => {
     expect(harness.api.addMovieWorldReference.mock.calls[0]![0]).toBe(PROJECT_A);
     expect(textOf(container)).not.toContain("Ghost reference");
     expect(textOf(container)).toContain("World movie-A");
+  });
+
+  it("drops a geography-sheet save after A→B→A rather than replacing the revisited A sheet", async () => {
+    await mountWorld(PROJECT_A);
+    const actions = requireNode(findByClass(container, "movie-world-geography-actions")[0], "geography sheet actions");
+    await click(requireNode(findByClass(actions, "movie-world-save")[0], "save sheet button"));
+    expect(geographySaves).toHaveLength(1);
+
+    await switchToProject(PROJECT_B);
+    await switchToProject(PROJECT_A);
+    await settle(() => geographySaves[0]!.resolve(geographySheetFor(PROJECT_A)));
+    await flush();
+
+    expect(harness.api.upsertMovieLocationGeographySheet.mock.calls[0]![0]).toBe("loc-movie-A");
+    expect(findByClass(container, "movie-world-bible")).toHaveLength(0);
+    expect(textOf(container)).toContain("World movie-A");
+  });
+
+  it("drops a set-variation result after A→B→A rather than rewriting the revisited A set", async () => {
+    await mountWorld(PROJECT_A);
+    await openSetsRoom();
+    const rail = requireNode(findByClass(container, "movie-world-variations")[0], "set variations rail");
+    await click(requireNode(findByClass(rail, "movie-world-inline-add")[0], "add variation button"));
+    const form = requireNode(findByClass(rail, "movie-world-inline-form")[0], "variation form");
+    await typeText(requireNode(findByTag(form, "INPUT")[0], "variation name input"), "Late variation");
+    await click(requireNode(findByTag(form, "BUTTON")[0], "save variation button"));
+    expect(variationAdds).toHaveLength(1);
+
+    await switchToProject(PROJECT_B);
+    await switchToProject(PROJECT_A);
+    await openSetsRoom();
+    await settle(() => variationAdds[0]!.resolve(setVariationFor(PROJECT_A, "Late variation")));
+    await flush();
+
+    expect(harness.api.addMovieSetVariation.mock.calls[0]![0]).toBe("set-movie-A");
+    expect(textOf(container)).not.toContain("Late variation");
+    expect(findByClass(container, "movie-world-variation-list")).toHaveLength(0);
+  });
+
+  it("keeps A's prior view hidden when B is held and A is revisited before its fresh load resolves", async () => {
+    await prepareAWithErrorAndEditedForm();
+
+    const heldB = await switchToProjectPending(PROJECT_B);
+    expect(heldB.settled).toBe(false);
+    expectFreshProjectLoading();
+
+    const freshA = await switchToProjectPending(PROJECT_A);
+    expectFreshProjectLoading();
+    await settle(() => { freshA.settled = true; freshA.deferred.resolve(worldFor(PROJECT_A)); });
+    await flush();
+
+    expect(textOf(container)).toContain("World movie-A");
+    expect(selectedListEntryName()).toContain("Alpha movie-A");
+    expect(findByClass(container, "movie-world-editor")).toHaveLength(0);
+    expect(textOf(container)).not.toContain("Unsaved A form");
+    expect(textOf(container)).not.toContain("A-only prior error");
+  });
+
+  it("hides A's prior view after B fails until the new A load succeeds", async () => {
+    await prepareAWithErrorAndEditedForm();
+
+    const failedB = await switchToProjectPending(PROJECT_B);
+    expectFreshProjectLoading();
+    await settle(() => { failedB.settled = true; failedB.deferred.reject(new Error("B world request failed")); });
+    await flush();
+
+    expect(findByClass(container, "movie-world-loading")).toHaveLength(1);
+    expect(textOf(container)).toContain("B world request failed");
+    expect(textOf(container)).not.toContain("A-only prior error");
+    expect(findByClass(container, "movie-world-list-item")).toHaveLength(0);
+    expect(findByClass(container, "movie-world-editor")).toHaveLength(0);
+    expect(selectedListEntryName()).toBeNull();
+
+    const freshA = await switchToProjectPending(PROJECT_A);
+    expectFreshProjectLoading();
+    await settle(() => { freshA.settled = true; freshA.deferred.resolve(worldFor(PROJECT_A)); });
+    await flush();
+
+    expect(textOf(container)).toContain("World movie-A");
+    expect(selectedListEntryName()).toContain("Alpha movie-A");
+    expect(findByClass(container, "movie-world-editor")).toHaveLength(0);
+    expect(textOf(container)).not.toContain("B world request failed");
+    expect(textOf(container)).not.toContain("Unsaved A form");
+    expect(textOf(container)).not.toContain("A-only prior error");
   });
 
   it("still applies a create that resolves while its own project is active", async () => {
