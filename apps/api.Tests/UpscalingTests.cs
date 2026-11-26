@@ -106,6 +106,60 @@ public sealed class UpscalingTests : IClassFixture<GenerationJobsNoWorkerFactory
     }
 
     [Fact]
+    public async Task Create_rejects_archived_source_asset_without_persisting_a_job()
+    {
+        using var client = factory.CreateClient();
+        var auth = await Register(client, $"upscale-archived-{Guid.NewGuid():N}@example.com");
+        var source = await CreateSourceAsset(auth);
+
+        // Archiving is the supported way to retire an asset: it leaves the default
+        // asset library and must stop being usable as the source of new upscaling work.
+        var archive = await SendWithCsrf(client, HttpMethod.Post, $"/api/assets/{source.Id}/archive", null);
+        Assert.Equal(HttpStatusCode.OK, archive.StatusCode);
+        var archived = await archive.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal("Archived", archived.GetProperty("status").GetString());
+        Assert.True(archived.GetProperty("archivedAt").ValueKind != JsonValueKind.Null);
+
+        var response = await SendWithCsrf(client, HttpMethod.Post, "/api/upscaling/jobs", new
+        {
+            workspaceId = auth.PersonalWorkspace.Id,
+            sourceAssetId = source.Id,
+            targetResolution = "1080p",
+        }, $"upscale-archived-{Guid.NewGuid():N}");
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        var body = await response.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal(UpscalingJobErrorCodes.SourceAssetUnsupported, body.GetProperty("error").GetProperty("code").GetString());
+        Assert.DoesNotContain("Provider", await response.Content.ReadAsStringAsync());
+
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        Assert.Equal(0, await db.UpscalingJobs.CountAsync(job => job.SourceAssetId == source.Id));
+    }
+
+    [Fact]
+    public async Task Create_admits_the_same_source_asset_again_once_it_is_restored()
+    {
+        using var client = factory.CreateClient();
+        var auth = await Register(client, $"upscale-restored-{Guid.NewGuid():N}@example.com");
+        var source = await CreateSourceAsset(auth);
+
+        Assert.Equal(HttpStatusCode.OK, (await SendWithCsrf(client, HttpMethod.Post, $"/api/assets/{source.Id}/archive", null)).StatusCode);
+        Assert.Equal(HttpStatusCode.OK, (await SendWithCsrf(client, HttpMethod.Post, $"/api/assets/{source.Id}/restore", null)).StatusCode);
+
+        var job = await SendWithCsrf<UpscalingJobDto>(client, HttpMethod.Post, "/api/upscaling/jobs", new
+        {
+            workspaceId = auth.PersonalWorkspace.Id,
+            sourceAssetId = source.Id,
+            targetResolution = "4k",
+        }, $"upscale-restored-{Guid.NewGuid():N}");
+
+        Assert.Equal(source.Id, job.SourceAssetId);
+        Assert.Equal("4k", job.TargetResolution);
+        Assert.Equal("Pending", job.Status);
+    }
+
+    [Fact]
     public async Task Lifecycle_records_attempt_provenance_hands_off_to_qc_and_supports_rejected_retry()
     {
         using var client = factory.CreateClient();
