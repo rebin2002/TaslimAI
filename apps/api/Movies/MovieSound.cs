@@ -256,8 +256,8 @@ public static class MovieSoundTrackProjection
     {
         var generatedAsset = track.Asset ?? track.GenerationJob?.Assets.OrderByDescending(item => item.CreatedAt).FirstOrDefault();
         var status = track.Status;
-        if (track.GenerationJob?.Status == GenerationJobStatus.Succeeded && generatedAsset is not null && status == MovieSoundStatuses.Queued)
-            status = MovieSoundStatuses.ReadyForReview;
+        if (track.GenerationJob?.Status == GenerationJobStatus.Succeeded && status == MovieSoundStatuses.Queued)
+            status = generatedAsset is null ? MovieSoundStatuses.Failed : MovieSoundStatuses.ReadyForReview;
         else if (track.GenerationJob?.Status == GenerationJobStatus.Failed && status == MovieSoundStatuses.Queued)
             status = MovieSoundStatuses.Failed;
         else if (track.GenerationJob?.Status == GenerationJobStatus.Cancelled && status == MovieSoundStatuses.Queued)

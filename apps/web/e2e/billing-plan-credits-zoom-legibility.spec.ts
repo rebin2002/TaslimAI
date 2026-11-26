@@ -11,12 +11,14 @@
 // /api/ request is fulfilled locally, so no charging endpoint is reachable.
 import { test, expect, type Locator, type Page } from "@playwright/test";
 
-const ZOOM = "2";
-const zoomFactor = Number(ZOOM);
-const desktopViewport = { width: 1280, height: 900 };
+const zoomFactor = 2;
+// A 1280 × 900 desktop at 200% zoom has a 640 × 450 CSS viewport.
+// Match browser zoom's media queries, CSS geometry, and physical pixel scale.
+const desktopViewport = { width: 1280 / zoomFactor, height: 900 / zoomFactor };
+test.use({ viewport: desktopViewport, deviceScaleFactor: zoomFactor });
 // Separation floor per issue #700: distinct label/value text must keep a visible
-// gap. 4 CSS px in layout space, compared against zoom-scaled viewport pixels.
-const minGap = 4 * zoomFactor;
+// gap. Client rectangles use CSS pixels; 4 CSS px here occupy 8 physical pixels.
+const minGap = 4;
 
 const session = {
   user: {
@@ -87,7 +89,7 @@ type Box = { left: number; top: number; right: number; bottom: number; width: nu
 
 // Fulfils every /api/ request locally; returns the observed request log so the
 // test can prove no mutation or charging traffic ever left the page.
-async function localApiHarness(page: Page): Promise<string[]> {
+async function localApiHarness(page: Page, locale: "ar" | "ku"): Promise<string[]> {
   const apiCalls: string[] = [];
   page.on("request", (request) => {
     const url = new URL(request.url());
@@ -96,7 +98,7 @@ async function localApiHarness(page: Page): Promise<string[]> {
   await page.route("**/api/**", (route) => {
     const pathname = new URL(route.request().url()).pathname;
     const json = (body: unknown) => route.fulfill({ json: body });
-    if (pathname === "/api/auth/me") return json(session);
+    if (pathname === "/api/auth/me") return json({ ...session, user: { ...session.user, preferredLanguage: locale } });
     if (pathname === "/api/auth/csrf") return json({ token: "e2e-zoom-legibility" });
     if (/^\/api\/workspaces\/[^/]+\/billing$/.test(pathname)) return json(billingAccount());
     return route.fulfill({ status: 204 });
@@ -105,14 +107,9 @@ async function localApiHarness(page: Page): Promise<string[]> {
 }
 
 async function openBillingAt200Zoom(page: Page, locale: "ar" | "ku"): Promise<string[]> {
-  const apiCalls = await localApiHarness(page);
-  await page.addInitScript((value) => window.localStorage.setItem("taslim-locale", value), locale);
-  await page.setViewportSize(desktopViewport);
+  const apiCalls = await localApiHarness(page, locale);
   await page.goto("/account/billing");
   await expect(page.locator(".billing-plan-option")).toHaveCount(3);
-  await page.evaluate((zoom) => {
-    document.documentElement.style.zoom = zoom;
-  }, ZOOM);
   await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
   return apiCalls;
 }
@@ -159,13 +156,13 @@ function assertInsideCard(label: string, child: Box, card: Box) {
 }
 
 test.describe("Billing plan & credits legibility at 200% zoom in Arabic/Sorani RTL (#700 B)", () => {
-  test("keeps current-plan and credit-amount label/value pairs separated, visible and unclipped at 200% zoom", async ({ page }) => {
-    test.setTimeout(90_000);
-    const cases = [
-      { locale: "ar" as const, lang: "ar" },
-      { locale: "ku" as const, lang: "ckb" },
-    ];
-    for (const { locale, lang } of cases) {
+  const cases = [
+    { locale: "ar", lang: "ar", currentBadge: "الحالية" },
+    { locale: "ku", lang: "ckb", currentBadge: "ئێستا" },
+  ] as const;
+  for (const { locale, lang, currentBadge } of cases) {
+    test(`${lang} current-plan and credit-amount labels remain separated, visible and unclipped at 200% zoom`, async ({ page }) => {
+      test.setTimeout(90_000);
       const apiCalls = await openBillingAt200Zoom(page, locale);
       await expect(page.locator("html"), `${locale}: document must render RTL`).toHaveAttribute("dir", "rtl");
       await expect(page.locator("html"), `${locale}: must expose its real language tag`).toHaveAttribute("lang", lang);
@@ -173,10 +170,14 @@ test.describe("Billing plan & credits legibility at 200% zoom in Arabic/Sorani R
       // Literal round-trip only — values come from the synthetic snapshot and no
       // balance is computed by this test.
       await expect(page.locator(".billing-plan-card > strong")).toHaveText("Free");
-      const creditTotalText = await page.locator(".billing-credit-card > strong").textContent();
-      expect(creditTotalText?.trim(), `${locale}: credit total must render digits`).toMatch(/[0-9\u0660-\u0669]/);
-      const creditsNoteText = await page.locator(".billing-credit-card > span").textContent();
-      expect(creditsNoteText?.trim(), `${locale}: credit note must not be empty`).not.toBe("");
+      const formatted = await page.evaluate((lang) => {
+        const format = new Intl.NumberFormat(lang);
+        return [1000, 750, 10000, 40000].map((amount) => format.format(amount));
+      }, lang);
+      const [totalCredits, remainingAllowance, plusAllowance, proAllowance] = formatted;
+      const planAllowances = [totalCredits, plusAllowance, proAllowance];
+      await expect(page.locator(".billing-credit-card > strong")).toHaveText(totalCredits);
+      await expect(page.locator(".billing-credit-card > span")).toContainText(remainingAllowance);
 
       // A. Current-plan summary card: plan name above its price line.
       const planCard = await boxOf(page.locator(".billing-plan-card"));
@@ -208,7 +209,9 @@ test.describe("Billing plan & credits legibility at 200% zoom in Arabic/Sorani R
         const optionCard = await boxOf(option);
         const name = await boxOf(option.locator("div:first-child > strong"));
         const price = await boxOf(option.locator("b"));
-        const credits = await boxOf(option.locator("span:not(.billing-current-badge)"));
+        const creditLine = option.locator("span:not(.billing-current-badge)");
+        await expect(creditLine).toContainText(planAllowances[index]);
+        const credits = await boxOf(creditLine);
         assertRenderedText(`${locale}: plan option ${index} name`, name);
         assertRenderedText(`${locale}: plan option ${index} price`, price);
         assertRenderedText(`${locale}: plan option ${index} credits`, credits);
@@ -223,7 +226,9 @@ test.describe("Billing plan & credits legibility at 200% zoom in Arabic/Sorani R
       const currentOption = page.locator(".billing-plan-option.current");
       await expect(currentOption).toHaveCount(1);
       const currentName = await boxOf(currentOption.locator("div:first-child > strong"));
-      const badge = await boxOf(currentOption.locator(".billing-current-badge"));
+      const badgeLabel = currentOption.locator(".billing-current-badge");
+      await expect(badgeLabel).toHaveText(currentBadge);
+      const badge = await boxOf(badgeLabel);
       assertRenderedText(`${locale}: current badge`, badge);
       assertReadablePair(`${locale}: current plan name vs "Current" badge`, currentName, badge);
       assertInsideCard(`${locale}: current badge`, badge, await boxOf(currentOption));
@@ -238,6 +243,6 @@ test.describe("Billing plan & credits legibility at 200% zoom in Arabic/Sorani R
         `${locale}: legibility test must never issue a mutation request`).toEqual([]);
       expect(apiCalls.filter((entry) => /checkout|payment|charge/i.test(entry)),
         `${locale}: legibility test must never touch a charging endpoint`).toEqual([]);
-    }
-  });
+    });
+  }
 });
