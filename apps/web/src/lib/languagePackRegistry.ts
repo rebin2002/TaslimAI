@@ -127,7 +127,7 @@ export class LanguagePackRegistry {
     return { languageTag: resource.manifest.languageTag, direction: resource.manifest.direction };
   }
 
-  /** Resolution order for a pack: itself, then each declared fallback, cycle-guarded. */
+  /** Resolve declared fallbacks first. A missing target or cycle gets one final English lookup. */
   private chain(id: LanguagePackId): readonly LanguagePackResource[] {
     const visited = new Set<LanguagePackId>();
     const chain: LanguagePackResource[] = [];
@@ -135,8 +135,11 @@ export class LanguagePackRegistry {
     while (current && !visited.has(current.manifest.id)) {
       visited.add(current.manifest.id);
       chain.push(current);
-      current = current.manifest.fallback ? this.get(current.manifest.fallback) : undefined;
+      if (current.manifest.fallback === null) return chain;
+      current = this.get(current.manifest.fallback);
     }
+    const english = this.get("en");
+    if (english && !visited.has("en")) chain.push(english);
     return chain;
   }
 
@@ -152,7 +155,7 @@ export class LanguagePackRegistry {
     return measureCoverage(resource, reference);
   }
 
-  /** Fallback targets that are not installed, which would strand every miss. */
+  /** Declared fallback targets that have not been installed. */
   missingFallbacks(): readonly LanguagePackId[] {
     return [...this.resources.values()]
       .map((resource) => resource.manifest.fallback)

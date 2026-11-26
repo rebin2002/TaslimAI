@@ -15,6 +15,13 @@
  * - `workspace` renders the inner workspace unit with a reused React instance, so
  *   only the fail-closed principal fence stands between one student's brief and
  *   the next student's session.
+ * - `panel` renders `AcademicSourcesPanel` with no container at all: the panel
+ *   instance is never keyed by identity and no workspace-level fence is mounted,
+ *   so the search lifecycle is protected only by the panel's own owner check.
+ *   That is the difference between proving an outcome and proving the mechanism
+ *   that produces it: `studio` and `workspace` both show a student the other's
+ *   search results never arrive, but only `panel` fails if the fence in the
+ *   component is removed.
  *
  * The module is read through a namespace import so this same harness builds and
  * runs on both sides of the fix. Before it there was no inner unit at all - one
@@ -24,11 +31,14 @@
  * fixed head.
  */
 import { createRoot } from "react-dom/client";
-import { type ReactElement } from "react";
+import { useState, type ReactElement } from "react";
 import * as academicStudio from "@/components/academic/AcademicResearchStudio";
+import * as academicPanel from "@/components/academic/AcademicSourcesPanel";
+import { createAcademicLabels, createAcademicTranslator, type AcademicLabelers, type AcademicTranslate } from "@/components/academic/academicStrings";
+import { academicSourceTypes, type AcademicSource, type AcademicSourceType, type CitationStyleId } from "@/components/academic/academicSourceLibrary";
 import { useAuth } from "@/components/AuthProvider";
 import { AuthProviderStub, setHarnessIdentity, type HarnessIdentity } from "./harnessAuth";
-import { LocaleProviderStub } from "./harnessLocale";
+import { LocaleProviderStub, useLocale } from "./harnessLocale";
 
 declare global {
   interface Window {
@@ -44,6 +54,22 @@ type StudioModule = {
   AcademicWorkspace?: (props: { principal: WorkspacePrincipal; initialState?: unknown }) => ReactElement | null;
 };
 
+/** The props a host must supply to embed the Sources panel on its own. */
+type PanelProps = {
+  sources: readonly AcademicSource[];
+  onLibraryChange: (next: AcademicSource[]) => void;
+  citationStyle: CitationStyleId;
+  allowedSourceTypes: readonly AcademicSourceType[];
+  requireFullText: boolean;
+  t: AcademicTranslate;
+  labels: AcademicLabelers;
+  workspaceId?: string | null;
+};
+
+type PanelModule = {
+  AcademicSourcesPanel: (props: PanelProps) => ReactElement | null;
+};
+
 /** Scope the workspace state belongs to; a null id means no signed-in principal. */
 type WorkspacePrincipal = { userId: string | null; workspaceId: string | null };
 
@@ -51,6 +77,7 @@ const studio = academicStudio as unknown as StudioModule;
 const ShippedContainer = studio.AcademicResearchStudio;
 const InnerWorkspace: NonNullable<StudioModule["AcademicWorkspace"]> =
   studio.AcademicWorkspace ?? (() => <ShippedContainer />);
+const SourcesPanel = (academicPanel as unknown as PanelModule).AcademicSourcesPanel;
 
 /** Host that changes `principal` without remounting the workspace instance. */
 function UnkeyedWorkspaceHost() {
@@ -63,12 +90,40 @@ function UnkeyedWorkspaceHost() {
   return <InnerWorkspace principal={principal} />;
 }
 
+/**
+ * Embeds the panel exactly the way its own props document ("Optional host override for tests and
+ * embedding"): no identity-keyed subtree above it, no workspace fence, and no remount when the
+ * principal moves. The host holds the library and hands over a fresh `workspaceId` per render,
+ * unmemoized, so ownership has to be decided inside the component or the previous student's
+ * answer lands in the next student's view.
+ */
+function DirectPanelHost() {
+  const { workspace } = useAuth();
+  const [library, setLibrary] = useState<AcademicSource[]>([]);
+  const { locale } = useLocale();
+  const ta = createAcademicTranslator(locale);
+  const labels = createAcademicLabels(ta);
+  return (
+    <SourcesPanel
+      sources={library}
+      onLibraryChange={setLibrary}
+      citationStyle="apa7"
+      allowedSourceTypes={academicSourceTypes}
+      requireFullText={false}
+      t={ta}
+      labels={labels}
+      workspaceId={workspace?.id ?? null}
+    />
+  );
+}
+
 function mount(): void {
   const container = document.getElementById("root");
   if (!container) return;
   setHarnessIdentity(window.__academicInitialIdentity ?? null);
   const mode = new URLSearchParams(window.location.search).get("mode");
-  const surface = mode === "workspace" ? <UnkeyedWorkspaceHost /> : <ShippedContainer />;
+  const surface =
+    mode === "workspace" ? <UnkeyedWorkspaceHost /> : mode === "panel" ? <DirectPanelHost /> : <ShippedContainer />;
   createRoot(container).render(
     <AuthProviderStub>
       <LocaleProviderStub>

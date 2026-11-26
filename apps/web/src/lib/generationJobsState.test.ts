@@ -30,6 +30,14 @@ function oldRowish(overrides: Partial<GenerationJob> = {}) {
   return job({ id: "job-old", workspaceId: "workspace-a", title: "Older page row", progressPercent: 10, ...overrides });
 }
 describe("generation job UI state", () => {
+  it("does not treat an unknown server status as an active cancellable job", () => {
+    const unknownStatus = "PausedByProvider" as GenerationJob["status"];
+    const unknown = job({ status: unknownStatus });
+
+    expect(isTerminalJob(unknown)).toBe(true);
+    expect(canCancelGenerationJob(unknown)).toBe(false);
+  });
+
   it("merges create and polling updates into the settled read and keeps the newest row", () => {
     let settled = read("workspace-1", 1, []);
     settled = mergeGenerationJobIntoRead(settled, job(), "workspace-1", 1)!;
