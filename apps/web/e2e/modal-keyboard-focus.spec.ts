@@ -223,3 +223,47 @@ test("project edit restores focus to its opener while the save-triggered list re
 function writesOf(api: { writes: string[] }) {
   return api.writes;
 }
+
+test("a save that finishes after its edit dialog closes leaves the next dialog open", async ({ authenticatedPage: page }) => {
+  const api = await installReadOnlyApiMock(page);
+  let listReads = 0;
+  page.on("request", (request) => {
+    if (new URL(request.url()).pathname === `/api/workspaces/${WORKSPACE_ID}/projects`) listReads += 1;
+  });
+  let releaseSave!: () => void;
+  const pendingSave = new Promise<void>((resolve) => { releaseSave = resolve; });
+  const projectPath = `/api/projects/${PROJECT_ID}`;
+  await page.route(`**${projectPath}`, async (route) => {
+    const method = route.request().method();
+    if (method === "PATCH") await pendingSave;
+    else if (method !== "GET") return route.fallback();
+    return route.fulfill({
+      ...json(projectPayload), headers: { ETag: '"revision-1"', "Access-Control-Expose-Headers": "ETag" },
+    });
+  });
+
+  await page.goto("/projects");
+  await page.getByRole("button", { name: /^edit$/i }).first().click();
+  const edit = page.getByRole("dialog", { name: /^edit project$/i });
+  await edit.getByLabel(/^project name$/i).fill("Updated project");
+  const isSave = (request: import("@playwright/test").Request) =>
+    request.method() === "PATCH" && new URL(request.url()).pathname === projectPath;
+  const saveStarted = page.waitForRequest(isSave);
+  await edit.getByRole("button", { name: /^save$/i }).click();
+  await saveStarted;
+  const readsBeforeClosing = listReads;
+  const response = page.waitForResponse((item) => isSave(item.request()));
+  try {
+    await page.keyboard.press("Escape");
+    await expect(edit).toBeHidden();
+    await page.getByRole("button", { name: /^new project$/i }).first().click();
+    await page.getByRole("dialog").getByLabel(/^project name$/i).fill("New draft");
+  } finally {
+    releaseSave();
+  }
+  await (await response).finished();
+  await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+  await expect(page.getByRole("dialog").getByLabel(/^project name$/i)).toHaveValue("New draft");
+  expect(listReads).toBe(readsBeforeClosing);
+  expect(api.writes).toEqual([]);
+});

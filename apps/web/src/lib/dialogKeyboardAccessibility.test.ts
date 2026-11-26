@@ -336,6 +336,22 @@ describe("useDialogAccessibility multi-instance stack gating", () => {
   // answer a document-level key now, which makes both failure modes
   // structurally impossible.
   const makeHandle = () => ({ token: Symbol("dialog") });
+  it("keeps the nested dialog on top when both layout effects mount together", () => {
+    const innerElement = { contains: () => false } as unknown as HTMLElement;
+    const outerElement = { contains: (element: HTMLElement) => element === innerElement } as unknown as HTMLElement;
+    const outer = { token: Symbol("outer"), element: outerElement };
+    const inner = { token: Symbol("inner"), element: innerElement };
+    openDialog(inner);
+    openDialog(outer);
+    try {
+      expect(shouldHandleDialogKey(inner, "Escape")).toBe(true);
+      expect(shouldHandleDialogKey(outer, "Tab")).toBe(false);
+    } finally {
+      closeDialog(inner);
+      closeDialog(outer);
+    }
+  });
+
   it("admits each open instance once and keeps a single top of stack", () => {
     const first = makeHandle();
     const second = makeHandle();

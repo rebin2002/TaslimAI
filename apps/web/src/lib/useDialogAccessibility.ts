@@ -75,7 +75,7 @@ export function isTabbableElement(element: HTMLElement, readStyle?: VisibilitySt
   return true;
 }
 
-export type DialogHandle = { readonly token: symbol };
+export type DialogHandle = { readonly token: symbol; readonly element?: HTMLElement };
 
 // Single stack of mounted, open dialog-hook instances. Exactly one instance —
 // the top of the stack — answers document-level focusin/keydown traffic at a
@@ -86,7 +86,11 @@ export type DialogHandle = { readonly token: symbol };
 const dialogStack: DialogHandle[] = [];
 
 export function openDialog(handle: DialogHandle): void {
-  if (!dialogStack.includes(handle)) dialogStack.push(handle);
+  if (dialogStack.includes(handle)) return;
+  // React can run a child's layout effect before its parent's on the same commit.
+  const nested = dialogStack.findIndex((open) => open.element && handle.element?.contains(open.element));
+  if (nested === -1) dialogStack.push(handle);
+  else dialogStack.splice(nested, 0, handle);
 }
 
 export function closeDialog(handle: DialogHandle): void {
@@ -173,7 +177,7 @@ export function useDialogAccessibility<T extends HTMLElement>(open: boolean, onC
     if (!open || !dialogRef.current) return;
 
     const dialog = dialogRef.current;
-    const handle: DialogHandle = { token: Symbol("taslim-dialog") };
+    const handle: DialogHandle = { token: Symbol("taslim-dialog"), element: dialog };
     openDialog(handle);
     // True between a keydown the trap consumed (boundary wrap/rescue) and the
     // matching Tab keyup, whose browser default must be suppressed too.
@@ -185,7 +189,7 @@ export function useDialogAccessibility<T extends HTMLElement>(open: boolean, onC
     openerRef.current = opener;
     openerDescriptorRef.current = opener ? describeFocusTarget(opener) : null;
     const focusInitial = window.setTimeout(() => {
-      if (!dialog.isConnected) return;
+      if (!dialog.isConnected || !isTopDialog(handle)) return;
       const marked = dialog.querySelector<HTMLElement>("[data-dialog-autofocus]");
       const initial = marked && isTabbableElement(marked)
         ? marked
@@ -201,14 +205,7 @@ export function useDialogAccessibility<T extends HTMLElement>(open: boolean, onC
 
     function handleFocusIn(event: FocusEvent) {
       const target = event.target;
-      if (!(target instanceof Node)) return;
-      if (dialog.contains(target)) {
-        // Whichever dialog actually receives focus is the one the user works
-        // in; it becomes the sole handler until focus moves again.
-        raiseDialog(handle);
-        return;
-      }
-      if (!isTopDialog(handle)) return;
+      if (!isTopDialog(handle) || !(target instanceof Node) || dialog.contains(target)) return;
       focusBoundary(false);
     }
 
@@ -219,7 +216,7 @@ export function useDialogAccessibility<T extends HTMLElement>(open: boolean, onC
       if (event.key === "Escape") {
         if (!shouldHandleDialogKey(handle, "Escape")) return;
         event.preventDefault();
-        event.stopPropagation();
+        event.stopImmediatePropagation();
         onCloseRef.current();
         return;
       }
@@ -279,11 +276,20 @@ export function useDialogAccessibility<T extends HTMLElement>(open: boolean, onC
       document.removeEventListener("focusin", handleFocusIn, true);
       document.removeEventListener("keydown", handleKeyDown, true);
       document.removeEventListener("keyup", handleKeyUp, true);
+      const wasTop = isTopDialog(handle);
       closeDialog(handle);
       const opener = openerRef.current;
       const openerDescriptor = openerDescriptorRef.current;
-      if (opener || openerDescriptor) {
-        window.setTimeout(() => resolveFocusTarget(opener, openerDescriptor)?.focus(), 0);
+      if (wasTop) {
+        window.setTimeout(() => {
+          const target = resolveFocusTarget(opener, openerDescriptor);
+          const currentDialog = dialogStack.at(-1)?.element;
+          if (target && (!currentDialog || currentDialog.contains(target))) {
+            target.focus();
+          } else if (currentDialog && !currentDialog.contains(document.activeElement)) {
+            (focusableElements(currentDialog)[0] ?? currentDialog).focus();
+          }
+        }, 0);
       }
     };
   }, [open, restoreFocusRef]);
