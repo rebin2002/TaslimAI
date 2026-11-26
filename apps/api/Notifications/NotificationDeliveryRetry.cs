@@ -13,9 +13,11 @@ public static class NotificationDeliveryRetry
         ArgumentNullException.ThrowIfNull(action);
         ArgumentOutOfRangeException.ThrowIfLessThan(maxAttempts, 1);
         delay ??= attempt => TimeSpan.FromMilliseconds(100 * attempt);
+        cancellationToken.ThrowIfCancellationRequested();
 
         for (var attempt = 1; attempt <= maxAttempts; attempt++)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             try
             {
                 await action();

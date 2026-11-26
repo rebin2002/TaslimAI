@@ -28,6 +28,12 @@ export type AssetCardLabels = {
   fileUnavailable: string;
 };
 
+export function formatAssetCardDate(value: string, locale: string) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "—";
+  return new Intl.DateTimeFormat(localeTag(locale), { month: "short", day: "numeric", year: "numeric" }).format(date);
+}
+
 function extension(asset: Asset) {
   const fromName = asset.name.split(".").pop();
   return (fromName && fromName !== asset.name ? fromName : asset.mimeType?.split("/").pop() ?? "asset").toUpperCase();
@@ -57,7 +63,7 @@ export function AssetCard({ asset, labels, locale, onOpen, onEdit, onArchive, on
   onRestore: (asset: Asset) => void;
 }) {
   const fileUrl = assetFileUrl(asset.id);
-  const date = new Intl.DateTimeFormat(localeTag(locale), { month: "short", day: "numeric", year: "numeric" }).format(new Date(asset.createdAt));
+  const date = formatAssetCardDate(asset.createdAt, locale);
   return <article className={`asset-card is-${asset.assetType}`}>
     <div className={`asset-preview is-${asset.assetType}`}>
       <MediaPreview asset={asset} labels={labels} onOpen={() => onOpen(asset)} />
