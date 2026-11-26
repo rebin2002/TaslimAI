@@ -48,4 +48,41 @@ public sealed class SocialGenerationUnitTests
         var wrongOrder = new SocialDraft { Title = "Launch", Platform = "linkedin", SocialType = "announcement", Language = "en", Posts = [new SocialPost { Order = 2, Hook = "Hook", Body = "Body" }] };
         Assert.Throws<SocialOutputValidationException>(() => SocialDraftValidator.Validate(wrongOrder, new SocialGenerationOptions()));
     }
+
+    [Theory]
+    [InlineData("en", "ar", "ar")]
+    [InlineData("ku", "en", "en")]
+    [InlineData("ar", "ku", "ku")]
+    public void Output_language_preserves_explicit_request_over_provider_drift(string providerLanguage, string requestedLanguage, string expected)
+    {
+        Assert.Equal(expected, SocialOutputLanguagePolicy.Normalize(providerLanguage, requestedLanguage));
+    }
+
+    [Theory]
+    [InlineData("ar")]
+    [InlineData("ku")]
+    [InlineData("en")]
+    public void Auto_requests_keep_the_provider_selected_language(string providerLanguage)
+    {
+        Assert.Equal(providerLanguage, SocialOutputLanguagePolicy.Normalize(providerLanguage, "auto"));
+    }
+
+    [Fact]
+    public void Output_language_normalizes_casing_and_whitespace()
+    {
+        Assert.Equal("ku", SocialOutputLanguagePolicy.Normalize(" KU ", "auto"));
+        Assert.Equal("ar", SocialOutputLanguagePolicy.Normalize("EN", " Ar "));
+    }
+
+    [Theory]
+    [InlineData("fr", "auto")]
+    [InlineData("auto", "auto")]
+    [InlineData("", "auto")]
+    [InlineData(null, "auto")]
+    [InlineData("fr", "zu")]
+    [InlineData(null, null)]
+    public void Unsupported_languages_fail_closed_to_english(string? providerLanguage, string? requestedLanguage)
+    {
+        Assert.Equal("en", SocialOutputLanguagePolicy.Normalize(providerLanguage, requestedLanguage));
+    }
 }

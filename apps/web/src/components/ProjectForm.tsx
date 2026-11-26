@@ -1,16 +1,17 @@
 "use client";
 
-import { FormEvent, useEffect, useRef, useState } from "react";
+import { FormEvent, useEffect, useRef, useState, type RefObject } from "react";
 import { Check, ChevronDown, X } from "lucide-react";
 import type { Project, ProjectInput } from "@/lib/api";
 import { draftBaseOf, isRevisionConflict, isRevisionDiverged, isRevisionUnavailable, type ProjectDraftBase, type ProjectRevisionSession } from "@/lib/projectRevision";
 import { useLocale } from "@/components/LocaleProvider";
 import { localeDirection } from "@/lib/i18n";
+import { useDialogAccessibility } from "@/lib/useDialogAccessibility";
 
 const projectTypes = ["General", "Movie", "Marketing", "Business", "Research", "Education", "Development"] as const;
 const typeKey = (type: string) => `project.type.${type.toLowerCase()}`;
 
-export function ProjectForm({ project, onClose, onSubmit, revision, onSaved }: Readonly<{
+export function ProjectForm({ project, onClose, onSubmit, revision, onSaved, restoreFocusRef }: Readonly<{
   project?: Project;
   onClose: () => void;
   /** Create path: the caller owns the write. Omitted when `revision` fences an edit. */
@@ -25,6 +26,11 @@ export function ProjectForm({ project, onClose, onSubmit, revision, onSaved }: R
   revision?: ProjectRevisionSession | null;
   /** The project the server committed, for the edit path to fold into its view. */
   onSaved?: (project: Project) => void;
+  /**
+   * Modal accessibility: the element that opened this dialog, so closing it
+   * returns focus where the member started rather than to the top of the page.
+   */
+  restoreFocusRef?: RefObject<HTMLElement | null>;
 }>) {
   const { t, locale } = useLocale();
   const [name, setName] = useState(project?.name ?? "");
@@ -34,6 +40,8 @@ export function ProjectForm({ project, onClose, onSubmit, revision, onSaved }: R
   const [type, setType] = useState(project?.type ?? "General");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
+  const dialogTitleId = "project-form-title";
+  const dialogRef = useDialogAccessibility<HTMLFormElement>(true, onClose, restoreFocusRef);
   // The fence refused the revision this draft was built on. The draft stays
   // exactly as typed until the member chooses what happens to it.
   const [conflict, setConflict] = useState(false);
@@ -172,9 +180,9 @@ export function ProjectForm({ project, onClose, onSubmit, revision, onSaved }: R
   }
 
   return <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
-    <form className="project-form modal-card" onSubmit={submit}>
-      <div className="modal-heading"><div><p className="section-eyebrow">{project ? t("projects.editEyebrow") : t("projects.newEyebrow")}</p><h2>{project ? t("projects.editTitle") : t("projects.newTitle")}</h2></div><button type="button" className="modal-close" onClick={onClose} aria-label={t("common.close")}><X size={18} /></button></div>
-      <label><span>{t("projects.name")}</span><input required minLength={1} maxLength={160} value={name} onChange={(event) => { beginEditing(); setName(event.target.value); }} autoFocus dir="auto" /></label>
+    <form ref={dialogRef} className="project-form modal-card" role="dialog" aria-modal="true" aria-labelledby={dialogTitleId} tabIndex={-1} onSubmit={submit}>
+      <div className="modal-heading"><div><p className="section-eyebrow">{project ? t("projects.editEyebrow") : t("projects.newEyebrow")}</p><h2 id={dialogTitleId}>{project ? t("projects.editTitle") : t("projects.newTitle")}</h2></div><button type="button" className="modal-close" onClick={onClose} aria-label={t("common.close")}><X size={18} /></button></div>
+      <label><span>{t("projects.name")}</span><input data-dialog-autofocus required minLength={1} maxLength={160} value={name} onChange={(event) => { beginEditing(); setName(event.target.value); }} dir="auto" /></label>
       <label><span>{t("projects.type")}</span><div className="select-shell"><select value={type} onChange={(event) => { beginEditing(); setType(event.target.value); }} dir={localeDirection(locale)}>{projectTypes.map((item) => <option key={item} value={item}>{t(typeKey(item))}</option>)}</select><ChevronDown size={15} aria-hidden="true" /></div></label>
       <label><span>{t("projects.description")}</span><textarea maxLength={2000} rows={4} value={description} onChange={(event) => { beginEditing(); setDescription(event.target.value); }} placeholder={t("projects.descriptionPlaceholder")} dir="auto" /></label>
       <label><span>{t("projects.instructions")}</span><textarea maxLength={4000} rows={4} value={instructions} onChange={(event) => { beginEditing(); setInstructions(event.target.value); }} placeholder={t("projects.instructionsPlaceholder")} dir="auto" /></label>

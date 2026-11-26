@@ -1,4 +1,15 @@
 import type { Asset, GenerationJob, SocialJobResult, SocialPost, StoredFile } from "./api";
+import {
+  clearSessionDraft,
+  defaultSessionDraftStore,
+  purgeSessionDraftsForUser,
+  readSessionDraft,
+  retireLegacyWorkspaceDraft,
+  sessionDraftStorageKey,
+  writeSessionDraft,
+  type DraftPrincipal,
+  type LegacyDraftDisposition,
+} from "./sessionDraftScope";
 
 const terminalStatuses = new Set(["Succeeded", "Failed", "Cancelled"]);
 const socialPlatforms = new Set(["instagram", "facebook", "linkedin", "x", "tiktok", "multi"]);
@@ -6,6 +17,7 @@ const socialTypes = new Set(["auto", "announcement", "product_launch", "promotio
 const socialTones = new Set(["professional", "friendly", "persuasive", "educational", "playful", "concise", "thoughtful"]);
 const socialLanguages = new Set(["auto", "en", "ar", "ku"]);
 const activeJobStoragePrefix = "taslim:social-generation:";
+const socialDraftNamespace = "social-draft";
 const draftStoragePrefix = "taslim:social-draft:";
 export type SocialStudioState = "compose" | "pending" | "queued" | "running" | "succeeded" | "completed-unavailable" | "failed" | "cancelled";
 export type SocialPreviewPlatform = "instagram" | "facebook" | "linkedin" | "x" | "tiktok" | "multi";
@@ -48,26 +60,106 @@ export function clearSocialActiveJobId(workspaceId: string) {
 export function isSocialJobForWorkspace(job: GenerationJob | null, workspaceId: string | null | undefined) {
   return !!job && !!workspaceId && job.workspaceId === workspaceId && typeof job.jobType === "string" && job.jobType.trim().toLowerCase() === "social.generate";
 }
-export function socialDraftStorageKey(workspaceId: string) { return `${draftStoragePrefix}${workspaceId}`; }
-export function readSocialDraft(workspaceId: string): SocialStudioDraft | null {
-  if (typeof window === "undefined") return null;
-  try {
-    const raw = window.sessionStorage.getItem(socialDraftStorageKey(workspaceId));
-    if (!raw) return null;
-    const parsed: unknown = JSON.parse(raw);
-    if (!isRecord(parsed)) return null;
-    return normalizeSocialDraft(parsed);
-  } catch {
-    return null;
-  }
+/**
+ * The principal a persisted Social draft is attributed to (issue #688).
+ *
+ * Before this change a draft was stored under `taslim:social-draft:<workspaceId>`, so the workspace
+ * identifier was the only boundary an unsent private draft respected. Two accounts that share one
+ * browser tab share one `sessionStorage`, so signing out of Account A and signing in as Account B in
+ * the same tab handed B A's prompt, brand-voice / audience / CTA copy and selected file and asset
+ * identifiers. A workspace id is an authorisation scope, not an authentication result, so persisted
+ * drafts are now bound to the authenticated identity *and* the workspace.
+ */
+export type SocialDraftPrincipal = { userId: string | null | undefined; workspaceId: string | null | undefined };
+/**
+ * A draft is addressed either by an identity+workspace principal or by the legacy workspace-only
+ * string form. The string form cannot prove who the owner is, therefore it resolves to no address at
+ * all: a read returns nothing, a write stores nothing, a discard removes nothing. It stays in the
+ * signature so an un-migrated call site fails closed instead of silently re-creating a shared
+ * address, and so a bare workspace id can never be smuggled in as an identity.
+ */
+export type SocialDraftTarget = SocialDraftPrincipal | string | null | undefined;
+
+function toSocialDraftPrincipal(target: SocialDraftTarget): DraftPrincipal {
+  if (typeof target === "string") return { userId: null, workspaceId: target };
+  return target ?? { userId: null, workspaceId: null };
 }
-export function persistSocialDraft(workspaceId: string, draft: SocialStudioDraft) {
-  if (typeof window === "undefined") return;
-  try { window.sessionStorage.setItem(socialDraftStorageKey(workspaceId), JSON.stringify(normalizeSocialDraft(draft))); } catch { /* Storage may be unavailable. */ }
+
+/** Identity-bound storage address, or null when no authenticated identity backs the request. */
+export function socialDraftStorageKey(target: SocialDraftTarget): string | null {
+  return sessionDraftStorageKey(socialDraftNamespace, toSocialDraftPrincipal(target));
 }
-export function clearSocialDraft(workspaceId: string) {
-  if (typeof window === "undefined") return;
-  try { window.sessionStorage.removeItem(socialDraftStorageKey(workspaceId)); } catch { /* Storage may be unavailable. */ }
+
+/**
+ * The pre-#688 workspace-only address. Exported so the quarantine path can FIND and REMOVE entries
+ * left by older builds; nothing may read their payload into any identity.
+ */
+export function legacySocialDraftStorageKey(workspaceId: string) { return `${draftStoragePrefix}${workspaceId}`; }
+
+export function readSocialDraft(target: SocialDraftTarget): SocialStudioDraft | null {
+  // The owner-bound envelope is the only source of truth and there is deliberately no workspace-only
+  // fallback: an entry that is not addressed to this exact user + workspace is never surfaced.
+  return readSessionDraft(defaultSessionDraftStore(), socialDraftNamespace, toSocialDraftPrincipal(target), (value) => (isRecord(value) ? normalizeSocialDraft(value) : null));
+}
+
+/** Persists the draft for this identity + workspace only. Returns false when nothing was written. */
+export function persistSocialDraft(target: SocialDraftTarget, draft: SocialStudioDraft): boolean {
+  return writeSessionDraft(defaultSessionDraftStore(), socialDraftNamespace, toSocialDraftPrincipal(target), normalizeSocialDraft(draft));
+}
+
+/** Discards exactly this identity + workspace draft. An unattributed target removes nothing. */
+export function clearSocialDraft(target: SocialDraftTarget): boolean {
+  return clearSessionDraft(defaultSessionDraftStore(), socialDraftNamespace, toSocialDraftPrincipal(target));
+}
+
+export type SocialDraftScope = { userId: string; workspaceId: string };
+export type LegacySocialDraftDisposition = LegacyDraftDisposition;
+
+/**
+ * Resolves the (identity, workspace) pair a draft session is bound to, or null while either half is
+ * missing or anonymous. The studio uses this as its hydration token so that a re-render for a
+ * different account is provably a different scope and can never be read as "same workspace, so keep
+ * showing what is already on screen" — that is the no-flash half of #688, while the identity-bound
+ * address above is the cannot-be-read half.
+ */
+export function resolveSocialDraftScope(target: SocialDraftTarget): SocialDraftScope | null {
+  const principal = toSocialDraftPrincipal(target);
+  if (!socialDraftStorageKey(target)) return null;
+  const userId = typeof principal.userId === "string" ? principal.userId.trim() : "";
+  const workspaceId = typeof principal.workspaceId === "string" ? principal.workspaceId.trim() : "";
+  if (!userId || !workspaceId) return null;
+  return { userId, workspaceId };
+}
+
+/** Stable identity+workspace token for effect dependency lists; null while unauthenticated. */
+export function socialDraftScopeToken(target: SocialDraftTarget): string | null {
+  const scope = resolveSocialDraftScope(target);
+  // JSON encoding keeps the token collision-free for ids that themselves contain separators.
+  return scope ? JSON.stringify([scope.userId, scope.workspaceId]) : null;
+}
+
+/**
+ * Removes a pre-#688 workspace-only draft from this tab WITHOUT ever surfacing its content to the
+ * identity that happens to arrive first: ownership of those entries cannot be proven, so they are
+ * quarantined (removed) rather than migrated. The one exception the policy makes is an entry that
+ * already carries this exact owner's envelope, which is promoted to the scoped address. The return
+ * value is a disposition label only; it never contains draft content.
+ */
+export function retireLegacySocialDraft(target: SocialDraftTarget): LegacySocialDraftDisposition {
+  const scope = resolveSocialDraftScope(target);
+  const store = defaultSessionDraftStore();
+  if (!scope || !store) return "storage-unavailable";
+  return retireLegacyWorkspaceDraft(store, legacySocialDraftStorageKey(scope.workspaceId), socialDraftNamespace, scope);
+}
+
+/**
+ * Account-boundary scrub for #688: removes the departing identity's persisted Social drafts from
+ * this tab and nothing else. It refuses to touch a single entry when the identity is not proven, so
+ * a half-resolved session can never wipe another account's state, and it never enumerates payloads.
+ */
+export function purgeSocialDraftsOnAccountBoundary(userId: string | null | undefined): { removedCount: number; refusedInvalidIdentity: boolean } {
+  const result = purgeSessionDraftsForUser(defaultSessionDraftStore(), userId, { namespace: socialDraftNamespace });
+  return { removedCount: result.removedKeys.length, refusedInvalidIdentity: result.refusedInvalidIdentity };
 }
 
 export function isSocialTerminal(job: GenerationJob | null) { return !!job && terminalStatuses.has(job.status); }
@@ -130,6 +222,13 @@ export function parseSocialJobResult(job: GenerationJob | null): SocialJobResult
     return { assetId: nonEmptyString(parsed.assetId) ? parsed.assetId : undefined, socialType: typeof parsed.socialType === "string" ? parsed.socialType : undefined, platform: typeof parsed.platform === "string" ? parsed.platform : undefined, title: typeof parsed.title === "string" ? parsed.title : undefined, language: typeof parsed.language === "string" ? parsed.language : undefined, postCount: typeof parsed.postCount === "number" ? parsed.postCount : undefined, posts: parsePosts(parsed.posts) };
   } catch { return null; }
 }
-export function isSocialSourceReady(file: StoredFile) { return [".pdf", ".docx", ".txt", ".md", ".csv", ".xlsx"].includes(file.extension.toLowerCase()) && file.status === "Ready" && file.textExtractionStatus === "Ready"; }
+export function isSocialSourceReady(file: StoredFile) {
+  // The API generation boundary additionally rejects sources whose ExtractedText is
+  // null or whitespace, so a source the API reports as having no extracted text must
+  // never be presented as selectable and then deterministically fail generation.
+  // `undefined` (field omitted by older callers) preserves the previous behaviour.
+  const knownExtractionLength: number | null | undefined = file.extractedTextLength;
+  return [".pdf", ".docx", ".txt", ".md", ".csv", ".xlsx"].includes(file.extension.toLowerCase()) && file.status === "Ready" && file.textExtractionStatus === "Ready" && (knownExtractionLength === undefined || (knownExtractionLength !== null && knownExtractionLength > 0));
+}
 export function isSocialAssetSelectable(asset: Asset) { return asset.status === "Active" && asset.hasFile && ["image", "document", "presentation", "research", "social"].includes(asset.assetType); }
 export function formatSocialPostForCopy(post: SocialPost) { return [post.hook, post.body, post.callToAction, post.hashtags?.join(" ")].filter((value) => typeof value === "string" && value.trim()).join("\n\n"); }

@@ -2,8 +2,6 @@ const configuredApiUrl = process.env.NEXT_PUBLIC_API_URL;
 if (process.env.NODE_ENV === "production" && (!configuredApiUrl || !configuredApiUrl.startsWith("https://")))
   throw new Error("NEXT_PUBLIC_API_URL must be an HTTPS URL in production.");
 const apiOrigin = (configuredApiUrl ?? "http://localhost:5000").replace(/\/$/, "");
-const MAX_PROXY_BODY_BYTES = 25 * 1024 * 1024;
-const UPSTREAM_TIMEOUT_MS = 30_000;
 // Every extra percent-encoding round is another spelling of the same relative
 // segment (%2e%2e, %252e%252e, ...), so decoding is iterated a bounded number of
 // times instead of assumed to stop after one pass.
@@ -11,6 +9,8 @@ const MAX_RELATIVE_DECODE_ROUNDS = 4;
 // The namespace this proxy may forward into, resolved once from the configured
 // origin so a base path in NEXT_PUBLIC_API_URL keeps being respected.
 const apiNamespacePathname = new URL(`${apiOrigin}/api/`).pathname;
+const MAX_PROXY_BODY_BYTES = 25 * 1024 * 1024;
+const UPSTREAM_TIMEOUT_MS = 30_000;
 // Remove the entire client-controlled forwarding namespace, not just today's
 // commonly recognized names (e.g. X-Forwarded-Client-Cert and future variants).
 // The upstream HTTPS/cookie trust boundary must never depend on client metadata.
@@ -20,6 +20,38 @@ function stripUntrustedForwardingHeaders(headers: Headers): void {
     if (name === "forwarded" || name === "via" || name === "x-real-ip" || name.startsWith("x-forwarded-")) {
       headers.delete(name);
     }
+  }
+}
+
+// RFC 9110 §7.6.1 reserves these fields for a single transport hop, and Proxy-*
+// carries that hop's own auth challenge and credentials. The hop the browser
+// speaks to is this proxy rather than the API behind it, so an upstream value
+// for any of them describes our connection and must never be echoed to a client.
+// On the request side this set includes `connection` itself, so the deployed
+// explicit removal of that header is preserved exactly, widened to the rest of
+// the reserved namespace and to any fields a sender names inside Connection.
+const HOP_BY_HOP_HEADERS: readonly string[] = [
+  "connection",
+  "keep-alive",
+  "proxy-authenticate",
+  "proxy-authorization",
+  "te",
+  "trailer",
+  "transfer-encoding",
+  "upgrade",
+];
+
+function stripHopByHopHeaders(headers: Headers): void {
+  const removable = new Set(HOP_BY_HOP_HEADERS);
+  // A sender may extend the set by naming fields in its own Connection header,
+  // e.g. `Connection: X-Internal-Digest`; honour that or the field leaks through.
+  for (const token of (headers.get("connection") ?? "").split(",")) {
+    const name = token.trim().toLowerCase();
+    if (name) removable.add(name);
+  }
+  // Snapshot names: deleting during a live Headers iterator can skip the next key.
+  for (const name of [...headers.keys()]) {
+    if (removable.has(name)) headers.delete(name);
   }
 }
 
@@ -66,6 +98,24 @@ function refuseInvalidPath(): Response {
     { status: 400 },
   );
 }
+
+// A Response may only carry an HTTP reason phrase (HTAB / SP / VCHAR / obs-text).
+// The upstream builds that byte sequence, so it is hostile-reachable: a status
+// line with a raw CR, LF or NUL in the reason phrase makes the Response
+// constructor throw inside the route handler instead of degrading the response.
+function safeStatusText(value: unknown): string {
+  if (typeof value !== "string") return "";
+  for (const character of value) {
+    const code = character.codePointAt(0) ?? 0;
+    if (code !== 0x09 && !(code >= 0x20 && code <= 0x7e) && !(code >= 0x80 && code <= 0xff)) return "";
+  }
+  return value;
+}
+
+// RFC 9110 §6.4.1: these statuses are answered without a body, so a body-bearing
+// variant from a non-compliant upstream must be dropped, not proxied verbatim
+// (the Response constructor rejects that pairing outright).
+const NULL_BODY_STATUSES = new Set([101, 103, 204, 205, 304]);
 
 function splitCombinedSetCookieHeader(value: string): string[] {
   return value.split(/,(?=\s*[^;,=\s]+=[^;,]*)/).map(cookie => cookie.trim()).filter(Boolean);
@@ -131,11 +181,16 @@ async function forward(request: Request, context: RouteContext): Promise<Respons
   headers.delete("host");
   headers.delete("content-length");
   headers.delete("accept-encoding");
-  headers.delete("connection");
   // The API trusts one hosting-proxy hop for the original HTTPS scheme so it
   // can issue Secure cookies. Never let a browser manufacture that metadata
   // through this same-origin proxy.
   stripUntrustedForwardingHeaders(headers);
+  // The deployed request-side `connection` removal is included in this set, so
+  // widening to the rest of the reserved namespace (and to Connection-extended
+  // field names) keeps client-side hop metadata and Proxy-Authorization
+  // credentials from reaching the API regardless of how the fetch
+  // implementation filters them.
+  stripHopByHopHeaders(headers);
 
   const init: RequestInit & { duplex?: "half" } = {
     method: request.method,
@@ -166,22 +221,41 @@ async function forward(request: Request, context: RouteContext): Promise<Respons
     clearTimeout(timeout);
   }
 
-  const responseHeaders = new Headers(upstream.headers);
-  responseHeaders.delete("content-length");
-  responseHeaders.delete("content-encoding");
-  responseHeaders.delete("transfer-encoding");
+  // From here the upstream owns the response head, so assembling the client
+  // response must not be able to throw: a rejected Response escapes as a
+  // framework 500 whose error surface is outside this contract, and leaves the
+  // upstream stream unread and its connection pinned. The deployed removals of
+  // content-length, content-encoding and transfer-encoding are kept verbatim;
+  // the hop-by-hop strip widens them to the full reserved namespace.
+  try {
+    const responseHeaders = new Headers(upstream.headers);
+    responseHeaders.delete("content-length");
+    responseHeaders.delete("content-encoding");
+    responseHeaders.delete("transfer-encoding");
+    stripHopByHopHeaders(responseHeaders);
 
-  const setCookies = getSetCookieHeaders(responseHeaders);
-  responseHeaders.delete("set-cookie");
-  if (setCookies.length > 0) {
-    for (const cookie of setCookies) responseHeaders.append("set-cookie", cookie);
+    const setCookies = getSetCookieHeaders(responseHeaders);
+    responseHeaders.delete("set-cookie");
+    if (setCookies.length > 0) {
+      for (const cookie of setCookies) responseHeaders.append("set-cookie", cookie);
+    }
+
+    return new Response(NULL_BODY_STATUSES.has(upstream.status) ? null : upstream.body, {
+      status: upstream.status,
+      statusText: safeStatusText(upstream.statusText),
+      headers: responseHeaders,
+    });
+  } catch {
+    try {
+      await upstream.body?.cancel();
+    } catch {
+      // The stream is already errored; nothing left to release.
+    }
+    return Response.json(
+      { error: { code: "API_UNAVAILABLE", message: "The service is temporarily unavailable. Please try again." } },
+      { status: 503 },
+    );
   }
-
-  return new Response(upstream.body, {
-    status: upstream.status,
-    statusText: upstream.statusText,
-    headers: responseHeaders,
-  });
 }
 
 export const GET = forward;
