@@ -140,14 +140,50 @@ function workspaceWorld(workspaceId: string): MovieWorldWorkspace {
   } as MovieWorldWorkspace;
 }
 
+function workspaceCastWithTwoCharacters(workspaceId: string): MovieCast {
+  const base = workspaceCast(workspaceId, 0);
+  const template = base.characters[0];
+  return {
+    ...base,
+    characters: [
+      { ...template, id: `${workspaceId}-character-a`, name: "Alpha", description: "Alpha summary.", referenceAssetId: `${workspaceId}-asset-a`, referenceAssetIds: [`${workspaceId}-asset-a`], lockedFactCount: 0, lockedFieldKeys: [] },
+      { ...template, id: `${workspaceId}-character-b`, name: "Bravo", description: "Bravo summary.", referenceAssetId: `${workspaceId}-asset-b`, referenceAssetIds: [`${workspaceId}-asset-b`], lockedFactCount: 0, lockedFieldKeys: [] },
+    ],
+  } as MovieCast;
+}
+
+function workspaceCharacterDetail(workspaceId: string, characterId: string, name: string, assetId: string): MovieCharacter {
+  return { ...workspaceDetail(workspaceId), id: characterId, name, referenceAssetId: assetId, referenceAssetIds: [assetId] } as MovieCharacter;
+}
+
+function workspaceWorldWithImageAsset(workspaceId: string): MovieWorldWorkspace {
+  return {
+    ...workspaceWorld(workspaceId),
+    assets: [{ id: "library-image", name: "Library portrait", assetType: "image", mimeType: "image/png", hasFile: true, canPreview: true } as MovieWorldWorkspace["assets"][number]],
+  };
+}
+
+function workspaceWorldWithUnavailableReference(workspaceId: string): MovieWorldWorkspace {
+  const base = workspaceWorld(workspaceId);
+  const [firstLocation, ...otherLocations] = base.world.locations;
+  return {
+    ...base,
+    world: { ...base.world, locations: [{ ...firstLocation, referenceAssetId: "pruned-private-image" }, ...otherLocations] },
+    assets: [{ id: "pruned-private-image", name: "Pruned private portrait", assetType: "image", mimeType: "image/png", hasFile: false, canPreview: false } as MovieWorldWorkspace["assets"][number]],
+  };
+}
+
 let testDocument: TestDocument;
 let container: TestNode;
 let root: Root | undefined;
 function drain() { return new Promise((resolve) => setTimeout(resolve, 0)); }
 function findClass(node: TestNode, className: string): TestNode[] { return [...(node.getAttribute("class")?.split(/\s+/).includes(className) ? [node] : []), ...node.childNodes.flatMap((child) => findClass(child, className))]; }
 function findButtons(node: TestNode): TestNode[] { return [...(node.nodeName === "BUTTON" ? [node] : []), ...node.childNodes.flatMap(findButtons)]; }
+function findSelects(node: TestNode): TestNode[] { return [...(node.nodeName === "SELECT" ? [node] : []), ...node.childNodes.flatMap(findSelects)]; }
+function findImages(node: TestNode): TestNode[] { return [...(node.nodeName === "IMG" ? [node] : []), ...node.childNodes.flatMap(findImages)]; }
 function selectedRecordName() { return findClass(container, "movie-kit-record").find((node) => node.getAttribute("class")?.includes("is-selected"))?.textContent ?? ""; }
 function click(node: TestNode) { node.dispatchEvent({ type: "click", bubbles: true }); }
+function choose(node: TestNode, value: string) { node.value = value; node.dispatchEvent({ type: "change", bubbles: true }); }
 function locationTab() { return findButtons(container).find((node) => node.getAttribute("role") === "tab" && node.textContent?.includes("movieBody.world.locations")); }
 
 beforeEach(() => {
@@ -207,6 +243,20 @@ describe("Production Kit workspace", () => {
     expect(source).not.toContain("promptName");
   });
 
+  it("does not preview a private world reference after its file is unavailable", async () => {
+    const workspaceId = "workspace-private-preview";
+    harness.api.getMovieCast.mockResolvedValue(workspaceCast(workspaceId));
+    harness.api.getMovieWorld.mockResolvedValue(workspaceWorldWithUnavailableReference(workspaceId));
+
+    await mount(workspaceId);
+    const tab = locationTab();
+    expect(tab).toBeDefined();
+    await act(async () => { click(tab!); await drain(); });
+
+    expect(findImages(container)).toHaveLength(0);
+    expect(container.textContent).toContain("assets.fileUnavailable");
+  });
+
   it("does not let a delayed previous-project load overwrite the newly selected project", async () => {
     const castA = deferred<MovieCast>();
     const worldA = deferred<MovieWorldWorkspace>();
@@ -226,6 +276,94 @@ describe("Production Kit workspace", () => {
 
     expect(container.textContent).toContain("workspace-b character");
     expect(container.textContent).not.toContain("workspace-a character");
+  });
+
+  it("hides a loaded project immediately and keeps it hidden when the next project's load fails", async () => {
+    const castB = deferred<MovieCast>();
+    const worldB = deferred<MovieWorldWorkspace>();
+    harness.api.getMovieCast.mockImplementation((id: string) => id === "workspace-b" ? castB.promise : Promise.resolve(workspaceCast(id)));
+    harness.api.getMovieWorld.mockImplementation((id: string) => id === "workspace-b" ? worldB.promise : Promise.resolve(workspaceWorld(id)));
+
+    await mount("workspace-a");
+    expect(container.textContent).toContain("workspace-a character");
+    await act(async () => { root?.render(<ProductionKitWorkspace projectId="workspace-b" />); await drain(); });
+    expect(container.textContent).not.toContain("workspace-a");
+    expect(container.textContent).toContain("movieBody.loading");
+
+    castB.reject(new Error("Project B could not be loaded."));
+    worldB.resolve(workspaceWorld("workspace-b"));
+    await act(async () => { await drain(); await drain(); });
+    expect(container.textContent).not.toContain("workspace-a");
+    expect(container.textContent).toContain("Project B could not be loaded.");
+    expect(findClass(container, "movie-kit-approve")).toHaveLength(0);
+  });
+
+  it("approves the selected character rather than reusing the previous character's detail", async () => {
+    const workspaceId = "workspace-selection";
+    const characterAId = `${workspaceId}-character-a`;
+    const characterBId = `${workspaceId}-character-b`;
+    const detailB = deferred<{ character: MovieCharacter }>();
+    harness.api.getMovieCast.mockResolvedValue(workspaceCastWithTwoCharacters(workspaceId));
+    harness.api.getMovieWorld.mockResolvedValue(workspaceWorld(workspaceId));
+    harness.api.getMovieCharacterDetail.mockImplementation((id: string) => id === characterAId
+      ? Promise.resolve({ character: workspaceCharacterDetail(workspaceId, characterAId, "Alpha canonical", `${workspaceId}-asset-a`) })
+      : detailB.promise);
+
+    await mount(workspaceId);
+    const bravo = findClass(container, "movie-kit-record").find((node) => node.textContent?.includes("Bravo"));
+    expect(bravo).toBeDefined();
+    await act(async () => { click(bravo!); await drain(); });
+    await act(async () => { click(findClass(container, "movie-kit-approve")[0]); await drain(); });
+    expect(selectedRecordName()).toContain("Bravo");
+
+    detailB.resolve({ character: workspaceCharacterDetail(workspaceId, characterBId, "Bravo canonical", `${workspaceId}-asset-b`) });
+    await act(async () => { await drain(); await drain(); await drain(); });
+    expect(harness.api.lockMovieCharacterFact).toHaveBeenCalledWith(characterBId, { fieldKey: "name", lockedValue: "Bravo canonical" });
+    expect(harness.api.lockMovieCharacterFact).not.toHaveBeenCalledWith(characterAId, expect.anything());
+  });
+
+  it("attaches a reference to the selected character rather than a previously loaded character", async () => {
+    const workspaceId = "workspace-reference-selection";
+    const characterAId = `${workspaceId}-character-a`;
+    const characterBId = `${workspaceId}-character-b`;
+    const detailB = deferred<{ character: MovieCharacter }>();
+    harness.api.getMovieCast.mockResolvedValue(workspaceCastWithTwoCharacters(workspaceId));
+    harness.api.getMovieWorld.mockResolvedValue(workspaceWorldWithImageAsset(workspaceId));
+    harness.api.getMovieCharacterDetail.mockImplementation((id: string) => id === characterAId
+      ? Promise.resolve({ character: workspaceCharacterDetail(workspaceId, characterAId, "Alpha canonical", `${workspaceId}-asset-a`) })
+      : detailB.promise);
+
+    await mount(workspaceId);
+    const bravo = findClass(container, "movie-kit-record").find((node) => node.textContent?.includes("Bravo"));
+    expect(bravo).toBeDefined();
+    await act(async () => { click(bravo!); await drain(); });
+    const imagePicker = findSelects(container)[0];
+    expect(imagePicker).toBeDefined();
+    await act(async () => { choose(imagePicker, "library-image"); await drain(); });
+
+    detailB.resolve({ character: workspaceCharacterDetail(workspaceId, characterBId, "Bravo canonical", `${workspaceId}-asset-b`) });
+    await act(async () => { await drain(); await drain(); await drain(); });
+    expect(harness.api.updateMovieCharacter).toHaveBeenCalledWith(characterBId, expect.objectContaining({ name: "Bravo canonical", referenceAssetIds: [`${workspaceId}-asset-b`, "library-image"] }));
+    expect(harness.api.updateMovieCharacter).not.toHaveBeenCalledWith(characterAId, expect.anything());
+  });
+
+  it("does not let a failed write response from the old project overwrite the new project", async () => {
+    const write = deferred<void>();
+    harness.api.getMovieCast.mockImplementation((id: string) => Promise.resolve(workspaceCast(id, 0)));
+    harness.api.getMovieWorld.mockImplementation((id: string) => Promise.resolve(workspaceWorld(id)));
+    harness.api.getMovieCharacterDetail.mockImplementation((id: string) => Promise.resolve({ character: workspaceDetail(id.replace(/-character$/, "")) }));
+    harness.api.lockMovieCharacterFact.mockReturnValue(write.promise);
+
+    await mount("workspace-write-a");
+    await act(async () => { click(findClass(container, "movie-kit-approve")[0]); await drain(); });
+    expect(harness.api.lockMovieCharacterFact).toHaveBeenCalledWith("workspace-write-a-character", expect.anything());
+    await act(async () => { root?.render(<ProductionKitWorkspace projectId="workspace-write-b" />); await drain(); await drain(); });
+    expect(container.textContent).toContain("workspace-write-b character");
+
+    write.reject(new Error("Stale project write failed."));
+    await act(async () => { await drain(); await drain(); });
+    expect(container.textContent).toContain("workspace-write-b character");
+    expect(container.textContent).not.toContain("Stale project write failed.");
   });
 
   it("keeps the selected location when a slower refresh from the previous room finishes", async () => {
