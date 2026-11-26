@@ -196,7 +196,18 @@ public sealed class ChatController(
             return;
         }
 
-        var laterUserMessageExists = await db.ChatMessages.AnyAsync(message =>
+        var requestId = request.RequestId.Trim();
+        var existingRequest = await db.ChatMessages.AsNoTracking().FirstOrDefaultAsync(message =>
+            message.ConversationId == conversationId && message.RequestId == requestId,
+            cancellationToken);
+        var existingRequestBelongsToTurn = await RequestBelongsToRegenerationTurnAsync(conversationId, assistant.Sequence, existingRequest, cancellationToken);
+        if (existingRequest is not null && !existingRequestBelongsToTurn)
+        {
+            await WriteEventAsync("message.failed", new { code = "REQUEST_ID_REUSED", message = "That regeneration request cannot be reused for a different response." }, cancellationToken);
+            return;
+        }
+
+        var laterUserMessageExists = !existingRequestBelongsToTurn && await db.ChatMessages.AnyAsync(message =>
             message.ConversationId == conversationId &&
             message.Role == ChatMessageRole.User &&
             message.Sequence > assistant.Sequence,
@@ -217,14 +228,15 @@ public sealed class ChatController(
             return;
         }
 
-        await StreamRegenerationAsync(conversation, sourceUser, request.RequestId.Trim(), cancellationToken);
+        await StreamRegenerationAsync(conversation, sourceUser, assistant.Sequence, requestId, cancellationToken);
     }
 
-    private async Task StreamRegenerationAsync(Conversation conversation, ChatMessage sourceUser, string requestId, CancellationToken cancellationToken)
+    private async Task StreamRegenerationAsync(Conversation conversation, ChatMessage sourceUser, long replacedAssistantSequence, string requestId, CancellationToken cancellationToken)
     {
         ChatMessage? assistant = null;
         UsageTransaction? usageTransaction = null;
         var persisted = false;
+        var isNewAssistantRow = false;
         try
         {
             var existing = await db.ChatMessages.FirstOrDefaultAsync(message => message.ConversationId == conversation.Id && message.RequestId == requestId, cancellationToken);
@@ -261,6 +273,23 @@ public sealed class ChatController(
             }
             else
             {
+                // Ordinary sends reserve their pair atomically. Reserve the regeneration slot with
+                // the same compare-and-swap order, then recheck admission: a send that won after
+                // the initial check must not leave this older turn's answer after the newer turn.
+                var assistantSequence = await ReserveNextMessageSequenceAsync(conversation.Id, cancellationToken);
+                var laterUserMessageExists = await db.ChatMessages.AnyAsync(message =>
+                    message.ConversationId == conversation.Id &&
+                    message.Role == ChatMessageRole.User &&
+                    message.Sequence > replacedAssistantSequence,
+                    cancellationToken);
+                if (laterUserMessageExists)
+                {
+                    await WriteEventAsync("message.failed", new { code = "MESSAGE_NOT_REGENERABLE", message = "Regenerate the latest response before continuing the conversation." }, cancellationToken);
+                    return;
+                }
+
+                conversation.NextMessageSequence = assistantSequence;
+                db.Entry(conversation).Property(item => item.NextMessageSequence).IsModified = false;
                 assistant = new ChatMessage
                 {
                     Id = Guid.NewGuid(),
@@ -270,13 +299,29 @@ public sealed class ChatController(
                     Content = string.Empty,
                     Status = ChatMessageStatus.Pending,
                     CreatedAt = DateTime.UtcNow,
-                    Sequence = ++conversation.NextMessageSequence,
+                    Sequence = assistantSequence,
                 };
                 db.ChatMessages.Add(assistant);
+                isNewAssistantRow = true;
             }
 
             conversation.UpdatedAt = DateTime.UtcNow;
-            await db.SaveChangesAsync(cancellationToken);
+            try
+            {
+                await db.SaveChangesAsync(cancellationToken);
+            }
+            catch (DbUpdateException) when (isNewAssistantRow)
+            {
+                // The unique request-ID index is the cross-process claim fence. Another request
+                // may have inserted the same ID after our lookup; report that persisted row's state
+                // instead of failing it as a provider error or trying to persist our losing row.
+                var winner = await db.ChatMessages.AsNoTracking()
+                    .FirstOrDefaultAsync(message => message.ConversationId == conversation.Id && message.RequestId == requestId, CancellationToken.None);
+                if (winner is null) throw;
+                if (assistant is not null) db.Entry(assistant).State = EntityState.Detached;
+                await WriteExistingRegenerationStateAsync(conversation, sourceUser, replacedAssistantSequence, winner, CancellationToken.None);
+                return;
+            }
             usageTransaction = await usageLedger.GetOrCreatePendingAsync(conversation.WorkspaceId, GetUserId(), conversation.ProjectId, conversation.Id, requestId, UsageFeature.Chat, cancellationToken);
             await WriteEventAsync("message.started", new { conversation = ToDto(conversation), userMessage = ToMessageDto(sourceUser), assistantMessage = ToMessageDto(assistant) }, cancellationToken);
 
@@ -300,6 +345,13 @@ public sealed class ChatController(
             if (usage is null) throw new AiGenerationException("AI response did not complete.");
             PersistRegenerationSuccess(conversation, assistant, new AiGenerationResult(content.ToString(), usage));
             await db.SaveChangesAsync(CancellationToken.None);
+            // This request loaded the conversation before generation began. Advance LastMessageAt
+            // with a database-side max so a later send committed during the stream cannot be
+            // overwritten by this stale tracked entity when regeneration completes.
+            await db.Conversations
+                .Where(item => item.Id == conversation.Id && (item.LastMessageAt == null || item.LastMessageAt < assistant.CreatedAt))
+                .ExecuteUpdateAsync(setters => setters.SetProperty(item => item.LastMessageAt, assistant.CreatedAt), CancellationToken.None);
+            await db.Entry(conversation).ReloadAsync(CancellationToken.None);
             await usageLedger.CompleteAsync(usageTransaction, usage, CancellationToken.None);
             persisted = true;
             await WriteEventAsync("message.completed", new SendMessageResponse(ToDto(conversation), ToMessageDto(sourceUser), ToMessageDto(assistant, usage.IsTestResponse)), cancellationToken);
@@ -323,6 +375,42 @@ public sealed class ChatController(
             }
             try { await WriteEventAsync("message.failed", new { code = "AI_GENERATION_FAILED", message = "Taslim could not regenerate a response right now." }, CancellationToken.None); } catch { /* client disconnected */ }
         }
+    }
+
+    private async Task<bool> RequestBelongsToRegenerationTurnAsync(Guid conversationId, long replacedAssistantSequence, ChatMessage? requestRow, CancellationToken cancellationToken)
+    {
+        if (requestRow is null || requestRow.Role != ChatMessageRole.Assistant || requestRow.Sequence <= replacedAssistantSequence) return false;
+        // A completed/failed retry may follow a later user turn, but no user row may separate the
+        // requested assistant from the claimed regeneration row.
+        return !await db.ChatMessages.AnyAsync(message =>
+            message.ConversationId == conversationId &&
+            message.Role == ChatMessageRole.User &&
+            message.Sequence > replacedAssistantSequence &&
+            message.Sequence < requestRow.Sequence,
+            cancellationToken);
+    }
+
+    private async Task WriteExistingRegenerationStateAsync(Conversation conversation, ChatMessage sourceUser, long replacedAssistantSequence, ChatMessage existing, CancellationToken cancellationToken)
+    {
+        if (!await RequestBelongsToRegenerationTurnAsync(conversation.Id, replacedAssistantSequence, existing, cancellationToken))
+        {
+            await WriteEventAsync("message.failed", new { code = "REQUEST_ID_REUSED", message = "That regeneration request cannot be reused for a different response." }, cancellationToken);
+            return;
+        }
+        if (existing.Status == ChatMessageStatus.Completed)
+        {
+            var completed = new SendMessageResponse(ToDto(conversation), ToMessageDto(sourceUser), ToMessageDto(existing, string.Equals(existing.ProviderKey, "mock", StringComparison.OrdinalIgnoreCase)));
+            await WriteEventAsync("message.started", new { conversation = completed.Conversation, userMessage = completed.UserMessage, assistantMessage = completed.AssistantMessage }, cancellationToken);
+            await WriteEventAsync("message.delta", new { messageId = completed.AssistantMessage.Id, delta = completed.AssistantMessage.Content }, cancellationToken);
+            await WriteEventAsync("message.completed", completed, cancellationToken);
+            return;
+        }
+        if (existing.Status == ChatMessageStatus.Pending)
+        {
+            await WriteEventAsync("message.failed", new { code = "MESSAGE_IN_PROGRESS", message = "That regeneration is already in progress." }, cancellationToken);
+            return;
+        }
+        await WriteEventAsync("message.failed", new { code = "AI_GENERATION_FAILED", message = "The existing regeneration failed; retry it using the same request ID." }, cancellationToken);
     }
 
     [HttpPost("conversations/{conversationId:guid}/messages")]
@@ -580,31 +668,61 @@ public sealed class ChatController(
         return PreparedChat.New(conversation, userMessage, assistantMessage);
     }
 
-    private async Task<AiChatRequest> BuildContextAsync(Conversation conversation, Guid currentMessageId, CancellationToken cancellationToken, long? excludedAssistantAfterSequence = null)
+    private async Task<AiChatRequest> BuildContextAsync(Conversation conversation, Guid currentMessageId, CancellationToken cancellationToken, long? includedThroughSequence = null)
     {
         var history = await db.ChatMessages.AsNoTracking()
             .Where(message => message.ConversationId == conversation.Id
                 && (message.Role == ChatMessageRole.User || message.Role == ChatMessageRole.Assistant)
                 && message.Status == ChatMessageStatus.Completed
-                && (excludedAssistantAfterSequence == null
-                    || message.Role != ChatMessageRole.Assistant
-                    || message.Sequence <= excludedAssistantAfterSequence.Value))
+                && (includedThroughSequence == null || message.Sequence <= includedThroughSequence.Value))
             .OrderBy(message => message.Sequence)
             .ThenBy(message => message.CreatedAt)
             .ThenBy(message => message.Id)
-            .Select(message => new AiChatMessage(message.Role.ToString().ToLowerInvariant(), message.Content))
+            .Select(message => new
+            {
+                Role = message.Role.ToString().ToLowerInvariant(),
+                message.Content,
+                message.CreatedAt,
+            })
             .ToListAsync(cancellationToken);
-        // docs/CHAT_ARCHITECTURE.md: a regeneration keeps the response it replaces as a completed
-        // transcript row, but only the newest assistant answer of a user turn is live, so a run of
-        // adjacent assistant rows means every row but the last one was superseded. The transcript
-        // is never edited here, and the ordering above is the only thing that tells a superseded
-        // response from a plain user/assistant pair. Without this filter the answer the user
-        // rejected is replayed into every later turn's context, and the surviving replacement is
-        // replayed beside it as a duplicate second assistant answer to the same user message.
-        for (var index = history.Count - 2; index >= 0; index--)
+        // New writes serialize send pairs and regeneration slots, so an assistant run normally
+        // means repeated answers to one user turn. The legacy ordering migration can place multiple
+        // same-timestamp users before later assistants without a turn link; preserve the next
+        // assistant run rather than guessing which legacy answer belongs to which user.
+        var usersByTimestampSinceAssistantRun = new Dictionary<DateTime, int>();
+        var ambiguousUsersPendingAssistantRun = false;
+        var retainedCount = 0;
+        for (var readIndex = 0; readIndex < history.Count;)
         {
-            if (history[index].Role == "assistant" && history[index + 1].Role == "assistant") history.RemoveAt(index);
+            var message = history[readIndex];
+            if (message.Role == "user")
+            {
+                history[retainedCount++] = message;
+                var sameTimestampUserCount = usersByTimestampSinceAssistantRun.GetValueOrDefault(message.CreatedAt) + 1;
+                usersByTimestampSinceAssistantRun[message.CreatedAt] = sameTimestampUserCount;
+                if (sameTimestampUserCount > 1) ambiguousUsersPendingAssistantRun = true;
+                readIndex++;
+                continue;
+            }
+
+            var runEnd = readIndex + 1;
+            while (runEnd < history.Count && history[runEnd].Role == "assistant") runEnd++;
+            if (ambiguousUsersPendingAssistantRun)
+            {
+                for (var runIndex = readIndex; runIndex < runEnd; runIndex++) history[retainedCount++] = history[runIndex];
+            }
+            else
+            {
+                // Keep the newest answer in each unambiguous adjacent assistant run. Compaction
+                // overwrites in place and removes one tail range, so work is O(n), even for long
+                // regeneration chains.
+                history[retainedCount++] = history[runEnd - 1];
+            }
+            readIndex = runEnd;
+            ambiguousUsersPendingAssistantRun = false;
+            usersByTimestampSinceAssistantRun.Clear();
         }
+        if (retainedCount < history.Count) history.RemoveRange(retainedCount, history.Count - retainedCount);
         var project = conversation.ProjectId is null
             ? null
             : await db.Projects.AsNoTracking()
@@ -723,7 +841,7 @@ public sealed class ChatController(
         }
         var attachmentCharacters = fileContexts.Sum(file => file.ExtractedText?.Length ?? 0);
         logger.LogInformation("Chat attachment context prepared. ConversationId={ConversationId}; MessageId={MessageId}; AttachmentCount={AttachmentCount}; ContextIncluded={ContextIncluded}; AttachmentContextCharacterCount={AttachmentContextCharacterCount}; AttachmentContextTokenEstimate={AttachmentContextTokenEstimate}", conversation.Id, currentMessageId, files.Count, fileContexts.Count > 0, attachmentCharacters, (attachmentCharacters + 3) / 4);
-        return contextBuilder.Build(history, project?.Instructions, project?.ContextNotes, memories, fileContexts);
+        return contextBuilder.Build(history.Select(message => new AiChatMessage(message.Role, message.Content)).ToList(), project?.Instructions, project?.ContextNotes, memories, fileContexts);
     }
 
     private async Task<IActionResult?> AttachFilesAsync(Conversation conversation, ChatMessage message, IReadOnlyCollection<Guid>? requestedIds, CancellationToken cancellationToken)
@@ -782,7 +900,6 @@ public sealed class ChatController(
         assistant.LatencyMs = result.Usage.LatencyMs;
         assistant.FinishReason = result.Usage.FinishReason;
         conversation.UpdatedAt = DateTime.UtcNow;
-        conversation.LastMessageAt = assistant.CreatedAt;
     }
 
     private static void ResetAssistantForRetry(ChatMessage assistant)
@@ -808,6 +925,29 @@ public sealed class ChatController(
             .Where(message => message.Id == assistantId && message.Role == ChatMessageRole.Assistant && message.Status == ChatMessageStatus.Failed)
             .ExecuteUpdateAsync(setters => setters.SetProperty(message => message.Status, ChatMessageStatus.Pending), cancellationToken);
         return updated == 1;
+    }
+
+    private async Task<long> ReserveNextMessageSequenceAsync(Guid conversationId, CancellationToken cancellationToken)
+    {
+        // Serialize a single regeneration slot with ordinary two-row send reservations. Sequence
+        // gaps are harmless; the key is monotonic ordering, not a dense count of transcript rows.
+        const int maxAttempts = 64;
+        for (var attempt = 0; attempt < maxAttempts; attempt++)
+        {
+            var current = await db.Conversations.AsNoTracking()
+                .Where(item => item.Id == conversationId)
+                .Select(item => item.NextMessageSequence)
+                .SingleAsync(cancellationToken);
+            var nextSequence = current + 1;
+            var updated = await db.Conversations
+                .Where(item => item.Id == conversationId && item.NextMessageSequence == current)
+                .ExecuteUpdateAsync(setters => setters.SetProperty(item => item.NextMessageSequence, nextSequence), cancellationToken);
+            if (updated == 1) return nextSequence;
+
+            await Task.Delay(TimeSpan.FromMilliseconds(Math.Min(25, attempt + 1)), cancellationToken);
+        }
+
+        throw new InvalidOperationException($"Could not reserve conversation message sequence after {maxAttempts} attempts.");
     }
 
     private async Task<long> ReserveMessageSequencePairAsync(Guid conversationId, CancellationToken cancellationToken)

@@ -1,12 +1,14 @@
 using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
+using System.Data.Common;
 using System.Runtime.CompilerServices;
 using System.Text.Json;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Diagnostics;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Taslim.Api.Ai;
@@ -136,6 +138,427 @@ public sealed class SupersededRegenerationStreamContextQaTests : IClassFixture<S
             transcript.Select(message => message.Content).ToArray());
     }
 
+    [Fact]
+    public async Task Concurrent_send_that_wins_after_regeneration_admission_prevents_misordered_regeneration()
+    {
+        using var client = factory.CreateClient();
+        var auth = await Register(client, "Send Wins Regeneration Race Owner");
+        var conversation = await CreateConversation(client, auth.PersonalWorkspace.Id);
+        var firstTurn = await SendWithCsrf<SendMessageResponse>(client, HttpMethod.Post, $"/api/conversations/{conversation.Id}/messages", new
+        {
+            content = "STREAMQA_RACE_FIRST_USER",
+            requestId = Guid.NewGuid().ToString("N"),
+        });
+
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            var originalAssistant = await db.ChatMessages.SingleAsync(message => message.Id == firstTurn.AssistantMessage.Id);
+            originalAssistant.Content = "STREAMQA_RACE_ORIGINAL_ASSISTANT";
+            await db.SaveChangesAsync();
+        }
+
+        var recorder = factory.Services.GetRequiredService<StreamQaRecordingChatCompletionService>();
+        var providerCallsBeforeRace = recorder.CallCount;
+        var gate = factory.Services.GetRequiredService<StreamQaInterleavingGate>();
+        gate.ArmSequenceReservation();
+        var regenerationRequestId = Guid.NewGuid().ToString("N");
+        var regenerationTask = SendWithCsrf(client, HttpMethod.Post,
+            $"/api/conversations/{conversation.Id}/messages/{firstTurn.AssistantMessage.Id}/regenerate",
+            new { requestId = regenerationRequestId });
+        try
+        {
+            await gate.WaitForSequenceReservationAsync(TimeSpan.FromSeconds(10));
+            var overlappingSend = await SendWithCsrf<SendMessageResponse>(client, HttpMethod.Post,
+                $"/api/conversations/{conversation.Id}/messages",
+                new { content = StreamQaRecordingChatCompletionService.OverlappingSendUser, requestId = Guid.NewGuid().ToString("N") });
+            Assert.Equal(StreamQaRecordingChatCompletionService.OverlappingSendUser, overlappingSend.UserMessage.Content);
+        }
+        finally
+        {
+            gate.ReleaseSequenceReservation();
+        }
+
+        using var regeneration = await regenerationTask;
+        var regenerationBody = await regeneration.Content.ReadAsStringAsync();
+        Assert.Equal(HttpStatusCode.OK, regeneration.StatusCode);
+        Assert.Contains("MESSAGE_NOT_REGENERABLE", regenerationBody, StringComparison.Ordinal);
+        Assert.DoesNotContain("message.completed", regenerationBody, StringComparison.Ordinal);
+        Assert.Equal(providerCallsBeforeRace + 1, recorder.CallCount); // Only the overlapping send reaches the fake provider; stale regeneration does not.
+
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            var transcript = await db.ChatMessages.AsNoTracking()
+                .Where(message => message.ConversationId == conversation.Id)
+                .OrderBy(message => message.Sequence)
+                .ToListAsync();
+            Assert.Equal(new long[] { 1, 2, 3, 4 }, transcript.Select(message => message.Sequence).ToArray());
+            Assert.DoesNotContain(transcript, message => message.RequestId == regenerationRequestId);
+            Assert.Contains(transcript, message => message.Content == "STREAMQA_RACE_ORIGINAL_ASSISTANT");
+        }
+
+        await SendMessage(client, conversation.Id, "STREAMQA_AFTER_REJECTED_REGEN_USER");
+        var laterPrompt = recorder.LastRequest!.Messages.ToArray();
+        Assert.Contains(laterPrompt, message => message.Content == "STREAMQA_RACE_ORIGINAL_ASSISTANT");
+        Assert.Contains(laterPrompt, message => message.Content == StreamQaRecordingChatCompletionService.OverlappingSendAnswer);
+        Assert.Equal(2, laterPrompt.Count(message => message.Role == "assistant"));
+    }
+
+    [Fact]
+    public async Task Concurrent_send_after_regeneration_reservation_is_excluded_from_regeneration_prompt()
+    {
+        using var client = factory.CreateClient();
+        var auth = await Register(client, "Regeneration Wins Send Race Owner");
+        var conversation = await CreateConversation(client, auth.PersonalWorkspace.Id);
+        var firstTurn = await SendWithCsrf<SendMessageResponse>(client, HttpMethod.Post, $"/api/conversations/{conversation.Id}/messages", new
+        {
+            content = "STREAMQA_RESERVED_FIRST_USER",
+            requestId = Guid.NewGuid().ToString("N"),
+        });
+
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            var originalAssistant = await db.ChatMessages.SingleAsync(message => message.Id == firstTurn.AssistantMessage.Id);
+            originalAssistant.Content = "STREAMQA_RESERVED_ORIGINAL_ASSISTANT";
+            await db.SaveChangesAsync();
+        }
+
+        var recorder = factory.Services.GetRequiredService<StreamQaRecordingChatCompletionService>();
+        var gate = factory.Services.GetRequiredService<StreamQaInterleavingGate>();
+        gate.ArmContextRead();
+        var regenerationTask = SendWithCsrf(client, HttpMethod.Post,
+            $"/api/conversations/{conversation.Id}/messages/{firstTurn.AssistantMessage.Id}/regenerate",
+            new { requestId = Guid.NewGuid().ToString("N") });
+        try
+        {
+            await gate.WaitForContextReadAsync(TimeSpan.FromSeconds(10));
+            var overlappingSend = await SendWithCsrf<SendMessageResponse>(client, HttpMethod.Post,
+                $"/api/conversations/{conversation.Id}/messages",
+                new { content = StreamQaRecordingChatCompletionService.OverlappingSendUser, requestId = Guid.NewGuid().ToString("N") });
+            Assert.Equal(StreamQaRecordingChatCompletionService.OverlappingSendUser, overlappingSend.UserMessage.Content);
+        }
+        finally
+        {
+            gate.ReleaseContextRead();
+        }
+
+        using var regeneration = await regenerationTask;
+        var regenerationBody = await regeneration.Content.ReadAsStringAsync();
+        Assert.Equal(HttpStatusCode.OK, regeneration.StatusCode);
+        Assert.Contains("message.completed", regenerationBody, StringComparison.Ordinal);
+        var regenerationPrompt = recorder.LastRequest!.Messages.ToArray();
+        Assert.Contains(regenerationPrompt, message => message.Content == "STREAMQA_RESERVED_FIRST_USER");
+        Assert.DoesNotContain(regenerationPrompt, message => message.Content == StreamQaRecordingChatCompletionService.OverlappingSendUser);
+        Assert.DoesNotContain(regenerationPrompt, message => message.Content == StreamQaRecordingChatCompletionService.OverlappingSendAnswer);
+
+        await SendMessage(client, conversation.Id, "STREAMQA_AFTER_SUCCESSFUL_RACE_USER");
+        var laterPrompt = recorder.LastRequest!.Messages.ToArray();
+        Assert.DoesNotContain(laterPrompt, message => message.Content == "STREAMQA_RESERVED_ORIGINAL_ASSISTANT");
+        Assert.Contains(laterPrompt, message => message.Content == StreamQaRecordingChatCompletionService.ReplacementContent);
+        Assert.Contains(laterPrompt, message => message.Content == StreamQaRecordingChatCompletionService.OverlappingSendAnswer);
+        Assert.Equal(2, laterPrompt.Count(message => message.Role == "assistant"));
+    }
+
+    [Fact]
+    public async Task Concurrent_regeneration_with_same_request_id_returns_the_winning_pending_state()
+    {
+        using var client = factory.CreateClient();
+        var auth = await Register(client, "Duplicate Regeneration Request Owner");
+        var conversation = await CreateConversation(client, auth.PersonalWorkspace.Id);
+        var firstTurn = await SendMessage(client, conversation.Id, "STREAMQA_DUPLICATE_REQUEST_SOURCE");
+        var recorder = factory.Services.GetRequiredService<StreamQaRecordingChatCompletionService>();
+        var providerCallsBeforeRace = recorder.CallCount;
+        var gate = factory.Services.GetRequiredService<StreamQaSaveChangesGate>();
+        var requestId = Guid.NewGuid().ToString("N");
+        gate.ArmRequestIdInsertBarrier(requestId);
+        recorder.ArmStreamBarrier();
+
+        var firstRequest = SendWithCsrf(client, HttpMethod.Post,
+            $"/api/conversations/{conversation.Id}/messages/{firstTurn.AssistantMessage.Id}/regenerate",
+            new { requestId });
+        Task<HttpResponseMessage>? secondRequest = null;
+        try
+        {
+            await gate.WaitForFirstRequestIdInsertAsync(TimeSpan.FromSeconds(10));
+            secondRequest = SendWithCsrf(client, HttpMethod.Post,
+                $"/api/conversations/{conversation.Id}/messages/{firstTurn.AssistantMessage.Id}/regenerate",
+                new { requestId });
+            await gate.WaitForSecondRequestIdInsertAsync(TimeSpan.FromSeconds(10));
+
+            gate.ReleaseFirstRequestIdInsert();
+            await recorder.WaitForStreamStartAsync(TimeSpan.FromSeconds(10));
+            gate.ReleaseSecondRequestIdInsert();
+
+            using var competingResponse = await secondRequest!;
+            var competingBody = await competingResponse.Content.ReadAsStringAsync();
+            Assert.Contains("MESSAGE_IN_PROGRESS", competingBody, StringComparison.Ordinal);
+            Assert.DoesNotContain("AI_GENERATION_FAILED", competingBody, StringComparison.Ordinal);
+            Assert.DoesNotContain("message.completed", competingBody, StringComparison.Ordinal);
+
+            recorder.ReleaseStream();
+            using var winningResponse = await firstRequest;
+            Assert.Contains("message.completed", await winningResponse.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+            Assert.Equal(providerCallsBeforeRace + 1, recorder.CallCount);
+
+            using var scope = factory.Services.CreateScope();
+            var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            var claimedRows = await db.ChatMessages.AsNoTracking()
+                .Where(message => message.ConversationId == conversation.Id && message.RequestId == requestId)
+                .ToListAsync();
+            var claimedRow = Assert.Single(claimedRows);
+            Assert.Equal(ChatMessageStatus.Completed, claimedRow.Status);
+            Assert.Equal(firstTurn.AssistantMessage.Sequence + 1, claimedRow.Sequence);
+        }
+        finally
+        {
+            gate.ReleaseFirstRequestIdInsert();
+            gate.ReleaseSecondRequestIdInsert();
+            recorder.ReleaseStream();
+        }
+    }
+
+    [Fact]
+    public async Task Failed_regeneration_retry_reuses_its_sequence_without_overwriting_a_later_turn_timestamp()
+    {
+        using var client = factory.CreateClient();
+        var auth = await Register(client, "Regeneration Retry Owner");
+        var conversation = await CreateConversation(client, auth.PersonalWorkspace.Id);
+        var firstTurn = await SendWithCsrf<SendMessageResponse>(client, HttpMethod.Post, $"/api/conversations/{conversation.Id}/messages", new
+        {
+            content = "STREAMQA_RETRY_SOURCE_USER",
+            requestId = Guid.NewGuid().ToString("N"),
+        });
+
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            var originalAssistant = await db.ChatMessages.SingleAsync(message => message.Id == firstTurn.AssistantMessage.Id);
+            originalAssistant.Content = "STREAMQA_RETRY_SUPERSEDED_ASSISTANT";
+            await db.SaveChangesAsync();
+        }
+
+        var recorder = factory.Services.GetRequiredService<StreamQaRecordingChatCompletionService>();
+        recorder.FailNextStream = true;
+        var regenerationRequestId = Guid.NewGuid().ToString("N");
+        using var failedAttempt = await SendWithCsrf(client, HttpMethod.Post,
+            $"/api/conversations/{conversation.Id}/messages/{firstTurn.AssistantMessage.Id}/regenerate",
+            new { requestId = regenerationRequestId });
+        Assert.Contains("message.failed", await failedAttempt.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+
+        long failedSequence;
+        DateTime failedCreatedAt;
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            var failedRow = await db.ChatMessages.SingleAsync(message => message.ConversationId == conversation.Id && message.RequestId == regenerationRequestId);
+            Assert.Equal(ChatMessageStatus.Failed, failedRow.Status);
+            failedSequence = failedRow.Sequence;
+            failedCreatedAt = failedRow.CreatedAt;
+            Assert.Equal(firstTurn.AssistantMessage.Sequence + 1, failedSequence);
+        }
+
+        // Pause the retry after it has loaded the conversation and built its source-bounded
+        // prompt. A synthetic ordinary turn then commits a later LastMessageAt before the retry
+        // saves its stale tracked Conversation entity.
+        var providerCallsBeforeRetry = recorder.CallCount;
+        recorder.ArmStreamBarrier();
+        var retryTask = SendWithCsrf(client, HttpMethod.Post,
+            $"/api/conversations/{conversation.Id}/messages/{firstTurn.AssistantMessage.Id}/regenerate",
+            new { requestId = regenerationRequestId });
+        DateTime? lastMessageAtAfterLaterTurn = null;
+        try
+        {
+            await recorder.WaitForStreamStartAsync(TimeSpan.FromSeconds(10));
+            using var scope = factory.Services.CreateScope();
+            var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            var entity = await db.Conversations.SingleAsync(item => item.Id == conversation.Id);
+            var laterUserCreatedAt = failedCreatedAt.AddMinutes(1);
+            var laterAssistantCreatedAt = laterUserCreatedAt.AddTicks(1);
+            db.ChatMessages.AddRange(
+                new ChatMessage { Id = Guid.NewGuid(), ConversationId = conversation.Id, Role = ChatMessageRole.User, Content = "STREAMQA_RETRY_LATER_USER", Status = ChatMessageStatus.Completed, CreatedAt = laterUserCreatedAt, Sequence = failedSequence + 1, RequestId = Guid.NewGuid().ToString("N") },
+                new ChatMessage { Id = Guid.NewGuid(), ConversationId = conversation.Id, Role = ChatMessageRole.Assistant, Content = "STREAMQA_RETRY_LATER_ASSISTANT", Status = ChatMessageStatus.Completed, CreatedAt = laterAssistantCreatedAt, Sequence = failedSequence + 2 });
+            entity.NextMessageSequence = failedSequence + 2;
+            entity.LastMessageAt = laterAssistantCreatedAt;
+            await db.SaveChangesAsync();
+            lastMessageAtAfterLaterTurn = entity.LastMessageAt;
+        }
+        finally
+        {
+            recorder.ReleaseStream();
+        }
+        Assert.NotNull(lastMessageAtAfterLaterTurn);
+        using var retriedAttempt = await retryTask;
+        var retryBody = await retriedAttempt.Content.ReadAsStringAsync();
+        Assert.Contains("message.completed", retryBody, StringComparison.Ordinal);
+        Assert.Equal(providerCallsBeforeRetry + 1, recorder.CallCount);
+        var retryPrompt = recorder.LastRequest!.Messages.ToArray();
+        Assert.Contains(retryPrompt, message => message.Content == "STREAMQA_RETRY_SOURCE_USER");
+        Assert.DoesNotContain(retryPrompt, message => message.Content == "STREAMQA_RETRY_LATER_USER");
+        Assert.DoesNotContain(retryPrompt, message => message.Content == "STREAMQA_RETRY_SUPERSEDED_ASSISTANT");
+
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            var retriedRow = await db.ChatMessages.SingleAsync(message => message.ConversationId == conversation.Id && message.RequestId == regenerationRequestId);
+            Assert.Equal(ChatMessageStatus.Completed, retriedRow.Status);
+            Assert.Equal(failedSequence, retriedRow.Sequence);
+            var retriedConversation = await db.Conversations.AsNoTracking().SingleAsync(item => item.Id == conversation.Id);
+            Assert.Equal(lastMessageAtAfterLaterTurn, retriedConversation.LastMessageAt);
+        }
+
+        var providerCallsBeforeReplay = recorder.CallCount;
+        using var replayedAttempt = await SendWithCsrf(client, HttpMethod.Post,
+            $"/api/conversations/{conversation.Id}/messages/{firstTurn.AssistantMessage.Id}/regenerate",
+            new { requestId = regenerationRequestId });
+        Assert.Contains("message.completed", await replayedAttempt.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+        Assert.Equal(providerCallsBeforeReplay, recorder.CallCount);
+
+        await SendMessage(client, conversation.Id, "STREAMQA_AFTER_RETRY_USER");
+        var laterPrompt = recorder.LastRequest!.Messages.ToArray();
+        Assert.DoesNotContain(laterPrompt, message => message.Content == "STREAMQA_RETRY_SUPERSEDED_ASSISTANT");
+        Assert.Contains(laterPrompt, message => message.Content == StreamQaRecordingChatCompletionService.ReplacementContent);
+        Assert.Contains(laterPrompt, message => message.Content == "STREAMQA_RETRY_LATER_ASSISTANT");
+        Assert.Equal(2, laterPrompt.Count(message => message.Role == "assistant"));
+    }
+
+    [Fact]
+    public async Task Completed_regeneration_request_id_cannot_be_replayed_for_a_different_turn()
+    {
+        using var client = factory.CreateClient();
+        var auth = await Register(client, "Regeneration Request ID Scope Owner");
+        var conversation = await CreateConversation(client, auth.PersonalWorkspace.Id);
+        var firstTurn = await SendMessage(client, conversation.Id, "REQUEST_SCOPE_FIRST_USER");
+        var secondTurn = await SendMessage(client, conversation.Id, "REQUEST_SCOPE_SECOND_USER");
+        var recorder = factory.Services.GetRequiredService<StreamQaRecordingChatCompletionService>();
+        var laterTurnRequestId = Guid.NewGuid().ToString("N");
+
+        using var laterTurnRegeneration = await SendWithCsrf(client, HttpMethod.Post,
+            $"/api/conversations/{conversation.Id}/messages/{secondTurn.AssistantMessage.Id}/regenerate",
+            new { requestId = laterTurnRequestId });
+        Assert.Contains("message.completed", await laterTurnRegeneration.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+        var providerCallsAfterValidRequest = recorder.CallCount;
+
+        using var wrongTurnReplay = await SendWithCsrf(client, HttpMethod.Post,
+            $"/api/conversations/{conversation.Id}/messages/{firstTurn.AssistantMessage.Id}/regenerate",
+            new { requestId = laterTurnRequestId });
+        var wrongTurnBody = await wrongTurnReplay.Content.ReadAsStringAsync();
+        Assert.Contains("REQUEST_ID_REUSED", wrongTurnBody, StringComparison.Ordinal);
+        Assert.DoesNotContain("message.completed", wrongTurnBody, StringComparison.Ordinal);
+        Assert.Equal(providerCallsAfterValidRequest, recorder.CallCount);
+    }
+
+    [Fact]
+    public async Task Equal_timestamp_legacy_backfill_preserves_ambiguous_assistant_runs()
+    {
+        using var client = factory.CreateClient();
+        var auth = await Register(client, "Legacy Timestamp Ordering Owner");
+        var conversation = await CreateConversation(client, auth.PersonalWorkspace.Id);
+        var legacyTimestamp = new DateTime(2026, 11, 26, 19, 0, 0, DateTimeKind.Utc);
+
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            var entity = await db.Conversations.SingleAsync(item => item.Id == conversation.Id);
+            entity.NextMessageSequence = 4;
+            db.ChatMessages.AddRange(
+                new ChatMessage { Id = Guid.NewGuid(), ConversationId = conversation.Id, Role = ChatMessageRole.User, Content = "LEGACY_FIRST_USER", Status = ChatMessageStatus.Completed, CreatedAt = legacyTimestamp, Sequence = 1, RequestId = Guid.NewGuid().ToString("N") },
+                new ChatMessage { Id = Guid.NewGuid(), ConversationId = conversation.Id, Role = ChatMessageRole.User, Content = "LEGACY_SECOND_USER", Status = ChatMessageStatus.Completed, CreatedAt = legacyTimestamp, Sequence = 2, RequestId = Guid.NewGuid().ToString("N") },
+                new ChatMessage { Id = Guid.NewGuid(), ConversationId = conversation.Id, Role = ChatMessageRole.Assistant, Content = "LEGACY_FIRST_ASSISTANT", Status = ChatMessageStatus.Completed, CreatedAt = legacyTimestamp.AddSeconds(1), Sequence = 3 },
+                new ChatMessage { Id = Guid.NewGuid(), ConversationId = conversation.Id, Role = ChatMessageRole.Assistant, Content = "LEGACY_SECOND_ASSISTANT", Status = ChatMessageStatus.Completed, CreatedAt = legacyTimestamp.AddSeconds(2), Sequence = 4 });
+            await db.SaveChangesAsync();
+        }
+
+        // This is a semantically ambiguous migration shape: two old users share CreatedAt, so the
+        // old schema cannot pair them reliably with the later assistant rows, even after timestamps advance.
+        await SendMessage(client, conversation.Id, "LEGACY_LATER_USER");
+        var prompt = factory.Services.GetRequiredService<StreamQaRecordingChatCompletionService>().LastRequest!.Messages.ToArray();
+        Assert.Contains(prompt, message => message.Content == "LEGACY_FIRST_ASSISTANT");
+        Assert.Contains(prompt, message => message.Content == "LEGACY_SECOND_ASSISTANT");
+        Assert.Equal(2, prompt.Count(message => message.Role == "assistant"));
+    }
+
+    [Fact]
+    public async Task Equal_timestamp_users_in_separate_sequence_ordered_turns_do_not_retain_superseded_answers()
+    {
+        using var client = factory.CreateClient();
+        var auth = await Register(client, "Sequence Ordered Timestamp Owner");
+        var conversation = await CreateConversation(client, auth.PersonalWorkspace.Id);
+        var sharedUserTimestamp = new DateTime(2026, 11, 26, 17, 0, 0, DateTimeKind.Utc);
+        var secondAssistantId = Guid.NewGuid();
+
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            var entity = await db.Conversations.SingleAsync(item => item.Id == conversation.Id);
+            entity.NextMessageSequence = 4;
+            db.ChatMessages.AddRange(
+                new ChatMessage { Id = Guid.NewGuid(), ConversationId = conversation.Id, Role = ChatMessageRole.User, Content = "SEQUENCE_FIRST_USER", Status = ChatMessageStatus.Completed, CreatedAt = sharedUserTimestamp, Sequence = 1, RequestId = Guid.NewGuid().ToString("N") },
+                new ChatMessage { Id = Guid.NewGuid(), ConversationId = conversation.Id, Role = ChatMessageRole.Assistant, Content = "SEQUENCE_FIRST_ASSISTANT", Status = ChatMessageStatus.Completed, CreatedAt = sharedUserTimestamp.AddTicks(1), Sequence = 2 },
+                new ChatMessage { Id = Guid.NewGuid(), ConversationId = conversation.Id, Role = ChatMessageRole.User, Content = "SEQUENCE_SECOND_USER", Status = ChatMessageStatus.Completed, CreatedAt = sharedUserTimestamp, Sequence = 3, RequestId = Guid.NewGuid().ToString("N") },
+                new ChatMessage { Id = secondAssistantId, ConversationId = conversation.Id, Role = ChatMessageRole.Assistant, Content = "SEQUENCE_SECOND_SUPERSEDED_ASSISTANT", Status = ChatMessageStatus.Completed, CreatedAt = sharedUserTimestamp.AddTicks(1), Sequence = 4 });
+            await db.SaveChangesAsync();
+        }
+
+        using var regeneration = await SendWithCsrf(client, HttpMethod.Post,
+            $"/api/conversations/{conversation.Id}/messages/{secondAssistantId}/regenerate",
+            new { requestId = Guid.NewGuid().ToString("N") });
+        Assert.Contains("message.completed", await regeneration.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+
+        await SendMessage(client, conversation.Id, "SEQUENCE_LATER_USER");
+        var prompt = factory.Services.GetRequiredService<StreamQaRecordingChatCompletionService>().LastRequest!.Messages.ToArray();
+        Assert.DoesNotContain(prompt, message => message.Content == "SEQUENCE_SECOND_SUPERSEDED_ASSISTANT");
+        Assert.Contains(prompt, message => message.Content == StreamQaRecordingChatCompletionService.ReplacementContent);
+        Assert.Contains(prompt, message => message.Content == "SEQUENCE_FIRST_ASSISTANT");
+        Assert.Equal(2, prompt.Count(message => message.Role == "assistant"));
+    }
+
+    [Fact]
+    public async Task Long_unambiguous_regeneration_chain_compacts_to_one_assistant_answer()
+    {
+        using var client = factory.CreateClient();
+        var auth = await Register(client, "Long Regeneration Chain Owner");
+        var conversation = await CreateConversation(client, auth.PersonalWorkspace.Id);
+        const int supersededAnswerCount = 2048;
+        var firstCreatedAt = new DateTime(2026, 11, 26, 18, 0, 0, DateTimeKind.Utc);
+
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            var entity = await db.Conversations.SingleAsync(item => item.Id == conversation.Id);
+            entity.NextMessageSequence = supersededAnswerCount + 1;
+            db.ChatMessages.Add(new ChatMessage
+            {
+                Id = Guid.NewGuid(),
+                ConversationId = conversation.Id,
+                Role = ChatMessageRole.User,
+                Content = "LONG_CHAIN_SOURCE_USER",
+                Status = ChatMessageStatus.Completed,
+                CreatedAt = firstCreatedAt,
+                Sequence = 1,
+                RequestId = Guid.NewGuid().ToString("N"),
+            });
+            db.ChatMessages.AddRange(Enumerable.Range(0, supersededAnswerCount).Select(index => new ChatMessage
+            {
+                Id = Guid.NewGuid(),
+                ConversationId = conversation.Id,
+                Role = ChatMessageRole.Assistant,
+                Content = $"LONG_CHAIN_ANSWER_{index:D4}",
+                Status = ChatMessageStatus.Completed,
+                CreatedAt = firstCreatedAt.AddTicks(index + 1),
+                Sequence = index + 2,
+            }));
+            await db.SaveChangesAsync();
+        }
+
+        await SendMessage(client, conversation.Id, "LONG_CHAIN_CURRENT_USER");
+        var prompt = factory.Services.GetRequiredService<StreamQaRecordingChatCompletionService>().LastRequest!.Messages.ToArray();
+        Assert.Contains(prompt, message => message.Content == "LONG_CHAIN_ANSWER_2047");
+        Assert.DoesNotContain(prompt, message => message.Content == "LONG_CHAIN_ANSWER_0000");
+        Assert.Equal(1, prompt.Count(message => message.Role == "assistant"));
+    }
+
     private async Task<AuthResponse> Register(HttpClient client, string displayName)
     {
         var response = await SendWithCsrf(client, HttpMethod.Post, "/api/auth/register", new
@@ -155,6 +578,13 @@ public sealed class SupersededRegenerationStreamContextQaTests : IClassFixture<S
         Assert.True(response.IsSuccessStatusCode, await response.Content.ReadAsStringAsync());
         return (await response.Content.ReadFromJsonAsync<ConversationDto>())!;
     }
+
+    private static Task<SendMessageResponse> SendMessage(HttpClient client, Guid conversationId, string content) =>
+        SendWithCsrf<SendMessageResponse>(client, HttpMethod.Post, $"/api/conversations/{conversationId}/messages", new
+        {
+            content,
+            requestId = Guid.NewGuid().ToString("N"),
+        });
 
     private static async Task<T> SendWithCsrf<T>(HttpClient client, HttpMethod method, string path, object payload)
     {
@@ -188,9 +618,14 @@ public sealed class SupersededRegenerationStreamContextQaTests : IClassFixture<S
 /// </summary>
 public sealed class StreamQaRecordingFactory : WebApplicationFactory<Program>
 {
-    private readonly SqliteConnection connection = new("DataSource=:memory:");
+    private readonly string connectionString = $"Data Source=streamqa-{Guid.NewGuid():N};Mode=Memory;Cache=Shared";
+    private readonly SqliteConnection anchorConnection;
 
-    public StreamQaRecordingFactory() => connection.Open();
+    public StreamQaRecordingFactory()
+    {
+        anchorConnection = new SqliteConnection(connectionString);
+        anchorConnection.Open();
+    }
 
     protected override void ConfigureWebHost(IWebHostBuilder builder)
     {
@@ -198,8 +633,13 @@ public sealed class StreamQaRecordingFactory : WebApplicationFactory<Program>
         builder.ConfigureServices(services =>
         {
             services.RemoveAll<DbContextOptions<TaslimDbContext>>();
-            services.AddSingleton(connection);
-            services.AddDbContext<TaslimDbContext>(options => options.UseSqlite(connection));
+            services.AddSingleton(anchorConnection);
+            services.AddSingleton<StreamQaInterleavingGate>();
+            services.AddSingleton<StreamQaSaveChangesGate>();
+            services.AddDbContext<TaslimDbContext>((serviceProvider, options) =>
+                options.UseSqlite(connectionString).AddInterceptors(
+                    serviceProvider.GetRequiredService<StreamQaInterleavingGate>(),
+                    serviceProvider.GetRequiredService<StreamQaSaveChangesGate>()));
             services.RemoveAll<IChatCompletionService>();
             services.AddSingleton<StreamQaRecordingChatCompletionService>();
             services.AddSingleton<IChatCompletionService>(services => services.GetRequiredService<StreamQaRecordingChatCompletionService>());
@@ -209,7 +649,137 @@ public sealed class StreamQaRecordingFactory : WebApplicationFactory<Program>
     protected override void Dispose(bool disposing)
     {
         base.Dispose(disposing);
-        if (disposing) connection.Dispose();
+        if (disposing) anchorConnection.Dispose();
+    }
+}
+
+/// <summary>Pauses one matching SQLite command so the tests control the exact write/read interleave.</summary>
+public sealed class StreamQaInterleavingGate : DbCommandInterceptor
+{
+    private TaskCompletionSource? reached;
+    private TaskCompletionSource? release;
+    private int armed;
+    private int gateSequenceReservation;
+    private int gateContextRead;
+
+    public void ArmSequenceReservation() => Arm(ref gateSequenceReservation);
+    public void ArmContextRead() => Arm(ref gateContextRead);
+
+    public Task WaitForSequenceReservationAsync(TimeSpan timeout) => WaitForGateAsync(gateSequenceReservation, timeout);
+    public Task WaitForContextReadAsync(TimeSpan timeout) => WaitForGateAsync(gateContextRead, timeout);
+    public void ReleaseSequenceReservation() => ReleaseGate(gateSequenceReservation);
+    public void ReleaseContextRead() => ReleaseGate(gateContextRead);
+
+    public override ValueTask<InterceptionResult<DbDataReader>> ReaderExecutingAsync(
+        DbCommand command,
+        CommandEventData eventData,
+        InterceptionResult<DbDataReader> result,
+        CancellationToken cancellationToken = default) =>
+        PauseIfArmedAsync(command, result, cancellationToken);
+
+    public override ValueTask<InterceptionResult<int>> NonQueryExecutingAsync(
+        DbCommand command,
+        CommandEventData eventData,
+        InterceptionResult<int> result,
+        CancellationToken cancellationToken = default) =>
+        PauseIfArmedAsync(command, result, cancellationToken);
+
+    private void Arm(ref int kind)
+    {
+        reached = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        Volatile.Write(ref gateSequenceReservation, 0);
+        Volatile.Write(ref gateContextRead, 0);
+        Volatile.Write(ref kind, 1);
+        Volatile.Write(ref armed, 1);
+    }
+
+    private Task WaitForGateAsync(int kind, TimeSpan timeout)
+    {
+        var signal = Volatile.Read(ref kind) == 1 ? reached : null;
+        if (signal is null) throw new InvalidOperationException("The requested SQLite interleaving gate was not armed.");
+        return signal.Task.WaitAsync(timeout);
+    }
+
+    private void ReleaseGate(int kind)
+    {
+        if (Volatile.Read(ref kind) == 1) release?.TrySetResult();
+    }
+
+    private async ValueTask<T> PauseIfArmedAsync<T>(DbCommand command, T result, CancellationToken cancellationToken)
+    {
+        if (Volatile.Read(ref armed) != 1) return result;
+        var sql = command.CommandText;
+        var isSequenceReservation = Volatile.Read(ref gateSequenceReservation) == 1
+            && sql.Contains("UPDATE \"Conversations\"", StringComparison.OrdinalIgnoreCase)
+            && sql.Contains("\"NextMessageSequence\"", StringComparison.OrdinalIgnoreCase);
+        var isContextRead = Volatile.Read(ref gateContextRead) == 1
+            && sql.Contains("FROM \"ChatMessages\"", StringComparison.OrdinalIgnoreCase)
+            && sql.Contains("ORDER BY", StringComparison.OrdinalIgnoreCase)
+            && sql.Contains("\"Sequence\"", StringComparison.OrdinalIgnoreCase)
+            && sql.Contains("\"CreatedAt\"", StringComparison.OrdinalIgnoreCase)
+            && sql.Contains("\"Content\"", StringComparison.OrdinalIgnoreCase)
+            && !sql.Contains("DESC", StringComparison.OrdinalIgnoreCase);
+        if ((!isSequenceReservation && !isContextRead) || Interlocked.Exchange(ref armed, 0) != 1) return result;
+
+        reached?.TrySetResult();
+        if (release is not null) await release.Task.WaitAsync(cancellationToken);
+        return result;
+    }
+}
+
+/// <summary>Pauses matching regeneration claims before EF opens its SaveChanges transaction.</summary>
+public sealed class StreamQaSaveChangesGate : SaveChangesInterceptor
+{
+    private string? requestId;
+    private TaskCompletionSource? firstReached;
+    private TaskCompletionSource? secondReached;
+    private TaskCompletionSource? firstRelease;
+    private TaskCompletionSource? secondRelease;
+    private int armed;
+    private int arrivalCount;
+
+    public void ArmRequestIdInsertBarrier(string requestId)
+    {
+        this.requestId = requestId;
+        firstReached = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        secondReached = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        firstRelease = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        secondRelease = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        Volatile.Write(ref arrivalCount, 0);
+        Volatile.Write(ref armed, 1);
+    }
+
+    public Task WaitForFirstRequestIdInsertAsync(TimeSpan timeout) => (firstReached?.Task ?? throw new InvalidOperationException("The request-ID SaveChanges barrier was not armed.")).WaitAsync(timeout);
+    public Task WaitForSecondRequestIdInsertAsync(TimeSpan timeout) => (secondReached?.Task ?? throw new InvalidOperationException("The request-ID SaveChanges barrier was not armed.")).WaitAsync(timeout);
+    public void ReleaseFirstRequestIdInsert() => firstRelease?.TrySetResult();
+    public void ReleaseSecondRequestIdInsert() => secondRelease?.TrySetResult();
+
+    public override async ValueTask<InterceptionResult<int>> SavingChangesAsync(
+        DbContextEventData eventData,
+        InterceptionResult<int> result,
+        CancellationToken cancellationToken = default)
+    {
+        var matchingClaim = Volatile.Read(ref armed) == 1 && requestId is not null &&
+            eventData.Context?.ChangeTracker.Entries<ChatMessage>().Any(entry =>
+                entry.State == EntityState.Added &&
+                entry.Entity.Role == ChatMessageRole.Assistant &&
+                string.Equals(entry.Entity.RequestId, requestId, StringComparison.Ordinal)) == true;
+        if (!matchingClaim) return result;
+
+        var arrival = Interlocked.Increment(ref arrivalCount);
+        if (arrival == 1)
+        {
+            firstReached?.TrySetResult();
+            if (firstRelease is not null) await firstRelease.Task.WaitAsync(cancellationToken);
+        }
+        else if (arrival == 2)
+        {
+            Volatile.Write(ref armed, 0);
+            secondReached?.TrySetResult();
+            if (secondRelease is not null) await secondRelease.Task.WaitAsync(cancellationToken);
+        }
+        return result;
     }
 }
 
@@ -220,16 +790,39 @@ public sealed class StreamQaRecordingFactory : WebApplicationFactory<Program>
 public sealed class StreamQaRecordingChatCompletionService : IChatCompletionService
 {
     public const string ReplacementContent = "STREAMQA_LIVE_REPLACEMENT";
+    public const string OverlappingSendUser = "STREAMQA_OVERLAPPING_SEND_USER";
+    public const string OverlappingSendAnswer = "STREAMQA_OVERLAPPING_SEND_ANSWER";
 
     public AiChatRequest? LastRequest { get; private set; }
     public int CallCount { get; private set; }
+    public bool FailNextStream { get; set; }
+    private TaskCompletionSource? streamStarted;
+    private TaskCompletionSource? streamRelease;
+
+    public void ArmStreamBarrier()
+    {
+        streamStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        streamRelease = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    }
+
+    public Task WaitForStreamStartAsync(TimeSpan timeout) => (streamStarted?.Task ?? throw new InvalidOperationException("The fake stream barrier was not armed.")).WaitAsync(timeout);
+    public void ReleaseStream() => streamRelease?.TrySetResult();
 
     public async IAsyncEnumerable<AiStreamEvent> StreamAsync(AiChatRequest request, [EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
         CallCount++;
         LastRequest = request;
+        streamStarted?.TrySetResult();
+        if (streamRelease is not null) await streamRelease.Task.WaitAsync(cancellationToken);
         await Task.Yield();
-        yield return new AiMessageDelta(ReplacementContent);
+        if (FailNextStream)
+        {
+            FailNextStream = false;
+            throw new InvalidOperationException("Synthetic stream failure for regeneration retry coverage.");
+        }
+        yield return new AiMessageDelta(string.Equals(request.Messages.LastOrDefault()?.Content, OverlappingSendUser, StringComparison.Ordinal)
+            ? OverlappingSendAnswer
+            : ReplacementContent);
         yield return new AiMessageCompleted(new AiUsageMetadata("mock", "taslim-stream-qa", null, null, null, 0m, 0m, 0, "test-complete", true));
     }
 
@@ -237,6 +830,9 @@ public sealed class StreamQaRecordingChatCompletionService : IChatCompletionServ
     {
         CallCount++;
         LastRequest = request;
-        return Task.FromResult(new AiGenerationResult(ReplacementContent, new AiUsageMetadata("mock", "taslim-stream-qa", null, null, null, 0m, 0m, 0, "test-complete", true)));
+        var content = string.Equals(request.Messages.LastOrDefault()?.Content, OverlappingSendUser, StringComparison.Ordinal)
+            ? OverlappingSendAnswer
+            : ReplacementContent;
+        return Task.FromResult(new AiGenerationResult(content, new AiUsageMetadata("mock", "taslim-stream-qa", null, null, null, 0m, 0m, 0, "test-complete", true)));
     }
 }
