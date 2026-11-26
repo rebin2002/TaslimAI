@@ -231,19 +231,15 @@ public sealed class ProviderBenchmarkService(TaslimDbContext db, TimeProvider ti
         if (completion.Status == ProviderBenchmarkRunStatus.Running)
             throw new ArgumentException("A run completion status must be terminal.", nameof(completion));
 
-        var run = await db.ProviderBenchmarkRuns.SingleOrDefaultAsync(item => item.Id == runId, cancellationToken)
+        var initial = await db.ProviderBenchmarkRuns.AsNoTracking()
+            .SingleOrDefaultAsync(item => item.Id == runId, cancellationToken)
             ?? throw new KeyNotFoundException("The benchmark run was not found.");
-        if (run.Status != ProviderBenchmarkRunStatus.Running)
+        var run = SynchronizeTrackedRun(initial);
+        if (initial.Status != ProviderBenchmarkRunStatus.Running)
         {
-            var persisted = await db.ProviderBenchmarkRuns.AsNoTracking()
-                .SingleOrDefaultAsync(item => item.Id == runId, cancellationToken)
-                ?? throw new KeyNotFoundException("The benchmark run was not found.");
-            run = SynchronizeTrackedRun(persisted);
-            if (persisted.Status != ProviderBenchmarkRunStatus.Running
-                && persisted.Status != completion.Status)
+            if (initial.Status != completion.Status)
                 throw new InvalidOperationException("The benchmark run has already reached a different terminal state.");
-            if (persisted.Status != ProviderBenchmarkRunStatus.Running)
-                return run;
+            return run;
         }
 
         var completionCode = ProviderBenchmarkValidation.Optional(completion.CompletionCode, nameof(completion.CompletionCode), 100);
@@ -274,7 +270,11 @@ public sealed class ProviderBenchmarkService(TaslimDbContext db, TimeProvider ti
     private ProviderBenchmarkRun SynchronizeTrackedRun(ProviderBenchmarkRun persisted)
     {
         var tracked = db.ProviderBenchmarkRuns.Local.SingleOrDefault(item => item.Id == persisted.Id);
-        if (tracked is null) return persisted;
+        if (tracked is null)
+        {
+            db.ProviderBenchmarkRuns.Attach(persisted);
+            return persisted;
+        }
 
         var entry = db.Entry(tracked);
         var status = entry.Property(item => item.Status);

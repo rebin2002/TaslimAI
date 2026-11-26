@@ -163,13 +163,31 @@ public sealed class ProviderBenchmarkingTests
         await using var connection = new SqliteConnection("Data Source=:memory:");
         await connection.OpenAsync();
         await using var db = CreateDb(connection);
+        await using var staleConflictDb = CreateDb(connection);
+        await using var winnerDb = CreateDb(connection);
         await db.Database.EnsureCreatedAsync();
         var service = new ProviderBenchmarkService(db, TimeProvider.System);
-        var run = await service.GetOrCreateRunAsync(new ProviderBenchmarkRunRequest("persisted-replay-001", "provider-benchmark-replay"));
+        var staleConflictService = new ProviderBenchmarkService(staleConflictDb, TimeProvider.System);
+        var winnerService = new ProviderBenchmarkService(winnerDb, TimeProvider.System);
+        var request = new ProviderBenchmarkRunRequest("persisted-replay-001", "provider-benchmark-replay");
+        var run = await service.GetOrCreateRunAsync(request);
+        var staleConflictRun = await staleConflictService.GetOrCreateRunAsync(request);
         var requestedAt = new DateTime(2026, 10, 26, 2, 15, 0, DateTimeKind.Utc).AddTicks(1);
 
-        await service.CompleteRunAsync(run.Id,
+        await winnerService.CompleteRunAsync(run.Id,
             new ProviderBenchmarkRunCompletion(ProviderBenchmarkRunStatus.Completed, "initial-completion", requestedAt));
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => staleConflictService.CompleteRunAsync(run.Id,
+            new ProviderBenchmarkRunCompletion(ProviderBenchmarkRunStatus.Cancelled, new string('x', 101))));
+        Assert.Equal(ProviderBenchmarkRunStatus.Completed, staleConflictRun.Status);
+        Assert.Equal("initial-completion", staleConflictRun.CompletionCode);
+        Assert.Equal(requestedAt, staleConflictRun.CompletedAt);
+
+        var firstReplay = await service.CompleteRunAsync(run.Id,
+            new ProviderBenchmarkRunCompletion(ProviderBenchmarkRunStatus.Completed, new string('x', 101)));
+        Assert.Equal("initial-completion", firstReplay.CompletionCode);
+        Assert.Equal(requestedAt, firstReplay.CompletedAt);
+        Assert.Same(db.ProviderBenchmarkRuns.Local.Single(item => item.Id == run.Id), firstReplay);
 
         var persistedAt = requestedAt.AddSeconds(1);
         await using (var writer = CreateDb(connection))
@@ -180,12 +198,12 @@ public sealed class ProviderBenchmarkingTests
             await writer.SaveChangesAsync();
         }
 
-        var replay = await service.CompleteRunAsync(run.Id,
+        var terminalReplay = await service.CompleteRunAsync(run.Id,
             new ProviderBenchmarkRunCompletion(ProviderBenchmarkRunStatus.Completed, new string('x', 101)));
 
-        Assert.Equal("database-completion", replay.CompletionCode);
-        Assert.Equal(persistedAt, replay.CompletedAt);
-        Assert.Same(db.ProviderBenchmarkRuns.Local.Single(item => item.Id == run.Id), replay);
+        Assert.Equal("database-completion", terminalReplay.CompletionCode);
+        Assert.Equal(persistedAt, terminalReplay.CompletedAt);
+        Assert.Same(db.ProviderBenchmarkRuns.Local.Single(item => item.Id == run.Id), terminalReplay);
         await Assert.ThrowsAsync<InvalidOperationException>(() => service.CompleteRunAsync(run.Id,
             new ProviderBenchmarkRunCompletion(ProviderBenchmarkRunStatus.Cancelled, new string('x', 101))));
         await Assert.ThrowsAsync<KeyNotFoundException>(() => service.CompleteRunAsync(Guid.NewGuid(),
