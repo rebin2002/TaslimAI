@@ -5,6 +5,7 @@ import { LocaleProvider } from "@/components/LocaleProvider";
 import { OnboardingGate } from "@/components/OnboardingGate";
 import "./globals.css";
 import "./chat.css";
+import "./onboarding-first-login.css";
 
 export const metadata: Metadata = {
   title: "Taslim.ai — Make more possible",

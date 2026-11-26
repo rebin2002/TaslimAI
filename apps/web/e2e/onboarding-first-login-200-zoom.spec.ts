@@ -4,8 +4,8 @@
 // WHY THIS FILE EXISTS AND WHY IT IS DISJOINT
 // The #700 lane is already partitioned and no existing claim exercises first-login onboarding
 // under a raised zoom factor:
-//   - issue-700-onboarding-billing-layout.spec.ts (#846, the owner of OnboardingGate.tsx,
-//     onboarding-billing-ui.css and useDialogAccessibility.ts): the onboarding dialog at 100% zoom
+//   - issue-700-onboarding-billing-layout.spec.ts (#846): the onboarding dialog at 100% zoom;
+//     current main already owns the live OnboardingGate and the newer nested-dialog hook.
 //     across 1440/768/375/320 widths, RTL direction, Tab/Shift+Tab wrap-around, Escape containment,
 //     opener focus restoration, axe, and modal inner scroll at 375x520. Its only zoom measurement is
 //     "keeps the billing layout within the viewport at 125% zoom", which is section B.
@@ -48,7 +48,8 @@
 // `expect.soft`, so one run reports the whole set and the owner sees the exact measured numbers.
 //
 // SCOPE GUARD-RAILS (issue #700 acceptance gates)
-// - Test-only. No production source file is touched and no path owned by #846 is claimed.
+// - This file is test-only. The paired production fix reuses only onboarding-specific #846 styles
+//   and the current-main nested-dialog hook; it does not import billing or unrelated parent changes.
 // - Hosted on `/projects`, so no billing route is mounted and no plan, price, allowance, credit
 //   balance or upgrade-enablement value is read, shaped or derived. The traffic census asserts that
 //   no billing, charging or provider endpoint is ever contacted.
@@ -298,12 +299,11 @@ test.describe("issue #700 section A: first-login onboarding at 200% browser zoom
         }
 
         // The workflow step is the reported defect ("six choices render as a continuous, unaligned
-        // text row ... icon/title/description/action arrows overlap"). The set shipped on this head
-        // is five tiles -- Chat, Image, Document, Presentation plus Movie Studio, with Project and
-        // Research deliberately withheld as beta module choices -- and the enumeration itself belongs
-        // to #846, so only the count floor and the geometry are asserted here. At this zoom the grid
+        // text row ... icon/title/description/action arrows overlap"). Current main presents six live
+        // choices: Project, Chat, Image, Document, Presentation and Research. Keep that production
+        // count and its geometry pinned without importing #846's unrelated parent changes. At this zoom the grid
         // must be a single column of distinct, separated cards.
-        expect(geometry.tiles.length, `the guided flow must keep its full choice set of five tiles (${context})`).toBe(5);
+        expect(geometry.tiles.length, `the guided flow must keep its full choice set of six tiles (${context})`).toBe(6);
         expect(geometry.gridColumns.split(" ").filter(Boolean).length, `workflow choices must collapse to one column at this zoomed width (${context})`).toBe(1);
         const collidingTiles: string[] = [];
         for (let i = 0; i < geometry.tiles.length; i += 1) {
@@ -377,7 +377,7 @@ test.describe("issue #700 section A: first-login onboarding at 200% browser zoom
       expect.soft(geometry.dialogCount, `exactly one prompt may be raised (${context})`).toBe(1);
       expect.soft(geometry.dir, `direction must follow the interface locale (${context})`).toBe(locale.dir);
       expect.soft(geometry.clippedText, `no text run may be clipped by its box (${context}): ${JSON.stringify(geometry.clippedText.slice(0, 6))}`).toHaveLength(0);
-      expect.soft(geometry.tiles.length, `the choice set must stay complete at five tiles (${context})`).toBe(5);
+      expect.soft(geometry.tiles.length, `the choice set must stay complete at six tiles (${context})`).toBe(6);
       expect.soft(
         geometry.tiles.filter((tile, index) => geometry.tiles.slice(index + 1).some((other) => overlaps(tile.box, other.box))).map((tile) => tile.label),
         `workflow choice tiles must never overlap (${context})`,
