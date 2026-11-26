@@ -104,6 +104,26 @@ public sealed class ResearchGenerationJobHandler(
             throw new ResearchGenerationStageException(ResearchGenerationStages.Search, GenerationJobErrorCodes.ResearchSourceUnavailable, "No usable research sources were found.", usage);
         evidenceCandidates = evidenceProcessor.Normalize(sourceCandidates, evidenceCandidates, settings).ToList();
         sourceCandidates = (await contentFetcher.FetchAsync(sourceCandidates, settings, cancellationToken)).ToList();
+        // The citation guard is a boundary, not an adapter convention. IResearchContentFetcher is an
+        // explicit extension point that may rewrite source links after adapter ingest, so every link
+        // is re-checked here, before it can reach the report prompt, the persisted source rows, the
+        // CSV manifest, the DOCX/PDF source list or the clickable source link. Rows that fail are
+        // dropped rather than rewritten, and the surviving server-assigned citation identifiers stay
+        // the only identifiers the validator, the exports and the UI can describe.
+        sourceCandidates = ResearchCitationUrlPolicy.FilterAdmissibleSourceLinks(sourceCandidates).ToList();
+        if (sourceCandidates.Count == 0)
+            throw new ResearchGenerationStageException(ResearchGenerationStages.Search, GenerationJobErrorCodes.ResearchSourceUnavailable, "No usable research sources were found.", usage);
+        // Evidence is normalized against the source list before this point, so it can
+        // still carry citations for sources the fetch stage dropped or the guard above
+        // just removed. Left unreconciled, provider evidence gathered from a removed
+        // source - for example one pointing at an internal metadata endpoint - would
+        // still be sent to the paid report provider, describing a source no reader can
+        // ever open. The prompt boundary must match the citation boundary; persistence
+        // already skips orphan evidence rows, and the draft validator below already
+        // reconciles against these surviving identifiers.
+        var survivingCitationIds = sourceCandidates.Select(source => source.CitationId).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        if (evidenceCandidates.Any(item => !survivingCitationIds.Contains(item.CitationId)))
+            evidenceCandidates = evidenceCandidates.Where(item => survivingCitationIds.Contains(item.CitationId)).ToList();
         progress.Report(50);
 
         var sourcesStaged = false;
@@ -215,51 +235,57 @@ public sealed class ResearchGenerationJobHandler(
         return files.OrderBy(file => order[file.Id]).ToList();
     }
 
+    // Staging is atomic with claim ownership: the claim fence, the token-fenced cleanup and the
+    // inserts run inside one transaction, so a worker whose claim was transferred cannot leave
+    // stale sources or evidence behind for the recovered worker. A fenced loss aborts the attempt
+    // exactly as before.
     private async Task PersistSourcesAsync(GenerationJob job, IReadOnlyList<ResearchSourceCandidate> candidates, IReadOnlyList<ResearchEvidenceCandidate> evidence, CancellationToken cancellationToken)
     {
-        if (!await ResearchSourceLifecycle.ClearIfClaimOwnedAsync(db, job, cancellationToken))
-            throw new OperationCanceledException(cancellationToken);
-        var entities = candidates.Select(candidate => new ResearchSource
+        var staged = await ResearchSourceLifecycle.TryPersistUnderClaimAsync(db, job, async ct =>
         {
-            Id = Guid.NewGuid(),
-            WorkspaceId = job.WorkspaceId,
-            GenerationJobId = job.Id,
-            StoredFileId = candidate.SourceType == "uploaded" ? candidate.StoredFileId : null,
-            CitationId = candidate.CitationId,
-            Url = candidate.Url,
-            CanonicalUrl = candidate.CanonicalUrl,
-            Title = candidate.Title,
-            Domain = candidate.Domain,
-            Publisher = candidate.Publisher,
-            PublishedAt = candidate.PublishedAt,
-            RetrievedAt = candidate.RetrievedAt,
-            SourceType = candidate.SourceType,
-            Snippet = candidate.Snippet,
-            ExtractedText = candidate.ExtractedText,
-            SearchQuery = candidate.SearchQuery,
-            Rank = candidate.Rank,
-            IsSelected = candidate.IsSelected,
-            MetadataJson = candidate.MetadataJson,
-        }).ToArray();
-        db.ResearchSources.AddRange(entities);
-        foreach (var item in evidence)
-        {
-            var source = entities.FirstOrDefault(entity => entity.CitationId.Equals(item.CitationId, StringComparison.OrdinalIgnoreCase));
-            if (source is null) continue;
-            db.ResearchEvidence.Add(new ResearchEvidence
+            var entities = candidates.Select(candidate => new ResearchSource
             {
                 Id = Guid.NewGuid(),
                 WorkspaceId = job.WorkspaceId,
                 GenerationJobId = job.Id,
-                ResearchSourceId = source.Id,
-                Topic = item.Topic,
-                Excerpt = item.Excerpt,
-                Context = item.Context,
-                PublishedAt = item.PublishedAt,
-                CreatedAt = DateTime.UtcNow,
-            });
-        }
-        await db.SaveChangesAsync(cancellationToken);
+                StoredFileId = candidate.SourceType == "uploaded" ? candidate.StoredFileId : null,
+                CitationId = candidate.CitationId,
+                Url = candidate.Url,
+                CanonicalUrl = candidate.CanonicalUrl,
+                Title = candidate.Title,
+                Domain = candidate.Domain,
+                Publisher = candidate.Publisher,
+                PublishedAt = candidate.PublishedAt,
+                RetrievedAt = candidate.RetrievedAt,
+                SourceType = candidate.SourceType,
+                Snippet = candidate.Snippet,
+                ExtractedText = candidate.ExtractedText,
+                SearchQuery = candidate.SearchQuery,
+                Rank = candidate.Rank,
+                IsSelected = candidate.IsSelected,
+                MetadataJson = candidate.MetadataJson,
+            }).ToArray();
+            db.ResearchSources.AddRange(entities);
+            foreach (var item in evidence)
+            {
+                var source = entities.FirstOrDefault(entity => entity.CitationId.Equals(item.CitationId, StringComparison.OrdinalIgnoreCase));
+                if (source is null) continue;
+                db.ResearchEvidence.Add(new ResearchEvidence
+                {
+                    Id = Guid.NewGuid(),
+                    WorkspaceId = job.WorkspaceId,
+                    GenerationJobId = job.Id,
+                    ResearchSourceId = source.Id,
+                    Topic = item.Topic,
+                    Excerpt = item.Excerpt,
+                    Context = item.Context,
+                    PublishedAt = item.PublishedAt,
+                    CreatedAt = DateTime.UtcNow,
+                });
+            }
+        }, cancellationToken);
+        if (!staged)
+            throw new OperationCanceledException(cancellationToken);
     }
 
     private static string NormalizeOutputLanguage(string draftLanguage, string requested) => draftLanguage is "en" or "ar" or "ku" ? draftLanguage : requested is "en" or "ar" or "ku" ? requested : "en";

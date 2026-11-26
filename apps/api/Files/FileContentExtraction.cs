@@ -4,6 +4,7 @@ using System.Xml;
 using System.Xml.Linq;
 using Microsoft.Extensions.Options;
 using UglyToad.PdfPig;
+using UglyToad.PdfPig.Core;
 using Taslim.Api.Domain;
 
 namespace Taslim.Api.Files;
@@ -141,7 +142,72 @@ public sealed class FileContentExtractor(IOptions<FileOptions> options) : IFileC
 
     private static string ExtractPdf(Stream content)
     {
-        using var document = PdfDocument.Open(content);
+        // Upload admission only verifies the "%PDF-" magic, so every structurally broken document
+        // reaches this call. PdfPig signals those documents with PdfDocumentFormatException, and
+        // with ArgumentOutOfRangeException when the content is shorter than the cross-reference
+        // window it reads from the end; neither derives from InvalidDataException, so they would
+        // otherwise escape the extraction boundary's format-exception filter and be logged by the
+        // generic processing-failure path, which includes parser text quoting tokens from the
+        // uploaded document. Convert them here, where the meaning is unambiguously "unreadable
+        // upload", leaving the outer filter (and its handling of genuinely unexpected failures)
+        // unchanged.
+        try
+        {
+            using var document = OpenPdfDocument(content);
+            return RenderPdfPageText(document);
+        }
+        // Those two parser types can also surface after the structure has been read, while the
+        // pages are resolved and their text assembled, so this filter still covers the whole
+        // method. NullReferenceException is deliberately absent from it: OpenPdfDocument is the
+        // only place that type is treated as a malformed upload, because it is the only place the
+        // fault is known to mean an unresolvable catalog rather than a programming defect.
+        catch (Exception exception) when (exception is PdfDocumentFormatException or ArgumentOutOfRangeException)
+        {
+            throw new InvalidDataException("The PDF could not be parsed.", exception);
+        }
+    }
+
+    // The parse point: PdfDocument.Open reads the cross-reference table and resolves the trailer
+    // /Root dictionary, which is where a document's structure either resolves or does not.
+    // One shape is missing from the types ExtractPdf converts above. When /Root names an object
+    // that the cross-reference table never registers, an undefined object number or the
+    // free-object number 0, PdfPig dereferences the absent object while it resolves the catalog
+    // and reports that as NullReferenceException from PdfDocumentFactory.ParseTrailer rather than
+    // as PdfDocumentFormatException, so it reaches the boundary unconverted and escapes it. The
+    // other unresolved-reference shapes probed against synthetic documents, an absent /Root key, a
+    // root naming a page, font, stream or literal, an unreachable startxref and a missing trailer,
+    // already raise one of the two types above, and a dangling /Pages, /Kids, /Contents or /Font
+    // reference either recovers or raises InvalidOperationException, which the outer filter
+    // contains. NullReferenceException is therefore specific to this call rather than a general
+    // symptom of bad input, which is why the conversion is scoped to this call alone instead of
+    // being widened over the traversal that follows a successful open. A null reference raised
+    // downstream is a fault in page traversal, in the parser's later stages or in this class, and
+    // has to stay visible as one rather than being answered as an unreadable upload.
+    // The widening stays inside PDF parsing on purpose: the outer filter in ExtractAsync still
+    // omits NullReferenceException, so a null reference from document, spreadsheet or plain-text
+    // extraction, or from this class itself, keeps propagating to the generic unexpected-failure
+    // handling in FileProcessingService unchanged.
+    internal static PdfDocument OpenPdfDocument(Stream content)
+    {
+        try
+        {
+            return PdfDocument.Open(content);
+        }
+        catch (Exception exception) when (exception is PdfDocumentFormatException or ArgumentOutOfRangeException or NullReferenceException)
+        {
+            throw new InvalidDataException("The PDF could not be parsed.", exception);
+        }
+    }
+
+    // Downstream of the parse point: page traversal and text assembly over a document whose
+    // structure has already resolved. This half must not treat a null reference as a malformed
+    // upload, so it carries no NullReferenceException filter of its own and ExtractPdf's filter
+    // does not add one for it. Split out so the containment is a property of the single call that
+    // needs it instead of a try block spanning both halves;
+    // PdfUnresolvedRootNullReferenceContainmentTests pins that a null reference raised here
+    // propagates rather than becoming a bounded EXTRACTION_FAILED.
+    internal static string RenderPdfPageText(PdfDocument document)
+    {
         var builder = new StringBuilder();
         foreach (var page in document.GetPages())
         {
