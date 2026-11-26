@@ -31,6 +31,7 @@ public static class PresentationGenerationFailureCodes
         AiProviderFailureCategories.UnsupportedRequest => GenerationJobErrorCodes.PresentationProviderUnsupportedRequest,
         AiProviderFailureCategories.RateLimited => GenerationJobErrorCodes.PresentationProviderRateLimited,
         AiProviderFailureCategories.Transient => GenerationJobErrorCodes.PresentationProviderTransientFailure,
+        AiProviderFailureCategories.MalformedResponse => GenerationJobErrorCodes.PresentationOutputInvalid,
         _ => GenerationJobErrorCodes.PresentationProviderUnavailable,
     };
 

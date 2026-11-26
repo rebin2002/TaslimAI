@@ -26,12 +26,20 @@ describe("homeDashboardState", () => {
     expect(result[1]).toMatchObject({ href: "/chat/conversation-1" });
   });
 
-  it("links completed activity with an asset to the private Asset Library search", () => {
+  it("links completed activity with an asset to its exact private Asset Library detail", () => {
     const result = buildHomeRecentItems({
       projects: [], conversations: [], assets: [], activity: [{ ...baseActivity, status: "Completed", assetId: "asset-1" }],
     });
 
-    expect(result[0]?.href).toBe("/assets?search=Product%20hero");
+    expect(result[0]?.href).toBe("/assets?assetId=asset-1&status=Active");
+  });
+
+  it("keeps duplicate-titled asset recents tied to their exact asset IDs and status", () => {
+    const result = buildHomeRecentItems({
+      projects: [], conversations: [], activity: [], assets: [{ ...baseAsset, id: "asset/archived", name: "Shared title", status: "Archived" }],
+    });
+
+    expect(result[0]?.href).toBe("/assets?assetId=asset%2Farchived&status=Archived");
   });
 
   it("limits the continuation list and recognizes in-flight work", () => {

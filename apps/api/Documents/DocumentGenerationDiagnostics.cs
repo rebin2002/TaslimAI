@@ -33,12 +33,20 @@ public sealed class DocumentGenerationStageException(
 
 public static class DocumentGenerationFailureCodes
 {
+    /// <summary>
+    /// A provider that answered with a structurally malformed body produced an
+    /// invalid document output rather than suffering an outage. Collapsing that
+    /// case into <see cref="GenerationJobErrorCodes.DocumentProviderUnavailable"/>
+    /// reports a healthy provider as unavailable and invites an operator retry
+    /// that cannot succeed, so the response-shape failure keeps the output code.
+    /// </summary>
     public static string ForProvider(AiProviderException exception) => exception.FailureCategory switch
     {
         AiProviderFailureCategories.Configuration => GenerationJobErrorCodes.DocumentProviderConfiguration,
         AiProviderFailureCategories.UnsupportedRequest => GenerationJobErrorCodes.DocumentProviderUnsupportedRequest,
         AiProviderFailureCategories.RateLimited => GenerationJobErrorCodes.DocumentProviderRateLimited,
         AiProviderFailureCategories.Transient => GenerationJobErrorCodes.DocumentProviderTransientFailure,
+        AiProviderFailureCategories.MalformedResponse => GenerationJobErrorCodes.DocumentOutputInvalid,
         _ => GenerationJobErrorCodes.DocumentProviderUnavailable,
     };
 
@@ -49,4 +57,21 @@ public static class DocumentGenerationFailureCodes
         DocumentGenerationStages.DraftParse or DocumentGenerationStages.DraftValidation => GenerationJobErrorCodes.DocumentOutputInvalid,
         _ => GenerationJobErrorCodes.DocumentGenerationFailed,
     };
+}
+
+/// <summary>
+/// The single provider-neutral Document Studio kill-switch contract. Every
+/// boundary that can start or resume Document provider work must fail closed
+/// with this code and message, so disabling Document Studio cannot be bypassed
+/// by choosing a different route and no provider detail reaches the browser.
+/// </summary>
+public static class DocumentStudioAvailability
+{
+    public const string UnavailableCode = GenerationJobErrorCodes.DocumentStudioUnavailable;
+    public const string UnavailableMessage = "Document generation is not available right now.";
+
+    public static DocumentGenerationStageException Unavailable() => new(
+        DocumentGenerationStages.Validation,
+        UnavailableCode,
+        UnavailableMessage);
 }
