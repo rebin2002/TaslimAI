@@ -24,6 +24,19 @@ public sealed class AcademicWorkflowSnapshot
     public required AcademicWorkflowRequest Request { get; init; }
     public AcademicProjectState State { get; set; } = AcademicProjectState.Running;
 
+    /// <summary>
+    /// Durable owner of the currently executing stage attempt. Older snapshots omit this
+    /// property; a legacy stage still marked Running without an owner is held for explicit
+    /// recovery rather than being assumed safe to execute again.
+    /// </summary>
+    public AcademicLiveAttempt? ActiveAttempt { get; set; }
+
+    /// <summary>
+    /// Internal audit of the most recent privileged abandoned-attempt recovery. This stays
+    /// in the workspace-scoped snapshot and is deliberately not part of the member DTO.
+    /// </summary>
+    public AcademicAttemptRecoveryAudit? LastAttemptRecovery { get; set; }
+
     /// <summary>Committed checkpoint revision; starts at 0 and only ever increases.</summary>
     public long Revision { get; set; }
 
@@ -67,6 +80,27 @@ public sealed class AcademicWorkflowSnapshot
     /// <summary>Deep copy through the canonical serializer; used before every mutation.</summary>
     public AcademicWorkflowSnapshot Clone() =>
         AcademicWorkflowSerialization.Deserialize(AcademicWorkflowSerialization.Serialize(this));
+}
+
+/// <summary>
+/// The worker identity and fencing token committed before a stage handler is entered.
+/// Only the worker holding <see cref="AttemptId"/> may commit that attempt's outcome.
+/// </summary>
+public sealed record AcademicLiveAttempt
+{
+    public required Guid AttemptId { get; init; }
+    public required Guid OwnerId { get; init; }
+    public required AcademicStage Stage { get; init; }
+    public required int Attempt { get; init; }
+    public required DateTime StartedAtUtc { get; init; }
+}
+
+public sealed record AcademicAttemptRecoveryAudit
+{
+    public Guid? AttemptId { get; init; }
+    public required Guid VerifiedByUserId { get; init; }
+    public required DateTime VerifiedAtUtc { get; init; }
+    public required string Reason { get; init; }
 }
 
 public sealed record AcademicStageRecord
@@ -329,9 +363,21 @@ public static class AcademicWorkflowSerialization
                 snapshot.Request.Discipline,
                 snapshot.Request.Level,
                 snapshot.Request.Method,
+                snapshot.Request.SelectedMethods,
                 snapshot.Request.CitationStyle,
                 snapshot.Request.Language,
                 snapshot.Request.TargetChapterHeadings,
+                snapshot.Request.WorkingTitle,
+                snapshot.Request.GeographicScope,
+                snapshot.Request.PopulationOrContext,
+                snapshot.Request.TimePeriod,
+                snapshot.Request.SubQuestions,
+                snapshot.Request.Keywords,
+                snapshot.Request.MinimumSources,
+                snapshot.Request.MinimumPeerReviewed,
+                snapshot.Request.AllowedSourceTypes,
+                snapshot.Request.RequireFullText,
+                snapshot.Request.ProgrammeRequirements,
                 snapshot.Stage(stage).ApprovalFeedback),
             AcademicStage.Discover => new DiscoverFingerprintSlice(snapshot.Plan, snapshot.Stage(stage).ApprovalFeedback),
             AcademicStage.Screen => new ScreenFingerprintSlice(snapshot.Plan, snapshot.Sources, snapshot.Stage(stage).ApprovalFeedback),
@@ -385,9 +431,21 @@ public static class AcademicWorkflowSerialization
         string Discipline,
         AcademicResearchLevel Level,
         AcademicMethod Method,
+        IReadOnlyList<AcademicMethod> SelectedMethods,
         AcademicCitationStyle CitationStyle,
         string Language,
         IReadOnlyList<string> TargetChapterHeadings,
+        string? WorkingTitle,
+        string? GeographicScope,
+        string? PopulationOrContext,
+        string? TimePeriod,
+        IReadOnlyList<string> SubQuestions,
+        IReadOnlyList<string> Keywords,
+        int? MinimumSources,
+        int? MinimumPeerReviewed,
+        IReadOnlyList<string> AllowedSourceTypes,
+        bool RequireFullText,
+        string? ProgrammeRequirements,
         string? Feedback);
 
     private sealed record DiscoverFingerprintSlice(AcademicResearchPlan? Plan, string? Feedback);

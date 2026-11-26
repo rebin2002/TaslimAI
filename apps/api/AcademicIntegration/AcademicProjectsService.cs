@@ -43,11 +43,23 @@ public sealed record AcademicProjectCreateInput
     public required string Discipline { get; init; }
     public AcademicResearchLevel Level { get; init; } = AcademicResearchLevel.Masters;
     public AcademicMethod Method { get; init; } = AcademicMethod.SystematicReview;
+    public IReadOnlyList<AcademicMethod> SelectedMethods { get; init; } = [];
     public AcademicCitationStyle CitationStyle { get; init; } = AcademicCitationStyle.Apa7;
     public string Language { get; init; } = "en";
     public int MaxDiscoverySources { get; init; } = 120;
     public int MaxEvidencePerSource { get; init; } = 6;
     public IReadOnlyList<string> TargetChapterHeadings { get; init; } = [];
+    public string? WorkingTitle { get; init; }
+    public string? GeographicScope { get; init; }
+    public string? PopulationOrContext { get; init; }
+    public string? TimePeriod { get; init; }
+    public IReadOnlyList<string> SubQuestions { get; init; } = [];
+    public IReadOnlyList<string> Keywords { get; init; } = [];
+    public int? MinimumSources { get; init; }
+    public int? MinimumPeerReviewed { get; init; }
+    public IReadOnlyList<string> AllowedSourceTypes { get; init; } = [];
+    public bool RequireFullText { get; init; }
+    public string? ProgrammeRequirements { get; init; }
     public IReadOnlyList<AcademicApprovalKind> RequiredApprovals { get; init; } =
     [
         AcademicApprovalKind.Plan,
@@ -97,10 +109,9 @@ public sealed class AcademicProjectsService(
         [.. stageHandlers.Select(handler => handler.Stage)];
 
     /// <summary>
-    /// Stages whose handler is wired into this process. Empty until the provider lanes
-    /// register through <c>AddAcademicStageHandler</c>, which is exactly what the API
-    /// surfaces as the honest connection status: nothing here pretends a stage exists
-    /// before its lane lands.
+    /// Stages whose handler is wired into this process. The deterministic Plan handler is
+    /// local; later stages are added only through <c>AddAcademicStageHandler</c> as their
+    /// independently reviewed lanes land.
     /// </summary>
     public IReadOnlySet<AcademicStage> ConnectedStages => connectedStages;
 
@@ -117,11 +128,23 @@ public sealed class AcademicProjectsService(
             Discipline = (input.Discipline ?? string.Empty).Trim(),
             Level = input.Level,
             Method = input.Method,
+            SelectedMethods = input.SelectedMethods,
             CitationStyle = input.CitationStyle,
             Language = string.IsNullOrWhiteSpace(input.Language) ? "en" : input.Language.Trim(),
             MaxDiscoverySources = input.MaxDiscoverySources,
             MaxEvidencePerSource = input.MaxEvidencePerSource,
             TargetChapterHeadings = input.TargetChapterHeadings,
+            WorkingTitle = input.WorkingTitle,
+            GeographicScope = input.GeographicScope,
+            PopulationOrContext = input.PopulationOrContext,
+            TimePeriod = input.TimePeriod,
+            SubQuestions = input.SubQuestions,
+            Keywords = input.Keywords,
+            MinimumSources = input.MinimumSources,
+            MinimumPeerReviewed = input.MinimumPeerReviewed,
+            AllowedSourceTypes = input.AllowedSourceTypes,
+            RequireFullText = input.RequireFullText,
+            ProgrammeRequirements = input.ProgrammeRequirements,
             Budget = input.Budget,
             RequiredApprovals = input.RequiredApprovals,
             MaxStageAttempts = input.MaxStageAttempts,
@@ -225,7 +248,12 @@ public sealed class AcademicProjectsService(
         if (snapshot is null) return AcademicProjectServiceResult.NotFound();
 
         var nextStage = FirstActionableStage(snapshot);
-        if (nextStage is AcademicStage stage && !ConnectedStages.Contains(stage))
+        var hasRunningAttempt = snapshot.ActiveAttempt is not null
+            || snapshot.Stages.Any(record => record.State == AcademicStageState.Running);
+        if (snapshot.State == AcademicProjectState.Running
+            && !hasRunningAttempt
+            && nextStage is AcademicStage stage
+            && !ConnectedStages.Contains(stage))
         {
             return new AcademicProjectServiceResult
             {
@@ -250,6 +278,19 @@ public sealed class AcademicProjectsService(
             };
         }
 
+        if (run.Status is AcademicWorkflowRunStatus.RevisionConflict or AcademicWorkflowRunStatus.AttemptInProgress)
+        {
+            return new AcademicProjectServiceResult
+            {
+                Status = AcademicProjectServiceStatus.Conflict,
+                Snapshot = run.Snapshot,
+                Code = run.Code ?? (run.Status == AcademicWorkflowRunStatus.AttemptInProgress
+                    ? "STAGE_ATTEMPT_IN_PROGRESS"
+                    : "CHECKPOINT_CONFLICT"),
+                Detail = run.Detail ?? "Another worker owns the current stage attempt; reload and retry later.",
+            };
+        }
+
         // A resume that lost the checkpoint race returns the loser's copy of the tree.
         // Projecting it here would rewrite the derived evidence tables from state the
         // durable store already rejected, so the conflict path never projects; the
@@ -266,10 +307,54 @@ public sealed class AcademicProjectsService(
         };
     }
 
+    /// <summary>
+    /// Explicitly releases a persisted attempt after its worker is known to be abandoned.
+    /// Recovery only writes a failure checkpoint and never invokes a stage handler; the
+    /// next ordinary Run call is a separate action and the prior budget reservation remains.
+    /// </summary>
+    public async Task<AcademicProjectServiceResult> RecoverAbandonedAsync(
+        Guid workspaceId,
+        Guid projectId,
+        long expectedRevision,
+        Guid? attemptId,
+        Guid verifiedByUserId,
+        string verificationReason,
+        CancellationToken cancellationToken)
+    {
+        var snapshot = await LoadFencedAsync(workspaceId, projectId, cancellationToken);
+        if (snapshot is null) return AcademicProjectServiceResult.NotFound();
+
+        var recovered = await engine.RecoverAbandonedAttemptAsync(
+            projectId, expectedRevision, attemptId, verifiedByUserId, verificationReason, cancellationToken);
+        if (recovered.Snapshot is null)
+            return AcademicProjectServiceResult.NotFound(recovered.Code ?? "PROJECT_NOT_FOUND");
+
+        if (recovered.Status == AcademicWorkflowRunStatus.RevisionConflict)
+        {
+            return new AcademicProjectServiceResult
+            {
+                Status = AcademicProjectServiceStatus.Conflict,
+                Snapshot = recovered.Snapshot,
+                Code = recovered.Code ?? "CHECKPOINT_CONFLICT",
+                Detail = recovered.Detail ?? "Reload the project before recovering its active attempt.",
+            };
+        }
+
+        return new AcademicProjectServiceResult
+        {
+            Status = AcademicProjectServiceStatus.Ok,
+            Snapshot = recovered.Snapshot,
+            Code = recovered.Code ?? string.Empty,
+            Detail = recovered.Detail ?? string.Empty,
+        };
+    }
+
     public async Task<AcademicProjectServiceResult> SubmitApprovalAsync(
         Guid workspaceId,
         Guid projectId,
         AcademicApprovalKind kind,
+        string approvalKey,
+        long checkpointRevision,
         AcademicApprovalDecision decision,
         string? notes,
         Guid userId,
@@ -278,7 +363,8 @@ public sealed class AcademicProjectsService(
         var snapshot = await LoadFencedAsync(workspaceId, projectId, cancellationToken);
         if (snapshot is null) return AcademicProjectServiceResult.NotFound();
 
-        var submission = await engine.SubmitApprovalDecisionAsync(projectId, kind, decision, notes, userId, cancellationToken);
+        var submission = await engine.SubmitApprovalDecisionAsync(
+            projectId, kind, approvalKey, checkpointRevision, decision, notes, userId, cancellationToken);
         var resulting = submission.Snapshot ?? snapshot;
 
         return submission.Status switch
@@ -290,6 +376,20 @@ public sealed class AcademicProjectsService(
                 Snapshot = resulting,
                 Code = "CHECKPOINT_CONFLICT",
                 Detail = "Another writer advanced the project first; reload and retry.",
+            },
+            AcademicApprovalSubmissionStatus.CheckpointMismatch => new AcademicProjectServiceResult
+            {
+                Status = AcademicProjectServiceStatus.Conflict,
+                Snapshot = resulting,
+                Code = "CHECKPOINT_MISMATCH",
+                Detail = "The submitted approval key or revision does not match the pending checkpoint; reload and retry.",
+            },
+            AcademicApprovalSubmissionStatus.DecisionConflict => new AcademicProjectServiceResult
+            {
+                Status = AcademicProjectServiceStatus.Conflict,
+                Snapshot = resulting,
+                Code = "APPROVAL_DECISION_CONFLICT",
+                Detail = "A different decision was already committed for this checkpoint; reload the project.",
             },
             AcademicApprovalSubmissionStatus.NoPendingApproval => new AcademicProjectServiceResult
             {
