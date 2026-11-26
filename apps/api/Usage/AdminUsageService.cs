@@ -14,18 +14,9 @@ public interface IAdminUsageService
 
 public sealed class AdminUsageService(TaslimDbContext db) : IAdminUsageService
 {
-    // The usage ledger maps every currency column on UsageTransaction as decimal(18, 8),
-    // so the exact sum of any set of stored rows is always representable at eight decimal
-    // places. SQLite cannot translate SUM(decimal), so the aggregates below accumulate
-    // through the portable double type and cast the result back; that round trip leaks
-    // binary rounding noise into the response (64 stored rows of 0.12345679 reported
-    // 7.90123455999999 instead of 7.90123456). Rounding an aggregate back to the stored
-    // scale is lossless for a correct total and removes only the binary artifact. This is
-    // the same guard UsageController applies to the customer charge total, so the admin
-    // report and the customer report can no longer disagree about the same rows.
-    // It normalises the reported projection only: no stored amount, debit or credit is
-    // recalculated here.
-    private const int LedgerScale = 8;
+    // PostgreSQL aggregates the ledger's numeric(18, 8) currency values natively. SQLite
+    // cannot translate SUM(decimal), so it uses an ordered streaming fallback that keeps
+    // exact decimal totals with bounded application memory. Neither path writes ledger data.
 
     // Breakdown ranks are re-read by operators and rendered into exports, so a tied row
     // order has to be identical on every host and in every request. The default string
@@ -37,14 +28,21 @@ public sealed class AdminUsageService(TaslimDbContext db) : IAdminUsageService
     // decide which members are reported at all.
     private const int ReportRankLimit = 20;
 
-    private static decimal LedgerAmount(double amount) => decimal.Round((decimal)amount, LedgerScale);
-
     public async Task<AdminUsageReportDto> GetReportAsync(AdminUsageFilter filter, CancellationToken cancellationToken = default)
     {
         var range = NormalizeRange(filter.FromUtc, filter.ToUtc);
         var query = ApplyFilters(db.UsageTransactions.AsNoTracking(), filter, range);
-        var summary = await BuildSummaryAsync(query, range, cancellationToken);
-        var breakdowns = await BuildBreakdownsAsync(query, cancellationToken);
+        AdminUsageSummaryDto summary;
+        AdminUsageBreakdownsDto breakdowns;
+        if (db.Database.ProviderName?.Contains("Sqlite", StringComparison.OrdinalIgnoreCase) == true)
+        {
+            (summary, breakdowns) = await AdminUsageSqliteAggregation.BuildAsync(db, query, range, cancellationToken);
+        }
+        else
+        {
+            summary = await BuildSummaryAsync(query, range, cancellationToken);
+            breakdowns = await BuildBreakdownsAsync(query, cancellationToken);
+        }
         var transactions = await BuildTransactionsAsync(query, filter.Page, filter.PageSize, cancellationToken);
         return new AdminUsageReportDto(summary, breakdowns, transactions);
     }
@@ -72,9 +70,9 @@ public sealed class AdminUsageService(TaslimDbContext db) : IAdminUsageService
             FailedCount = group.Count(item => item.Status == UsageTransactionStatus.Failed),
             CancelledCount = group.Count(item => item.Status == UsageTransactionStatus.Cancelled),
             RefundedCount = group.Count(item => item.Status == UsageTransactionStatus.Refunded),
-            TotalProviderCostUsd = group.Sum(item => (double)item.ProviderCostUsd),
-            TotalCustomerChargesUsd = group.Sum(item => (double)(item.ChargedAmount - item.ReversedAmount)),
-            PendingEstimatedProviderCostUsd = group.Sum(item => item.Status == UsageTransactionStatus.Pending ? (double)(item.EstimatedProviderCostUsd ?? 0m) : 0d),
+            TotalProviderCostUsd = group.Sum(item => item.ProviderCostUsd),
+            TotalCustomerChargesUsd = group.Sum(item => item.ChargedAmount - item.ReversedAmount),
+            PendingEstimatedProviderCostUsd = group.Sum(item => item.Status == UsageTransactionStatus.Pending ? item.EstimatedProviderCostUsd ?? 0m : 0m),
             AnomalousCount = group.Count(item => item.IsAnomalous),
         }).SingleOrDefaultAsync(cancellationToken);
 
@@ -86,9 +84,9 @@ public sealed class AdminUsageService(TaslimDbContext db) : IAdminUsageService
             aggregate?.FailedCount ?? 0,
             aggregate?.CancelledCount ?? 0,
             aggregate?.RefundedCount ?? 0,
-            LedgerAmount(aggregate?.TotalProviderCostUsd ?? 0d),
-            LedgerAmount(aggregate?.TotalCustomerChargesUsd ?? 0d),
-            LedgerAmount(aggregate?.PendingEstimatedProviderCostUsd ?? 0d),
+            aggregate?.TotalProviderCostUsd ?? 0m,
+            aggregate?.TotalCustomerChargesUsd ?? 0m,
+            aggregate?.PendingEstimatedProviderCostUsd ?? 0m,
             aggregate?.AnomalousCount ?? 0,
             UsageCurrencies.Usd);
     }
@@ -102,19 +100,19 @@ Feature = group.Key,
             SuccessfulCount = group.Count(item => item.Status == UsageTransactionStatus.Completed),
             FailedCount = group.Count(item => item.Status == UsageTransactionStatus.Failed),
             CancelledCount = group.Count(item => item.Status == UsageTransactionStatus.Cancelled),
-            ProviderCostUsd = group.Sum(item => (double)item.ProviderCostUsd),
-            CustomerChargesUsd = group.Sum(item => (double)(item.ChargedAmount - item.ReversedAmount)),
+            ProviderCostUsd = group.Sum(item => item.ProviderCostUsd),
+            CustomerChargesUsd = group.Sum(item => item.ChargedAmount - item.ReversedAmount),
         }).ToListAsync(cancellationToken);
-        var byFeature = featureRows.Select(item => new AdminUsageFeatureBreakdownDto(item.Feature.ToString(), item.TransactionCount, item.SuccessfulCount, item.FailedCount, item.CancelledCount, LedgerAmount(item.ProviderCostUsd), LedgerAmount(item.CustomerChargesUsd))).OrderByDescending(item => item.ProviderCostUsd).ThenBy(item => item.Feature, Ordinal).ToArray();
+        var byFeature = featureRows.Select(item => new AdminUsageFeatureBreakdownDto(item.Feature.ToString(), item.TransactionCount, item.SuccessfulCount, item.FailedCount, item.CancelledCount, item.ProviderCostUsd, item.CustomerChargesUsd)).OrderByDescending(item => item.ProviderCostUsd).ThenBy(item => item.Feature, Ordinal).ToArray();
 
         var dayRows = await query.GroupBy(item => item.CreatedAt.Date).Select(group => new
         {
-DayUtc = group.Key,
+            DayUtc = group.Key,
             TransactionCount = group.Count(),
-            ProviderCostUsd = group.Sum(item => (double)item.ProviderCostUsd),
-            CustomerChargesUsd = group.Sum(item => (double)(item.ChargedAmount - item.ReversedAmount)),
+            ProviderCostUsd = group.Sum(item => item.ProviderCostUsd),
+            CustomerChargesUsd = group.Sum(item => item.ChargedAmount - item.ReversedAmount),
         }).ToListAsync(cancellationToken);
-        var byDay = dayRows.Select(item => new AdminUsageDailyBreakdownDto(item.DayUtc, item.TransactionCount, LedgerAmount(item.ProviderCostUsd), LedgerAmount(item.CustomerChargesUsd))).OrderBy(item => item.DayUtc).ToArray();
+        var byDay = dayRows.Select(item => new AdminUsageDailyBreakdownDto(item.DayUtc, item.TransactionCount, item.ProviderCostUsd, item.CustomerChargesUsd)).OrderBy(item => item.DayUtc).ToArray();
 
         var workspaceRows = await (from transaction in query
                                    join workspace in db.Workspaces.AsNoTracking() on transaction.WorkspaceId equals workspace.Id
@@ -124,13 +122,13 @@ DayUtc = group.Key,
                                        grouped.Key.WorkspaceId,
                                        WorkspaceName = grouped.Key.Name,
                                        TransactionCount = grouped.Count(),
-                                       ProviderCostUsd = grouped.Sum(item => (double)item.ProviderCostUsd),
-                                       CustomerChargesUsd = grouped.Sum(item => (double)(item.ChargedAmount - item.ReversedAmount)),
+                                       ProviderCostUsd = grouped.Sum(item => item.ProviderCostUsd),
+                                       CustomerChargesUsd = grouped.Sum(item => item.ChargedAmount - item.ReversedAmount),
                                    }).ToListAsync(cancellationToken);
         // The rank list is truncated, so ties must be broken before the cut: without the
         // ordinal name and id tie-breakers the database decides which workspaces survive
         // Take(20), and two identical requests can report different members.
-        var byWorkspace = workspaceRows.Select(item => new AdminUsageWorkspaceBreakdownDto(item.WorkspaceId, item.WorkspaceName, item.TransactionCount, LedgerAmount(item.ProviderCostUsd), LedgerAmount(item.CustomerChargesUsd))).OrderByDescending(item => item.ProviderCostUsd).ThenBy(item => item.WorkspaceName, Ordinal).ThenBy(item => item.WorkspaceId).Take(ReportRankLimit).ToArray();
+        var byWorkspace = workspaceRows.Select(item => new AdminUsageWorkspaceBreakdownDto(item.WorkspaceId, item.WorkspaceName, item.TransactionCount, item.ProviderCostUsd, item.CustomerChargesUsd)).OrderByDescending(item => item.ProviderCostUsd).ThenBy(item => item.WorkspaceName, Ordinal).ThenBy(item => item.WorkspaceId).Take(ReportRankLimit).ToArray();
 
         var userRows = await (from transaction in query
                               join user in db.Users.AsNoTracking() on transaction.UserId equals user.Id
@@ -141,10 +139,10 @@ DayUtc = group.Key,
                                   grouped.Key.Email,
                                   grouped.Key.DisplayName,
                                   TransactionCount = grouped.Count(),
-                                  ProviderCostUsd = grouped.Sum(item => (double)item.ProviderCostUsd),
-                                  CustomerChargesUsd = grouped.Sum(item => (double)(item.ChargedAmount - item.ReversedAmount)),
+                                  ProviderCostUsd = grouped.Sum(item => item.ProviderCostUsd),
+                                  CustomerChargesUsd = grouped.Sum(item => item.ChargedAmount - item.ReversedAmount),
                               }).ToListAsync(cancellationToken);
-        var byUser = userRows.Select(item => new AdminUsageUserBreakdownDto(item.UserId, item.Email, item.DisplayName, item.TransactionCount, LedgerAmount(item.ProviderCostUsd), LedgerAmount(item.CustomerChargesUsd))).OrderByDescending(item => item.ProviderCostUsd).ThenBy(item => item.DisplayName, Ordinal).ThenBy(item => item.Email ?? string.Empty, Ordinal).ThenBy(item => item.UserId).Take(ReportRankLimit).ToArray();
+        var byUser = userRows.Select(item => new AdminUsageUserBreakdownDto(item.UserId, item.Email, item.DisplayName, item.TransactionCount, item.ProviderCostUsd, item.CustomerChargesUsd)).OrderByDescending(item => item.ProviderCostUsd).ThenBy(item => item.DisplayName, Ordinal).ThenBy(item => item.Email ?? string.Empty, Ordinal).ThenBy(item => item.UserId).Take(ReportRankLimit).ToArray();
 
         var statusRows = await query.GroupBy(item => item.Status).Select(group => new
         {
@@ -153,10 +151,10 @@ DayUtc = group.Key,
             SuccessfulCount = group.Count(item => item.Status == UsageTransactionStatus.Completed),
             FailedCount = group.Count(item => item.Status == UsageTransactionStatus.Failed),
             CancelledCount = group.Count(item => item.Status == UsageTransactionStatus.Cancelled),
-            ProviderCostUsd = group.Sum(item => (double)item.ProviderCostUsd),
-            CustomerChargesUsd = group.Sum(item => (double)(item.ChargedAmount - item.ReversedAmount)),
+            ProviderCostUsd = group.Sum(item => item.ProviderCostUsd),
+            CustomerChargesUsd = group.Sum(item => item.ChargedAmount - item.ReversedAmount),
         }).ToListAsync(cancellationToken);
-        var byStatus = statusRows.Select(item => new AdminUsageStatusBreakdownDto(item.Status.ToString(), item.TransactionCount, item.SuccessfulCount, item.FailedCount, item.CancelledCount, LedgerAmount(item.ProviderCostUsd), LedgerAmount(item.CustomerChargesUsd))).OrderBy(item => item.Status, Ordinal).ToArray();
+        var byStatus = statusRows.Select(item => new AdminUsageStatusBreakdownDto(item.Status.ToString(), item.TransactionCount, item.SuccessfulCount, item.FailedCount, item.CancelledCount, item.ProviderCostUsd, item.CustomerChargesUsd)).OrderBy(item => item.Status, Ordinal).ToArray();
 
         return new AdminUsageBreakdownsDto(byFeature, byDay, byWorkspace, byUser, byStatus);
     }
