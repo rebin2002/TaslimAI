@@ -200,6 +200,7 @@ let root: Root;
 let container: TestNode;
 let loads: { projectId: string; deferred: Deferred<WorldData>; settled: boolean }[];
 let creates: Deferred<MovieLocation>[];
+let updates: Deferred<MovieLocation>[];
 let referenceAdds: Deferred<MovieWorldReference>[];
 
 async function mountWorld(projectId: string) {
@@ -281,6 +282,14 @@ async function startCreateInA() {
   if (creates.length !== 1) throw new Error(`expected one pending create, saw ${creates.length}`);
 }
 
+async function startUpdate(name: string) {
+  await click(requireNode(findByClass(container, "movie-world-edit")[0], "edit record button"));
+  const editor = requireNode(findByClass(container, "movie-world-editor")[0], "world editor");
+  await typeText(requireNode(findByTag(editor, "INPUT")[0], "name input"), name);
+  await typeText(requireNode(findByTag(editor, "TEXTAREA")[0], "description field"), `updated as ${name}`);
+  await click(editorSaveButton());
+}
+
 beforeEach(() => {
   document = new TestDocument();
   container = document.createElement("div");
@@ -302,6 +311,7 @@ beforeEach(() => {
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
   loads = [];
   creates = [];
+  updates = [];
   referenceAdds = [];
   harness.api.getMovieWorld.mockReset().mockImplementation((projectId: string) => {
     const entry = { projectId, deferred: deferred<WorldData>(), settled: false };
@@ -311,6 +321,11 @@ beforeEach(() => {
   harness.api.addMovieLocation.mockReset().mockImplementation(() => {
     const entry = deferred<MovieLocation>();
     creates.push(entry);
+    return entry.promise;
+  });
+  harness.api.updateMovieLocation.mockReset().mockImplementation(() => {
+    const entry = deferred<MovieLocation>();
+    updates.push(entry);
     return entry.promise;
   });
   harness.api.addMovieWorldReference.mockReset().mockImplementation(() => {
@@ -366,6 +381,56 @@ describe("MovieWorldWorkspace project-switch continuation fence", () => {
     expect(textOf(container)).toContain("World movie-B");
   });
 
+  it("drops an A create after A→B→A even when the returned project ID matches again", async () => {
+    await mountWorld(PROJECT_A);
+    await startCreateInA();
+
+    await switchToProject(PROJECT_B);
+    await switchToProject(PROJECT_A);
+    expect(selectedListEntryName()).toContain("Alpha movie-A");
+
+    await settle(() => creates[0]!.resolve({
+      id: "loc-a-late", name: "Late arrival", description: "lands after returning to A",
+      visualContinuityNotes: null, referenceAssetId: null,
+    }));
+    await flush();
+
+    expect(harness.api.addMovieLocation.mock.calls[0]![0]).toBe(PROJECT_A);
+    expect(textOf(container)).not.toContain("Late arrival");
+    expect(findByClass(container, "movie-world-list-item")).toHaveLength(1);
+    expect(selectedListEntryName()).toContain("Alpha movie-A");
+    expect(textOf(container)).toContain("World movie-A");
+  });
+
+  it("does not apply an old A update or clear a newer save after A→B→A", async () => {
+    await mountWorld(PROJECT_A);
+    await startUpdate("Stale A edit");
+    await switchToProject(PROJECT_B);
+    await switchToProject(PROJECT_A);
+    await startUpdate("Current A edit");
+    expect(updates).toHaveLength(2);
+    expect(textOf(editorSaveButton())).toContain("movieBody.loading");
+
+    await settle(() => updates[0]!.resolve({
+      id: "loc-movie-A", name: "Stale A edit", description: "lands after returning to A",
+      visualContinuityNotes: null, referenceAssetId: null,
+    }));
+    await flush();
+
+    // The old continuation may neither overwrite the new A view nor clear its save spinner.
+    expect(findByClass(container, "movie-world-editor")).toHaveLength(1);
+    expect(textOf(container)).not.toContain("Stale A edit");
+    expect(textOf(editorSaveButton())).toContain("movieBody.loading");
+
+    await settle(() => updates[1]!.resolve({
+      id: "loc-movie-A", name: "Current A edit", description: "current A response",
+      visualContinuityNotes: null, referenceAssetId: null,
+    }));
+    await flush();
+    expect(textOf(container)).toContain("Current A edit");
+    expect(findByClass(container, "movie-world-editor")).toHaveLength(0);
+  });
+
   it("drops a reference success that resolves after switching to another project", async () => {
     await mountWorld(PROJECT_A);
     const bottomGrid = requireNode(findByClass(container, "movie-world-bottom-grid")[0], "reference library card");
@@ -400,6 +465,25 @@ describe("MovieWorldWorkspace project-switch continuation fence", () => {
 
     expect(textOf(container)).not.toContain("register refused under A");
     expect(findByClass(container, "movie-workspace-error-inline")).toHaveLength(0);
+  });
+
+  it("drops a reference success after A→B→A rather than appending it to the revisited A", async () => {
+    await mountWorld(PROJECT_A);
+    const bottomGrid = requireNode(findByClass(container, "movie-world-bottom-grid")[0], "reference library card");
+    await click(requireNode(findByClass(bottomGrid, "movie-world-inline-add")[0], "register reference button"));
+    const form = referenceForm();
+    await typeText(requireNode(findByTag(form, "INPUT")[0], "reference name input"), "Ghost reference");
+    await click(requireNode(findByTag(form, "BUTTON").find((node) => (node.getAttribute("class") ?? "").includes("movie-world-save")), "reference save button"));
+    if (referenceAdds.length !== 1) throw new Error(`expected one pending reference add, saw ${referenceAdds.length}`);
+
+    await switchToProject(PROJECT_B);
+    await switchToProject(PROJECT_A);
+    await settle(() => referenceAdds[0]!.resolve({ id: "ref-a-late", name: "Ghost reference", kind: "moodboard", description: null, tagsJson: null, assetId: null }));
+    await flush();
+
+    expect(harness.api.addMovieWorldReference.mock.calls[0]![0]).toBe(PROJECT_A);
+    expect(textOf(container)).not.toContain("Ghost reference");
+    expect(textOf(container)).toContain("World movie-A");
   });
 
   it("still applies a create that resolves while its own project is active", async () => {
