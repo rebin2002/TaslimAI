@@ -28,30 +28,18 @@
  *   --self-test            Synthetic fixed-shape (400) and broken-shape
  *                          (500) servers; asserts the evaluator decides
  *                          both correctly. No app build required.
- *   --serve                Spawn `next start` against the existing
- *                          production build in apps/web/.next, run the
- *                          strict gate + embedded negative control, tear
- *                          the server down. Requires `next build` first.
  *   --url <base>           Run the gate against an externally started
  *                          production server (loopback only).
  *
  * Exit codes: 0 PASS, 1 FAIL (5xx observed / recovery broken),
  * 2 harness error or vacuous-gate guard tripped.
  *
- * Test-only, provider-free, loopback-only. No secrets, no production
- * probes, no source changes. Uses Node >= 18 built-ins only.
+ * Test-only, direct literal loopback. The externally started app must be isolated
+ * from credentials and external services. No production probes.
  */
-import { createServer } from "node:http";
-import { spawn } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
-import { createRequire } from "node:module";
-import { fileURLToPath } from "node:url";
-import net from "node:net";
-import path from "node:path";
+import { Agent, createServer, request } from "node:http";
 
-const WEB_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 const FETCH_TIMEOUT_MS = 15_000;
-const READY_TIMEOUT_MS = 60_000;
 
 const FORM_ACTION_IDS = [
   ["literal \"x\" (prod shape)", "x"],
@@ -59,16 +47,35 @@ const FORM_ACTION_IDS = [
 ];
 const FORM_BODY = "email=anon%40example.test&note=synthetic";
 
-async function httpFetch(url, init = {}) {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
-  try {
-    const res = await fetch(url, { redirect: "manual", signal: controller.signal, ...init });
-    const body = await res.text().catch(() => "");
-    return { status: res.status, headers: res.headers, body };
-  } finally {
-    clearTimeout(timer);
+function parseLoopbackPort(url) {
+  const match = /^http:\/\/127\.0\.0\.1:([1-9]\d{0,4})$/.exec(url);
+  if (!match || match[0] !== url || Number(match[1]) > 65535) {
+    throw new Error("Only literal http://127.0.0.1:PORT (1-65535) is allowed.");
   }
+  return Number(match[1]);
+}
+
+async function httpFetch(baseUrl, init = {}) {
+  const port = parseLoopbackPort(baseUrl);
+  // Explicit direct agent; no DNS, ambient proxy configuration or redirects.
+  const agent = new Agent({ keepAlive: false });
+  return new Promise((resolve, reject) => {
+    const headers = { ...init.headers };
+    if (init.body !== undefined) headers["content-length"] = Buffer.byteLength(init.body);
+    const req = request({
+      hostname: "127.0.0.1", port, path: "/", method: init.method ?? "GET",
+      headers, agent,
+    }, (res) => {
+      res.on("error", reject);
+      res.on("aborted", () => reject(new Error("Loopback response aborted")));
+      res.on("end", () => resolve({ status: res.statusCode }));
+      res.resume();
+    });
+    const timer = setTimeout(() => req.destroy(new Error("Loopback request timed out")), FETCH_TIMEOUT_MS);
+    req.on("error", reject);
+    req.on("close", () => { clearTimeout(timer); agent.destroy(); });
+    req.end(init.body);
+  });
 }
 
 /**
@@ -80,7 +87,7 @@ async function evaluateStrictGate(baseUrl) {
   const cases = [];
   let pass = true;
 
-  const baseline = await httpFetch(`${baseUrl}/`);
+  const baseline = await httpFetch(baseUrl);
   cases.push({ name: "baseline GET / is 200", ok: baseline.status === 200, status: baseline.status });
   if (baseline.status !== 200) pass = false;
 
@@ -91,7 +98,7 @@ async function evaluateStrictGate(baseUrl) {
         "content-type": "application/x-www-form-urlencoded",
       };
       if (withOrigin) headers.origin = new URL(baseUrl).origin;
-      const res = await httpFetch(`${baseUrl}/`, { method: "POST", body: FORM_BODY, headers });
+      const res = await httpFetch(baseUrl, { method: "POST", body: FORM_BODY, headers });
       // STRICT: any 5xx fails. 400/404 (post-fix) and framework 200/3xx pass.
       const ok = res.status < 500;
       cases.push({
@@ -103,7 +110,7 @@ async function evaluateStrictGate(baseUrl) {
     }
   }
 
-  const recovery = await httpFetch(`${baseUrl}/`);
+  const recovery = await httpFetch(baseUrl);
   cases.push({ name: "recovery GET / is 200 after malformed storm", ok: recovery.status === 200, status: recovery.status });
   if (recovery.status !== 200) pass = false;
 
@@ -146,14 +153,6 @@ async function listen(server) {
   return `http://127.0.0.1:${port}`;
 }
 
-async function freePort() {
-  const srv = net.createServer();
-  await new Promise((resolve) => srv.listen(0, "127.0.0.1", resolve));
-  const { port } = srv.address();
-  await new Promise((resolve) => srv.close(resolve));
-  return port;
-}
-
 /**
  * Negative control: the deterministic-500 server MUST make the strict
  * evaluator FAIL. Returns true when the gate's teeth are confirmed.
@@ -186,69 +185,39 @@ function printResult(title, result) {
   }
 }
 
-async function spawnNextStart(port) {
-  const buildIdPath = path.join(WEB_DIR, ".next", "BUILD_ID");
-  if (!existsSync(buildIdPath)) {
-    console.error(`No production build found at ${buildIdPath}.`);
-    console.error("Run first (loopback, synthetic env only): cd apps/web && NEXT_PUBLIC_API_URL=https://synthetic.invalid npx next build");
-    process.exit(2);
+function parseArgs(argv) {
+  if (argv.length === 1 && argv[0] === "--self-test") return { mode: "self-test" };
+  if (argv.length === 2 && argv[0] === "--url") {
+    parseLoopbackPort(argv[1]);
+    return { mode: "url", url: argv[1] };
   }
-  console.log(`[serve] using build ${readFileSync(buildIdPath, "utf8").trim()} via next start on 127.0.0.1:${port}`);
-  // `next` may be hoisted to the workspace root (npm workspaces) — resolve
-  // it the same way the local `next` bin shim does, with a direct fallback.
-  const require_ = createRequire(path.join(WEB_DIR, "package.json"));
-  let nextBin;
-  try {
-    nextBin = require_.resolve("next/dist/bin/next");
-  } catch {
-    nextBin = path.join(WEB_DIR, "node_modules", "next", "dist", "bin", "next");
-  }
-  const child = spawn(process.execPath, [nextBin, "start", "-p", String(port), "-H", "127.0.0.1"], {
-    cwd: WEB_DIR,
-    stdio: ["ignore", "pipe", "pipe"],
-    env: { ...process.env, NODE_ENV: "production", NEXT_TELEMETRY_DISABLED: "1" },
-  });
-  let log = "";
-  child.stdout.on("data", (d) => { log += d; });
-  child.stderr.on("data", (d) => { log += d; });
-  const deadline = Date.now() + READY_TIMEOUT_MS;
-  while (Date.now() < deadline) {
-    if (child.exitCode !== null) {
-      console.error("[serve] next start exited early:\n" + log);
-      process.exit(2);
-    }
-    try {
-      const probe = await httpFetch(`http://127.0.0.1:${port}/`);
-      if (probe.status === 200) return child;
-    } catch {
-      // not listening yet
-    }
-    await new Promise((r) => setTimeout(r, 500));
-  }
-  child.kill("SIGKILL");
-  console.error("[serve] next start never became ready:\n" + log);
-  process.exit(2);
+  throw new Error("Usage: --self-test | --url http://127.0.0.1:PORT; --serve is disabled.");
 }
 
-function parseArgs(argv) {
-  const args = { mode: "", url: "" };
-  for (let i = 0; i < argv.length; i += 1) {
-    if (argv[i] === "--self-test") args.mode = "self-test";
-    else if (argv[i] === "--serve") args.mode = "serve";
-    else if (argv[i] === "--url") { args.mode = "url"; args.url = argv[i + 1] ?? ""; i += 1; }
-    else { console.error(`Unknown argument: ${argv[i]}`); process.exit(2); }
+function verifyTargetGuard() {
+  const denied = [
+    "http://localhost:3000", "http://example.invalid:3000",
+    "http://127.0.0.1", "http://127.0.0.1:0", "http://127.0.0.1:65536",
+    "http://127.1:3000", "http://2130706433:3000", "http://[::1]:3000",
+    "https://127.0.0.1:3000", "http://127.0.0.1:3000/path",
+    "http://127.0.0.1:3000@outside.invalid", "http://127.0.0.1:3000?x=1",
+    "http://127.0.0.1:3000\n",
+  ];
+  for (const url of denied) {
+    let rejected = false;
+    try { parseLoopbackPort(url); } catch { rejected = true; }
+    if (!rejected) throw new Error("Target guard accepted a disallowed URL");
   }
-  return args;
+  if (parseLoopbackPort("http://127.0.0.1:3000") !== 3000) {
+    throw new Error("Target guard rejected literal loopback");
+  }
+  console.log("[self-test] literal loopback target guard: OK");
 }
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
-  if (!args.mode) {
-    console.log("Usage: node next-start-strict-gate.mjs --self-test | --serve | --url <loopback-base-url>");
-    process.exit(2);
-  }
-
   if (args.mode === "self-test") {
+    verifyTargetGuard();
     const positive = await runPositiveControl();
     printResult("control/fixed-shape(400) — must PASS", positive);
     const negative = await runNegativeControl();
@@ -258,36 +227,25 @@ async function main() {
     process.exit(good ? 0 : 1);
   }
 
-  let targetUrl = args.url;
-  let child = null;
-  if (args.mode === "serve") {
-    targetUrl = `http://127.0.0.1:${await freePort()}`;
-    child = await spawnNextStart(new URL(targetUrl).port);
-  }
-  if (!/^http:\/\/(127\.0\.0\.1|localhost)(:\d+)?$/.test(targetUrl)) {
-    console.error("Refusing: --url must be loopback-only (http://127.0.0.1:PORT or http://localhost:PORT). No production probes.");
+  const targetUrl = args.url;
+  const result = await evaluateStrictGate(targetUrl);
+  printResult(`strict-gate/${targetUrl}`, result);
+
+  // Embedded negative control: a green on the real server is only
+  // meaningful if the SAME evaluator demonstrably fails a deterministic
+  // 500. If that control ever reports PASS, this gate cannot certify.
+  const control = await runNegativeControl();
+  printResult("negative-control/broken(500) — must FAIL", control);
+  if (control.verdict !== "FAIL") {
+    console.error("\n[gate-guard] negative control did NOT fail the evaluator; refusing to certify. Exit 2.");
     process.exit(2);
   }
 
-  try {
-    const result = await evaluateStrictGate(targetUrl);
-    printResult(`strict-gate/${targetUrl}`, result);
-
-    // Embedded negative control: a green on the real server is only
-    // meaningful if the SAME evaluator demonstrably fails a deterministic
-    // 500. If that control ever reports PASS, this gate cannot certify.
-    const control = await runNegativeControl();
-    printResult("negative-control/broken(500) — must FAIL", control);
-    if (control.verdict !== "FAIL") {
-      console.error("\n[gate-guard] negative control did NOT fail the evaluator; refusing to certify. Exit 2.");
-      process.exit(2);
-    }
-
-    console.log(`\n[strict-gate] FINAL: ${result.verdict} (negative-control guard confirmed: a 500 fails this gate)`);
-    process.exit(result.verdict === "PASS" ? 0 : 1);
-  } finally {
-    if (child && child.exitCode === null) child.kill("SIGKILL");
-  }
+  console.log(`\n[strict-gate] FINAL: ${result.verdict} (negative-control guard confirmed: a 500 fails this gate)`);
+  process.exit(result.verdict === "PASS" ? 0 : 1);
 }
 
-void main();
+void main().catch((error) => {
+  console.error("[strict-gate] harness error:", error.message);
+  process.exitCode = 2;
+});
