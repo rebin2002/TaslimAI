@@ -162,38 +162,61 @@ const prerequisiteLabels: Record<Locale, Record<string, [string, string, string,
 
 const numberLocales: Record<Locale, string> = { en: "en-US", ar: "ar-u-nu-arab", ku: "ku-Arab-u-nu-arab" };
 
-export function movieDirectorText(locale: Locale, key: MovieDirectorKey, variables: Record<string, string | number> = {}) {
-  return catalogs[locale][key].replace(/\{(\w+)\}/g, (_, variable: string) => String(variables[variable] ?? `{${variable}}`));
-}
+export type MovieDirectorPackTranslate = (key: string, variables?: Record<string, string>) => string;
 
-export function movieDirectorRoomLabel(locale: Locale, room: DirectorRoom) {
-  return roomLabels[locale][room];
-}
-
-export function movieDirectorRoomDetail(locale: Locale, key: string, variables: Record<string, string | number> = {}) {
-  const value = roomDetails[locale][key] ?? roomDetails.en[key];
+function interpolateDirectorText(value: string, variables: Record<string, string | number> = {}) {
   return value.replace(/\{(\w+)\}/g, (_, variable: string) => String(variables[variable] ?? `{${variable}}`));
 }
 
-export function movieDirectorActionLabel(locale: Locale, actionType: string) {
-  return actionLabels[locale][actionType] ?? actionLabels[locale].default;
+function packText(suffix: string, translatePack?: MovieDirectorPackTranslate, variables: Record<string, string | number> = {}) {
+  if (!translatePack) return undefined;
+  const key = `movieDirector.${suffix}`;
+  const stringVariables = Object.fromEntries(Object.entries(variables).map(([name, value]) => [name, String(value)]));
+  const translated = translatePack(key, Object.keys(stringVariables).length ? stringVariables : undefined);
+  return translated && translated !== key ? interpolateDirectorText(translated, variables) : undefined;
 }
 
-export function movieDirectorProposalStatusLabel(locale: Locale, status: string) {
-  return statusLabels[locale][status] ?? status;
+// Installable packs may add these namespaced keys as data; missing keys keep using the legacy catalogs.
+export function movieDirectorText(locale: Locale, key: MovieDirectorKey, variables: Record<string, string | number> = {}, translatePack?: MovieDirectorPackTranslate) {
+  return packText(`text.${key}`, translatePack, variables) ?? interpolateDirectorText(catalogs[locale][key], variables);
 }
 
-export function movieDirectorHistoryLabel(locale: Locale, eventType: string) {
-  return historyLabels[locale][eventType] ?? historyLabels[locale].default;
+export function movieDirectorRoomLabel(locale: Locale, room: DirectorRoom, translatePack?: MovieDirectorPackTranslate) {
+  return packText(`room.${room}`, translatePack) ?? roomLabels[locale][room];
 }
 
-export function movieDirectorReasonLabel(locale: Locale, reason: string) {
-  return reasonLabels[locale][reason] ?? reason.replaceAll("_", " ");
+export function movieDirectorRoomDetail(locale: Locale, key: string, variables: Record<string, string | number> = {}, translatePack?: MovieDirectorPackTranslate) {
+  const fallback = roomDetails[locale][key] ?? roomDetails.en[key];
+  return packText(`roomDetail.${key}`, translatePack, variables) ?? interpolateDirectorText(fallback, variables);
 }
 
-export function movieDirectorPrerequisite(locale: Locale, key: string, satisfied: boolean) {
+export function movieDirectorActionLabel(locale: Locale, actionType: string, translatePack?: MovieDirectorPackTranslate) {
+  const fallback = actionLabels[locale][actionType] ?? actionLabels[locale].default;
+  return packText(`action.${actionType}`, translatePack) ?? fallback;
+}
+
+export function movieDirectorProposalStatusLabel(locale: Locale, status: string, translatePack?: MovieDirectorPackTranslate) {
+  const fallback = statusLabels[locale][status] ?? status;
+  return packText(`status.${status}`, translatePack) ?? fallback;
+}
+
+export function movieDirectorHistoryLabel(locale: Locale, eventType: string, translatePack?: MovieDirectorPackTranslate) {
+  const fallback = historyLabels[locale][eventType] ?? historyLabels[locale].default;
+  return packText(`history.${eventType}`, translatePack) ?? fallback;
+}
+
+export function movieDirectorReasonLabel(locale: Locale, reason: string, translatePack?: MovieDirectorPackTranslate) {
+  const fallback = reasonLabels[locale][reason] ?? reason.replaceAll("_", " ");
+  return packText(`reason.${reason}`, translatePack) ?? fallback;
+}
+
+export function movieDirectorPrerequisite(locale: Locale, key: string, satisfied: boolean, translatePack?: MovieDirectorPackTranslate) {
   const values = prerequisiteLabels[locale][key] ?? prerequisiteLabels.en[key];
-  return { label: values[0], detail: satisfied ? values[1] : values[2] };
+  const detailKey = satisfied ? "satisfied" : "unsatisfied";
+  return {
+    label: packText(`prerequisite.${key}.label`, translatePack) ?? values[0],
+    detail: packText(`prerequisite.${key}.${detailKey}`, translatePack) ?? (satisfied ? values[1] : values[2]),
+  };
 }
 
 export function formatMovieDirectorNumber(locale: Locale, value: number) {
@@ -204,7 +227,9 @@ export function formatMovieDirectorDate(locale: Locale, value: string) {
   return new Intl.DateTimeFormat(numberLocales[locale], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }).format(new Date(value));
 }
 
-export function movieDirectorQualityLabel(locale: Locale, value: string) {
+export function movieDirectorQualityLabel(locale: Locale, value: string, translatePack?: MovieDirectorPackTranslate) {
+  const translated = packText(`quality.${value}`, translatePack);
+  if (translated) return translated;
   const labels: Record<Locale, Record<string, string>> = {
     en: { Fast: "Fast", Standard: "Standard", Cinematic: "Cinematic", Studio: "Studio" },
     ar: { Fast: "سريع", Standard: "قياسي", Cinematic: "سينمائي", Studio: "استوديو" },
