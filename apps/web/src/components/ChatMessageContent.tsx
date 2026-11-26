@@ -14,5 +14,5 @@ export function ChatMessageContent({ role, status, content }: ChatMessageContent
 
   return role.toLowerCase() === "assistant"
     ? <AssistantMarkdown content={content} />
-    : <p>{content}</p>;
+    : <p style={{ whiteSpace: "pre-wrap" }}>{content}</p>;
 }
