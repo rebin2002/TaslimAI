@@ -10,74 +10,54 @@ using Xunit;
 namespace Taslim.Api.Tests;
 
 /// <summary>
-/// Boundary legs of the #1145 exactness fix that the six facts in
-/// <see cref="AdminUsageReportExactnessTests"/> do not reach. That class seeds only
-/// <see cref="UsageTransactionStatus.Completed"/> rows with
-/// <c>ReversedAmount = 0</c>, and asserts rank order only on the workspace and feature
-/// lists. The admin report still projects three uncovered properties:
-/// 1. a synthetic over-reversal result: <c>UsageLedgerService</c> does not create this
-///    state, and the entity's <c>NetChargedAmount</c> clamps at zero. The report currently
-///    sums the raw operands, so this case isolates whether the precision pin preserves
-///    the signed numeric result. It does not declare a customer-accounting policy;
-///    any clamp-versus-signed decision for invalid ledger states needs owner review;
-/// 2. the status breakdown, which is now ordinal-ordered by its displayed name while
-///    its Cancelled/Refunded legs carry zero net charges alongside positive provider
-///    costs;
-/// 3. the truncated user rank - the workspace rank has a membership test, but the
-///    second <c>Take(ReportRankLimit)</c> site (per-user rows joined by email) has
-///    none, so a tied cut there is unguarded.
-/// Pure read-side projection tests: synthetic in-memory SQLite rows, Provider = "mock",
-/// no stored amount is recalculated and no billing write path is exercised.
+/// Covers filtered partial refunds at the smallest ledger unit, cancellation costs,
+/// and the deterministic top-20 boundary when users tie on both cost and name.
+/// All transactions are synthetic, and these read-side tests exercise no billing actions.
 /// </summary>
 public sealed class AdminUsageReportExactnessBoundaryTests
 {
     // Same stored-scale constant as the #1145 class so the arithmetic provenance matches.
     private const decimal LedgerRowCostUsd = 0.12345679m;
-    private const int LedgerRowCount = 64;
     private const decimal ExactLedgerTotalUsd = 7.90123456m;
 
     private static readonly DateTime WindowStart = new(2026, 11, 16, 12, 0, 0, DateTimeKind.Utc);
 
-    /// <summary>
-    /// This synthetic fixture sets ReversedAmount > ChargedAmount, a state not produced
-    /// by the refund service. It verifies only that the current read projection's signed
-    /// arithmetic is pinned to the ledger scale, without binary noise. The negative
-    /// result is not approval of an accounting policy: whether the admin report should
-    /// clamp invalid over-reversal remains an owner decision.
-    /// </summary>
     [Fact]
-    public async Task Synthetic_over_reversal_pins_signed_arithmetic_without_defining_policy()
+    public async Task Filtered_partial_refunds_preserve_the_smallest_positive_residual()
     {
         await using var fixture = await BoundaryFixture.CreateAsync();
         var workspace = fixture.Workspaces[0];
+        var otherWorkspace = fixture.AddWorkspace("Other Workspace");
         var user = fixture.Users[0];
 
-        // Two rows charged 1.00 each, reversed 3.00000001 in total: net = -1.00000002.
-        fixture.AddTransaction(workspace, user, UsageTransactionStatus.Refunded, LedgerRowCostUsd, 1.00m, 2.00000001m);
-        fixture.AddTransaction(workspace, user, UsageTransactionStatus.Refunded, LedgerRowCostUsd, 1.00m, 1.00000001m);
+        // Both reversals are valid. The matching rows leave one and two units at the
+        // ledger's eight-decimal scale. Each other row differs in exactly one filter.
+        fixture.AddTransaction(workspace, user, UsageTransactionStatus.Refunded, LedgerRowCostUsd, 1m, 0.99999999m);
+        fixture.AddTransaction(workspace, user, UsageTransactionStatus.Refunded, LedgerRowCostUsd, 1m, 0.99999998m);
+        fixture.AddTransaction(otherWorkspace, user, UsageTransactionStatus.Refunded, 5m, 5m, 1m);
+        fixture.AddTransaction(workspace, fixture.Users[1], UsageTransactionStatus.Refunded, 5m, 5m, 1m);
+        fixture.AddTransaction(workspace, user, UsageTransactionStatus.Completed, 5m, 5m, 0m);
         await fixture.SaveChangesAsync();
 
-        var report = await fixture.Service.GetReportAsync(fixture.FullRange);
+        var filter = fixture.FullRange with { WorkspaceId = workspace.Id, UserId = user.Id, Status = UsageTransactionStatus.Refunded };
+        var report = await fixture.Service.GetReportAsync(filter);
 
-        // Sign preserved, pinned at eight places - the artifact double sum would show as
-        // -1.0000000200000019 before the pin.
-        Assert.Equal(-1.00000002m, report.Summary.TotalCustomerChargesUsd);
-        Assert.True(report.Summary.TotalCustomerChargesUsd < 0m);
-
-        // Provider cost is unaffected by the reversal legs and still pins exactly.
+        const decimal expectedNet = 0.00000003m;
+        Assert.Equal(2, report.Summary.TransactionCount);
+        Assert.Equal(expectedNet, report.Summary.TotalCustomerChargesUsd);
         Assert.Equal(2 * LedgerRowCostUsd, report.Summary.TotalProviderCostUsd);
-
         var status = Assert.Single(report.Breakdowns.ByStatus);
         Assert.Equal(nameof(UsageTransactionStatus.Refunded), status.Status);
-        Assert.Equal(-1.00000002m, status.CustomerChargesUsd);
+        Assert.Equal(expectedNet, status.CustomerChargesUsd);
         Assert.Equal(2 * LedgerRowCostUsd, status.ProviderCostUsd);
+        Assert.Equal(expectedNet, Assert.Single(report.Breakdowns.ByDay).CustomerChargesUsd);
+        Assert.Equal(expectedNet, Assert.Single(report.Breakdowns.ByUser).CustomerChargesUsd);
+        Assert.Equal(expectedNet, Assert.Single(report.Breakdowns.ByWorkspace).CustomerChargesUsd);
+        Assert.Equal(expectedNet, Assert.Single(report.Breakdowns.ByFeature).CustomerChargesUsd);
+        Assert.Equal(new[] { 0.00000001m, 0.00000002m }, report.Transactions.Items.Select(item => item.ChargedAmount).OrderBy(amount => amount));
 
-        var day = Assert.Single(report.Breakdowns.ByDay);
-        Assert.Equal(-1.00000002m, day.CustomerChargesUsd);
-
-        // Wire form: negative, invariant, non-exponential, at the ledger scale.
         var json = JsonSerializer.Serialize(report.Summary, new JsonSerializerOptions(JsonSerializerDefaults.Web));
-        Assert.Contains("\"totalCustomerChargesUsd\":-1.00000002", json, StringComparison.Ordinal);
+        Assert.Contains("\"totalCustomerChargesUsd\":0.00000003", json, StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -125,21 +105,29 @@ public sealed class AdminUsageReportExactnessBoundaryTests
         await using var fixture = await BoundaryFixture.CreateAsync(userCount: 21);
         var workspace = fixture.Workspaces[0];
 
-        for (int index = 0; index < 21; index++)
+        // At the cutoff three users share a display name. The user with the lowest
+        // identifier has an email; the two users without email must rank first, by id.
+        for (int index = 18; index < 21; index++)
         {
-            fixture.AddTransaction(workspace, fixture.Users[index], UsageTransactionStatus.Completed, 1.00m, 1.00m, 0m);
+            fixture.Users[index].DisplayName = "Tied User 18";
+            if (index > 18)
+            {
+                fixture.Users[index].Email = null;
+                fixture.Users[index].NormalizedEmail = null;
+            }
+        }
+
+        foreach (var user in fixture.Users.AsEnumerable().Reverse())
+        {
+            fixture.AddTransaction(workspace, user, UsageTransactionStatus.Completed, 1m, 1m, 0m);
         }
         await fixture.SaveChangesAsync();
 
-        string ExpectedName(int index) => $"Tied User {index:D2}";
-
         var first = await fixture.Service.GetReportAsync(fixture.FullRange);
         var second = await fixture.Service.GetReportAsync(fixture.FullRange);
-
+        var expectedIds = fixture.Users.Take(18).Concat(fixture.Users.Skip(19)).Select(user => user.Id);
         Assert.Equal(20, first.Breakdowns.ByUser.Count);
-        Assert.Equal(
-            Enumerable.Range(0, 20).Select(ExpectedName),
-            first.Breakdowns.ByUser.Select(item => item.DisplayName));
+        Assert.Equal(expectedIds, first.Breakdowns.ByUser.Select(item => item.UserId));
 
         // Identical request, identical members and order: no dependence on group-by emission.
         Assert.Equal(
@@ -241,7 +229,7 @@ public sealed class AdminUsageReportExactnessBoundaryTests
         {
             var user = new ApplicationUser
             {
-                Id = Guid.NewGuid(),
+                Id = Guid.Parse($"00000000-0000-0000-0000-{Users.Count + 1:D12}"),
                 UserName = email,
                 NormalizedUserName = email.ToUpperInvariant(),
                 Email = email,

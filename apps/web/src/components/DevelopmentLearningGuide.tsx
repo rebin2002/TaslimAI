@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { ArrowLeft, Check, CheckCircle2, Code2, FileCode2, GitBranch, LockKeyhole, RefreshCw, ShieldCheck, TerminalSquare } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useAuth } from "@/components/AuthProvider";
 import { useLocale } from "@/components/LocaleProvider";
 import type { Locale } from "@/lib/i18n";
@@ -171,6 +171,7 @@ export function DevelopmentLearningGuide() {
   const { workspace } = useAuth();
   const strings = copy[locale];
   const [guideState, setGuideState] = useState<DevelopmentLearningState>(createDefaultDevelopmentLearningState);
+  const guideStateRef = useRef<DevelopmentLearningState>(createDefaultDevelopmentLearningState());
   const [loadedWorkspaceId, setLoadedWorkspaceId] = useState<string | null>(null);
   const [persistenceError, setPersistenceError] = useState(false);
 
@@ -179,7 +180,9 @@ export function DevelopmentLearningGuide() {
     // Workspace changes must load a different namespace before rendering old progress.
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setLoadedWorkspaceId(null);
-    setGuideState(readDevelopmentLearningState(workspace.id));
+    const next = readDevelopmentLearningState(workspace.id);
+    guideStateRef.current = next;
+    setGuideState(next);
     setLoadedWorkspaceId(workspace.id);
     setPersistenceError(false);
   }, [workspace?.id]);
@@ -190,18 +193,20 @@ export function DevelopmentLearningGuide() {
     return { done, total: activeTrack.lessons.length };
   }, [activeTrack.lessons, guideState]);
 
-  function persist(next: DevelopmentLearningState) {
+  function updateGuide(update: (current: DevelopmentLearningState) => DevelopmentLearningState) {
+    const next = update(guideStateRef.current);
+    guideStateRef.current = next;
     setGuideState(next);
     if (!workspace?.id || !saveDevelopmentLearningState(workspace.id, next)) setPersistenceError(true);
     else setPersistenceError(false);
   }
 
   function chooseTrack(trackId: LearningTrackId) {
-    persist({ ...guideState, activeTrack: trackId, updatedAt: new Date().toISOString() });
+    updateGuide((current) => ({ ...current, activeTrack: trackId, updatedAt: new Date().toISOString() }));
   }
 
   function toggleLesson(lessonId: string, completed: boolean) {
-    persist(setDevelopmentLessonCompletion(guideState, lessonId, completed));
+    updateGuide((current) => setDevelopmentLessonCompletion(current, lessonId, completed));
   }
 
   if (!workspace) {
@@ -243,7 +248,7 @@ export function DevelopmentLearningGuide() {
               return <li key={lesson.id} className={`${styles.lesson} ${completed ? styles.lessonComplete : ""}`}><label className={styles.lessonLabel}><input type="checkbox" checked={completed} onChange={(event) => toggleLesson(lesson.id, event.target.checked)} aria-label={`${completed ? strings.markIncomplete : strings.complete}: ${lesson.title}`} /><span className={styles.checkbox} aria-hidden="true">{completed ? <Check size={14} /> : null}</span><span className={styles.lessonCopy}><strong>{lesson.title}</strong><small>{lesson.description}</small></span></label><span className={styles.lessonStatus}>{completed ? <><CheckCircle2 size={14} aria-hidden="true" /> {strings.complete}</> : null}</span></li>;
             })}
           </ol>
-          <label className={styles.notes}><span>{strings.notesLabel}</span><textarea dir="auto" value={guideState.notes} onChange={(event) => persist(setDevelopmentLearningNotes(guideState, event.target.value))} maxLength={2_000} placeholder={strings.notesPlaceholder} aria-describedby="development-notes-hint" /><small id="development-notes-hint">{strings.notesHint} {guideState.notes.length}/2,000</small></label>
+          <label className={styles.notes}><span>{strings.notesLabel}</span><textarea dir="auto" value={guideState.notes} onChange={(event) => updateGuide((current) => setDevelopmentLearningNotes(current, event.target.value))} maxLength={2_000} placeholder={strings.notesPlaceholder} aria-describedby="development-notes-hint" /><small id="development-notes-hint">{strings.notesHint} {guideState.notes.length}/2,000</small></label>
           <div className={styles.feedback} role="status" aria-live="polite">{persistenceError ? <><ShieldCheck size={14} aria-hidden="true" /> {strings.storageError}</> : <><CheckCircle2 size={14} aria-hidden="true" /> {strings.saved}</>}</div>
         </section>
       </section>
