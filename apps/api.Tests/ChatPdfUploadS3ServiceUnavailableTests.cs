@@ -121,6 +121,15 @@ public sealed class ChatPdfUploadS3ServiceUnavailableTests
         Assert.DoesNotContain(SyntheticAccessKey, uploadBody, StringComparison.Ordinal);
         Assert.DoesNotContain(SyntheticSecretKey, uploadBody, StringComparison.Ordinal);
         Assert.DoesNotContain(SyntheticPutToken, uploadBody, StringComparison.Ordinal);
+        var putLogs = api.CapturedLogs.Lines.Where(line =>
+            line.Contains("S3-compatible storage operation failed", StringComparison.Ordinal) &&
+            line.Contains("Operation=put", StringComparison.Ordinal)).ToList();
+        var putLog = Assert.Single(putLogs);
+        Assert.Contains("StatusCode=503", putLog, StringComparison.Ordinal);
+        Assert.Contains("HasRequestId=True", putLog, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("FailureClass=s3_service_error", putLog, StringComparison.Ordinal);
+        Assert.DoesNotContain("; ErrorCode=", putLog, StringComparison.Ordinal);
+        Assert.DoesNotContain("; RequestId=", putLog, StringComparison.Ordinal);
         foreach (var line in api.CapturedLogs.Lines)
         {
             Assert.DoesNotContain(SyntheticBucket, line, StringComparison.Ordinal);
@@ -352,11 +361,10 @@ public sealed class ChatPdfUploadS3ServiceUnavailableTests
 
             if (FailWithServiceUnavailable)
             {
-                // The incident's status class: the provider answered, with 503. Canary
-                // values ride in the exception text so the test can prove nothing leaks.
+                // A synthetic provider response: unlike #459's no-response shape, the
+                // provider returned an HTTP 503. Canary values exercise log sanitization.
                 throw new AmazonS3Exception(
-                    $"synthetic provider unavailable bucket={bucket} key={key} endpoint={SyntheticEndpoint} token={SyntheticPutToken}",
-                    new HttpRequestException($"synthetic provider body access={SyntheticAccessKey} secret={SyntheticSecretKey}"))
+                    $"synthetic provider unavailable bucket={bucket} key={key} endpoint={SyntheticEndpoint} token={SyntheticPutToken} access={SyntheticAccessKey} secret={SyntheticSecretKey}")
                 {
                     StatusCode = HttpStatusCode.ServiceUnavailable,
                     ErrorCode = "ServiceUnavailable",
