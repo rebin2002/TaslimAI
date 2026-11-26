@@ -8,7 +8,7 @@ vi.mock("next/navigation", () => ({
 }));
 
 vi.mock("@/components/AuthProvider", () => ({
-  useAuth: () => ({ workspace: { id: "workspace-1" } }),
+  useAuth: () => ({ user: { id: "synthetic-test-user" }, workspace: { id: "workspace-1" } }),
 }));
 
 vi.mock("@/components/LocaleProvider", () => ({

@@ -442,6 +442,7 @@ select.memory-control { appearance: auto; cursor: pointer; }
 .document-compose-layout { display: grid; grid-template-columns: minmax(0, 1.45fr) minmax(300px, .7fr); gap: 18px; max-width: 1120px; margin: 0 auto; align-items: start; }
 .document-brief-card, .document-rail-card, .document-reader, .document-inspector, .document-state-card { border: 1px solid #dfe7ef; border-radius: 16px; background: #fff; box-shadow: 0 14px 38px rgba(23,38,57,.055); }
 .document-brief-card { display: grid; gap: 17px; padding: 24px; }
+.document-draft-note { display: flex; align-items: center; gap: 7px; margin: 0; padding: 9px 12px; color: #2f6fb0; border: 1px solid #d7e6f8; border-radius: 10px; background: #f2f8fe; font-size: 12px; line-height: 1.5; }
 .document-card-heading, .document-card-title, .document-recent-heading, .document-inspector-header, .document-brief-footer, .document-reader-topline, .document-inspector-footer { display: flex; align-items: center; justify-content: space-between; gap: 14px; }
 .document-card-title { justify-content: flex-start; }
 .document-card-icon, .document-rail-icon, .document-inspector-icon { display: grid; flex: 0 0 auto; place-items: center; width: 32px; height: 32px; color: var(--blue); border-radius: 10px; background: #eaf2ff; }
@@ -537,6 +538,7 @@ select.memory-control { appearance: auto; cursor: pointer; }
 .document-terminal-state .document-result-actions { justify-content: center; }
 .document-generation-state { display: grid; gap: 16px; max-width: 900px; }
 .generation-cancel-button { justify-self: center; }
+[dir="rtl"] .document-draft-note { flex-direction: row-reverse; }
 [dir="rtl"] .document-studio-header, [dir="rtl"] .document-card-heading, [dir="rtl"] .document-card-title, [dir="rtl"] .document-recent-heading, [dir="rtl"] .document-reader-topline, [dir="rtl"] .document-inspector-header, [dir="rtl"] .document-brief-footer, [dir="rtl"] .document-inspector-footer { flex-direction: row-reverse; }
 [dir="rtl"] .document-inspector-footer { align-items: flex-end; }
 [dir="rtl"] .document-reader-rule { margin-inline-start: auto; }
@@ -2948,3 +2950,80 @@ body { background: var(--canvas); }
 [dir="rtl"] .movie-shot-title, [dir="rtl"] .movie-shot-list-item { flex-direction: row-reverse; }
 [dir="rtl"] .movie-shot-designer-heading, [dir="rtl"] .movie-shot-intent-heading, [dir="rtl"] .movie-shot-advanced-heading, [dir="rtl"] .movie-shot-designer-footer, [dir="rtl"] .movie-capability-heading { flex-direction: row-reverse; }
 @media (max-width: 520px) { [dir="rtl"] .movie-shot-designer-heading, [dir="rtl"] .movie-shot-advanced-heading, [dir="rtl"] .movie-shot-designer-footer, [dir="rtl"] .movie-capability-heading { flex-direction: column; } }
+
+/* #1030: a pruned/processing representation row keeps its metadata but is no longer a link — match the muted unavailable affordance. */
+.asset-representation.is-unavailable { color: #a0acb7; }
+
+/* Music Studio structured-lyrics composer (#708, styling pass on the wiring landed by PR #1253).
+   PR #1253 put PR #772's LyricsSectionEditor and MusicLyricsPreflightPanel on the studio surface,
+   and not one of the 20 classes those components render had a rule anywhere in this file: the studio
+   scopes its field styling to .music-primary-field / .music-choice-field, so the lyric textareas fell
+   back to browser defaults on a dark studio, the eight add controls rendered as unspaced bare text,
+   and every mirrored-contract state the panel publishes through data-* attributes was unstyled.
+   Presentational only, deliberately: no `content` value here generates prose (a stylesheet must not be
+   able to claim a readiness or a provider capability the contract does not publish), no physical
+   left/right offsets are used so Sorani and Arabic mirror through logical properties, and the blocked
+   handoff control is stated visually without ever leaving the focus order - no display:none,
+   visibility:hidden or pointer-events:none, because the panel keeps it aria-disabled on purpose.
+   Covered by src/app/musicLyricsStudioStyles.test.ts. */
+.music-lyrics-composition { display: flex; flex-direction: column; gap: 13px; padding: 16px; border: 1px solid var(--music-line); border-radius: 14px; background: rgba(4, 10, 16, .28); }
+.music-lyrics-composition > .music-section-heading { margin-bottom: 2px; }
+.music-lyrics-composition > .music-section-heading p { margin: 0; color: var(--music-muted); font-size: 11px; font-weight: 500; line-height: 1.55; }
+.lyrics-section-editor { display: flex; flex-direction: column; gap: 11px; }
+.lyrics-section-editor-list { display: flex; flex-direction: column; gap: 10px; }
+.lyrics-section-editor-item { display: flex; flex-direction: column; gap: 9px; padding: 12px; border: 1px solid var(--music-line); border-radius: 12px; background: rgba(255, 255, 255, .035); }
+.lyrics-section-editor-item-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.lyrics-section-editor-item-title { margin: 0; color: var(--music-text); font-size: 12px; font-weight: 800; letter-spacing: -.01em; }
+.lyrics-section-editor-item-actions { display: flex; flex: 0 0 auto; gap: 6px; }
+.lyrics-section-editor-item-actions button { min-width: 30px; height: 30px; padding: 0; color: #c6d2d5; border: 1px solid var(--music-line); border-radius: 8px; background: rgba(255, 255, 255, .035); font-size: 13px; line-height: 1; transition: border-color .18s ease, background-color .18s ease, color .18s ease; }
+.lyrics-section-editor-item-actions button:hover:not([disabled]) { color: var(--music-text); border-color: rgba(101, 215, 198, .42); background: rgba(101, 215, 198, .08); }
+.lyrics-section-editor-item-actions button[disabled] { color: #5f6f79; border-color: rgba(170, 204, 220, .1); border-style: dashed; cursor: not-allowed; }
+.lyrics-section-editor textarea { width: 100%; min-width: 0; min-height: 112px; padding: 12px 13px; color: var(--music-text); border: 1px solid var(--music-line); border-radius: 11px; outline: 0; background: rgba(7, 14, 21, .56); font: inherit; font-size: 13px; line-height: 1.65; resize: vertical; transition: border-color .18s ease, background-color .18s ease; }
+.lyrics-section-editor textarea::placeholder { color: #6f818c; }
+.lyrics-section-editor textarea:focus { border-color: rgba(101, 215, 198, .78); box-shadow: 0 0 0 3px rgba(101, 215, 198, .11); background: rgba(7, 14, 21, .78); }
+.lyrics-section-editor textarea[aria-invalid="true"] { border-color: rgba(222, 119, 119, .55); }
+.lyrics-section-editor-error { margin: 0; padding: 8px 10px; color: #f1b6b6; border: 1px solid rgba(222, 119, 119, .22); border-inline-start-width: 3px; border-radius: 9px; background: rgba(160, 48, 55, .12); font-size: 11px; line-height: 1.45; }
+.lyrics-section-editor-add { display: flex; flex-wrap: wrap; gap: 7px; }
+.lyrics-section-editor-add button { min-height: 34px; padding: 0 12px; color: #c6d2d5; border: 1px solid var(--music-line); border-radius: 999px; background: rgba(255, 255, 255, .035); font-size: 11px; font-weight: 800; transition: border-color .18s ease, background-color .18s ease, color .18s ease; }
+.lyrics-section-editor-add button:hover:not([disabled]) { color: var(--music-text); border-color: rgba(101, 215, 198, .46); background: rgba(101, 215, 198, .09); }
+.lyrics-section-editor-add button[disabled] { color: #5f6f79; border-color: rgba(170, 204, 220, .1); border-style: dashed; cursor: not-allowed; }
+.lyrics-section-editor-hints { display: flex; flex-wrap: wrap; gap: 4px 14px; margin: 0; color: var(--music-muted); font-size: 10px; line-height: 1.5; }
+.music-lyrics-attestations { display: flex; flex-direction: column; gap: 8px; }
+.music-lyrics-attestation { display: flex; align-items: flex-start; gap: 9px; color: #d4dfe2; font-size: 11px; font-weight: 600; line-height: 1.5; cursor: pointer; }
+.music-lyrics-attestation input { flex: 0 0 auto; width: 17px; height: 17px; margin: 1px 0 0; accent-color: var(--music-accent); cursor: pointer; }
+.music-lyrics-preflight { display: flex; flex-direction: column; gap: 9px; padding: 13px; border: 1px solid var(--music-line); border-radius: 12px; background: rgba(7, 14, 21, .42); }
+.music-lyrics-preflight > h2 { margin: 0; color: var(--music-accent); font-size: 10px; font-weight: 800; letter-spacing: .15em; text-transform: uppercase; }
+.music-lyrics-preflight h3 { margin: 0; color: var(--music-text); font-size: 11px; font-weight: 800; }
+.music-lyrics-preflight p { margin: 0; color: var(--music-muted); font-size: 11px; line-height: 1.55; }
+.music-lyrics-preflight-summary { display: grid; grid-template-columns: repeat(auto-fit, minmax(132px, 1fr)); gap: 3px 12px; padding: 10px 11px; border: 1px solid var(--music-line); border-radius: 10px; background: rgba(255, 255, 255, .03); }
+.music-lyrics-preflight-summary p { font-variant-numeric: tabular-nums; }
+.music-lyrics-preflight-sections { display: flex; flex-direction: column; gap: 3px; margin: 0; padding-inline-start: 16px; color: var(--music-muted); font-size: 11px; line-height: 1.5; }
+.music-lyrics-preflight-sections li { font-variant-numeric: tabular-nums; }
+.music-lyrics-preflight-sections li[data-empty="true"] { color: #a0acb7; font-style: italic; }
+.music-lyrics-preflight-sections li[data-invisible-only="true"] { color: #f1b6b6; font-style: normal; font-weight: 700; }
+.music-lyrics-preflight-issues { display: flex; flex-direction: column; gap: 6px; }
+.music-lyrics-preflight-issues-live { display: flex; flex-direction: column; gap: 4px; }
+.music-lyrics-preflight-issues-live ul { display: flex; flex-direction: column; gap: 4px; margin: 0; padding: 0; list-style: none; }
+.music-lyrics-preflight-issues-live li { padding: 7px 10px; color: #f1b6b6; border: 1px solid rgba(222, 119, 119, .22); border-inline-start-width: 3px; border-radius: 8px; background: rgba(160, 48, 55, .12); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 10px; line-height: 1.45; }
+.music-lyrics-preflight-capability { display: flex; flex-direction: column; gap: 5px; padding: 10px 11px; border: 1px solid rgba(223, 169, 90, .23); border-radius: 10px; background: rgba(223, 169, 90, .07); }
+.music-lyrics-preflight-capability h3 { color: #f3d49d; }
+.music-lyrics-preflight-capability p { color: #c4d0d3; }
+.music-lyrics-preflight-status { padding: 9px 11px; border: 1px solid var(--music-line); border-radius: 9px; font-size: 11px; line-height: 1.55; }
+.music-lyrics-preflight-status[data-ready="true"] { color: #a9ded2; border-color: rgba(101, 215, 198, .32); background: rgba(101, 215, 198, .08); }
+.music-lyrics-preflight-status[data-ready="false"] { color: #c4d0d3; border-color: rgba(223, 169, 90, .26); background: rgba(223, 169, 90, .07); }
+.music-lyrics-preflight > button { align-self: flex-start; min-height: 38px; padding: 0 15px; color: var(--music-bg); border: 1px solid transparent; border-radius: 10px; background: var(--music-accent); font-size: 11px; font-weight: 800; transition: background-color .18s ease, color .18s ease, border-color .18s ease; }
+.music-lyrics-preflight > button:hover { background: var(--music-accent-strong); }
+.music-lyrics-preflight > button[aria-disabled="true"] { color: #c6d2d5; border-color: var(--music-line); background: rgba(255, 255, 255, .035); }
+.music-lyrics-draft-notice { margin: 0; padding: 10px 11px; color: #a9ded2; border: 1px solid rgba(101, 215, 198, .26); border-inline-start-width: 3px; border-radius: 9px; background: rgba(101, 215, 198, .07); font-size: 11px; line-height: 1.5; }
+.music-studio-page :is(.music-lyrics-composition, .lyrics-section-editor, .music-lyrics-preflight) :is(a, button, input, select, textarea, summary):focus-visible { outline: 2px solid #8de0d1; outline-offset: 3px; }
+@media (prefers-reduced-motion: reduce) {
+  .music-lyrics-composition :is(textarea, button, input) { transition-duration: 0.01ms !important; }
+}
+@media (max-width: 560px) {
+  .music-lyrics-composition { gap: 11px; padding: 13px; }
+  .lyrics-section-editor-item-actions button { min-width: 40px; height: 40px; }
+  .lyrics-section-editor-add { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .lyrics-section-editor-add button { width: 100%; min-height: 40px; }
+  .music-lyrics-preflight-summary { grid-template-columns: 1fr; }
+  .music-lyrics-preflight > button { width: 100%; min-height: 40px; }
+}
