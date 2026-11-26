@@ -158,19 +158,29 @@ public sealed class GenerationQualityControlUnitTests
 
     private static byte[] Png(int width, int height)
     {
-        var bytes = new byte[40];
+        // Non-empty IDAT chunk so the fixture is structurally complete for the generated-image
+        // completeness gate, which now refuses an IHDR+IEND pair with no image data.
+        var bytes = new byte[58];
         new byte[] { 137, 80, 78, 71, 13, 10, 26, 10 }.CopyTo(bytes, 0);
         BinaryPrimitives.WriteUInt32BigEndian(bytes.AsSpan(8, 4), 13);
         "IHDR"u8.CopyTo(bytes.AsSpan(12, 4));
         BinaryPrimitives.WriteInt32BigEndian(bytes.AsSpan(16, 4), width);
         BinaryPrimitives.WriteInt32BigEndian(bytes.AsSpan(20, 4), height);
-        "IEND"u8.CopyTo(bytes.AsSpan(32, 4));
+        BinaryPrimitives.WriteUInt32BigEndian(bytes.AsSpan(33, 4), 1);
+        "IDAT"u8.CopyTo(bytes.AsSpan(37, 4));
+        bytes[41] = 0x78;
+        "IEND"u8.CopyTo(bytes.AsSpan(50, 4));
         return bytes;
     }
 
     private static byte[] PngWithTrailingPadding(int width, int height)
     {
         var bytes = new byte[8_192];
+        // This fixture feeds the streamed-prefix probe, not the generated-image completeness gate:
+        // GenerationQualityControl reads dimensions from the leading bytes and looks for the
+        // terminator at the end of the sampled buffer, so the terminator is placed there and the
+        // space between is fill. The completeness gate itself is exercised by the artifacts built
+        // with Png above, which do carry an IDAT chunk.
         new byte[] { 137, 80, 78, 71, 13, 10, 26, 10 }.CopyTo(bytes, 0);
         BinaryPrimitives.WriteUInt32BigEndian(bytes.AsSpan(8, 4), 13);
         "IHDR"u8.CopyTo(bytes.AsSpan(12, 4));
@@ -274,6 +284,9 @@ public sealed class GenerationQualityControlIntegrationTests : IClassFixture<Gen
         Assert.False(await db.StoredFiles.AsNoTracking().AnyAsync(item => item.GenerationJobOutputs.Any(output => output.GenerationJobId == created.Id)));
         var usage = await db.UsageTransactions.AsNoTracking().SingleAsync(item => item.GenerationJobId == created.Id);
         Assert.Equal(UsageTransactionStatus.Failed, usage.Status);
+        Assert.Equal(0m, usage.ChargedAmount);
+        Assert.Equal(0m, usage.ReversedAmount);
+        Assert.False(usage.IsBillable);
         Assert.Contains(GenerationQualityReasonCodes.RepresentationCorrupt, usage.SafeMetadataJson, StringComparison.Ordinal);
         Assert.Contains("FailedPermanent", usage.SafeMetadataJson, StringComparison.Ordinal);
     }
@@ -297,13 +310,18 @@ internal sealed class InvalidQualityGenerationJobHandler : IGenerationJobHandler
 
     private static byte[] SignatureValidPng()
     {
-        var bytes = new byte[40];
+        // Structurally complete container whose IHDR declares zero dimensions, so the failure is
+        // attributable to quality control rather than to the completeness gate.
+        var bytes = new byte[58];
         new byte[] { 137, 80, 78, 71, 13, 10, 26, 10 }.CopyTo(bytes, 0);
         BinaryPrimitives.WriteUInt32BigEndian(bytes.AsSpan(8, 4), 13);
         "IHDR"u8.CopyTo(bytes.AsSpan(12, 4));
         BinaryPrimitives.WriteInt32BigEndian(bytes.AsSpan(16, 4), 0);
         BinaryPrimitives.WriteInt32BigEndian(bytes.AsSpan(20, 4), 0);
-        "IEND"u8.CopyTo(bytes.AsSpan(32, 4));
+        BinaryPrimitives.WriteUInt32BigEndian(bytes.AsSpan(33, 4), 1);
+        "IDAT"u8.CopyTo(bytes.AsSpan(37, 4));
+        bytes[41] = 0x78;
+        "IEND"u8.CopyTo(bytes.AsSpan(50, 4));
         return bytes;
     }
 }
