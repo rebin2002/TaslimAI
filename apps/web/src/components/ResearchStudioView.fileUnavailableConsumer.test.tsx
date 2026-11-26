@@ -200,15 +200,18 @@ vi.mock("lucide-react", async (importOriginal) => {
   return stubs;
 });
 
-import { ResearchStudioView } from "./ResearchStudioView";
+import { ResearchStudioView, sameResearchDownloadContext } from "./ResearchStudioView";
 
 const WS = { id: "workspace-1" };
 const DOCX_CONTENT_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
 const PDF_CONTENT_TYPE = "application/pdf";
 const ASSET_ID = "00000000-0000-4000-8000-000000000030";
+const OTHER_ASSET_ID = "00000000-0000-4000-8000-000000000033";
 const DOCX_ID = "00000000-0000-4000-8000-000000000031";
 const PDF_ID = "00000000-0000-4000-8000-000000000032";
 const JOB_ID = "00000000-0000-4000-8000-000000000007";
+const REPLACEMENT_JOB_ID = "00000000-0000-4000-8000-000000000008";
+const OTHER_WORKSPACE_ID = "workspace-2";
 const PINNED = "2026-11-19T00:00:00Z";
 const activeJobKey = `taslim:research-generation:${WS.id}`;
 
@@ -228,14 +231,14 @@ function unavailableError() {
 
 /** The published snapshot of a completed report: both renditions remain advertised with
  *  identity only - no availability fact - exactly what `GET /api/generation/jobs/{id}` returns. */
-function completedResearchJob(): GenerationJob {
+function completedResearchJob(jobId = JOB_ID, assetId = ASSET_ID): GenerationJob {
   return {
-    id: JOB_ID, workspaceId: WS.id, projectId: null, jobType: "research.generate", status: "Succeeded",
+    id: jobId, workspaceId: WS.id, projectId: null, jobType: "research.generate", status: "Succeeded",
     title: "Synthetic market scan", progressPercent: 100, errorCode: null, errorMessage: null,
     cancellationRequested: false, createdAt: PINNED, queuedAt: PINNED, startedAt: PINNED,
     completedAt: PINNED, failedAt: null, cancelledAt: null, outputs: [],
     resultJson: JSON.stringify({
-      assetId: ASSET_ID,
+      assetId,
       researchType: "research",
       title: "Synthetic market scan",
       language: "en",
@@ -306,6 +309,23 @@ async function selectCompletedResultInView() {
   expect(findByClass(container, "research-report-shell")).toHaveLength(1);
 }
 
+async function rerenderWithWorkspace(workspaceId: string) {
+  harness.workspace = { id: workspaceId };
+  await act(async () => { root.render(<ResearchStudioView />); await drain(); });
+  await settle();
+  runTimers();
+  await settle();
+}
+
+async function restoreCompletedResultInView(jobId: string) {
+  const completed = completedResearchJob(jobId);
+  const active = { ...completed, status: "Running" as const, progressPercent: 80 };
+  harness.api.getGenerationJob.mockReset().mockResolvedValueOnce(active).mockResolvedValue(completed);
+  storage.set(activeJobKey, jobId);
+  await rerenderWithWorkspace(WS.id);
+  expect(findByClass(container, "research-report-shell")).toHaveLength(1);
+}
+
 beforeEach(() => {
   doc = new TestDocument();
   container = doc.createElement("div");
@@ -353,6 +373,15 @@ beforeEach(() => {
 afterEach(() => { act(() => root?.unmount()); vi.unstubAllGlobals(); });
 
 describe("Research Studio click-time 409 ASSET_FILE_UNAVAILABLE consumer contract (#1049)", () => {
+  it("treats changed assets and renditions as a new context even when job and workspace IDs match", () => {
+    const currentJob = completedResearchJob();
+    expect(sameResearchDownloadContext(currentJob, completedResearchJob())).toBe(true);
+    expect(sameResearchDownloadContext(currentJob, completedResearchJob(JOB_ID, OTHER_ASSET_ID))).toBe(false);
+    const changedResult = JSON.parse(currentJob.resultJson ?? "{}") as { representations: Array<{ id: string; type: string; fileName: string; contentType: string }> };
+    changedResult.representations[0].fileName = "updated-market-scan.docx";
+    expect(sameResearchDownloadContext(currentJob, { ...currentJob, resultJson: JSON.stringify(changedResult) })).toBe(false);
+  });
+
   it("turns the pruned backing file into a localized alert with no silent success and no payload leak", async () => {
     harness.api.downloadAssetRepresentation.mockImplementation((_assetId: string, representationId: string) =>
       representationId === DOCX_ID ? Promise.reject(unavailableError()) : Promise.resolve(new Blob(["synthetic"], { type: PDF_CONTENT_TYPE })));
@@ -456,6 +485,89 @@ describe("Research Studio click-time 409 ASSET_FILE_UNAVAILABLE consumer contrac
     // Whatever the fix shape is, a rejected download must never leave a stuck busy promise.
     expect(downloadButton("DOCX").getAttribute("aria-busy"), "a rejected download must leave the busy state").not.toBe("true");
     expect(downloadButton("PDF").getAttribute("aria-busy"), "the sibling must never inherit the busy state").not.toBe("true");
+  });
+
+  it("does not let an old job's late success download or clear the replacement job's busy state", async () => {
+    let resolveOld: ((blob: Blob) => void) | undefined;
+    harness.api.downloadAssetRepresentation.mockImplementationOnce(() => new Promise<Blob>((resolve) => { resolveOld = resolve; }));
+    await selectCompletedResultInView();
+
+    await settle(() => { downloadButton("DOCX").dispatchEvent({ type: "click", bubbles: true }); });
+    expect(downloadButton("DOCX").getAttribute("aria-busy")).toBe("true");
+    const createAnother = findByClass(container, "primary-button").find((n) => (n.textContent ?? "").includes(translations.en["research.createAnother"]));
+    expect(createAnother).toBeTruthy();
+    await settle(() => { createAnother!.dispatchEvent({ type: "click", bubbles: true }); });
+    expect(findByClass(container, "research-studio-layout")).toHaveLength(1);
+    expect(findByClass(container, "research-report-shell")).toHaveLength(0);
+
+    await restoreCompletedResultInView(REPLACEMENT_JOB_ID);
+    let resolveNew: ((blob: Blob) => void) | undefined;
+    harness.api.downloadAssetRepresentation.mockImplementation(() => new Promise<Blob>((resolve) => { resolveNew = resolve; }));
+    await settle(() => { downloadButton("DOCX").dispatchEvent({ type: "click", bubbles: true }); });
+    expect(downloadButton("DOCX").getAttribute("aria-busy"), "the replacement job's operation must be active").toBe("true");
+
+    await settle(() => { resolveOld?.(new Blob(["old job"], { type: DOCX_CONTENT_TYPE })); });
+    expect(clickedAnchors(), "the old job must not create a download link").toHaveLength(0);
+    expect(downloadButton("DOCX").getAttribute("aria-busy"), "the old operation must not clear the replacement operation").toBe("true");
+    expect(downloadAlertNode(), "the old operation must not write into the replacement report").toBeFalsy();
+
+    await settle(() => { resolveNew?.(new Blob(["new job"], { type: DOCX_CONTENT_TYPE })); });
+    await settle(() => { runTimers(); });
+    expect(clickedAnchors(), "only the replacement job's completed request may download").toHaveLength(1);
+    expect(clickedAnchors()[0].download).toBe("synthetic-market-scan.docx");
+    expect(downloadButton("DOCX").getAttribute("aria-busy")).not.toBe("true");
+  });
+
+  it("does not let a late unavailable-file error or finally clear a newer replacement-job operation", async () => {
+    let rejectOld: ((cause: unknown) => void) | undefined;
+    harness.api.downloadAssetRepresentation.mockImplementationOnce(() => new Promise<Blob>((_resolve, reject) => { rejectOld = reject; }));
+    await selectCompletedResultInView();
+
+    await settle(() => { downloadButton("DOCX").dispatchEvent({ type: "click", bubbles: true }); });
+    const createAnother = findByClass(container, "primary-button").find((n) => (n.textContent ?? "").includes(translations.en["research.createAnother"]));
+    await settle(() => { createAnother!.dispatchEvent({ type: "click", bubbles: true }); });
+    await restoreCompletedResultInView(REPLACEMENT_JOB_ID);
+    let resolveNew: ((blob: Blob) => void) | undefined;
+    harness.api.downloadAssetRepresentation.mockImplementation(() => new Promise<Blob>((resolve) => { resolveNew = resolve; }));
+    await settle(() => { downloadButton("DOCX").dispatchEvent({ type: "click", bubbles: true }); });
+    expect(downloadButton("DOCX").getAttribute("aria-busy"), "the replacement operation must remain active").toBe("true");
+
+    await settle(() => { rejectOld?.(unavailableError()); });
+    expect(downloadAlertNode(), "a stale 409 must not be announced in the replacement report").toBeFalsy();
+    expect(downloadButton("DOCX").getAttribute("aria-busy"), "the stale rejection must not clear the new operation").toBe("true");
+    expect(findByClass(container, "research-report-shell")).toHaveLength(1);
+
+    await settle(() => { resolveNew?.(new Blob(["new job"], { type: DOCX_CONTENT_TYPE })); });
+    await settle(() => { runTimers(); });
+    expect(clickedAnchors()).toHaveLength(1);
+    expect(downloadButton("DOCX").getAttribute("aria-busy")).not.toBe("true");
+  });
+
+  it("invalidates old downloads across workspace A→B→A and protects the re-entered operation", async () => {
+    let resolveOld: ((blob: Blob) => void) | undefined;
+    harness.api.downloadAssetRepresentation.mockImplementationOnce(() => new Promise<Blob>((resolve) => { resolveOld = resolve; }));
+    await selectCompletedResultInView();
+
+    await settle(() => { downloadButton("DOCX").dispatchEvent({ type: "click", bubbles: true }); });
+    expect(downloadButton("DOCX").getAttribute("aria-busy")).toBe("true");
+    await rerenderWithWorkspace(OTHER_WORKSPACE_ID);
+    expect(findByClass(container, "research-report-shell")).toHaveLength(0);
+
+    await restoreCompletedResultInView(JOB_ID);
+    expect(downloadButton("DOCX").getAttribute("aria-busy"), "a workspace round-trip must clear the previous busy state").not.toBe("true");
+    let resolveFresh: ((blob: Blob) => void) | undefined;
+    harness.api.downloadAssetRepresentation.mockImplementation(() => new Promise<Blob>((resolve) => { resolveFresh = resolve; }));
+    await settle(() => { downloadButton("DOCX").dispatchEvent({ type: "click", bubbles: true }); });
+    expect(downloadButton("DOCX").getAttribute("aria-busy")).toBe("true");
+
+    await settle(() => { resolveOld?.(new Blob(["old workspace"], { type: DOCX_CONTENT_TYPE })); });
+    expect(clickedAnchors(), "the old workspace response must not create a link").toHaveLength(0);
+    expect(downloadButton("DOCX").getAttribute("aria-busy"), "the old response must not clear the re-entered workspace operation").toBe("true");
+
+    await settle(() => { resolveFresh?.(new Blob(["current workspace"], { type: DOCX_CONTENT_TYPE })); });
+    await settle(() => { runTimers(); });
+    expect(clickedAnchors()).toHaveLength(1);
+    expect(downloadButton("DOCX").getAttribute("aria-busy")).not.toBe("true");
   });
 
   it.each(["en", "ar", "ku"] as const)("%s: names each Research download control as a download, not as a bare format token", async (locale) => {
