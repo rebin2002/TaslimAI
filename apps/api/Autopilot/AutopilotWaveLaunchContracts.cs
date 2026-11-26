@@ -1,3 +1,5 @@
+using System.Text.Json.Serialization;
+
 namespace Taslim.Api.Autopilot;
 
 /// <summary>
@@ -33,7 +35,15 @@ public sealed record WaveLaunchProviderRequest(
     string Instructions,
     string BaseSha,
     string Branch,
-    string IdempotencyKey);
+    string IdempotencyKey)
+{
+    /// <summary>
+    /// Positive database-backed completion/launch fence epoch. It is sent only
+    /// in the Bridge fencing header, never in the public request body.
+    /// </summary>
+    [JsonIgnore]
+    public long FencingToken { get; init; }
+}
 
 public static class WaveLaunchProviderOutcomes
 {
