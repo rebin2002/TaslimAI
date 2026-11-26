@@ -5,6 +5,13 @@ Owner: the Music Studio preflight integration lane. This document describes
 provider-free end-to-end preflight surface for Sorani and Arabic lyrics, and
 the exact contract it mirrors.
 
+It now also describes the consumer of that surface: the structured-lyrics
+composer wired into `apps/web/src/components/MusicStudioView.tsx`, which puts
+PR #772's `LyricsSectionEditor` and this panel on the compose screen and keeps
+what is typed there in a browser-local saved draft. That is follow-up step 1,
+and it is recorded below rather than removed, so the contract-mirror guard that
+pinned it can be satisfied by the wiring itself.
+
 Related, already-merged work: PR #802 (client mapper), PR #826 (the fail-closed
 song request contract from PR #709 plus the Sorani roundtrip test from PR #796).
 Related blockers are inventoried in `docs/MUSIC_STUDIO_ARCHITECTURE.md`; this
@@ -123,8 +130,8 @@ structurally by scanning its own source.
 ## Ownership boundaries respected
 
 Audited file-by-file against every open PR before each branch was cut (483 at
-the original slice, 523 at the accessibility follow-up). These paths are not
-claimed by any open PR:
+the original slice, 523 at the accessibility follow-up, 404 at the studio
+wiring). These paths are not claimed by any open PR:
 
 - `apps/web/src/components/music/MusicLyricsPreflightPanel.tsx` (new)
 - `apps/web/src/components/music/MusicLyricsPreflightPanel.test.tsx` (new)
@@ -132,6 +139,12 @@ claimed by any open PR:
   (new, accessibility follow-up)
 - `apps/api.Tests/MusicLyricsDraftContractMirrorTests.cs` (new)
 - `docs/MUSIC_STUDIO_PREFLIGHT_UI.md` (this file)
+- `apps/web/src/lib/musicStudioLyricsDraftState.ts` (+ its test file) (new,
+  studio wiring)
+- `apps/web/src/components/music/musicStudioLyricsLabels.ts` (new, studio
+  wiring)
+- `apps/web/e2e/music-lyrics-section-wiring.acceptance.spec.ts` (new, studio
+  wiring)
 
 The accessibility follow-up changes only the panel and its own new test file.
 `dir` and `lang` semantics stay exactly as the merged direction fix (#758)
@@ -143,8 +156,8 @@ Deliberately untouched, with their owners:
 
 | Path | Owner | Why untouched |
 | --- | --- | --- |
-| `LyricsSectionEditor.tsx` (+ test) | draft PR #772 | The editor is that lane's deliverable; this panel consumes its row model (`id`, `type`, `text`) rather than duplicating it. |
-| `MusicStudioView.tsx`, `MusicStudioView.test.tsx` | open PR #560 (+ CI twin #561) | Studio wiring would replace that lane's work. |
+| `LyricsSectionEditor.tsx` (+ test) | PR #772 | The editor is that lane's deliverable; this panel consumes its row model (`id`, `type`, `text`) rather than duplicating it. |
+| `MusicStudioView.test.tsx` | the #560/#561 lineage | The studio's own submit-path tests stay theirs; the wiring adds a separate test file rather than editing that one. |
 | `MusicGenerationContracts.cs`, `MusicGenerationRequestValidator.cs`, `MusicGenerationCapabilityCatalog.cs`, `MusicGenerationSongContractTests.cs`, `MusicInvisibleTextAdmissionTests.cs` | draft PR #709 (with #260, #812 as other claimants) | Read-only mirror assertions only. |
 | `MusicInvisibleLyricsCostAdmissionTests.cs` | draft PR #773 | Its red contract stays red until #813 lands. |
 | `musicLyricsDraftPayload.ts` | merged PR #802 | Mirrored vocabulary must change server-side first. |
@@ -152,18 +165,67 @@ Deliberately untouched, with their owners:
 | `i18n.ts`, `api.ts`, `Program.cs` | multiple open lanes | No locale keys or client transport added; labels are inline with a prop override. |
 | Voice and Direct Video contracts | draft PR #837 | Different lane; no overlap. |
 
-`MusicLyricsDraftContractMirrorTests.StructuredLyricsEditorRemainsOwnedItsOwnOpenSlice`
-turns the one dependency that matters into a signal: the moment PR #772 lands,
-that assertion fails and points at the studio-wiring follow-up, so this panel
-cannot sit unused while two editors exist.
+`MusicLyricsDraftContractMirrorTests.StructuredLyricsEditorStaysSingleSourcedAndTheWiringFollowUpStaysRecorded`
+keeps the one dependency that matters in force after PR #772 landed its editor:
+exactly one structured lyrics editor may exist, it must mirror the contract
+vocabulary in `musicLyricsDraftPayload.ts` rather than restate it, and until
+`MusicStudioView.tsx` consumes it the step-1 sentence below must stay in this
+document - so this panel cannot sit unused and a second editor cannot appear.
+The guard is satisfied by its `wired` branch now: `MusicStudioView.tsx` imports
+and renders `LyricsSectionEditor`, so the pinned step-1 sentence no longer has
+to be present for the assertion to hold, and re-adding it would record work
+that is already finished.
+
+## Studio wiring (follow-up step 1)
+
+`MusicStudioView.tsx` renders one labelled `<section className="music-lyrics-composition">`
+after the reference-audio panel, holding three things and nothing else: PR #772's
+`LyricsSectionEditor`, the rights attestations the contract asks for, and this
+lane's `MusicLyricsPreflightPanel`. Authored rows are measured on every keystroke
+by the same mirrored contract the server applies, and the panel's handoff control
+is relabelled to "Check and keep this draft" because there is nothing to hand off
+*to*: `MusicGenerationCapabilityCatalog` still reports
+`SupportsLyricsToVocals: false` for every provider, the client
+`MusicGenerationInput` has no lyrics fields at all, and the submit path is
+untouched. A clean handoff records the section count into a browser-local notice.
+
+The draft itself follows the pattern every sibling studio already uses
+(`documentStudioDraftState.ts`): a `sessionStorage` entry keyed
+`taslim:music-lyrics-draft:<userId>:<workspaceId>`, owner-scoped, restored once
+per owner scope, never mirrored while a generation job owns the surface, dropped
+when it becomes empty, and parsed fail-closed - rows whose section token is not
+in the contract vocabulary, blank rows, rows past the 24-section ceiling and text
+past the 3,500-character ceiling are discarded or truncated at line boundaries
+rather than trusted. Nothing private leaves the browser and no locale key or
+transport change is involved.
+
+Ownership hazard, stated plainly: the wiring was audited against 404 open PRs,
+and `MusicStudioView.tsx` was the most contended file in the area with 18
+claimants (`api.ts` 68, `i18n.ts` 63, `musicStudioState.ts` 17). Of the two lanes
+the original note named, PR #560 closed unmerged and PR #561 is still open on
+`ci: validate Music Studio workspace response freshness`, so this diff is the
+smaller one - four import blocks, one contiguous state block, one new JSX
+section, and one `id="music-vocal-language"` attribute added to the studio's
+existing language select. That attribute is the only pre-existing line this lane
+edits, and it exists because a `<select>` wrapped in its own `<label>` folds its
+option text into its computed accessible name, so a browser test cannot address
+the field by label - the same reason `#document-output-format` is addressed by
+id elsewhere in the suite. The branch must be rebased, not re-derived, if #561
+lands first.
 
 ## Follow-ups, in order
 
-1. Land #772 (editor) and wire it to this panel in `MusicStudioView.tsx` -
-   that wiring must be rebased onto whatever #560/#561 leave behind.
+1. ~~Wire the landed #772 editor to this panel in `MusicStudioView.tsx`.~~
+   **Landed.** The editor, the attestations and the panel now share one composer
+   section, and the authored draft survives a tab switch. The rebase obligation
+   that came with it is open while PR #561 is: whoever merges next rebases the
+   composer block, not the contract.
 2. Land #709 with #813, then #773, which makes the server gate match the client
    gate this slice already applies.
 3. Locale keys for the panel copy, once `i18n.ts` is free of its open lanes.
+   The composer strings live in `musicStudioLyricsLabels.ts` for exactly that
+   reason: one file to replace when the catalogs open up, instead of a hunt
+   through the most contended view in the area.
 4. Any capability change (reference conditioning, dialect enablement) requires
    the blockers in `docs/MUSIC_STUDIO_ARCHITECTURE.md` to clear first; the
    fail-closed tests here will fail until that evidence exists.
@@ -175,3 +237,84 @@ contracts, Frontend checks, API integration tests, Browser E2E, Autopilot
 next-wave gate, Production container smoke, and Release evidence and safety
 contract. Targeted local equivalents: the new panel test file, the full web
 unit suite, `tsc --noEmit`, `eslint`, and the two new C# test classes.
+For the wiring, the targeted equivalents are
+`src/lib/musicStudioLyricsDraftState.test.ts`,
+`src/components/MusicStudioView.lyricsWiring.test.tsx`, the new Playwright
+acceptance spec, and
+`MusicLyricsDraftContractMirrorTests.StructuredLyricsEditorStaysSingleSourcedAndTheWiringFollowUpStaysRecorded`
+- which must keep passing with the pinned step-1 sentence gone, because the
+wiring is what carries it now.
+
+## Composer styling (the presentation pass on step 1)
+
+Step 1 put the composer on the studio, and PR #772's editor and panel shipped with
+20 class names that had no rule anywhere in `apps/web/src/app/globals.css`: the
+studio scopes its field styling to `.music-primary-field` / `.music-choice-field`,
+so nothing was inherited either. The lyric textareas fell back to browser defaults
+on a dark page, the eight add-section controls rendered as unspaced bare text, and
+every state the mirrored contract publishes through `data-*` attributes
+(`data-empty`, `data-invisible-only`, `data-ready`, `data-issue-code`,
+`aria-invalid`, `aria-disabled`) was invisible. The block appended at the end of
+`globals.css` closes that, using only the `--music-*` tokens declared on
+`.music-studio-page` and the same card, field, notice and error language the rest
+of the studio already uses.
+
+It is presentational only, which is why it is a safe next step and reviewable on
+its own:
+
+- it adds no submit path and touches no request. `MUSIC_STUDIO_PROVIDER_ACCESS`
+  stays `paused`, no cost-admission surface changes, and the paused provider
+  notice and the generate button are deliberately out of scope: their colours are
+  the studio's claim about capability, not a styling question.
+- it states contract facts and never authors them. Every visual state is keyed to
+  an attribute the mirrored contract or `LyricsSectionEditor` already renders, and
+  no `content` declaration generates prose, so a stylesheet cannot claim
+  readiness, a dialect, or a provider capability.
+- it preserves #772's accessibility decision. The blocked handoff control is
+  `aria-disabled` rather than `disabled` so that it stays in the sequential focus
+  order, so the block contains no `display: none`, `visibility: hidden` or
+  `pointer-events` rule anywhere, and it gives the composer the studio's `#8de0d1`
+  focus-visible ring, which before this pass was scoped to `.music-reference-panel`
+  and so left the composer with no keyboard focus indicator at all.
+- it is right-to-left safe by construction: logical properties only, so Sorani
+  (`ckb`) and Arabic indent and inset on the correct edge, asserted from computed
+  styles in the acceptance spec rather than assumed.
+
+`src/app/musicLyricsStudioStyles.test.ts` pins the block and derives the class list
+from `LyricsSectionEditor.tsx`, `MusicLyricsPreflightPanel.tsx` and the composer in
+`MusicStudioView.tsx` instead of restating it, so a class added to a component
+fails the suite until it is styled. The fourth test of
+`e2e/music-lyrics-section-wiring.acceptance.spec.ts` reads what a browser does with
+the same rules: card and field geometry, the invalid-row colour, the keyboard focus
+ring inside the composer, a blocked handoff that stays reachable and fail-closed,
+the RTL mirror measured physically, and 40px touch targets at 390px.
+
+That last pair is asserted as behaviour, not as an enabled/disabled flag. Playwright
+reads a present `aria-disabled="true"` as disabled, so asking the blocked handoff to
+be both `aria-disabled` and `toBeEnabled()` asks for two contradictory things and the
+second can only ever time out; the first hosted run of this pass failed exactly there
+(Browser E2E on `111f2995`, all six other jobs green). The control's real contract is
+that it stays in the sequential focus order and answers rather than being inert, so
+the test tabs from the attestation to it, checks that a focus attempt takes and that
+no native `disabled` attribute crept in, then activates it twice - keyboard Enter, and
+the `click()` DOM method a user press resolves to - and asserts the withheld notice,
+`data-ready="false"`, `data-admissible="false"` and a job-route counter of zero.
+
+Both halves of that activation matter for different reasons, and neither may be written
+as `handoff.click()`. Playwright's actionability contract refuses to click a control
+carrying `aria-disabled`, so clicking the deliberately-blocked handoff waits out the
+whole test budget and fails on every attempt; the second hosted run of this pass
+(Browser E2E on `3bd008ec`) failed there. Enter activation and `el.click()` run the
+component's own handler the way the engine does, so the fail-closed path is exercised
+without touching the component's semantics. The attribute is never weakened: an
+*enabled* handoff is still asserted with `toBeEnabled()` in the clean-handoff test,
+where the panel drops it.
+
+Still open, and deliberately not attempted here: an `ar` (Arabic) draft can never
+reach `data-ready="true"`, because the mirrored contract requires a dialect for
+`ar` and there is no dialect control. Follow-up 4 gates dialect enablement on the
+capability evidence in `docs/MUSIC_STUDIO_ARCHITECTURE.md`, and every provider's
+`SupportedLyricsDialects` is pinned empty by `MusicVocalCapabilityFailClosedTests`,
+so a picker today would advertise a capability no provider has. This pass makes
+that dead end legible - the `dialect_required` issue now reads as an issue -
+without pretending to fix it.

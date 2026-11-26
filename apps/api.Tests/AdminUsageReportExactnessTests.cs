@@ -18,8 +18,8 @@ namespace Taslim.Api.Tests;
 /// </summary>
 public sealed class AdminUsageReportExactnessTests
 {
-    // Stored at the ledger's declared decimal(18, 8) scale. Summing 64 of these through the
-    // double projection SQLite needs lands on 7.90123455999999 instead of 7.90123456.
+    // Stored at the ledger's declared decimal(18, 8) scale. The pre-fix double projection
+    // accumulated 64 of these as 7.90123455999999 instead of the exact 7.90123456.
     private const decimal LedgerRowCostUsd = 0.12345679m;
     private const int LedgerRowCount = 64;
     private const decimal ExactLedgerTotalUsd = 7.90123456m;
@@ -27,7 +27,7 @@ public sealed class AdminUsageReportExactnessTests
     private static readonly DateTime WindowStart = new(2026, 11, 16, 12, 0, 0, DateTimeKind.Utc);
 
     [Fact]
-    public async Task Report_totals_are_pinned_to_the_ledger_scale()
+    public async Task Report_totals_preserve_fractional_ledger_units()
     {
         await using var fixture = await AdminUsageFixture.CreateAsync();
         fixture.AddTransactions(
@@ -52,6 +52,76 @@ public sealed class AdminUsageReportExactnessTests
 
         var workspace = Assert.Single(report.Breakdowns.ByWorkspace);
         Assert.Equal(ExactLedgerTotalUsd, workspace.ProviderCostUsd);
+    }
+
+    [Fact]
+    public async Task Large_totals_preserve_the_lowest_ledger_unit_in_summary_and_every_breakdown()
+    {
+        await using var fixture = await AdminUsageFixture.CreateAsync();
+        fixture.AddTransaction(
+            fixture.Workspaces[0],
+            fixture.Users[0],
+            UsageFeature.Chat,
+            UsageTransactionStatus.Pending,
+            1_000_000_000.00000000m,
+            1_000_000_000.00000001m,
+            0.00000001m,
+            1_000_000_000.00000000m);
+        fixture.AddTransaction(
+            fixture.Workspaces[0],
+            fixture.Users[0],
+            UsageFeature.Chat,
+            UsageTransactionStatus.Pending,
+            0.00000001m,
+            0.00000002m,
+            0.00000001m,
+            0.00000001m);
+        await fixture.SaveChangesAsync();
+
+        var report = await fixture.Service.GetReportAsync(fixture.FullRange);
+        const decimal exactTotal = 1_000_000_000.00000001m;
+
+        Assert.Equal(exactTotal, report.Summary.TotalProviderCostUsd);
+        Assert.Equal(exactTotal, report.Summary.TotalCustomerChargesUsd);
+        Assert.Equal(exactTotal, report.Summary.PendingEstimatedProviderCostUsd);
+
+        var summaryJson = JsonSerializer.Serialize(report.Summary, new JsonSerializerOptions(JsonSerializerDefaults.Web));
+        using var summaryDocument = JsonDocument.Parse(summaryJson);
+        Assert.Equal("1000000000.00000001", summaryDocument.RootElement.GetProperty("totalProviderCostUsd").GetRawText());
+
+        var feature = Assert.Single(report.Breakdowns.ByFeature);
+        Assert.Equal(exactTotal, feature.ProviderCostUsd);
+        Assert.Equal(exactTotal, feature.CustomerChargesUsd);
+
+        var day = Assert.Single(report.Breakdowns.ByDay);
+        Assert.Equal(exactTotal, day.ProviderCostUsd);
+        Assert.Equal(exactTotal, day.CustomerChargesUsd);
+
+        var workspace = Assert.Single(report.Breakdowns.ByWorkspace);
+        Assert.Equal(exactTotal, workspace.ProviderCostUsd);
+        Assert.Equal(exactTotal, workspace.CustomerChargesUsd);
+
+        var user = Assert.Single(report.Breakdowns.ByUser);
+        Assert.Equal(exactTotal, user.ProviderCostUsd);
+        Assert.Equal(exactTotal, user.CustomerChargesUsd);
+
+        var status = Assert.Single(report.Breakdowns.ByStatus);
+        Assert.Equal("Pending", status.Status);
+        Assert.Equal(exactTotal, status.ProviderCostUsd);
+        Assert.Equal(exactTotal, status.CustomerChargesUsd);
+    }
+
+    [Fact]
+    public async Task Sqlite_streaming_aggregation_observes_request_cancellation()
+    {
+        await using var fixture = await AdminUsageFixture.CreateAsync();
+        fixture.AddTransactions(fixture.Workspaces[0], fixture.Users[0], [1.00m], UsageFeature.Chat);
+        await fixture.SaveChangesAsync();
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            () => fixture.Service.GetReportAsync(fixture.FullRange, cancellation.Token));
     }
 
     /// <summary>
@@ -282,27 +352,43 @@ public sealed class AdminUsageReportExactnessTests
         {
             foreach (var cost in providerCostsUsd)
             {
-                db.UsageTransactions.Add(new UsageTransaction
-                {
-                    Id = Guid.NewGuid(),
-                    WorkspaceId = workspace.Id,
-                    UserId = user.Id,
-                    RequestId = Guid.NewGuid().ToString("N"),
-                    Feature = feature,
-                    Provider = "mock",
-                    Model = "mock-model",
-                    Status = UsageTransactionStatus.Completed,
-                    InputTokens = 10,
-                    OutputTokens = 10,
-                    ProviderCostUsd = cost,
-                    ChargedAmount = cost,
-                    ProviderCostKnown = true,
-                    CostBasis = "Actual",
-                    Currency = UsageCurrencies.Usd,
-                    CreatedAt = WindowStart.AddSeconds(Interlocked.Increment(ref sequence)),
-                    CompletedAt = WindowStart.AddSeconds(sequence),
-                });
+                AddTransaction(workspace, user, feature, UsageTransactionStatus.Completed, cost, cost, 0m, null);
             }
+        }
+
+        public void AddTransaction(
+            Workspace workspace,
+            ApplicationUser user,
+            UsageFeature feature,
+            UsageTransactionStatus status,
+            decimal providerCostUsd,
+            decimal chargedAmount,
+            decimal reversedAmount,
+            decimal? estimatedProviderCostUsd)
+        {
+            var createdAt = WindowStart.AddSeconds(Interlocked.Increment(ref sequence));
+            db.UsageTransactions.Add(new UsageTransaction
+            {
+                Id = Guid.NewGuid(),
+                WorkspaceId = workspace.Id,
+                UserId = user.Id,
+                RequestId = Guid.NewGuid().ToString("N"),
+                Feature = feature,
+                Provider = "mock",
+                Model = "mock-model",
+                Status = status,
+                InputTokens = 10,
+                OutputTokens = 10,
+                ProviderCostUsd = providerCostUsd,
+                ChargedAmount = chargedAmount,
+                ReversedAmount = reversedAmount,
+                EstimatedProviderCostUsd = estimatedProviderCostUsd,
+                ProviderCostKnown = true,
+                CostBasis = "Actual",
+                Currency = UsageCurrencies.Usd,
+                CreatedAt = createdAt,
+                CompletedAt = status == UsageTransactionStatus.Completed ? createdAt : null,
+            });
         }
 
         private ApplicationUser AddUser(string email)
