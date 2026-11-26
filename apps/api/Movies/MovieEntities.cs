@@ -826,7 +826,15 @@ public sealed class MovieVideoProviderException(string code, bool transient, str
 
 public sealed class MovieVideoProviderOutputException : Exception
 {
-    public MovieVideoProviderOutputException() : base("The movie provider returned an invalid output.") { }
+    public MovieVideoProviderOutputException() : this(null, null) { }
+
+    public MovieVideoProviderOutputException(Taslim.Api.Ai.AiUsageMetadata? usage, Exception? innerException = null)
+        : base("The movie provider returned an invalid output.", innerException)
+    {
+        Usage = usage;
+    }
+
+    public Taslim.Api.Ai.AiUsageMetadata? Usage { get; }
 }
 
 public sealed record MovieGenerationInput(

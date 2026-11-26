@@ -1198,6 +1198,7 @@ public sealed class GenerationJobWorker(
             failureUsage ??= (exception as PresentationGenerationStageException)?.Usage;
             failureUsage ??= (exception as ResearchGenerationStageException)?.Usage;
             failureUsage ??= (exception as SocialGenerationStageException)?.Usage;
+            failureUsage ??= (exception as MovieVideoProviderOutputException)?.Usage;
 var qualityFailure = exception as GenerationQualityControlException ?? exception.InnerException as GenerationQualityControlException;
             if (qualityFailure is not null)
             {

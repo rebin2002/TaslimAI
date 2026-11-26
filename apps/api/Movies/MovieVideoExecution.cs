@@ -344,22 +344,6 @@ public sealed class MovieVideoGenerationJobHandler(
                 throw new MovieVideoProviderException(GenerationJobErrorCodes.MovieGenerationFailed, false);
 
             var output = await WithTransientRetriesAsync(token => provider.RetrieveAsync(execution.ProviderJobId!, terminal, token), cancellationToken);
-            ValidateOutput(output);
-            progress.Report(92);
-            var metadata = JsonSerializer.Serialize(new
-            {
-                assetType = AssetTypes.Video,
-                contentType = output.ContentType,
-                durationSeconds = output.DurationSeconds,
-                referenceImageApplied = !string.IsNullOrWhiteSpace(input.SourceImageUri),
-                unsupportedFeatures = new[] { "continuation" },
-            });
-            var artifact = new GeneratedStreamFileArtifact(
-                string.IsNullOrWhiteSpace(output.FileName) ? $"movie-{job.Id:N}.mp4" : output.FileName,
-                output.ContentType,
-                output.SizeBytes,
-                output.OpenReadAsync,
-                metadata);
             var usage = new AiUsageMetadata(
                 provider.Key,
                 output.ProviderModelKey ?? "video",
@@ -376,6 +360,31 @@ public sealed class MovieVideoGenerationJobHandler(
                 Currency: output.Currency,
                 CostBasis: output.CostBasis,
                 SafeMetadataJson: output.SafeMetadataJson);
+            try
+            {
+                ValidateOutput(output);
+            }
+            catch (MovieVideoProviderOutputException exception)
+            {
+                // Provider spend can already be incurred even when measured duration
+                // is missing or invalid. Preserve it for non-billable failure settlement.
+                throw new MovieVideoProviderOutputException(usage, exception);
+            }
+            progress.Report(92);
+            var metadata = JsonSerializer.Serialize(new
+            {
+                assetType = AssetTypes.Video,
+                contentType = output.ContentType,
+                durationSeconds = output.DurationSeconds,
+                referenceImageApplied = !string.IsNullOrWhiteSpace(input.SourceImageUri),
+                unsupportedFeatures = new[] { "continuation" },
+            });
+            var artifact = new GeneratedStreamFileArtifact(
+                string.IsNullOrWhiteSpace(output.FileName) ? $"movie-{job.Id:N}.mp4" : output.FileName,
+                output.ContentType,
+                output.SizeBytes,
+                output.OpenReadAsync,
+                metadata);
             var result = JsonSerializer.Serialize(new
             {
                 assetType = AssetTypes.Video,
