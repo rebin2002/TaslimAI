@@ -102,15 +102,45 @@ describe("language-pack registry", () => {
     expect(registry.translate("x-proto", "constructor")).toBe("constructor");
   });
 
-  it("reports an uninstalled fallback target instead of stranding every miss", () => {
-    const registry = new LanguagePackRegistry();
-    registry.install({
-      manifest: { schemaVersion: 1, id: "x-orphan", version: "1.0.0", displayName: "Orphan", nativeName: "Orphan", languageTag: "x-Orphan", direction: "ltr", fallback: "x-missing", completeness: "partial", reviewState: "needs-human-review", reviewFlags: [] },
+  it("reports a missing fallback and uses installed English for known keys", () => {
+    const english = defaultLanguagePackRegistry.get("en")!;
+    const orphan = {
+      manifest: { ...english.manifest, id: "x-orphan", fallback: "x-missing" },
       translations: { "navigation.home": "Orphan home" },
-    });
-    expect(registry.missingFallbacks()).toEqual(["x-missing"]);
+    };
+    const registry = new LanguagePackRegistry([english, orphan]);
+    expect(registry.missingFallbacks()).toContain("x-missing");
     expect(registry.translate("x-orphan", "navigation.home")).toBe("Orphan home");
-    expect(registry.translate("x-orphan", "navigation.account")).toBe("navigation.account");
+    expect(registry.translate("x-orphan", "navigation.account")).toBe("Account");
+    expect(registry.translate("x-orphan", "movie.sceneCount", { count: "3" })).toBe("3 scenes");
+    expect(registry.translate("x-orphan", "missing.key")).toBe("missing.key");
+    expect(new LanguagePackRegistry([orphan]).translate("x-orphan", "navigation.account")).toBe("navigation.account");
+  });
+
+  it("keeps nearer translations and falls back to English when a replacement creates a cycle", () => {
+    const english = defaultLanguagePackRegistry.get("en")!;
+    const first = {
+      manifest: { ...english.manifest, id: "x-first", fallback: "x-second" },
+      translations: {},
+    };
+    const second = {
+      manifest: { ...english.manifest, id: "x-second", fallback: "en" },
+      translations: { "navigation.home": "Second home" },
+    };
+    const registry = new LanguagePackRegistry([english, first, second]);
+    expect(registry.translate("x-first", "navigation.home")).toBe("Second home");
+    expect(registry.translate("x-first", "navigation.account")).toBe("Account");
+
+    registry.install({
+      ...second,
+      manifest: { ...second.manifest, version: "2.0.0", fallback: "x-first" },
+    }, { replaceVersion: second.manifest.version });
+
+    for (const id of ["x-first", "x-second"]) {
+      expect(registry.translate(id, "navigation.home")).toBe("Second home");
+      expect(registry.translate(id, "navigation.account")).toBe("Account");
+      expect(registry.translate(id, "missing.key")).toBe("missing.key");
+    }
   });
 
   it("keeps the built-in registry free of fallback gaps and coverage drift", () => {

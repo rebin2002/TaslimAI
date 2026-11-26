@@ -2,7 +2,7 @@
 import { localeTag, type Locale } from "@/lib/i18n";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { ArrowRight, ArrowUpRight, FolderKanban, LibraryBig, LoaderCircle, MessageSquare, Sparkles } from "lucide-react";
 import { ProtectedPage } from "@/components/ProtectedPage";
 import { HomeComposer } from "@/components/HomeComposer";
@@ -12,6 +12,7 @@ import { StudioChooser } from "@/components/StudioChooser";
 import { api, type ActivityItem, type Asset, type Conversation, type Project } from "@/lib/api";
 import { buildHomeRecentItems, hasInFlightActivity, type HomeRecentItem } from "@/lib/homeDashboardState";
 import { currentHomeDashboard, currentHomeProjectSelection, isHomeDashboardRequestCurrent, startHomeDashboardRequest } from "@/lib/homeDashboardRequest";
+import { createHomeCreationSubmissionGate, resolveHomeCreationPrompt } from "@/lib/homeCreation";
 
 const promptChips = [
   { labelKey: "home.promptCampaign" },
@@ -26,7 +27,20 @@ function formatDate(value: string, locale: Locale) {
 }
 
 export default function HomePage() {
-  return <ProtectedPage><HomeDashboard /></ProtectedPage>;
+  return <ProtectedPage><IdentityScopedHomeDashboard /></ProtectedPage>;
+}
+
+/**
+ * A Home composer holds unsent text, local File objects, selected project and
+ * private dashboard results. A same-tab account/workspace switch must remount
+ * all of it before the new principal can see or submit stale old-scope data.
+ * A key on the child handles this synchronously during render, unlike an
+ * effect that clears the previous account after one visible frame.
+ */
+function IdentityScopedHomeDashboard() {
+  const { user, workspace, loading } = useAuth();
+  if (loading || !user || !workspace) return null;
+  return <HomeDashboard key={`${user.id}:${workspace.id}`} />;
 }
 
 function HomeDashboard() {
@@ -37,6 +51,17 @@ function HomeDashboard() {
   const [projectId, setProjectId] = useState("");
   const [files, setFiles] = useState<File[]>([]);
   const [asking, setAsking] = useState(false);
+  const submissionGate = useRef(createHomeCreationSubmissionGate());
+  // Auth transitions replace HomeDashboard by identity key. Use layout cleanup
+  // so the old principal's in-flight create loses permission synchronously
+  // during the transition commit, before passive effects or a stale promise can
+  // resume and submit private attachments under the former session.
+  useLayoutEffect(() => {
+    submissionGate.current.cancel();
+    const gate = createHomeCreationSubmissionGate();
+    submissionGate.current = gate;
+    return () => gate.cancel();
+  }, []);
   const [dashboard, setDashboard] = useState<DashboardData | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<{ workspaceId: string; message: string } | null>(null);
@@ -107,24 +132,38 @@ function HomeDashboard() {
   const visibleProjectId = currentHomeProjectSelection(projectId, projects);
 
   async function askTaslim() {
-    const prompt = idea.trim();
+    const prompt = resolveHomeCreationPrompt(idea, files.length, locale);
     if (!prompt) {
       if (!files.length) router.push("/chat");
       setAskError(t("chat.sendError"));
       return;
     }
     if (!workspace) return;
+    const gate = submissionGate.current;
+    if (!gate.tryStart()) return;
     setAsking(true);
     setAskError("");
     try {
       const conversation = await api.createConversation(workspace.id, visibleProjectId ? { projectId: visibleProjectId } : {});
-      const uploaded = await Promise.all(files.map((file) => api.uploadFile(workspace.id, file, { conversationId: conversation.id, projectId: visibleProjectId || undefined })));
+      if (!gate.isActive()) return;
+      // Upload serially so a logout or workspace transition stops the next
+      // private attachment before its request starts. An already-sent upload
+      // cannot be retroactively undone by the client.
+      const uploaded: Awaited<ReturnType<typeof api.uploadFile>>[] = [];
+      for (const file of files) {
+        if (!gate.isActive()) return;
+        uploaded.push(await api.uploadFile(workspace.id, file, { conversationId: conversation.id, projectId: visibleProjectId || undefined }));
+      }
+      if (!gate.isActive()) return;
       await api.sendMessage(conversation.id, prompt, undefined, uploaded.map((file) => file.id));
+      if (!gate.isActive()) return;
       router.push(`/chat/${conversation.id}`);
     } catch {
-      setAskError(t("home.askError"));
+      if (gate.isActive()) setAskError(t("home.askError"));
     } finally {
-      setAsking(false);
+      const shouldUpdateUi = gate.isActive();
+      gate.finish();
+      if (shouldUpdateUi) setAsking(false);
     }
   }
 
