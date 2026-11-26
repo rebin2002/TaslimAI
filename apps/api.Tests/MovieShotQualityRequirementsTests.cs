@@ -108,6 +108,26 @@ public sealed class MovieShotQualityRequirementsTests
         Assert.Contains("level does not match", error, StringComparison.OrdinalIgnoreCase);
     }
 
+    [Fact]
+    public void TryParse_rejects_null_adaptive_shot_description_without_throwing()
+    {
+        var sceneId = Guid.NewGuid();
+        var profile = MovieShotQualityRequirementsPlanner.Plan(new MovieShot
+        {
+            Id = Guid.NewGuid(),
+            MovieSceneId = sceneId,
+            Description = "A bounded shot description.",
+        }, Context(sceneId, "A restrained interior film."));
+        var malformed = profile with
+        {
+            AdaptiveResolutionDirectorInput = profile.AdaptiveResolutionDirectorInput with { ShotDescription = null! },
+        };
+
+        var json = JsonSerializer.Serialize(malformed);
+
+        Assert.False(MovieShotQualityRequirementsPlanner.TryParse(json, out _));
+    }
+
     private static MovieShotQualityPlanningContext Context(Guid sceneId, string description) => new(
         Guid.NewGuid(), sceneId, "Quality test movie", description, "cinematic",
         "Naturalistic visual language", "Measured camera language", "Cool dawn palette",
