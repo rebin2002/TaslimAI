@@ -152,10 +152,9 @@ The prior current-head record is [PR comment #7203105747](https://github.com/reb
 At this qualification, live `main` is
 `26f8e3e74f2a1b7c287dce8ad548229a33ed16a2`, which includes #1292, #1294, and #1298.
 The prior `61a8c781…` snapshot was superseded while this work was in progress; the
-new head has been fetched and is being used for the final merge and path check. The
-resulting PR source diff is expected to remain limited to `.github/workflows/ci.yml`,
-this document, and the two `scripts/deploy-readiness-gate*` files; see the verified
-merge result below.
+new head was fetched and merged append-only. The three-way merge is clean and the PR
+source diff is exactly `.github/workflows/ci.yml`, this document, and the two
+`scripts/deploy-readiness-gate*` files.
 
 The separately owned [#1144](https://github.com/rebin2002/TaslimAI/pull/1144) remains
 open for review on `7afa4ac936e7562a9fea2d72dcdf76c0d1831ba0`. Its CI workflow patch
@@ -213,7 +212,8 @@ retry, required-dependency red, and matching/mismatching/unavailable revision
 identity. The local two-service candidate fixture supplies the expected revision in
 the API and Web response headers. This rehearses retry and identity behavior; it is
 not a deployed staging environment and does not establish platform configuration.
-On the current #1277 worktree, `bash -n scripts/deploy-readiness-gate.sh scripts/deploy-readiness-gate.test.sh` and `git diff --check` pass, and
+On the current #1277 worktree, `bash -n scripts/deploy-readiness-gate.sh
+scripts/deploy-readiness-gate.test.sh` and `git diff --check` pass, and
 `bash scripts/deploy-readiness-gate.test.sh` reports **70 passed / 0 failed**.
 
 **Remaining cutover holds.** The readiness code and its loopback contract can be
