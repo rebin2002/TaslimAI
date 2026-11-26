@@ -1,6 +1,7 @@
 using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Taslim.Api.Controllers;
 using Taslim.Api.Contracts;
@@ -13,30 +14,18 @@ using Xunit;
 namespace Taslim.Api.Tests;
 
 /// <summary>
-/// Issue #667 — cross-project admission evidence for Social asset selection, driven through the
-/// real in-process HTTP pipeline: register, CSRF, POST /api/social-generation/jobs, the queue,
-/// the job handler, then GET /api/generation/jobs/{id}. Provider-free and storage-free.
+/// Issue #667 — Social Asset/backing-file visibility through the real in-process HTTP pipeline:
+/// register, CSRF, POST /api/social-generation/jobs, queue/handler, then GET the terminal job.
+/// The fixture replaces the provider with a deterministic in-process implementation.
 ///
-/// This is deliberately disjoint from <c>SocialAssetFileProjectPairingTests</c> (PR #1128), which
-/// proves the pairing predicate with a single creator-side requester, and from
-/// <c>SocialAssetSelectionTests</c>, which covers unsupported types and private-asset selection.
-/// The gap closed here is exactly what issue #667 records as not yet confirmed by an API
-/// integration test: the two-user / two-project boundary, where the requester is a workspace
-/// member rather than <c>Asset.CreatedByUserId</c>.
+/// Project IDs on a visible Asset and its backing StoredFile do not have to match. The documented
+/// boundary shares a project Asset and a project file with workspace members when each belongs to
+/// that workspace and neither object is private or conversation-scoped. These cases pin that
+/// legitimate cross-project use remains available while private and foreign-workspace selections
+/// fail closed after ordinary job admission.
 ///
-/// Four claims are pinned:
-/// 1. Mismatched pair (asset in project B over a backing file in project A), requested by a
-///    non-creator member: refused, fails closed, no outputs, and nothing about either scope or the
-///    backing file's extracted text is observable in the HTTP response.
-/// 2. Correctly paired, explicitly authorized project-shared asset, requested by that member:
-///    still usable. Tightening the invariant must not break legitimate project sharing.
-/// 3. Personal asset over personal backing file (unscoped over unscoped): still usable, so the
-///    lifted <c>Guid?</c> comparison cannot read symmetry-by-absence as a mismatch.
-/// 4. Mirrored asymmetry (asset in project B over a personal backing file), requested by a member:
-///    also fails closed, with creator privacy enforced ahead of any pairing shortcut.
-///
-/// Synthetic rows only: no billing, no paid inference, no real customer data or object storage,
-/// no migrations, and no modification of any source file.
+/// Synthetic rows only: no production data, live storage, external provider, billing action,
+/// migration, or production source change.
 /// </summary>
 public sealed class SocialAssetProjectScopeHttpTests : IClassFixture<SocialGenerationApiFactory>
 {
@@ -53,50 +42,41 @@ public sealed class SocialAssetProjectScopeHttpTests : IClassFixture<SocialGener
     }
 
     [Fact]
-    public async Task Social_job_rejects_cross_project_pair_for_non_creator_member_and_leaks_nothing()
+    public async Task Social_job_admits_visible_same_workspace_cross_project_asset_and_backing_file()
     {
         using var world = await SeedTwoUsersTwoProjectsAsync();
         var assetName = $"scope-asset-{Guid.NewGuid():N}";
-        var extractedText = $"cross-project-secret-{Guid.NewGuid():N}";
+        var extractedText = $"cross-project-visible-text-{Guid.NewGuid():N}";
 
-        // The shape from issue #667: the asset's project moved to Beta, the backing file stayed in Alpha.
+        // Both records are workspace-scoped and project-shared, but intentionally use distinct
+        // projects. The member is not the creator and has no access to private creator content.
         var assetId = await SeedAssetAsync(world, assetName, extractedText,
             assetProjectId: world.ProjectBId, fileProjectId: world.ProjectAId);
 
-        var response = await SubmitAsync(world.Member, workspaceId: world.WorkspaceId, projectId: null,
-            prompt: "Announce the workshop using the image selected here.", assetId: assetId);
+        var response = await SubmitAsync(world.Member, workspaceId: world.WorkspaceId, projectId: world.ProjectBId,
+            prompt: "Announce the workshop using the selected project image.", assetId: assetId);
 
-        // Admission is asynchronous: enqueueing succeeds and the invariant is enforced by the
-        // handler, so the refusal must surface as a terminal failure rather than a 4xx.
+        // A non-empty opaque ID is admitted normally; visibility is resolved at job execution.
         Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
         var created = (await response.Content.ReadFromJsonAsync<CreateSocialGenerationResponse>())!;
-        var rawCreate = await response.Content.ReadAsStringAsync();
         var terminal = await WaitForTerminalAsync(world.Member, created.Job.Id);
         var rawTerminal = await world.Member.GetStringAsync($"/api/generation/jobs/{created.Job.Id}");
 
-        Assert.Equal("Failed", terminal.Status);
-        Assert.Equal(GenerationJobErrorCodes.SocialContextUnavailable, terminal.ErrorCode);
-        Assert.Empty(terminal.Outputs);
-        Assert.True(string.IsNullOrEmpty(terminal.ResultJson));
-
-        // Nothing from either scope may come back over HTTP: not the sibling project names, not
-        // the asset's identity, and not the backing file's extracted text — the value that
-        // SocialGenerationJobHandler actually feeds into the prompt.
-        foreach (var secret in new[] { assetName, extractedText, ProjectAName, ProjectBName })
-        {
-            Assert.DoesNotContain(secret, rawCreate, StringComparison.Ordinal);
-            Assert.DoesNotContain(secret, rawTerminal, StringComparison.Ordinal);
-        }
+        Assert.Equal("Succeeded", terminal.Status);
+        Assert.Null(terminal.ErrorCode);
+        Assert.Single(terminal.Outputs);
+        Assert.False(string.IsNullOrWhiteSpace(terminal.ResultJson));
+        Assert.DoesNotContain(extractedText, rawTerminal, StringComparison.Ordinal);
+        await AssertAdmittedJobSideEffectsAsync(world.WorkspaceId, created.Job.Id,
+            GenerationJobStatus.Succeeded, UsageTransactionStatus.Completed, outputCount: 1, publishedAssetCount: 1);
     }
 
     [Fact]
-    public async Task Social_job_admits_authorized_project_shared_asset_with_matching_pair_for_non_creator_member()
+    public async Task Social_job_still_admits_same_project_shared_asset_for_non_creator_member()
     {
         using var world = await SeedTwoUsersTwoProjectsAsync();
         var assetName = $"scope-asset-{Guid.NewGuid():N}";
-        var extractedText = $"shared-project-text-{Guid.NewGuid():N}";
-
-        // Correctly paired and explicitly shared with the project the member is acting in.
+        var extractedText = $"same-project-visible-text-{Guid.NewGuid():N}";
         var assetId = await SeedAssetAsync(world, assetName, extractedText,
             assetProjectId: world.ProjectAId, fileProjectId: world.ProjectAId);
 
@@ -107,20 +87,15 @@ public sealed class SocialAssetProjectScopeHttpTests : IClassFixture<SocialGener
         var created = (await response.Content.ReadFromJsonAsync<CreateSocialGenerationResponse>())!;
         var terminal = await WaitForTerminalAsync(world.Member, created.Job.Id);
 
-        // The invariant must not over-restrict: an authorized project-shared asset stays usable
-        // for a member who did not create it.
         Assert.Equal("Succeeded", terminal.Status);
         Assert.Null(terminal.ErrorCode);
         Assert.Single(terminal.Outputs);
-        Assert.Contains("posts", terminal.ResultJson);
-
-        // Usable is not the same as readable: the selection's private content stays out of the response.
-        var rawTerminal = await world.Member.GetStringAsync($"/api/generation/jobs/{created.Job.Id}");
-        Assert.DoesNotContain(extractedText, rawTerminal, StringComparison.Ordinal);
+        await AssertAdmittedJobSideEffectsAsync(world.WorkspaceId, created.Job.Id,
+            GenerationJobStatus.Succeeded, UsageTransactionStatus.Completed, outputCount: 1, publishedAssetCount: 1);
     }
 
     [Fact]
-    public async Task Social_job_admits_unscoped_personal_asset_with_unscoped_backing_file_for_its_creator()
+    public async Task Social_job_admits_unscoped_personal_asset_and_file_for_its_creator()
     {
         using var creator = factory.CreateClient();
         var creatorAuth = await Register(creator, "Scope Personal Creator");
@@ -143,53 +118,126 @@ public sealed class SocialAssetProjectScopeHttpTests : IClassFixture<SocialGener
         var created = (await response.Content.ReadFromJsonAsync<CreateSocialGenerationResponse>())!;
         var terminal = await WaitForTerminalAsync(creator, created.Job.Id);
 
-        // Absence on both sides is symmetry, not mismatch: personal assets must keep working.
         Assert.Equal("Succeeded", terminal.Status);
         Assert.Null(terminal.ErrorCode);
         Assert.Single(terminal.Outputs);
+        await AssertAdmittedJobSideEffectsAsync(creatorAuth.PersonalWorkspace.Id, created.Job.Id,
+            GenerationJobStatus.Succeeded, UsageTransactionStatus.Completed, outputCount: 1, publishedAssetCount: 1);
     }
 
     [Fact]
-    public async Task Social_job_rejects_project_scoped_asset_over_personal_backing_file_for_non_creator_member()
+    public async Task Social_job_denies_project_asset_with_private_personal_backing_file_to_non_creator()
     {
         using var world = await SeedTwoUsersTwoProjectsAsync();
-        var assetName = $"scope-asset-{Guid.NewGuid():N}";
-        var extractedText = $"personal-file-secret-{Guid.NewGuid():N}";
-
-        // The mirrored asymmetry: the asset carries Beta while its backing file never left personal scope.
+        var assetName = $"scope-private-file-asset-{Guid.NewGuid():N}";
+        var extractedText = $"private-file-secret-{Guid.NewGuid():N}";
         var assetId = await SeedAssetAsync(world, assetName, extractedText,
             assetProjectId: world.ProjectBId, fileProjectId: null);
 
         var response = await SubmitAsync(world.Member, workspaceId: world.WorkspaceId, projectId: world.ProjectBId,
-            prompt: "Use the Beta image whose backing file is still personal.", assetId: assetId);
+            prompt: "Use the shared image and its source.", assetId: assetId);
 
         Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
         var created = (await response.Content.ReadFromJsonAsync<CreateSocialGenerationResponse>())!;
+        var rawCreate = await response.Content.ReadAsStringAsync();
         var terminal = await WaitForTerminalAsync(world.Member, created.Job.Id);
+        var rawTerminal = await world.Member.GetStringAsync($"/api/generation/jobs/{created.Job.Id}");
 
         Assert.Equal("Failed", terminal.Status);
         Assert.Equal(GenerationJobErrorCodes.SocialContextUnavailable, terminal.ErrorCode);
         Assert.Empty(terminal.Outputs);
+        Assert.True(string.IsNullOrEmpty(terminal.ResultJson));
+        AssertNoPrivateContent(rawCreate, rawTerminal, assetName, extractedText, ProjectAName, ProjectBName);
+        await AssertAdmittedJobSideEffectsAsync(world.WorkspaceId, created.Job.Id,
+            GenerationJobStatus.Failed, UsageTransactionStatus.Failed, outputCount: 0, publishedAssetCount: 0);
+    }
 
-        // Creator privacy is enforced ahead of any pairing shortcut, and the refusal stays generic.
+    [Fact]
+    public async Task Social_job_denies_personal_asset_and_file_to_non_creator_workspace_member()
+    {
+        using var world = await SeedTwoUsersTwoProjectsAsync();
+        var assetName = $"scope-private-asset-{Guid.NewGuid():N}";
+        var extractedText = $"private-personal-pair-{Guid.NewGuid():N}";
+        var assetId = await SeedAssetAsync(world, assetName, extractedText,
+            assetProjectId: null, fileProjectId: null);
+
+        var response = await SubmitAsync(world.Member, workspaceId: world.WorkspaceId, projectId: null,
+            prompt: "Use the personal image selected here.", assetId: assetId);
+
+        Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
+        var created = (await response.Content.ReadFromJsonAsync<CreateSocialGenerationResponse>())!;
+        var rawCreate = await response.Content.ReadAsStringAsync();
+        var terminal = await WaitForTerminalAsync(world.Member, created.Job.Id);
         var rawTerminal = await world.Member.GetStringAsync($"/api/generation/jobs/{created.Job.Id}");
-        foreach (var secret in new[] { assetName, extractedText, ProjectAName, ProjectBName })
-            Assert.DoesNotContain(secret, rawTerminal, StringComparison.Ordinal);
+
+        Assert.Equal("Failed", terminal.Status);
+        Assert.Equal(GenerationJobErrorCodes.SocialContextUnavailable, terminal.ErrorCode);
+        Assert.Empty(terminal.Outputs);
+        Assert.True(string.IsNullOrEmpty(terminal.ResultJson));
+        AssertNoPrivateContent(rawCreate, rawTerminal, assetName, extractedText);
+        await AssertAdmittedJobSideEffectsAsync(world.WorkspaceId, created.Job.Id,
+            GenerationJobStatus.Failed, UsageTransactionStatus.Failed, outputCount: 0, publishedAssetCount: 0);
+    }
+
+    [Fact]
+    public async Task Social_job_denies_project_asset_from_another_workspace_to_nonmember()
+    {
+        using var world = await SeedTwoUsersTwoProjectsAsync();
+        using var foreignOwner = factory.CreateClient();
+        var foreignAuth = await Register(foreignOwner, "Scope Foreign Workspace Owner");
+        var foreignProjectId = Guid.NewGuid();
+        var foreignFileId = Guid.NewGuid();
+        var foreignAssetId = Guid.NewGuid();
+        var foreignProjectName = $"foreign-project-{Guid.NewGuid():N}";
+        var foreignAssetName = $"foreign-asset-{Guid.NewGuid():N}";
+        var foreignText = $"foreign-workspace-secret-{Guid.NewGuid():N}";
+
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            db.Projects.Add(new Project
+            {
+                Id = foreignProjectId,
+                WorkspaceId = foreignAuth.PersonalWorkspace.Id,
+                Name = foreignProjectName,
+                CreatedAt = DateTime.UtcNow,
+                UpdatedAt = DateTime.UtcNow,
+            });
+            AddStoredFile(db, foreignAuth, foreignFileId, foreignProjectId, foreignAuth.User.Id, foreignText);
+            AddAsset(db, foreignAuth, foreignAssetId, foreignFileId, foreignAssetName, foreignProjectId);
+            await db.SaveChangesAsync();
+        }
+
+        // The foreign Asset and file are valid and project-shared inside their own workspace;
+        // the requesting member is not a member of that workspace.
+        var response = await SubmitAsync(world.Member, workspaceId: world.WorkspaceId, projectId: world.ProjectBId,
+            prompt: "Use the selected project image.", assetId: foreignAssetId);
+
+        Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
+        var created = (await response.Content.ReadFromJsonAsync<CreateSocialGenerationResponse>())!;
+        var rawCreate = await response.Content.ReadAsStringAsync();
+        var terminal = await WaitForTerminalAsync(world.Member, created.Job.Id);
+        var rawTerminal = await world.Member.GetStringAsync($"/api/generation/jobs/{created.Job.Id}");
+
+        Assert.Equal("Failed", terminal.Status);
+        Assert.Equal(GenerationJobErrorCodes.SocialContextUnavailable, terminal.ErrorCode);
+        Assert.Empty(terminal.Outputs);
+        Assert.True(string.IsNullOrEmpty(terminal.ResultJson));
+        AssertNoPrivateContent(rawCreate, rawTerminal, foreignAssetName, foreignProjectName, foreignText);
+        await AssertAdmittedJobSideEffectsAsync(world.WorkspaceId, created.Job.Id,
+            GenerationJobStatus.Failed, UsageTransactionStatus.Failed, outputCount: 0, publishedAssetCount: 0);
     }
 
     /// <summary>
     /// Two distinct users in one workspace with two projects inside it. Membership is seeded
-    /// directly so the boundary under test is the Social selection predicate itself rather than
-    /// workspace access, which the pipeline already grants to the member.
+    /// directly so the boundary under test is the Social selection visibility policy itself.
     /// </summary>
     private async Task<SeededWorld> SeedTwoUsersTwoProjectsAsync()
     {
         var creator = factory.CreateClient();
         var creatorAuth = await Register(creator, "Scope Sharing Creator");
-
         var member = factory.CreateClient();
         var memberAuth = await Register(member, "Scope Sharing Member");
-
         var projectAId = Guid.NewGuid();
         var projectBId = Guid.NewGuid();
 
@@ -221,7 +269,6 @@ public sealed class SocialAssetProjectScopeHttpTests : IClassFixture<SocialGener
         AddStoredFile(db, world.CreatorAuth, storedFileId, fileProjectId, world.CreatorAuth.User.Id, extractedText);
         AddAsset(db, world.CreatorAuth, assetId, storedFileId, assetName, assetProjectId);
         await db.SaveChangesAsync();
-
         return assetId;
     }
 
@@ -289,6 +336,38 @@ public sealed class SocialAssetProjectScopeHttpTests : IClassFixture<SocialGener
         {
             Creator.Dispose();
             Member.Dispose();
+        }
+    }
+
+    private async Task AssertAdmittedJobSideEffectsAsync(
+        Guid workspaceId,
+        Guid jobId,
+        GenerationJobStatus expectedJobStatus,
+        UsageTransactionStatus expectedUsageStatus,
+        int outputCount,
+        int publishedAssetCount)
+    {
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        var jobs = await db.GenerationJobs.AsNoTracking().Where(job => job.WorkspaceId == workspaceId && job.Id == jobId).ToListAsync();
+        var job = Assert.Single(jobs);
+        Assert.Equal(expectedJobStatus, job.Status);
+        Assert.Equal(outputCount, await db.GenerationJobOutputs.AsNoTracking().CountAsync(output => output.GenerationJobId == jobId));
+        Assert.Equal(publishedAssetCount, await db.Assets.AsNoTracking().CountAsync(asset => asset.SourceGenerationJobId == jobId));
+
+        var usage = await db.UsageTransactions.AsNoTracking().SingleAsync(item => item.GenerationJobId == jobId);
+        Assert.Equal(UsageFeature.Social, usage.Feature);
+        Assert.Equal(expectedUsageStatus, usage.Status);
+        Assert.Equal(0m, usage.ChargedAmount);
+        Assert.Equal(0m, usage.ReversedAmount);
+    }
+
+    private static void AssertNoPrivateContent(string rawCreate, string rawTerminal, params string[] secrets)
+    {
+        foreach (var secret in secrets)
+        {
+            Assert.DoesNotContain(secret, rawCreate, StringComparison.Ordinal);
+            Assert.DoesNotContain(secret, rawTerminal, StringComparison.Ordinal);
         }
     }
 
