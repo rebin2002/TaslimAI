@@ -1097,6 +1097,7 @@ public sealed class MovieStudioController(IMovieStudioService movies, IMovieProd
             return result is null ? ApiResults.Error(this, 404, "MOVIE_PROJECT_NOT_FOUND", "Movie project not found.") : CreatedAtAction(nameof(GetStoryRevision), new { movieProjectId, revisionId = result.CurrentRevisionId }, result);
         }
         catch (MovieStoryValidationException exception) { return ApiResults.Error(this, 400, "MOVIE_STORY_INVALID", exception.Message); }
+        catch (MovieStoryRevisionConflictException exception) { return ApiResults.Error(this, 409, "MOVIE_STORY_REVISION_CONFLICT", exception.Message); }
         catch (MovieCollaborationForbiddenException) { return Forbid(); }
     }
 
