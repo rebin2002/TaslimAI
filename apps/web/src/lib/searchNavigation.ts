@@ -1,7 +1,7 @@
 import type { GlobalSearchResult } from "./api";
 
 export function assetDestination(assetId: string, status = "Active"): string {
-  return `/assets?assetId=${encodeURIComponent(assetId)}&status=${status}`;
+  return `/assets?assetId=${encodeURIComponent(assetId)}&status=${status === "Archived" ? "Archived" : "Active"}`;
 }
 
 /**
