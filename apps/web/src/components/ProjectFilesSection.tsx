@@ -25,7 +25,6 @@ export function isCurrentProjectFileUpload(
     && token.projectId === activeScope.projectId;
 }
 
-const MAX_FILE_SIZE = 25 * 1024 * 1024;
 const ACCEPTED_EXTENSIONS = [".pdf", ".docx", ".txt", ".md", ".csv", ".xlsx", ".jpg", ".jpeg", ".png", ".webp"];
 
 export function ProjectFilesSection({ project }: ProjectFilesSectionProps) {
@@ -63,7 +62,7 @@ export function ProjectFilesSection({ project }: ProjectFilesSectionProps) {
     try {
       for (const file of Array.from(selected)) {
         const extension = `.${file.name.split(".").pop()?.toLowerCase() ?? ""}`;
-        if (!ACCEPTED_EXTENSIONS.includes(extension) || file.size <= 0 || file.size > MAX_FILE_SIZE) {
+        if (!ACCEPTED_EXTENSIONS.includes(extension) || file.size <= 0) {
           throw new Error(t("projects.fileUploadError"));
         }
         const stored = await api.uploadFile(project.workspaceId, file, { projectId: project.id });

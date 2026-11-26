@@ -9,10 +9,11 @@ import { HomeComposer } from "@/components/HomeComposer";
 import { useAuth } from "@/components/AuthProvider";
 import { useLocale } from "@/components/LocaleProvider";
 import { StudioChooser } from "@/components/StudioChooser";
-import { api, type ActivityItem, type Asset, type Conversation, type Project } from "@/lib/api";
+import { ApiError, api, type ActivityItem, type Asset, type Conversation, type Project } from "@/lib/api";
 import { buildHomeRecentItems, hasInFlightActivity, type HomeRecentItem } from "@/lib/homeDashboardState";
 import { currentHomeDashboard, currentHomeProjectSelection, isHomeDashboardRequestCurrent, startHomeDashboardRequest } from "@/lib/homeDashboardRequest";
 import { createHomeCreationSubmissionGate, resolveHomeCreationPrompt } from "@/lib/homeCreation";
+import { getUserUploadSizeError } from "@/lib/fileUploadLimits";
 
 const promptChips = [
   { labelKey: "home.promptCampaign" },
@@ -139,6 +140,11 @@ function HomeDashboard() {
       return;
     }
     if (!workspace) return;
+    const uploadSizeError = files.map((file) => getUserUploadSizeError(file.size)).find((message) => message !== null);
+    if (uploadSizeError) {
+      setAskError(uploadSizeError);
+      return;
+    }
     const gate = submissionGate.current;
     if (!gate.tryStart()) return;
     setAsking(true);
@@ -158,8 +164,8 @@ function HomeDashboard() {
       await api.sendMessage(conversation.id, prompt, undefined, uploaded.map((file) => file.id));
       if (!gate.isActive()) return;
       router.push(`/chat/${conversation.id}`);
-    } catch {
-      if (gate.isActive()) setAskError(t("home.askError"));
+    } catch (caught) {
+      if (gate.isActive()) setAskError(caught instanceof ApiError ? caught.message : t("home.askError"));
     } finally {
       const shouldUpdateUi = gate.isActive();
       gate.finish();

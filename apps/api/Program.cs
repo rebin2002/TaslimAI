@@ -60,11 +60,14 @@ builder.Services.AddOptions<HealthOptions>()
     .Validate(options => options.ProbeTimeoutSeconds is >= 1 and <= 60, "Health:ProbeTimeoutSeconds must be between 1 and 60 seconds.")
     .ValidateOnStart();
 builder.Services.AddScoped<OperationalHealthService>();
-builder.Services.AddOptions<FileSettings>().Bind(builder.Configuration.GetSection("Files"));
+builder.Services.AddOptions<FileSettings>()
+    .Bind(builder.Configuration.GetSection("Files"))
+    .Validate(options => FileSettings.IsValidMaxFileSizeBytes(options.MaxFileSizeBytes), $"Files:MaxFileSizeBytes must be between 1 and {FileSettings.MaxUserUploadFileSizeBytes} bytes.")
+    .ValidateOnStart();
 builder.Services.Configure<FormOptions>(options =>
 {
-    var maxFileSize = builder.Configuration.GetValue<long>("Files:MaxFileSizeBytes", 25 * 1024 * 1024);
-    options.MultipartBodyLengthLimit = maxFileSize + (1024 * 1024);
+    var maxFileSize = builder.Configuration.GetValue<long>("Files:MaxFileSizeBytes", FileSettings.MaxUserUploadFileSizeBytes);
+    options.MultipartBodyLengthLimit = maxFileSize + FileSettings.MultipartFormOverheadBytes;
 });
 
 builder.Services.Configure<ForwardedHeadersOptions>(options =>
