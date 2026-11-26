@@ -312,6 +312,13 @@ public sealed partial class AcademicWorkflowOrchestrator
         AcademicStage stage,
         CancellationToken cancellationToken)
     {
+        var currentAttemptCount = loaded.Stage(stage).AttemptCount;
+        if (currentAttemptCount >= loaded.Request.MaxStageAttempts)
+            return (true, await FailProjectAsync(
+                loaded,
+                "MAX_STAGE_ATTEMPTS_EXCEEDED",
+                $"Stage {stage} reached the configured maximum of {loaded.Request.MaxStageAttempts} attempts.",
+                cancellationToken));
         if (!handlers.TryGetValue(stage, out var handler))
             return (true, await FailProjectAsync(loaded, "NO_STAGE_HANDLER", $"No stage handler is registered for {stage}.", cancellationToken));
 

@@ -45,6 +45,7 @@ function project(projectId: string): AcademicProjectDto {
       startedAtUtc: now,
       completedAtUtc: now,
     }],
+    activeAttemptId: null,
     pendingApproval: {
       kind: "Plan",
       approvalKey: `${projectId}:Plan:1`,
@@ -297,7 +298,7 @@ describe("Academic workflow create idempotency and conflict refresh", () => {
     expect(container.textContent).toContain(translate("workflow.resumeAction"));
   });
 
-  it("reloads after a resume 409 and removes the stale resume action", async () => {
+  it("does not offer Resume after a 409 refresh finds a Running project with an active attempt", async () => {
     const latest = deferred<AcademicProjectDto>();
     const getProject = vi.spyOn(api, "getAcademicProject")
       .mockResolvedValueOnce(approvedProject("resume-conflict", "Running"))
@@ -316,10 +317,12 @@ describe("Academic workflow create idempotency and conflict refresh", () => {
     expect(container.textContent).toContain(translate("workflow.conflictReloading"));
     expect(container.textContent).not.toContain(translate("workflow.resumeAction"));
     await act(async () => {
-      latest.resolve(approvedProject("resume-conflict", "Completed"));
+      latest.resolve({ ...approvedProject("resume-conflict", "Running"), activeAttemptId: "active-attempt-1" });
       await new Promise((resolve) => setTimeout(resolve, 0));
     });
     expect(container.textContent).toContain(translate("workflow.conflictReloaded"));
+    expect(container.textContent).toContain("Running");
     expect(container.textContent).not.toContain(translate("workflow.resumeAction"));
+    expect(api.runAcademicProject).toHaveBeenCalledTimes(1);
   });
 });

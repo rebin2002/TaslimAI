@@ -355,7 +355,7 @@ export function AcademicWorkflowPanel({ workspaceId, brief, chapterHeadings, lan
 
   async function resume() {
     const targetProjectId = project?.project.projectId;
-    if (!workspaceId || !project || !targetProjectId || busy || project.pendingApproval
+    if (!workspaceId || !project || !targetProjectId || busy || project.pendingApproval || project.activeAttemptId
       || !isSelectedAcademicProject(targetProjectId, selectedId) || selectedIdRef.current !== targetProjectId) return;
     const operationWorkspaceId = workspaceId;
     const operationWorkspaceGeneration = workspaceGenerationRef.current;
@@ -518,7 +518,8 @@ export function AcademicWorkflowPanel({ workspaceId, brief, chapterHeadings, lan
               ) : null}
 
               {nextStageMissing ? <p className={styles.workflowNotice} role="status">{t("workflow.discoverNotConnected")}</p> : null}
-              {planApproved && !displayedProject.pendingApproval && displayedProject.project.state === "Running" ? (
+              {planApproved && !displayedProject.pendingApproval && !displayedProject.activeAttemptId
+                && displayedProject.project.state === "Running" ? (
                 <button type="button" className={styles.secondaryButton} onClick={() => void resume()} disabled={busy}>
                   {busy ? t("workflow.working") : t("workflow.resumeAction")}
                 </button>

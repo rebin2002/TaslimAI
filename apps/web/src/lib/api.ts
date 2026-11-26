@@ -827,6 +827,7 @@ export type AcademicResearchPlan = {
 export type AcademicProjectDto = {
   project: AcademicProjectSummary;
   stages: AcademicProjectStage[];
+  activeAttemptId: string | null;
   pendingApproval: { kind: string; approvalKey: string; checkpointRevision: number; requestedAtUtc: string; reviewerPrompts: string[] } | null;
   approvals: AcademicProjectApproval[];
   usage: { spentUsd: number; ceilingUsd: number; remainingUsd: number; callsUsed: number; callCeiling: number; callsRemaining: number };

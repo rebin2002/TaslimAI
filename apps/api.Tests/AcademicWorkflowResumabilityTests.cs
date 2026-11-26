@@ -10,6 +10,28 @@ namespace Taslim.Api.Tests;
 /// </summary>
 public sealed class AcademicWorkflowResumabilityTests
 {
+    private sealed class BlockingStageHandler(AcademicStage stage) : IAcademicStageHandler
+    {
+        public AcademicStage Stage { get; } = stage;
+        public int EstimateCalls { get; private set; }
+        public int ExecuteCalls { get; private set; }
+        public TaskCompletionSource<bool> Started { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public AcademicStageEstimate Estimate(AcademicStageContext context)
+        {
+            EstimateCalls++;
+            return new AcademicStageEstimate { EstimatedCostUsd = 0.5m, EstimatedProviderCalls = 2 };
+        }
+
+        public async Task<AcademicStageOutcome> ExecuteAsync(AcademicStageContext context, CancellationToken cancellationToken)
+        {
+            ExecuteCalls++;
+            Started.TrySetResult(true);
+            await Task.Delay(Timeout.Infinite, cancellationToken);
+            throw new InvalidOperationException("The blocking test handler should only exit through cancellation.");
+        }
+    }
+
     private sealed class ConcurrentApprovalStore(IAcademicWorkflowStateStore inner) : IAcademicWorkflowStateStore
     {
         private readonly TaskCompletionSource<bool> bothApprovalLoads = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -159,6 +181,51 @@ public sealed class AcademicWorkflowResumabilityTests
         Assert.Equal(AcademicApprovalKind.Plan, resumed.Snapshot!.PendingApproval!.Kind);
         Assert.Equal(0, successor[AcademicStage.Plan].Calls.Count);
         Assert.Equal(0, successor[AcademicStage.Discover].Calls.Count);
+    }
+
+    [Fact]
+    public async Task Recovering_At_Maximum_Attempts_Fails_Without_Invoking_Another_Handler()
+    {
+        var request = AcademicWorkflowFixtures.Request("recovered-at-attempt-cap") with { MaxStageAttempts = 1 };
+        var store = new InMemoryAcademicWorkflowStateStore();
+        var handler = new BlockingStageHandler(AcademicStage.Plan);
+        var orchestrator = new AcademicWorkflowOrchestrator(store, [handler], new SteadyTimeProvider());
+        using var cancellation = new CancellationTokenSource();
+
+        var interruptedTask = orchestrator.StartAsync(request, cancellation.Token);
+        await handler.Started.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        cancellation.Cancel();
+        var interrupted = await interruptedTask;
+
+        Assert.Equal(AcademicWorkflowRunStatus.StageFailure, interrupted.Status);
+        Assert.Equal("STAGE_CANCELLED", interrupted.Code);
+        var running = (await store.LoadAsync(interrupted.Snapshot!.ProjectId, CancellationToken.None))!;
+        Assert.Equal(request.MaxStageAttempts, running.Stage(AcademicStage.Plan).AttemptCount);
+        var attemptId = Assert.IsType<AcademicLiveAttempt>(running.ActiveAttempt).AttemptId;
+
+        var recovered = await orchestrator.RecoverAbandonedAttemptAsync(
+            running.ProjectId,
+            running.Revision,
+            attemptId,
+            Guid.NewGuid(),
+            "Verified the cancelled test attempt is abandoned.",
+            CancellationToken.None);
+
+        Assert.Equal(AcademicWorkflowRunStatus.StageFailure, recovered.Status);
+        Assert.Equal(AcademicStageState.Failed, recovered.Snapshot!.Stage(AcademicStage.Plan).State);
+        Assert.Equal(request.MaxStageAttempts, recovered.Snapshot.Stage(AcademicStage.Plan).AttemptCount);
+        Assert.Equal(1, handler.EstimateCalls);
+        Assert.Equal(1, handler.ExecuteCalls);
+
+        var resumed = await orchestrator.ResumeAsync(running.ProjectId, CancellationToken.None);
+
+        Assert.Equal(AcademicWorkflowRunStatus.ProjectFailed, resumed.Status);
+        Assert.Equal("MAX_STAGE_ATTEMPTS_EXCEEDED", resumed.Code);
+        Assert.Equal(AcademicProjectState.Failed, resumed.Snapshot!.State);
+        Assert.Equal(AcademicStageState.Failed, resumed.Snapshot.Stage(AcademicStage.Plan).State);
+        Assert.Equal(request.MaxStageAttempts, resumed.Snapshot.Stage(AcademicStage.Plan).AttemptCount);
+        Assert.Equal(1, handler.EstimateCalls);
+        Assert.Equal(1, handler.ExecuteCalls);
     }
 
     [Fact]
