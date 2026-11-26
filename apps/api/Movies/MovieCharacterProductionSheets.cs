@@ -298,21 +298,31 @@ public sealed class MovieCharacterProductionSheetService(TaslimDbContext db, Mov
                 await transaction.CommitAsync(cancellationToken);
                 return MovieCharacterProductionSheetMapper.ToDto(await Query().FirstAsync(item => item.Id == sheet.Id, cancellationToken));
             }
-            catch (DbUpdateConcurrencyException) when (attempt + 1 < MaximumVersionAllocationAttempts)
+            catch (DbUpdateConcurrencyException)
             {
                 // Concurrent draft saves can lose the shared sheet-row update even
                 // when the provider does not surface the version unique conflict.
+                if (attempt + 1 >= MaximumVersionAllocationAttempts)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    break;
+                }
                 await Task.Delay(TimeSpan.FromMilliseconds(25 * (attempt + 1)), cancellationToken);
                 db.ChangeTracker.Clear();
             }
-            catch (DbUpdateException exception) when (attempt + 1 < MaximumVersionAllocationAttempts && IsVersionAllocationUniqueViolation(exception))
+            catch (DbUpdateException exception) when (IsVersionAllocationUniqueViolation(exception))
             {
+                if (attempt + 1 >= MaximumVersionAllocationAttempts)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    break;
+                }
                 await Task.Delay(TimeSpan.FromMilliseconds(25 * (attempt + 1)), cancellationToken);
                 db.ChangeTracker.Clear();
             }
         }
 
-        throw new InvalidOperationException("Movie character production-sheet version allocation did not converge after concurrent retries.");
+        throw new MovieCharacterProductionSheetValidationException("SHEET_STATE_CHANGED", "The production sheet changed while this draft version was being allocated. Retry the save.");
     }
 
     internal static bool IsVersionAllocationUniqueViolation(DbUpdateException exception)

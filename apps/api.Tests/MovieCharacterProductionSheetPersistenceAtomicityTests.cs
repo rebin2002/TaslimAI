@@ -141,20 +141,42 @@ public sealed class MovieCharacterProductionSheetPersistenceAtomicityTests
         }
     }
 
-    /// <summary>Injects one narrowly classified version-allocation conflict before any SQL write.</summary>
-    private sealed class InjectedVersionAllocationConflictInterceptor(Func<Task>? beforeConflict = null) : SaveChangesInterceptor
+    /// <summary>Injects bounded provider-shaped conflicts before any SQL write.</summary>
+    private sealed class InjectedVersionAllocationConflictInterceptor : SaveChangesInterceptor
     {
-        private int injected;
+        private readonly Func<Task>? beforeConflict;
+        private readonly int maximumConflicts;
+        private readonly bool concurrencyConflict;
+        private readonly bool unrelatedUniqueConflict;
+        private int saveAttempts;
+        private int injectedConflicts;
+
+        public InjectedVersionAllocationConflictInterceptor(
+            Func<Task>? beforeConflict = null,
+            int maximumConflicts = 1,
+            bool concurrencyConflict = false,
+            bool unrelatedUniqueConflict = false)
+        {
+            this.beforeConflict = beforeConflict;
+            this.maximumConflicts = maximumConflicts;
+            this.concurrencyConflict = concurrencyConflict;
+            this.unrelatedUniqueConflict = unrelatedUniqueConflict;
+        }
+
+        public int InjectedConflicts => Volatile.Read(ref injectedConflicts);
 
         public override async ValueTask<InterceptionResult<int>> SavingChangesAsync(
             DbContextEventData eventData,
             InterceptionResult<int> result,
             CancellationToken cancellationToken = default)
         {
-            if (Interlocked.Exchange(ref injected, 1) == 0)
+            if (Interlocked.Increment(ref saveAttempts) <= maximumConflicts)
             {
+                Interlocked.Increment(ref injectedConflicts);
                 if (beforeConflict is not null) await beforeConflict();
-                throw new DbUpdateException("duplicate key value violates unique constraint \"IX_MovieCharacterProductionSheetVersions_MovieCharacterProducti\"");
+                if (concurrencyConflict) throw new DbUpdateConcurrencyException("Injected stale sheet allocation.");
+                var index = unrelatedUniqueConflict ? "IX_UnrelatedTable_UniqueKey" : "IX_MovieCharacterProductionSheetVersions_MovieCharacterProducti";
+                throw new DbUpdateException("duplicate key value violates unique constraint \"" + index + "\"");
             }
 
             return result;
@@ -409,6 +431,121 @@ public sealed class MovieCharacterProductionSheetPersistenceAtomicityTests
                     seed.UserId, seed.CharacterId, new MovieCharacterProductionSheetRequest { ProvenanceNote = "cancelled-retry" }, cancellation.Token));
             }
 
+            await using var verify = new TaslimDbContext(options);
+            var stored = await verify.MovieCharacterProductionSheets.AsNoTracking().SingleAsync(item => item.Id == initial!.Id);
+            Assert.Equal(1, stored.CurrentVersionNumber);
+            Assert.False(await verify.MovieCharacterProductionSheetVersions.AsNoTracking()
+                .AnyAsync(item => item.MovieCharacterProductionSheetId == initial.Id && item.VersionNumber == 2));
+        }
+        finally { if (File.Exists(databasePath)) File.Delete(databasePath); }
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Cancellation_on_final_allocation_conflict_is_not_converted_to_sheet_conflict(bool concurrencyConflict)
+    {
+        const int maximumConflicts = 5;
+        var databasePath = Path.Combine(Path.GetTempPath(), $"taslim-sheet-retry-final-cancel-{Guid.NewGuid():N}.db");
+        try
+        {
+            var options = new DbContextOptionsBuilder<TaslimDbContext>()
+                .UseSqlite($"Data Source={databasePath};Default Timeout=30").Options;
+            await using var setup = new TaslimDbContext(options);
+            await setup.Database.EnsureCreatedAsync();
+            var seed = await SeedAsync(setup);
+            var initial = await CreateService(setup).SaveDraftAsync(seed.UserId, seed.CharacterId, new MovieCharacterProductionSheetRequest());
+            Assert.NotNull(initial);
+
+            using var cancellation = new CancellationTokenSource();
+            var callbackAttempts = 0;
+            var conflict = new InjectedVersionAllocationConflictInterceptor(
+                beforeConflict: () =>
+                {
+                    if (Interlocked.Increment(ref callbackAttempts) == maximumConflicts) cancellation.Cancel();
+                    return Task.CompletedTask;
+                },
+                maximumConflicts: maximumConflicts,
+                concurrencyConflict: concurrencyConflict);
+            await using (var retrying = new TaslimDbContext(new DbContextOptionsBuilder<TaslimDbContext>()
+                .UseSqlite($"Data Source={databasePath};Default Timeout=30").AddInterceptors(conflict).Options))
+            {
+                await Assert.ThrowsAnyAsync<OperationCanceledException>(() => CreateService(retrying).SaveDraftAsync(
+                    seed.UserId, seed.CharacterId, new MovieCharacterProductionSheetRequest { ProvenanceNote = "cancelled-final-conflict" }, cancellation.Token));
+            }
+
+            Assert.Equal(maximumConflicts, conflict.InjectedConflicts);
+            await using var verify = new TaslimDbContext(options);
+            var stored = await verify.MovieCharacterProductionSheets.AsNoTracking().SingleAsync(item => item.Id == initial!.Id);
+            Assert.Equal(1, stored.CurrentVersionNumber);
+            Assert.False(await verify.MovieCharacterProductionSheetVersions.AsNoTracking()
+                .AnyAsync(item => item.MovieCharacterProductionSheetId == initial.Id && item.VersionNumber == 2));
+        }
+        finally { if (File.Exists(databasePath)) File.Delete(databasePath); }
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Exhausted_allocation_retries_return_safe_sheet_conflict_after_bounded_attempts(bool concurrencyConflict)
+    {
+        const int maximumConflicts = 5;
+        var databasePath = Path.Combine(Path.GetTempPath(), $"taslim-sheet-retry-exhausted-{Guid.NewGuid():N}.db");
+        try
+        {
+            var options = new DbContextOptionsBuilder<TaslimDbContext>()
+                .UseSqlite($"Data Source={databasePath};Default Timeout=30").Options;
+            await using var setup = new TaslimDbContext(options);
+            await setup.Database.EnsureCreatedAsync();
+            var seed = await SeedAsync(setup);
+            var initial = await CreateService(setup).SaveDraftAsync(seed.UserId, seed.CharacterId, new MovieCharacterProductionSheetRequest());
+            Assert.NotNull(initial);
+
+            var conflict = new InjectedVersionAllocationConflictInterceptor(
+                maximumConflicts: maximumConflicts, concurrencyConflict: concurrencyConflict);
+            await using (var retrying = new TaslimDbContext(new DbContextOptionsBuilder<TaslimDbContext>()
+                .UseSqlite($"Data Source={databasePath};Default Timeout=30").AddInterceptors(conflict).Options))
+            {
+                var failure = await Assert.ThrowsAsync<MovieCharacterProductionSheetValidationException>(() => CreateService(retrying).SaveDraftAsync(
+                    seed.UserId, seed.CharacterId, new MovieCharacterProductionSheetRequest { ProvenanceNote = "exhausted-retry" }));
+                Assert.Equal("SHEET_STATE_CHANGED", failure.Code);
+                Assert.Equal("The production sheet changed while this draft version was being allocated. Retry the save.", failure.Message);
+            }
+
+            Assert.Equal(maximumConflicts, conflict.InjectedConflicts);
+            await using var verify = new TaslimDbContext(options);
+            var stored = await verify.MovieCharacterProductionSheets.AsNoTracking().SingleAsync(item => item.Id == initial!.Id);
+            Assert.Equal(1, stored.CurrentVersionNumber);
+            Assert.False(await verify.MovieCharacterProductionSheetVersions.AsNoTracking()
+                .AnyAsync(item => item.MovieCharacterProductionSheetId == initial.Id && item.VersionNumber == 2));
+        }
+        finally { if (File.Exists(databasePath)) File.Delete(databasePath); }
+    }
+
+    [Fact]
+    public async Task Unrelated_unique_failure_is_not_retried_or_converted_to_sheet_conflict()
+    {
+        var databasePath = Path.Combine(Path.GetTempPath(), $"taslim-sheet-retry-unrelated-{Guid.NewGuid():N}.db");
+        try
+        {
+            var options = new DbContextOptionsBuilder<TaslimDbContext>()
+                .UseSqlite($"Data Source={databasePath};Default Timeout=30").Options;
+            await using var setup = new TaslimDbContext(options);
+            await setup.Database.EnsureCreatedAsync();
+            var seed = await SeedAsync(setup);
+            var initial = await CreateService(setup).SaveDraftAsync(seed.UserId, seed.CharacterId, new MovieCharacterProductionSheetRequest());
+            Assert.NotNull(initial);
+
+            var conflict = new InjectedVersionAllocationConflictInterceptor(unrelatedUniqueConflict: true);
+            await using (var retrying = new TaslimDbContext(new DbContextOptionsBuilder<TaslimDbContext>()
+                .UseSqlite($"Data Source={databasePath};Default Timeout=30").AddInterceptors(conflict).Options))
+            {
+                var failure = await Assert.ThrowsAsync<DbUpdateException>(() => CreateService(retrying).SaveDraftAsync(
+                    seed.UserId, seed.CharacterId, new MovieCharacterProductionSheetRequest { ProvenanceNote = "unrelated-conflict" }));
+                Assert.Contains("IX_UnrelatedTable_UniqueKey", failure.Message, StringComparison.Ordinal);
+            }
+
+            Assert.Equal(1, conflict.InjectedConflicts);
             await using var verify = new TaslimDbContext(options);
             var stored = await verify.MovieCharacterProductionSheets.AsNoTracking().SingleAsync(item => item.Id == initial!.Id);
             Assert.Equal(1, stored.CurrentVersionNumber);

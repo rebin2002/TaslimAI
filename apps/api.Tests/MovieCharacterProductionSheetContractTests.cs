@@ -1,8 +1,13 @@
+using System.Security.Claims;
+using Microsoft.AspNetCore.Http;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Diagnostics;
+using Microsoft.AspNetCore.Mvc;
 using Npgsql;
 using Taslim.Api.Authorization;
+using Taslim.Api.Contracts;
+using Taslim.Api.Controllers;
 using Taslim.Api.Domain;
 using Taslim.Api.Movies;
 using Taslim.Api.Persistence;
@@ -12,6 +17,36 @@ namespace Taslim.Api.Tests;
 
 public sealed class MovieCharacterProductionSheetContractTests
 {
+    [Theory]
+    [InlineData("SHEET_STATE_CHANGED", 409)]
+    [InlineData("DUPLICATE_LOOK_KEY", 400)]
+    public async Task Save_production_sheet_maps_retryable_state_conflict_to_409_and_other_validation_to_400(string code, int expectedStatus)
+    {
+        var userId = Guid.NewGuid();
+        var controller = new MovieStudioController(
+            movies: null!, complexity: null!, durationBudgets: null!, guides: null!, stories: null!, storyCast: null!,
+            continuity: null!, worldContinuity: null!, productionContinuity: null!, productionReferences: null!,
+            productionPreflight: null!, timeline: null!, transitionEdits: null!, takeSelects: null!, shotExecution: null!,
+            authorization: null!, shotImportance: null!, cinematographyPlanning: null!,
+            productionSheets: new ConflictOnlyProductionSheetService(code), geographySheets: null!, propBible: null!,
+            referenceReadiness: null!, insertPlanner: null!)
+        {
+            ControllerContext = new ControllerContext
+            {
+                HttpContext = new DefaultHttpContext
+                {
+                    User = new ClaimsPrincipal(new ClaimsIdentity([new Claim(ClaimTypes.NameIdentifier, userId.ToString())], "test")),
+                },
+            },
+        };
+
+        var action = await controller.SaveProductionSheet(Guid.NewGuid(), new MovieCharacterProductionSheetRequest(), CancellationToken.None);
+        var response = Assert.IsType<ObjectResult>(action);
+        Assert.Equal(expectedStatus, response.StatusCode);
+        var envelope = Assert.IsType<ErrorEnvelope>(response.Value);
+        Assert.Equal(code, envelope.Error.Code);
+    }
+
     [Fact]
     public void Rejects_duplicate_identity_reference_assets()
     {
@@ -372,4 +407,22 @@ public sealed class MovieCharacterProductionSheetContractTests
     }
 
     private sealed record Seed(Guid UserId, Guid CharacterId);
+
+    private sealed class ConflictOnlyProductionSheetService(string code) : IMovieCharacterProductionSheetService
+    {
+        public Task<MovieCharacterProductionSheetDto?> GetAsync(Guid userId, Guid characterId, CancellationToken cancellationToken = default) =>
+            Task.FromResult<MovieCharacterProductionSheetDto?>(null);
+
+        public Task<MovieCharacterProductionSheetDto?> SaveDraftAsync(Guid userId, Guid characterId, MovieCharacterProductionSheetRequest request, CancellationToken cancellationToken = default) =>
+            Task.FromException<MovieCharacterProductionSheetDto?>(new MovieCharacterProductionSheetValidationException(code, "The production sheet changed while this draft version was being allocated. Retry the save."));
+
+        public Task<MovieCharacterProductionSheetDto?> ApproveAsync(Guid userId, Guid sheetId, CancellationToken cancellationToken = default) =>
+            Task.FromResult<MovieCharacterProductionSheetDto?>(null);
+
+        public Task<MovieCharacterProductionSheetDto?> LockAsync(Guid userId, Guid sheetId, CancellationToken cancellationToken = default) =>
+            Task.FromResult<MovieCharacterProductionSheetDto?>(null);
+
+        public Task<MovieCharacterProductionSheetDto?> UnlockAsync(Guid userId, Guid sheetId, CancellationToken cancellationToken = default) =>
+            Task.FromResult<MovieCharacterProductionSheetDto?>(null);
+    }
 }

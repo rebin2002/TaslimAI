@@ -230,7 +230,11 @@ public sealed class MovieStudioController(IMovieStudioService movies, IMovieProd
             var result = await productionSheets.SaveDraftAsync(GetUserId(), characterId, request, cancellationToken);
             return result is null ? ApiResults.Error(this, 404, "MOVIE_CHARACTER_NOT_FOUND", "Movie character not found.") : Ok(result);
         }
-        catch (MovieCharacterProductionSheetValidationException exception) { return ApiResults.Error(this, 400, exception.Code, exception.Message); }
+        catch (MovieCharacterProductionSheetValidationException exception)
+        {
+            var statusCode = exception.Code == "SHEET_STATE_CHANGED" ? 409 : 400;
+            return ApiResults.Error(this, statusCode, exception.Code, exception.Message);
+        }
         catch (MovieCharacterProductionSheetLockedException exception) { return ApiResults.Error(this, 409, "MOVIE_CHARACTER_PRODUCTION_SHEET_LOCKED", exception.Message); }
     }
 
