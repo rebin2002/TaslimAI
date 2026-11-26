@@ -186,7 +186,7 @@ public static class CinematographyIntentValidator
         if (selection.CapabilityReferences is { Count: > 32 })
             return "Cinematography capability references are limited to 32 items.";
         if (selection.CapabilityReferences is not null && selection.CapabilityReferences.Any(reference =>
-                string.IsNullOrWhiteSpace(reference.Field) || reference.Field.Trim().Length > 80 ||
+                reference is null || string.IsNullOrWhiteSpace(reference.Field) || reference.Field.Trim().Length > 80 ||
                 !CinematographyCapabilityClassification.Supported.Contains(reference.Classification) ||
                 reference.Rationale?.Trim().Length > MaxFieldLength))
             return "Cinematography capability references are invalid.";
@@ -210,7 +210,10 @@ public static class CinematographyIntentValidator
         var presetId = string.IsNullOrWhiteSpace(selection.PresetId) ? preset?.Id : preset?.Id ?? selection.PresetId.Trim();
         var references = selection.CapabilityReferences is null
             ? preset?.CapabilityReferences
-            : selection.CapabilityReferences.Select(reference => new CinematographyCapabilityReference(reference.Field.Trim(), reference.Classification, reference.Rationale?.Trim())).ToArray();
+            : selection.CapabilityReferences
+                .Where(reference => reference is not null && !string.IsNullOrWhiteSpace(reference.Field))
+                .Select(reference => new CinematographyCapabilityReference(reference.Field.Trim(), reference.Classification, reference.Rationale?.Trim()))
+                .ToArray();
         return new CinematographyIntentSelection(
             intent,
             presetId,

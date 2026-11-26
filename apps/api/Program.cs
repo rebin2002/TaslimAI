@@ -252,7 +252,7 @@ builder.Services.AddSingleton<IProviderCostGuard, AllowAllProviderCostGuard>();
 builder.Services.AddSingleton(TimeProvider.System);
 // Academic Research Studio integration lane: Phase B evidence services + persistence and
 // the Phase C workflow engine over the shared context. The deterministic Plan handler is
-// wired locally; discovery, screening, extraction, synthesis, drafting and verification
+// enabled only by an explicit API opt-in. Discovery, screening, extraction, synthesis, drafting and verification
 // remain unconnected and are reported as the exact missing stage.
 builder.Services.AddAcademicProjects(builder.Configuration);
 builder.Services.Configure<AutopilotOptions>(builder.Configuration.GetSection("Autopilot"));
@@ -424,7 +424,9 @@ if (builder.Configuration.GetValue("GenerationJobs:WorkerEnabled", !builder.Envi
     builder.Services.AddHostedService<GenerationJobWorker>();
 }
 builder.Services.Configure<AiOptions>(builder.Configuration.GetSection("Ai"));
-builder.Services.Configure<ImageGenerationOptions>(builder.Configuration.GetSection("ImageGeneration"));
+builder.Services.AddOptions<ImageGenerationOptions>()
+    .Bind(builder.Configuration.GetSection("ImageGeneration"))
+    .ValidateOnStart();
 builder.Services.Configure<DocumentGenerationOptions>(builder.Configuration.GetSection("DocumentGeneration"));
 builder.Services.AddOptions<PresentationGenerationOptions>()
     .Bind(builder.Configuration.GetSection("PresentationGeneration"))
