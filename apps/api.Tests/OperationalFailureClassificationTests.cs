@@ -12,10 +12,18 @@ public sealed class OperationalFailureClassificationTests
     [InlineData("DOCUMENT_PROVIDER_UNSUPPORTED_REQUEST", "provider", false)]
     [InlineData("DOCUMENT_STORAGE_FAILED", "storage", true)]
     [InlineData("IMAGE_OUTPUT_INVALID", "output", true)]
+    [InlineData("RESEARCH_SEARCH_UNAVAILABLE", "provider", true)]
     [InlineData("JOB_CANCELLED", "cancelled", false)]
     [InlineData("JOB_POISONED", "recovery", false)]
     [InlineData("IMAGE_REQUEST_INVALID", "validation", false)]
     [InlineData("UNRECOGNIZED_FAILURE", "internal", false)]
+    // Post-billing music delivery failures are isolated from the retryable provider class, while
+    // the ordinary music provider outage keeps its existing (log-only) retryable classification.
+    [InlineData("MUSIC_OUTPUT_RETRIEVAL_FAILED", "delivery", false)]
+    [InlineData("MUSIC_RETRIEVAL_RETRY_BLOCKED", "delivery", false)]
+    // Lease expiry with an unknown submission outcome is terminalized, never auto-re-dispatched.
+    [InlineData("MUSIC_PROVIDER_SUBMISSION_UNCONFIRMED", "provider", false)]
+    [InlineData("MUSIC_PROVIDER_UNAVAILABLE", "provider", true)]
     public void Classifier_returns_bounded_operational_categories(string code, string category, bool retryable)
     {
         var result = GenerationFailureClassifier.Classify(code);

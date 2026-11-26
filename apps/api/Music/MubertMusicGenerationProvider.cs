@@ -93,7 +93,7 @@ public sealed class MubertMusicGenerationProvider(
             if (string.IsNullOrWhiteSpace(generation?.Url))
                 throw new MusicProviderTimeoutException();
 
-            var download = await DownloadAsync(new Uri(generation.Url, UriKind.Absolute), timeout.Token);
+            var download = await DownloadWithTransportRecoveryAsync(new Uri(generation.Url, UriKind.Absolute), timeout.Token);
             var format = NormalizeFormat(settings.MubertFormat);
             var contentType = NormalizeContentType(download.ContentType, format);
             var safeMetadata = JsonSerializer.Serialize(new
@@ -192,6 +192,51 @@ public sealed class MubertMusicGenerationProvider(
         }
     }
 
+    /// <summary>
+    /// Re-fetches a completed track's artifact with the same GET when the transport fails. The
+    /// track already exists and was billed by Mubert once the status reported it, so the only
+    /// safe recovery is another artifact GET: creating a second track would bill the generation
+    /// again and orphan the first artifact. Auth and quota faults are excluded because they are
+    /// not transport recoveries, and integrity faults (MusicOutputInvalidException,
+    /// FileUploadValidationException) never reach this wrapper.
+    /// </summary>
+    private async Task<MubertDownload> DownloadWithTransportRecoveryAsync(Uri artifactUri, CancellationToken cancellationToken)
+    {
+        var budget = Math.Clamp(settings.MubertMaxRetryAttempts, 0, 5);
+        for (var attempt = 0; ; attempt++)
+        {
+            try
+            {
+                return await DownloadAsync(artifactUri, cancellationToken);
+            }
+            catch (MusicProviderUnavailableException exception) when (
+                exception is not MusicProviderAuthenticationException
+                && exception is not MusicProviderQuotaException
+                )
+            {
+                // The budget is spent on GETs of the same artifact, never on a second track
+                // request. Exhaustion is post-billing, so it is isolated from the generic
+                // provider-unavailable class: the generic code invites a retry, and a retry
+                // here would create a second paid track and orphan the finished one.
+                if (attempt >= budget)
+                {
+                    logger.LogWarning(
+                        exception,
+                        "Mubert artifact transport fault persisted after {TransportFaults} bounded artifact re-fetch(es). The completed track was not re-created, so no second billable request was issued.",
+                        attempt);
+                    throw new MusicOutputRetrievalFailedException();
+                }
+
+                logger.LogWarning(
+                    exception,
+                    "Mubert artifact transport fault after the track completed; re-fetching the same artifact URL instead of creating a second billable track. Attempt={Attempt}; MaxBytes={MaxBytes}",
+                    attempt + 1,
+                    Math.Min(25 * 1_048_576, Math.Max(1, settings.MaxOutputBytes)));
+                await RetryDelayAsync(attempt, cancellationToken);
+            }
+        }
+    }
+
     private async Task<MubertDownload> DownloadAsync(Uri uri, CancellationToken cancellationToken)
     {
         var maxBytes = Math.Min(25 * 1_048_576, Math.Max(1, settings.MaxOutputBytes));
@@ -207,40 +252,59 @@ public sealed class MubertMusicGenerationProvider(
             catch (HttpRequestException exception)
             {
                 logger.LogWarning(exception, "Mubert download request failed.");
-                throw new MusicProviderFailureException();
+                throw new MusicProviderUnavailableException();
             }
 
             using (response)
             {
-                if ((int)response.StatusCode is 301 or 302 or 303 or 307 or 308)
+                try
                 {
-                    if (redirect == ProviderDownloadSecurity.MaxRedirects || response.Headers.Location is null)
+                    if ((int)response.StatusCode is 301 or 302 or 303 or 307 or 308)
+                    {
+                        if (redirect == ProviderDownloadSecurity.MaxRedirects || response.Headers.Location is null)
+                            throw new MusicOutputInvalidException();
+                        uri = new Uri(uri, response.Headers.Location);
+                        continue;
+                    }
+                    if (!response.IsSuccessStatusCode) throw new MusicProviderFailureException();
+                    if (response.Content.Headers.ContentLength > maxBytes) throw new MusicOutputInvalidException();
+                    await using var source = await response.Content.ReadAsStreamAsync(cancellationToken);
+                    await using var buffer = new MemoryStream(Math.Min((int)(response.Content.Headers.ContentLength ?? 0), maxBytes));
+                    var chunk = new byte[81920];
+                    var total = 0;
+                    while (true)
+                    {
+                        var read = await source.ReadAsync(chunk, cancellationToken);
+                        if (read == 0) break;
+                        total += read;
+                        if (total > maxBytes) throw new MusicOutputInvalidException();
+                        await buffer.WriteAsync(chunk.AsMemory(0, read), cancellationToken);
+                    }
+                    if (response.Content.Headers.ContentLength.HasValue && total != response.Content.Headers.ContentLength.Value)
                         throw new MusicOutputInvalidException();
-                    uri = new Uri(uri, response.Headers.Location);
-                    continue;
-                }
-                if (!response.IsSuccessStatusCode) throw new MusicProviderFailureException();
-                if (response.Content.Headers.ContentLength > maxBytes) throw new MusicOutputInvalidException();
-                await using var source = await response.Content.ReadAsStreamAsync(cancellationToken);
-                await using var buffer = new MemoryStream(Math.Min((int)(response.Content.Headers.ContentLength ?? 0), maxBytes));
-                var chunk = new byte[81920];
-                var total = 0;
-                while (true)
-                {
-                    var read = await source.ReadAsync(chunk, cancellationToken);
-                    if (read == 0) break;
-                    total += read;
-                    if (total > maxBytes) throw new MusicOutputInvalidException();
-                    await buffer.WriteAsync(chunk.AsMemory(0, read), cancellationToken);
-                }
-                if (response.Content.Headers.ContentLength.HasValue && total != response.Content.Headers.ContentLength.Value)
-                    throw new MusicOutputInvalidException();
 
-                var format = NormalizeFormat(settings.MubertFormat);
-                var contentType = NormalizeContentType(response.Content.Headers.ContentType?.MediaType, format);
-                var descriptor = GeneratedMediaSecurity.ValidateDescriptor($"provider-output.{format}", contentType);
-                GeneratedMediaSecurity.ValidateContent(descriptor, buffer.GetBuffer().AsSpan(0, (int)buffer.Length), new Taslim.Api.Files.FileOptions { MaxArchiveEntries = 1, MaxArchiveUncompressedBytes = maxBytes, MaxArchiveEntryBytes = maxBytes });
-                return new MubertDownload(buffer.ToArray(), contentType);
+                    var format = NormalizeFormat(settings.MubertFormat);
+                    var contentType = NormalizeContentType(response.Content.Headers.ContentType?.MediaType, format);
+                    var descriptor = GeneratedMediaSecurity.ValidateDescriptor($"provider-output.{format}", contentType);
+                    GeneratedMediaSecurity.ValidateContent(descriptor, buffer.GetBuffer().AsSpan(0, (int)buffer.Length), new Taslim.Api.Files.FileOptions { MaxArchiveEntries = 1, MaxArchiveUncompressedBytes = maxBytes, MaxArchiveEntryBytes = maxBytes });
+                    return new MubertDownload(buffer.ToArray(), contentType);
+                }
+                catch (HttpRequestException exception)
+                {
+                    logger.LogWarning(exception, "Mubert download stream failed.");
+                    throw new MusicProviderUnavailableException();
+                }
+                catch (IOException exception)
+                {
+                    // A reset or aborted socket while the artifact body is still streaming surfaces
+                    // as IOException (SocketException derives from it) rather than HttpRequestException.
+                    // Without this the transport fault reaches the job handler unclassified, so it is
+                    // reported as the same transient provider outage a failed request produces.
+                    // MusicOutputInvalidException and FileUploadValidationException above are not
+                    // IOException-derived, so integrity rejections keep their existing categories.
+                    logger.LogWarning(exception, "Mubert download stream failed during transport.");
+                    throw new MusicProviderUnavailableException();
+                }
             }
         }
 

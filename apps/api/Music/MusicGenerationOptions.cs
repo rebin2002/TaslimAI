@@ -45,7 +45,16 @@ public sealed class MusicGenerationOptions
     public decimal StableAudioUsdPerCredit { get; set; } = 0.01m;
 }
 
-public class MusicProviderUnavailableException() : Exception("The configured music provider is unavailable.");
+public class MusicProviderUnavailableException : Exception
+{
+    public MusicProviderUnavailableException() : base("The configured music provider is unavailable.")
+    {
+    }
+
+    protected MusicProviderUnavailableException(string message) : base(message)
+    {
+    }
+}
 public sealed class MusicProviderAuthenticationException() : MusicProviderUnavailableException;
 public sealed class MusicProviderQuotaException() : MusicProviderUnavailableException;
 public sealed class MusicProviderTimeoutException() : Exception("The music provider timed out.");
@@ -60,3 +69,19 @@ public sealed class MusicRequestValidationException(string code, string message)
 }
 
 public sealed class MusicOutputStorageException() : Exception("The generated music could not be saved.");
+
+/// <summary>
+/// The provider completed and billed a generation or track, but its finished result could not be
+/// retrieved even after the bounded GET re-fetches. Deriving from
+/// <see cref="MusicProviderUnavailableException"/> keeps every existing provider-unavailable guard
+/// and catch working unchanged, while the distinct type lets the failure be mapped to its own
+/// public code so that it is NOT treated as an ordinary "please try again" provider fault: a
+/// retry would POST a second billable generation and orphan the one that already exists.
+/// Nothing provider-specific (URLs, keys, payloads) is carried in the message.
+/// </summary>
+public sealed class MusicOutputRetrievalFailedException : MusicProviderUnavailableException
+{
+    public MusicOutputRetrievalFailedException() : base("The completed music result could not be retrieved.")
+    {
+    }
+}

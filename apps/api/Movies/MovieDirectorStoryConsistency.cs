@@ -142,7 +142,24 @@ public static class DirectorStoryConsistencyAnalyzer
     {
         if (approved is null || approved.RevisionId == current.RevisionId) return;
 
-        var currentByKey = current.Scenes.ToDictionary(SceneKey, StringComparer.OrdinalIgnoreCase);
+        var currentByKey = new Dictionary<string, DirectorScreenplaySceneContext>(StringComparer.OrdinalIgnoreCase);
+        foreach (var group in current.Scenes.GroupBy(SceneKey, StringComparer.OrdinalIgnoreCase))
+        {
+            var scenes = group.ToArray();
+            if (scenes.Length > 1)
+            {
+                Add(findings, Finding(
+                    DirectorStoryFindingTypes.HardContinuityConflict, DirectorStoryFindingSeverities.Error,
+                    DirectorStoryFindingCategories.Chronology,
+                    scenes.Select(scene => StoryEvidence(current, scene.SceneIdentifier, SceneText(scene))).ToArray(),
+                    Target("screenplay_scene", scenes[0].Id, scenes[0].SceneIdentifier),
+                    $"The current Story links multiple screenplay scenes to production scene '{group.Key}'. Approved-story comparison is ambiguous.",
+                    "Give each screenplay scene a distinct production scene link before approval.", .99m, null));
+            }
+
+            currentByKey[group.Key] = scenes[0];
+        }
+
         foreach (var approvedScene in approved.Scenes)
         {
             if (!currentByKey.TryGetValue(SceneKey(approvedScene), out var currentScene))
