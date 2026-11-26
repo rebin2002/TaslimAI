@@ -16,8 +16,8 @@ const socialPlatforms = new Set(["instagram", "facebook", "linkedin", "x", "tikt
 const socialTypes = new Set(["auto", "announcement", "product_launch", "promotion", "educational", "thought_leadership", "company_update", "event", "community", "general"]);
 const socialTones = new Set(["professional", "friendly", "persuasive", "educational", "playful", "concise", "thoughtful"]);
 const socialLanguages = new Set(["auto", "en", "ar", "ku"]);
-const activeJobStoragePrefix = "taslim:social-generation:";
 const socialDraftNamespace = "social-draft";
+const socialActiveJobNamespace = "social-generation";
 const draftStoragePrefix = "taslim:social-draft:";
 export type SocialStudioState = "compose" | "pending" | "queued" | "running" | "succeeded" | "completed-unavailable" | "failed" | "cancelled";
 export type SocialPreviewPlatform = "instagram" | "facebook" | "linkedin" | "x" | "tiktok" | "multi";
@@ -38,23 +38,34 @@ export type SocialStudioDraft = {
   generateVariants: boolean;
 };
 
-export function socialActiveJobStorageKey(workspaceId: string) { return `${activeJobStoragePrefix}${workspaceId}`; }
-export function readSocialActiveJobId(workspaceId: string) {
-  if (typeof window === "undefined") return null;
+export function legacySocialActiveJobStorageKey(workspaceId: string) { return `taslim:social-generation:${workspaceId}`; }
+export function socialActiveJobStorageKey(target: SocialDraftTarget): string | null {
+  return sessionDraftStorageKey(socialActiveJobNamespace, toSocialDraftPrincipal(target));
+}
+export function readSocialActiveJobId(target: SocialDraftTarget) {
+  const principal = toSocialDraftPrincipal(target);
+  return readSessionDraft(defaultSessionDraftStore(), socialActiveJobNamespace, principal, (value) =>
+    typeof value === "string" && value.trim() ? value.trim() : null,
+  );
+}
+export function persistSocialActiveJobId(target: SocialDraftTarget, jobId: string): boolean {
+  if (typeof jobId !== "string" || !jobId.trim()) return false;
+  return writeSessionDraft(defaultSessionDraftStore(), socialActiveJobNamespace, toSocialDraftPrincipal(target), jobId.trim());
+}
+export function clearSocialActiveJobId(target: SocialDraftTarget): boolean {
+  return clearSessionDraft(defaultSessionDraftStore(), socialActiveJobNamespace, toSocialDraftPrincipal(target));
+}
+/** Remove an unattributed pre-#688 pointer without ever reading or restoring its job id. */
+export function retireLegacySocialActiveJobId(target: SocialDraftTarget): boolean {
+  const scope = resolveSocialDraftScope(target);
+  const store = defaultSessionDraftStore();
+  if (!scope || !store) return false;
   try {
-    const jobId = window.sessionStorage.getItem(socialActiveJobStorageKey(workspaceId));
-    return jobId?.trim() || null;
+    store.removeItem(legacySocialActiveJobStorageKey(scope.workspaceId));
+    return true;
   } catch {
-    return null;
+    return false;
   }
-}
-export function persistSocialActiveJobId(workspaceId: string, jobId: string) {
-  if (typeof window === "undefined" || !jobId.trim()) return;
-  try { window.sessionStorage.setItem(socialActiveJobStorageKey(workspaceId), jobId); } catch { /* Storage may be unavailable. */ }
-}
-export function clearSocialActiveJobId(workspaceId: string) {
-  if (typeof window === "undefined") return;
-  try { window.sessionStorage.removeItem(socialActiveJobStorageKey(workspaceId)); } catch { /* Storage may be unavailable. */ }
 }
 
 export function isSocialJobForWorkspace(job: GenerationJob | null, workspaceId: string | null | undefined) {
@@ -138,6 +149,11 @@ export function socialDraftScopeToken(target: SocialDraftTarget): string | null 
   return scope ? JSON.stringify([scope.userId, scope.workspaceId]) : null;
 }
 
+/** Render-sensitive state is visible only while its loaded principal still owns the active scope. */
+export function isSocialDraftScopeActive(ownerToken: string | null | undefined, activeToken: string | null | undefined): boolean {
+  return typeof activeToken === "string" && activeToken.length > 0 && ownerToken === activeToken;
+}
+
 /**
  * Removes a pre-#688 workspace-only draft from this tab WITHOUT ever surfacing its content to the
  * identity that happens to arrive first: ownership of those entries cannot be proven, so they are
@@ -159,7 +175,11 @@ export function retireLegacySocialDraft(target: SocialDraftTarget): LegacySocial
  */
 export function purgeSocialDraftsOnAccountBoundary(userId: string | null | undefined): { removedCount: number; refusedInvalidIdentity: boolean } {
   const result = purgeSessionDraftsForUser(defaultSessionDraftStore(), userId, { namespace: socialDraftNamespace });
-  return { removedCount: result.removedKeys.length, refusedInvalidIdentity: result.refusedInvalidIdentity };
+  const activeJobs = purgeSessionDraftsForUser(defaultSessionDraftStore(), userId, { namespace: socialActiveJobNamespace });
+  return {
+    removedCount: result.removedKeys.length + activeJobs.removedKeys.length,
+    refusedInvalidIdentity: result.refusedInvalidIdentity || activeJobs.refusedInvalidIdentity,
+  };
 }
 
 export function isSocialTerminal(job: GenerationJob | null) { return !!job && terminalStatuses.has(job.status); }

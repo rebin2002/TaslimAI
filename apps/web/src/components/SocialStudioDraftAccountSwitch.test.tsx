@@ -150,7 +150,7 @@ vi.mock("lucide-react", () => {
 });
 
 import { SocialStudioView } from "./SocialStudioView";
-import { legacySocialDraftStorageKey, persistSocialDraft, socialDraftStorageKey, type SocialStudioDraft } from "@/lib/socialStudioState";
+import { legacySocialDraftStorageKey, persistSocialDraft, readSocialActiveJobId, socialDraftStorageKey, type SocialStudioDraft } from "@/lib/socialStudioState";
 
 /** Synthetic identities sharing ONE workspace id — the condition #688 turns on. */
 const ACCOUNT_A = "synthetic-account-a-688";
@@ -174,6 +174,15 @@ function promptBox() { return allNodes(container).find((n) => n.nodeName === "TE
 /** Every character the tab is currently showing to whoever holds it. */
 function renderedText() { return allNodes(container).map((n) => `${n.getAttribute("value") ?? ""}|${n.textContent}`).join("\n"); }
 function storedText() { return [...storage.values()].join("\n"); }
+function completedSocialJob(title: string, id = "synthetic-job-a-688") {
+  return {
+    id, workspaceId: SHARED_WORKSPACE.id, jobType: "social.generate", status: "Succeeded",
+    title, progressPercent: 100,
+    resultJson: JSON.stringify({ assetId: "synthetic-generated-asset-a-688", title, platform: "instagram", posts: [{ order: 1, hook: title, body: "synthetic private result" }] }),
+    errorCode: null, errorMessage: null, cancellationRequested: false, createdAt: "2026-01-01T00:00:00Z",
+    queuedAt: null, startedAt: null, completedAt: "2026-01-01T00:00:01Z", failedAt: null, cancelledAt: null, outputs: [],
+  };
+}
 /** The studio persists on the next commit, so let the autosave effect flush. */
 async function flushAutosave() { await settle(() => undefined); await settle(() => undefined); }
 
@@ -202,6 +211,11 @@ async function typePrompt(text: string) {
     box.dispatchEvent({ type: "input", bubbles: true });
     box.dispatchEvent({ type: "keyup", bubbles: true });
   });
+}
+async function submitForm() {
+  const form = allNodes(container).find((node) => node.nodeName === "FORM");
+  if (!form) throw new Error("no form rendered");
+  await settle(() => form.dispatchEvent({ type: "submit", bubbles: true, cancelable: true }));
 }
 
 beforeEach(() => {
@@ -370,5 +384,64 @@ describe("Social Studio same-tab account switch, rendered through the studio (#6
     expect(storedText()).not.toContain(PRIVATE_A);
     expect([...storage.keys()].filter((key) => key.includes(SHARED_WORKSPACE.id) || key.includes(PRIVATE_A_ASSET))).toEqual([]);
     expect(renderedText()).not.toContain(PRIVATE_A);
+  });
+
+  it("does not render Account A's generated preview or active-job pointer for Account B in the same workspace", async () => {
+    const privatePreview = "SYNTHETIC-688-A private generated preview";
+    await signInAs(ACCOUNT_A);
+    await mount();
+    await typePrompt(PRIVATE_A);
+    await flushAutosave();
+    harness.api.createSocialGenerationJob.mockResolvedValue(completedSocialJob(privatePreview));
+    await submitForm();
+    expect(renderedText()).toContain(privatePreview);
+    expect(readSocialActiveJobId({ userId: ACCOUNT_A, workspaceId: SHARED_WORKSPACE.id })).toBe("synthetic-job-a-688");
+
+    await signInAs(ACCOUNT_B);
+    await rerender();
+    expect(renderedText()).not.toContain(privatePreview);
+    expect(renderedText()).not.toContain(PRIVATE_A);
+    expect(promptBox()?.value ?? "").toBe("");
+    expect(readSocialActiveJobId({ userId: ACCOUNT_A, workspaceId: SHARED_WORKSPACE.id })).toBeNull();
+    expect(readSocialActiveJobId({ userId: ACCOUNT_B, workspaceId: SHARED_WORKSPACE.id })).toBeNull();
+  });
+
+  it("discards Account A's delayed generation completion after Account B takes over the same workspace", async () => {
+    const privatePreview = "SYNTHETIC-688-A late generated preview";
+    let resolveCreate!: (job: ReturnType<typeof completedSocialJob>) => void;
+    harness.api.createSocialGenerationJob.mockReturnValue(new Promise((resolve) => { resolveCreate = resolve; }));
+    await signInAs(ACCOUNT_A);
+    await mount();
+    await typePrompt(PRIVATE_A);
+    await submitForm();
+
+    await signInAs(ACCOUNT_B);
+    await rerender();
+    await settle(() => resolveCreate(completedSocialJob(privatePreview, "synthetic-job-a-late-688")));
+
+    expect(renderedText()).not.toContain(privatePreview);
+    expect(renderedText()).not.toContain(PRIVATE_A);
+    expect(promptBox()?.value ?? "").toBe("");
+    expect(readSocialActiveJobId({ userId: ACCOUNT_A, workspaceId: SHARED_WORKSPACE.id })).toBeNull();
+    expect(readSocialActiveJobId({ userId: ACCOUNT_B, workspaceId: SHARED_WORKSPACE.id })).toBeNull();
+  });
+
+  it("keeps draft-only legal defaults safe when Social Studio's input API is offline", async () => {
+    harness.api.listProjects.mockRejectedValue(new Error("offline"));
+    harness.api.listFiles.mockRejectedValue(new Error("offline"));
+    harness.api.listAssets.mockRejectedValue(new Error("offline"));
+    await signInAs(ACCOUNT_A);
+    await mount();
+
+    expect(renderedText()).toContain("No publishing");
+    expect(renderedText()).toContain("No scheduling");
+    expect(renderedText()).toContain("No social credentials");
+
+    await typePrompt("offline draft brief; no external post");
+    await flushAutosave();
+    expect(storage.has(socialDraftStorageKey({ userId: ACCOUNT_A, workspaceId: SHARED_WORKSPACE.id }) as string)).toBe(true);
+    expect(harness.api.createSocialGenerationJob).not.toHaveBeenCalled();
+    expect(renderedText()).not.toContain("Publish now");
+    expect(renderedText()).not.toContain("Schedule post");
   });
 });

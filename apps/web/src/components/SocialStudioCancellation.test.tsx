@@ -125,6 +125,7 @@ vi.mock("lucide-react", () => {
 });
 
 import { SocialStudioView } from "./SocialStudioView";
+import { persistSocialActiveJobId } from "@/lib/socialStudioState";
 
 const wsA = { id: "workspace-a" };
 const wsB = { id: "workspace-b" };
@@ -160,8 +161,6 @@ async function settle(fn: () => void) { await act(async () => { fn(); await drai
 function allNodes(node: TestNode): TestNode[] { return [node, ...node.childNodes.flatMap(allNodes)]; }
 function findByClass(node: TestNode, cls: string) { return allNodes(node).filter((n) => (n.getAttribute("class")?.split(/\s+/) ?? []).includes(cls)); }
 function findByTag(node: TestNode, tag: string) { return allNodes(node).filter((n) => n.nodeName === tag.toUpperCase()); }
-/** The pointer a Social Studio session keeps for the job it is watching. */
-function pointerKey(workspaceId: string) { return `taslim:social-generation:${workspaceId}`; }
 function progressPercent() {
   return findByClass(container, "generation-progress-track")[0]?.getAttribute("aria-valuenow") ?? null;
 }
@@ -236,7 +235,7 @@ afterEach(() => { act(() => root?.unmount()); vi.unstubAllGlobals(); });
 describe("Social Studio cancellation session semantics", () => {
   it("keeps a cancellation that settles after a workspace switch from releasing the new session's work lock", async () => {
     // Session A is watching a running Social generation and asks for it to stop.
-    storage.set(pointerKey(wsA.id), "job-a-1");
+    persistSocialActiveJobId({ userId: "user-a", workspaceId: wsA.id }, "job-a-1");
     harness.api.getGenerationJob.mockResolvedValue(job({ progressPercent: 10 }));
     await mount();
     await runTimers();
@@ -270,7 +269,7 @@ describe("Social Studio cancellation session semantics", () => {
 
   it("discards a cancellation response that settles after the session was replaced and restored", async () => {
     // Session A asks to stop job-a-1 while it is at 10%.
-    storage.set(pointerKey(wsA.id), "job-a-1");
+    persistSocialActiveJobId({ userId: "user-a", workspaceId: wsA.id }, "job-a-1");
     let frame = 0;
     const restoreA = job({ progressPercent: 10 });
     const authoritative = job({ progressPercent: 55 });
@@ -301,7 +300,7 @@ describe("Social Studio cancellation session semantics", () => {
     expect(progressPercent()).toBe("55");
   });
   it("keeps a cancellation from an old account from unlocking a new account in the same workspace", async () => {
-    storage.set(pointerKey(wsA.id), "job-a-1");
+    persistSocialActiveJobId({ userId: "user-a", workspaceId: wsA.id }, "job-a-1");
     harness.api.getGenerationJob.mockResolvedValue(job({ progressPercent: 10 }));
     await mount();
     await runTimers();

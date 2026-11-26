@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { GenerationJob } from "./api";
-import { clearSocialActiveJobId, clearSocialDraft, displaySocialProgress, formatSocialPostForCopy, isSocialJobForWorkspace, isSocialSourceReady, legacySocialDraftStorageKey, nextSocialRestoreDelay, normalizeSocialPreviewPlatform, parseSocialJobResult, persistSocialActiveJobId, persistSocialDraft, purgeSocialDraftsOnAccountBoundary, readSocialActiveJobId, readSocialDraft, resolveSocialDraftScope, retireLegacySocialDraft, socialActiveJobStorageKey, socialDraftScopeToken, socialDraftStorageKey, socialStudioState } from "./socialStudioState";
+import { clearSocialActiveJobId, clearSocialDraft, displaySocialProgress, formatSocialPostForCopy, isSocialDraftScopeActive, isSocialJobForWorkspace, isSocialSourceReady, legacySocialActiveJobStorageKey, legacySocialDraftStorageKey, nextSocialRestoreDelay, normalizeSocialPreviewPlatform, parseSocialJobResult, persistSocialActiveJobId, persistSocialDraft, purgeSocialDraftsOnAccountBoundary, readSocialActiveJobId, readSocialDraft, resolveSocialDraftScope, retireLegacySocialActiveJobId, retireLegacySocialDraft, socialActiveJobStorageKey, socialDraftScopeToken, socialDraftStorageKey, socialStudioState } from "./socialStudioState";
 
 const job = (overrides: Partial<GenerationJob> = {}): GenerationJob => ({ id: "job-1", workspaceId: "workspace-1", projectId: null, jobType: "social.generate", status: "Running", title: null, progressPercent: 100, resultJson: null, errorCode: null, errorMessage: null, cancellationRequested: false, createdAt: "2026-01-01T00:00:00Z", queuedAt: null, startedAt: null, completedAt: null, failedAt: null, cancelledAt: null, outputs: [], ...overrides });
 
@@ -40,16 +40,27 @@ describe("socialStudioState", () => {
     expect(isSocialJobForWorkspace(job(), "workspace-2")).toBe(false);
     expect(isSocialJobForWorkspace(job({ jobType: "image.generate" }), "workspace-1")).toBe(false);
     expect(isSocialJobForWorkspace(null, "workspace-1")).toBe(false);
+    const accountA = socialDraftScopeToken({ userId: "user-a", workspaceId: "workspace-1" });
+    const accountB = socialDraftScopeToken({ userId: "user-b", workspaceId: "workspace-1" });
+    expect(isSocialDraftScopeActive(accountA, accountA)).toBe(true);
+    expect(isSocialDraftScopeActive(accountA, accountB)).toBe(false);
+    expect(isSocialDraftScopeActive(accountA, null)).toBe(false);
   });
-  it("persists the active job by workspace and clears it when the user starts over", () => {
+  it("persists active jobs by identity + workspace and quarantines legacy pointers", () => {
     const values = new Map<string, string>();
     vi.stubGlobal("window", { sessionStorage: { getItem: (key: string) => values.get(key) ?? null, setItem: (key: string, value: string) => values.set(key, value), removeItem: (key: string) => values.delete(key) } });
-    persistSocialActiveJobId("workspace-1", "job-1");
-    expect(values.get(socialActiveJobStorageKey("workspace-1"))).toBe("job-1");
-    expect(readSocialActiveJobId("workspace-1")).toBe("job-1");
-    expect(readSocialActiveJobId("workspace-2")).toBeNull();
-    clearSocialActiveJobId("workspace-1");
-    expect(readSocialActiveJobId("workspace-1")).toBeNull();
+    const owner = { userId: "user-1", workspaceId: "workspace-1" };
+    persistSocialActiveJobId(owner, "job-1");
+    expect(values.has(socialActiveJobStorageKey(owner) as string)).toBe(true);
+    expect(readSocialActiveJobId(owner)).toBe("job-1");
+    expect(readSocialActiveJobId({ userId: "user-2", workspaceId: "workspace-1" })).toBeNull();
+    expect(readSocialActiveJobId({ userId: "user-1", workspaceId: "workspace-2" })).toBeNull();
+    const legacyKey = legacySocialActiveJobStorageKey("workspace-1");
+    values.set(legacyKey, "unattributed-old-job");
+    expect(retireLegacySocialActiveJobId({ userId: "user-2", workspaceId: "workspace-1" })).toBe(true);
+    expect(values.has(legacyKey)).toBe(false);
+    clearSocialActiveJobId(owner);
+    expect(readSocialActiveJobId(owner)).toBeNull();
   });
   it("persists drafts for an identity + workspace pair and bounds values restored from session storage", () => {
     const values = new Map<string, string>();
@@ -66,7 +77,7 @@ describe("socialStudioState", () => {
     expect(restored?.prompt).toHaveLength(6000);
     expect(restored?.selectedFiles).toEqual(["a", "b", "c", "d", "e"]);
     values.set(socialDraftStorageKey(owner) as string, JSON.stringify({ v: 1, u: "user-1", w: "workspace-1", savedAt: 1, d: { socialType: "unsupported", platform: "provider-only", tone: "unknown", language: "fr" } }));
-    expect(readSocialDraft(owner)).toMatchObject({ socialType: "auto", platform: "multi", tone: "professional", language: "auto" });
+    expect(readSocialDraft(owner)).toMatchObject({ socialType: "auto", platform: "multi", tone: "professional", language: "auto", includeHashtags: true, includeEmojis: false, generateVariants: true, selectedFiles: [], selectedAssets: [] });
     // An entry claiming a different owner is never surfaced to this identity, and is purged.
     values.set(socialDraftStorageKey(owner) as string, JSON.stringify({ v: 1, u: "user-2", w: "workspace-1", savedAt: 1, d: { prompt: "SYNTHETIC foreign private" } }));
     expect(readSocialDraft(owner)).toBeNull();
@@ -110,9 +121,13 @@ describe("socialStudioState", () => {
     const draft = (prompt: string) => ({ projectId: "", selectedFiles: [], selectedAssets: [], prompt, socialType: "auto", platform: "multi", tone: "professional", language: "auto", audience: "", brandVoice: "", callToAction: "", includeHashtags: true, includeEmojis: false, generateVariants: true });
     persistSocialDraft({ userId: "user-1", workspaceId: "workspace-1" }, draft("A private"));
     persistSocialDraft({ userId: "user-2", workspaceId: "workspace-1" }, draft("B private"));
-    expect(purgeSocialDraftsOnAccountBoundary("user-1")).toEqual({ removedCount: 1, refusedInvalidIdentity: false });
+    persistSocialActiveJobId({ userId: "user-1", workspaceId: "workspace-1" }, "job-a");
+    persistSocialActiveJobId({ userId: "user-2", workspaceId: "workspace-1" }, "job-b");
+    expect(purgeSocialDraftsOnAccountBoundary("user-1")).toEqual({ removedCount: 2, refusedInvalidIdentity: false });
     expect(readSocialDraft({ userId: "user-1", workspaceId: "workspace-1" })).toBeNull();
     expect(readSocialDraft({ userId: "user-2", workspaceId: "workspace-1" })?.prompt).toBe("B private");
+    expect(readSocialActiveJobId({ userId: "user-1", workspaceId: "workspace-1" })).toBeNull();
+    expect(readSocialActiveJobId({ userId: "user-2", workspaceId: "workspace-1" })).toBe("job-b");
     // An unproven identity destroys nothing at all, so a half-resolved session cannot wipe state.
     expect(purgeSocialDraftsOnAccountBoundary(null)).toEqual({ removedCount: 0, refusedInvalidIdentity: true });
     expect(purgeSocialDraftsOnAccountBoundary("anonymous")).toEqual({ removedCount: 0, refusedInvalidIdentity: true });
