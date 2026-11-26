@@ -149,6 +149,19 @@ public sealed class MovieDurationBudgetTests
         Assert.Single(result.Scenes);
     }
 
+    [Fact]
+    public void Active_scene_with_only_archived_shots_is_incomplete()
+    {
+        var archivedShot = new MovieDurationShotInput(Guid.NewGuid(), 30, Archived: true);
+        var scene = new MovieDurationSceneInput(Guid.NewGuid(), "Active scene", 30, [archivedShot]);
+
+        var result = Validate(30, scene);
+
+        Assert.Equal(MovieDurationBudgetStatuses.Incomplete, result.Status);
+        Assert.False(result.IsComplete);
+        Assert.Contains(result.Diagnostics, item => item.Code == "shots_missing");
+    }
+
     private static MovieDurationBudgetResult Validate(int target, params MovieDurationSceneInput[] scenes) =>
         MovieDurationBudgetValidator.Validate(new MovieDurationBudgetInput(target, scenes));
 
