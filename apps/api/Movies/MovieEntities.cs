@@ -1025,11 +1025,19 @@ public static class MovieStudioValidation
     public const int AdditionalInstructionsMaxLength = 8_000;
     public const int CreativeDirectionFieldMaxLength = 4_000;
     public const int ContinuityRulesMaxLength = 8_000;
+    // A new Full movie also writes the brief to the tighter root Project column.
+    // Other create shapes write the description only to MovieProject.Description.
+    public const int MovieDescriptionMaxLength = 8_000;
+    public const int NewRootProjectDescriptionMaxLength = 2_000;
 
     public static string? Validate(MovieStudioCreateRequest request)
     {
         if (string.IsNullOrWhiteSpace(request.Title) || request.Title.Trim().Length > 160) return "Add a movie title.";
-        if (string.IsNullOrWhiteSpace(request.Description) || request.Description.Trim().Length > 8000) return "Describe the movie in 1–8,000 characters.";
+        var descriptionMaxLength = request.Mode == MovieProjectModes.Full && request.ProjectId is null
+            ? NewRootProjectDescriptionMaxLength
+            : MovieDescriptionMaxLength;
+        if (string.IsNullOrWhiteSpace(request.Description) || request.Description.Trim().Length > descriptionMaxLength)
+            return $"Describe the movie in 1–{descriptionMaxLength:N0} characters.";
         if (request.DurationSeconds is < 1 or > 3600) return "Movie duration must be between 1 second and 60 minutes.";
         if (!SupportedAspectRatios.Contains(request.AspectRatio)) return "Choose a supported aspect ratio.";
         if (!LanguageCodes.Supported.Contains(request.Language)) return "Choose English, Arabic, or Kurdish.";

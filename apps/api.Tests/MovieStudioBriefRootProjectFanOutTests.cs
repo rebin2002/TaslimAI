@@ -12,23 +12,13 @@ using Xunit;
 namespace Taslim.Api.Tests;
 
 /// <summary>
-/// The submitted brief description has two persisted targets and the create
-/// path's length validation only mirrors the looser one. TaslimDbContext
-/// declares MovieProject.Description as character varying(8,000) - the bound
-/// MovieStudioValidation applies - while the root Project row that a brand-new
-/// Full-mode movie creates declares Project.Description as only character
-/// varying(2,000). A description between those two limits therefore clears
-/// validation and is then written into a column the model says cannot hold it:
-/// the production provider aborts SaveChanges with a varchar length violation
-/// (HTTP 500 INTERNAL_ERROR), while the in-memory provider used here does not
-/// enforce column sizes and silently stores the over-long root row, which is
-/// how these facts see the divergence without touching a provider. The three
-/// accompanying facts pin the neighbouring contract any remedy has to keep:
-/// the description is only copied into a root project when the create path
-/// makes that row itself (a supplied projectId and Quick mode both write the
-/// movie row alone, where the wider ceiling legitimately applies), and the
-/// value that lands in the root column is the trimmed text, so a brief whose
-/// trimmed description sits exactly on the root limit must stay creatable.
+/// MovieProject.Description accepts 8,000 characters, but a new Full-mode
+/// create also writes to Project.Description, whose column accepts 2,000.
+/// Validation must reject 2,001 before persistence with MOVIE_REQUEST_INVALID
+/// and leave neither root nor movie records behind. A supplied projectId and
+/// Quick mode write the movie row alone, where 8,000 remains valid; a new Full
+/// project accepts a trimmed description exactly at 2,000. The synthetic HTTP
+/// requests use the in-memory test factory and never contact a provider.
 /// Sorani and Arabic script are used for the synthetic briefs because that is
 /// the product's Kurdish/Arabic path. Every character used is in the Basic
 /// Multilingual Plane, so .NET's UTF-16 code-unit count equals the provider's
@@ -50,33 +40,28 @@ public sealed class MovieStudioBriefRootProjectFanOutTests : IClassFixture<Gener
     [Fact]
     public async Task BriefCreate_newRootProject_neverStoresADescriptionPastTheRootColumnsDeclaredLimit()
     {
-        // One character past Project.Description while still inside the
-        // MovieProject.Description ceiling the validator mirrors.
+        // One character past Project.Description but still inside the movie
+        // column's wider ceiling; refusal must happen before either row exists.
         using var client = factory.CreateClient();
         var auth = await Register(client, "Fan-Out Brief Owner");
         var rootLimit = await DeclaredLimitAsync<Project>(nameof(Project.Description));
         var movieLimit = await DeclaredLimitAsync<MovieProject>(nameof(MovieProject.Description));
+        Assert.Equal(2_000, rootLimit);
+        Assert.Equal(8_000, movieLimit);
         Assert.True(rootLimit < movieLimit,
             $"the root project no longer declares a tighter description column than the movie row ({rootLimit} vs {movieLimit}); the fan-out boundary pinned here has moved, refresh this regression.");
         var description = SoraniText(rootLimit + 1);
-        var response = await CreateAsync(client, auth, MovieProjectModes.Full, description);
+        var title = $"Rejected Fan-Out Brief {Guid.NewGuid():N}";
+        var response = await CreateAsync(client, auth, MovieProjectModes.Full, description, title: title);
 
-        if (response.StatusCode == HttpStatusCode.BadRequest)
-        {
-            // Fail closed inside the endpoint's own envelope: an accepted remedy.
-            Assert.Equal("MOVIE_REQUEST_INVALID", await ReadErrorCode(response));
-            return;
-        }
-
-        Assert.True(response.IsSuccessStatusCode,
-            $"a {description.Length}-character description inside the validated {movieLimit:N0}-character ceiling returned {(int)response.StatusCode} rather than the endpoint's fail-closed 400 envelope: {await response.Content.ReadAsStringAsync()}");
-        var created = await ReadCreatedAsync(response);
-        Assert.NotNull(created.RootProjectId);
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        var error = await response.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal("MOVIE_REQUEST_INVALID", error.GetProperty("error").GetProperty("code").GetString());
+        Assert.Contains($"{rootLimit:N0}", error.GetProperty("error").GetProperty("message").GetString() ?? string.Empty);
         using var scope = factory.Services.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
-        var root = await db.Projects.AsNoTracking().SingleAsync(item => item.Id == created.RootProjectId!.Value);
-        Assert.True(root.Description!.Length <= rootLimit,
-            $"the accepted brief wrote a {root.Description.Length}-character description into Project.Description, which the model declares as character varying({rootLimit}); MovieStudioValidation only bounds the submitted value at the movie column's {movieLimit:N0} characters, so on the production provider this create aborts in SaveChanges with a varchar length violation (500 INTERNAL_ERROR) instead of returning 202.");
+        Assert.False(await db.Projects.AsNoTracking().AnyAsync(item => item.Name == title && item.Type == ProjectTypes.Movie));
+        Assert.False(await db.MovieProjects.AsNoTracking().AnyAsync(item => item.Title == title));
     }
 
     [Fact]
@@ -165,13 +150,13 @@ public sealed class MovieStudioBriefRootProjectFanOutTests : IClassFixture<Gener
 
     private static string ArabicText(int length) => new('ش', length);
 
-    private async Task<HttpResponseMessage> CreateAsync(HttpClient client, AuthResponse auth, string mode, string description, Guid? rootProjectId = null, string language = "ku") =>
+    private async Task<HttpResponseMessage> CreateAsync(HttpClient client, AuthResponse auth, string mode, string description, Guid? rootProjectId = null, string language = "ku", string? title = null) =>
         await SendWithCsrf(client, HttpMethod.Post, "/api/movie-studio/projects", new Dictionary<string, object?>
         {
             ["workspaceId"] = auth.PersonalWorkspace.Id,
             ["mode"] = mode,
             ["projectId"] = rootProjectId,
-            ["title"] = "Fan-Out Boundary Brief",
+            ["title"] = title ?? "Fan-Out Boundary Brief",
             ["description"] = description,
             ["durationSeconds"] = 60,
             ["aspectRatio"] = "16:9",
@@ -196,11 +181,6 @@ public sealed class MovieStudioBriefRootProjectFanOutTests : IClassFixture<Gener
         var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
         return db.Model.FindEntityType(typeof(TEntity))!.FindProperty(propertyName)!.GetMaxLength()!.Value;
     }
-
-    private static async Task<string?> ReadErrorCode(HttpResponseMessage response) =>
-        (await response.Content.ReadFromJsonAsync<JsonElement>()).TryGetProperty("error", out var error)
-            ? error.GetProperty("code").GetString()
-            : null;
 
     private static async Task<AuthResponse> Register(HttpClient client, string displayName) =>
         await SendWithCsrf<AuthResponse>(client, HttpMethod.Post, "/api/auth/register", new { displayName, email = $"fanout-{Guid.NewGuid():N}@example.com", password = "StrongPassword!123", preferredLanguage = "en" });
