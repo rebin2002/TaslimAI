@@ -23,6 +23,7 @@ public sealed record AcademicProjectCreateRequest(
     string? Discipline,
     string? Level,
     string? Method,
+    IReadOnlyList<string>? Methodologies,
     string? CitationStyle,
     string? Language,
     int? MaxDiscoverySources,
@@ -30,7 +31,18 @@ public sealed record AcademicProjectCreateRequest(
     IReadOnlyList<string>? TargetChapterHeadings,
     IReadOnlyList<string>? RequiredApprovals,
     int? MaxStageAttempts,
-    AcademicBudgetRequestDto? Budget);
+    AcademicBudgetRequestDto? Budget,
+    string? WorkingTitle,
+    string? GeographicScope,
+    string? PopulationOrContext,
+    string? TimePeriod,
+    IReadOnlyList<string>? SubQuestions,
+    IReadOnlyList<string>? Keywords,
+    int? MinimumSources,
+    int? MinimumPeerReviewed,
+    IReadOnlyList<string>? AllowedSourceTypes,
+    bool? RequireFullText,
+    string? ProgrammeRequirements);
 
 public sealed record AcademicBudgetRequestDto(
     decimal? MaxTotalUsd,
@@ -40,7 +52,15 @@ public sealed record AcademicBudgetRequestDto(
 
 public sealed record AcademicApprovalRequest(
     string? Decision,
-    string? Notes);
+    string? Notes,
+    string? ApprovalKey,
+    long? CheckpointRevision);
+
+public sealed record AcademicAttemptRecoveryRequest(
+    Guid? AttemptId,
+    long? ExpectedRevision,
+    bool? OperatorConfirmedWorkerStopped,
+    string? VerificationReason);
 
 public sealed record AcademicStageDto(
     string Stage,
@@ -61,6 +81,7 @@ public sealed record AcademicApprovalDto(
 
 public sealed record AcademicPendingApprovalDto(
     string Kind,
+    string ApprovalKey,
     long CheckpointRevision,
     DateTime RequestedAtUtc,
     IReadOnlyList<string> ReviewerPrompts);
@@ -89,6 +110,7 @@ public sealed record AcademicProjectSummaryDto(
 public sealed record AcademicProjectDto(
     AcademicProjectSummaryDto Project,
     IReadOnlyList<AcademicStageDto> Stages,
+    Guid? ActiveAttemptId,
     AcademicPendingApprovalDto? PendingApproval,
     IReadOnlyList<AcademicApprovalDto> Approvals,
     AcademicUsageDto Usage,
@@ -104,9 +126,39 @@ public sealed record AcademicProjectDto(
     int ThemeCount,
     int ChapterCount,
     AcademicVerificationDto? Verification,
+    AcademicResearchPlanDto? Plan,
     // Machine-readable outcome of the action that produced this snapshot (APPLIED,
     // ALREADY_APPLIED, BUDGET_RAISED, BUDGET_UNCHANGED, ...). Null on plain reads.
     string? Code);
+
+public sealed record AcademicResearchPlanDto(
+    int PlanVersion,
+    string ResearchQuestion,
+    string? WorkingTitle,
+    string Level,
+    string Method,
+    IReadOnlyList<string> Methodologies,
+    string CitationStyle,
+    IReadOnlyList<string> Objectives,
+    IReadOnlyList<string> InclusionCriteria,
+    IReadOnlyList<string> ExclusionCriteria,
+    IReadOnlyList<AcademicSearchSpecificationDto> SearchStrategy,
+    IReadOnlyList<string> ChapterOutline,
+    string? GeographicScope,
+    string? PopulationOrContext,
+    string? TimePeriod,
+    IReadOnlyList<string> SubQuestions,
+    IReadOnlyList<string> Keywords,
+    int? MinimumSources,
+    int? MinimumPeerReviewed,
+    IReadOnlyList<string> AllowedSourceTypes,
+    bool RequireFullText,
+    string? ProgrammeRequirements);
+
+public sealed record AcademicSearchSpecificationDto(
+    string Collection,
+    string Query,
+    IReadOnlyList<string> Filters);
 
 public sealed record AcademicVerificationDto(
     bool? ReportPassed,
@@ -163,11 +215,13 @@ public sealed record AcademicCheckpointDto(
 /// CSRF like the rest of the API, and every mutation carries the same existing
 /// abuse-boundary policies the comparable lanes use: intake and checkpoint decisions sit
 /// behind the generation policy, a resume (which spends stage work when lanes connect)
-/// behind the expensive-AI policy, and a spend-ceiling raise behind account security.
-/// Reads stay on the global limiter only. None of these routes reaches a scholarly catalog or an
-/// export renderer: until those lanes register stage handlers, <c>run</c> reports the
-/// exact missing stage instead of pretending, and reads return whatever the committed
-/// checkpoints actually hold.
+/// behind the expensive-AI policy, and budget changes plus abandoned-attempt recovery behind
+/// account security. Recovery additionally requires the administrator policy and an explicit
+/// attestation with a reason; it is never enabled by elapsed time. Recovery is revision/attempt
+/// fenced and never calls a stage handler. Reads stay on the global limiter only. None of these
+/// routes reaches a scholarly catalog or an export renderer: <c>run</c> can prepare and
+/// checkpoint the deterministic Plan stage; until downstream lanes register stage handlers,
+/// it reports the exact missing stage instead of pretending, and reads return committed checkpoints.
 /// </summary>
 [ApiController]
 [Authorize]
@@ -263,6 +317,41 @@ public sealed class AcademicProjectsController(
         };
     }
 
+    [Authorize(Policy = AdminPolicies.Usage)]
+    [HttpPost("api/academic-projects/{projectId:guid}/recover-abandoned")]
+    [ValidateAntiForgeryToken]
+    [EnableRateLimiting(RateLimiting.AccountSecurity)]
+    public async Task<IActionResult> RecoverAbandoned(
+        Guid projectId,
+        AcademicAttemptRecoveryRequest request,
+        CancellationToken cancellationToken)
+    {
+        var (snapshot, failure) = await FencedLoadAsync(projectId, cancellationToken);
+        if (failure is not null) return failure;
+        if (request.ExpectedRevision is null or <= 0)
+            return ApiResults.Validation(this, "A positive ExpectedRevision is required for abandoned-attempt recovery.");
+        if (request.OperatorConfirmedWorkerStopped is not true
+            || string.IsNullOrWhiteSpace(request.VerificationReason)
+            || request.VerificationReason.Length > 500)
+            return ApiResults.Validation(this,
+                "Administrator recovery requires confirmation that the worker has stopped and a reason of at most 500 characters.");
+
+        var outcome = await service.RecoverAbandonedAsync(
+            snapshot!.WorkspaceId,
+            projectId,
+            request.ExpectedRevision.Value,
+            request.AttemptId,
+            GetUserId(),
+            request.VerificationReason.Trim(),
+            cancellationToken);
+        return outcome.Status switch
+        {
+            AcademicProjectServiceStatus.NotFound => ApiResults.Error(this, 404, "PROJECT_NOT_FOUND", "Project not found."),
+            AcademicProjectServiceStatus.Conflict => ApiResults.Error(this, 409, outcome.Code, outcome.Detail),
+            _ => Ok(await BuildDtoAsync(outcome, cancellationToken)),
+        };
+    }
+
     [HttpPost("api/academic-projects/{projectId:guid}/approvals/{kind}")]
     [ValidateAntiForgeryToken]
     [EnableRateLimiting(RateLimiting.Generation)]
@@ -277,11 +366,15 @@ public sealed class AcademicProjectsController(
 
         if (!Enum.TryParse<AcademicApprovalKind>(kind, ignoreCase: true, out var approvalKind))
             return ApiResults.Validation(this, "Unknown approval checkpoint.");
-        if (!Enum.TryParse<AcademicApprovalDecision>(request.Decision, ignoreCase: true, out var decision))
+        if (!Enum.TryParse<AcademicApprovalDecision>(request.Decision, ignoreCase: true, out var decision)
+            || !Enum.IsDefined(decision))
             return ApiResults.Validation(this, "Decision must be Approved, RequestRevision, or Rejected.");
+        if (string.IsNullOrWhiteSpace(request.ApprovalKey) || request.CheckpointRevision is null or <= 0)
+            return ApiResults.Validation(this, "ApprovalKey and a positive CheckpointRevision are required.");
 
         var outcome = await service.SubmitApprovalAsync(
-            snapshot!.WorkspaceId, projectId, approvalKind, decision, request.Notes, GetUserId(), cancellationToken);
+            snapshot!.WorkspaceId, projectId, approvalKind, request.ApprovalKey, request.CheckpointRevision.Value,
+            decision, request.Notes, GetUserId(), cancellationToken);
 
         return outcome.Status switch
         {
@@ -420,7 +513,7 @@ public sealed class AcademicProjectsController(
         if (ownerWorkspace is null)
             return (null, ApiResults.Error(this, 404, "PROJECT_NOT_FOUND", "Project not found."));
         if (!await access.IsMemberAsync(GetUserId(), ownerWorkspace.Value, cancellationToken))
-            return (null, Forbid());
+            return (null, ApiResults.Error(this, 404, "PROJECT_NOT_FOUND", "Project not found."));
 
         var snapshot = await service.LoadFencedAsync(ownerWorkspace.Value, projectId, cancellationToken);
         if (snapshot is null)
@@ -447,8 +540,10 @@ public sealed class AcademicProjectsController(
                 stage.LastErrorDetail is null ? null : AcademicProjectTextPolicy.Sanitize(stage.LastErrorDetail),
                 stage.StartedAtUtc,
                 stage.CompletedAtUtc))],
+            snapshot.ActiveAttempt?.AttemptId,
             snapshot.PendingApproval is null ? null : new AcademicPendingApprovalDto(
                 snapshot.PendingApproval.Kind.ToString(),
+                snapshot.PendingApproval.ApprovalKey,
                 snapshot.PendingApproval.CheckpointRevision,
                 snapshot.PendingApproval.RequestedAtUtc,
                 [.. snapshot.PendingApproval.ReviewerPrompts.Select(AcademicProjectTextPolicy.Sanitize)]),
@@ -477,8 +572,44 @@ public sealed class AcademicProjectsController(
             snapshot.Themes.Count,
             snapshot.Chapters.Count,
             snapshot.Verification is null ? null : ToVerification(snapshot),
+            snapshot.Plan is null ? null : ToPlan(snapshot.Plan),
             outcome.Code is { Length: > 0 } ? outcome.Code : null);
     }
+
+    private static AcademicResearchPlanDto ToPlan(AcademicResearchPlan plan) => new(
+        plan.PlanVersion,
+        plan.ResearchQuestion,
+        plan.WorkingTitle,
+        plan.Level.ToString(),
+        plan.Method.ToString(),
+        [.. plan.Methodologies.DefaultIfEmpty(plan.Method).Select(method => method.ToString())],
+        plan.CitationStyle.ToString(),
+        plan.Objectives,
+        plan.InclusionCriteria,
+        plan.ExclusionCriteria,
+        [.. plan.SearchStrategy.Select(search => new AcademicSearchSpecificationDto(
+            search.Catalog switch
+            {
+                AcademicCatalog.OpenAlex => "ScholarlyRecords",
+                AcademicCatalog.Crossref => "JournalAndIdentifierRecords",
+                AcademicCatalog.OpenLibrary or AcademicCatalog.GoogleBooks => "BookRecords",
+                AcademicCatalog.PubMed or AcademicCatalog.EuropePMC => "BiomedicalRecords",
+                AcademicCatalog.InstitutionalRepository => "InstitutionalRecords",
+                _ => "ScholarlyRecords",
+            },
+            search.Query,
+            search.Filters))],
+        plan.ChapterOutline,
+        plan.GeographicScope,
+        plan.PopulationOrContext,
+        plan.TimePeriod,
+        plan.SubQuestions,
+        plan.Keywords,
+        plan.MinimumSources,
+        plan.MinimumPeerReviewed,
+        plan.AllowedSourceTypes,
+        plan.RequireFullText,
+        plan.ProgrammeRequirements);
 
     private static AcademicVerificationDto ToVerification(AcademicWorkflowSnapshot snapshot) => new(
         snapshot.Verification!.Passed,
@@ -576,6 +707,21 @@ public sealed class AcademicProjectsController(
 
         var level = ParseEnum<AcademicResearchLevel>(request.Level, AcademicResearchLevel.Masters);
         var method = ParseEnum<AcademicMethod>(request.Method, AcademicMethod.SystematicReview);
+        var methods = new List<AcademicMethod>();
+        if (request.Methodologies is { Count: > 0 })
+        {
+            foreach (var item in request.Methodologies)
+            {
+                if (!Enum.TryParse<AcademicMethod>(item, ignoreCase: true, out var parsed) || !Enum.IsDefined(parsed))
+                    return (null, $"Unknown research methodology: {item}");
+                methods.Add(parsed);
+            }
+            method = methods[0];
+        }
+        else
+        {
+            methods.Add(method);
+        }
         var style = ParseEnum<AcademicCitationStyle>(request.CitationStyle, AcademicCitationStyle.Apa7);
 
         List<AcademicApprovalKind>? approvals = null;
@@ -609,6 +755,7 @@ public sealed class AcademicProjectsController(
             Discipline = request.Discipline,
             Level = level,
             Method = method,
+            SelectedMethods = methods,
             CitationStyle = style,
             Language = string.IsNullOrWhiteSpace(request.Language) ? "en" : request.Language.Trim(),
             MaxDiscoverySources = Math.Clamp(request.MaxDiscoverySources ?? 120, 1, AcademicProjectsService.AbsoluteMaxDiscoverySources),
@@ -616,8 +763,18 @@ public sealed class AcademicProjectsController(
             TargetChapterHeadings = (request.TargetChapterHeadings ?? [])
                 .Where(h => !string.IsNullOrWhiteSpace(h))
                 .Select(h => h.Trim())
-                .Take(24)
                 .ToArray(),
+            WorkingTitle = request.WorkingTitle?.Trim(),
+            GeographicScope = request.GeographicScope?.Trim(),
+            PopulationOrContext = request.PopulationOrContext?.Trim(),
+            TimePeriod = request.TimePeriod?.Trim(),
+            SubQuestions = (request.SubQuestions ?? []).Where(value => !string.IsNullOrWhiteSpace(value)).Select(value => value.Trim()).ToArray(),
+            Keywords = (request.Keywords ?? []).Where(value => !string.IsNullOrWhiteSpace(value)).Select(value => value.Trim()).ToArray(),
+            MinimumSources = request.MinimumSources,
+            MinimumPeerReviewed = request.MinimumPeerReviewed,
+            AllowedSourceTypes = (request.AllowedSourceTypes ?? []).Where(value => !string.IsNullOrWhiteSpace(value)).Select(value => value.Trim()).ToArray(),
+            RequireFullText = request.RequireFullText ?? false,
+            ProgrammeRequirements = request.ProgrammeRequirements?.Trim(),
             RequiredApprovals = approvals ??
             [
                 AcademicApprovalKind.Plan,
