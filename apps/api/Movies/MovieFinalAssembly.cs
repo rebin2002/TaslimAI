@@ -403,10 +403,14 @@ public sealed class MovieFinalAssemblyService(
             }, cancellationToken, normalizedIdempotencyKey);
             db.Entry(job).State = EntityState.Detached;
             committedJob = job;
-            assembly.GenerationJobId = job.Id;
-            assembly.Status = MovieAssemblyStatuses.Queued;
-            assembly.UpdatedAt = DateTime.UtcNow;
-            await db.SaveChangesAsync(cancellationToken);
+            // New jobs own their target at commit. Read both sides together because a worker
+            // can already have advanced them before the submitter receives its acknowledgement.
+            var published = await db.MovieAssemblies.AsNoTracking()
+                .Include(item => item.GenerationJob).ThenInclude(item => item!.Outputs)
+                .SingleAsync(item => item.Id == assembly.Id, cancellationToken);
+            if (published.GenerationJobId == job.Id) return ToDto(published, published.GenerationJob);
+            if (!await TryRepairQueueLinkAsync(assembly, job))
+                throw new MovieFinalAssemblyValidationException(GenerationJobErrorCodes.MovieAssemblyQueueFailed, "The assembly could not be linked to its job.");
             return ToDto(assembly, job);
         }
         catch
@@ -428,10 +432,14 @@ public sealed class MovieFinalAssemblyService(
             // failed too. Keep the terminal queue-failure compensation; a repeated
             // identical request then converges through RecoverQueueLinkAsync rather
             // than replaying this transient failure forever.
-            assembly.Status = MovieAssemblyStatuses.Failed;
-            assembly.LastErrorCode = GenerationJobErrorCodes.MovieAssemblyQueueFailed;
-            assembly.UpdatedAt = DateTime.UtcNow;
-            await db.SaveChangesAsync(CancellationToken.None);
+            await db.MovieAssemblies.Where(item => item.Id == assembly.Id
+                    && item.GenerationJobId == null && item.Status == MovieAssemblyStatuses.Planned
+                    && item.CheckpointJson == assembly.CheckpointJson && item.UpdatedAt == assembly.UpdatedAt)
+                .ExecuteUpdateAsync(setters => setters
+                    .SetProperty(item => item.Status, MovieAssemblyStatuses.Failed)
+                    .SetProperty(item => item.LastErrorCode, GenerationJobErrorCodes.MovieAssemblyQueueFailed)
+                    .SetProperty(item => item.UpdatedAt, DateTime.UtcNow), CancellationToken.None);
+            await db.Entry(assembly).ReloadAsync(CancellationToken.None);
             throw;
         }
     }
@@ -558,7 +566,7 @@ public sealed class MovieFinalAssemblyService(
             // abandon this durability write, since the fault itself may have been one.
             var now = DateTime.UtcNow;
             var checkpoint = JsonSerializer.Serialize(new { phase = "queued", progressPercent = 0 }, JsonOptions);
-            var linked = await db.MovieAssemblies
+            await db.MovieAssemblies
                 .Where(item => item.Id == assembly.Id
                     && item.Status == MovieAssemblyStatuses.Planned
                     && item.GenerationJobId == null)
@@ -568,14 +576,8 @@ public sealed class MovieFinalAssemblyService(
                     .SetProperty(item => item.LastErrorCode, (string?)null)
                     .SetProperty(item => item.CheckpointJson, checkpoint)
                     .SetProperty(item => item.UpdatedAt, now), CancellationToken.None);
-            if (linked == 0) return false;
-
-            assembly.GenerationJobId = job.Id;
-            assembly.Status = MovieAssemblyStatuses.Queued;
-            assembly.LastErrorCode = null;
-            assembly.CheckpointJson = checkpoint;
-            assembly.UpdatedAt = now;
-            return true;
+            await db.Entry(assembly).ReloadAsync(CancellationToken.None);
+            return assembly.GenerationJobId == job.Id;
         }
         catch (Exception)
         {
@@ -720,14 +722,16 @@ public sealed class MovieFinalAssemblyService(
         if (assembly.GenerationJobId is not null || assembly.RequestedByUserId != userId) return null;
         var requesterId = userId;
         var attempts = ReadQueueRedriveAttempts(assembly.CheckpointJson);
-        if (assembly.Status == MovieAssemblyStatuses.Planned && attempts > 0
-            && assembly.CheckpointJson == WriteQueueRedriveCheckpoint(attempts))
+        var expectedClaim = attempts == 0
+            ? JsonSerializer.Serialize(new { phase = "planned", progressPercent = 0 }, JsonOptions)
+            : WriteQueueRedriveCheckpoint(attempts);
+        if (assembly.Status == MovieAssemblyStatuses.Planned && assembly.CheckpointJson == expectedClaim)
         {
-            // A process may stop after reserving a retry but before publishing the job.
+            // A process may stop after persisting the first plan or reserving a retry.
             // Preserve an active owner's window and fence an expired owner's compensation.
             var leaseMinutes = Math.Max(2, (generationOptions?.Value ?? new GenerationJobOptions()).ClaimLeaseMinutes);
             if (assembly.UpdatedAt > DateTime.UtcNow.AddMinutes(-leaseMinutes)) return null;
-            await RestoreQueueFailureAsync(assembly, fingerprint, attempts);
+            await RestoreQueueFailureAsync(assembly, fingerprint, attempts, expectedClaim);
             attempts = ReadQueueRedriveAttempts(assembly.CheckpointJson);
         }
         if (assembly.Status != MovieAssemblyStatuses.Failed
@@ -818,9 +822,10 @@ public sealed class MovieFinalAssemblyService(
     /// never overwritten by a losing re-drive. Never throws: if the row cannot be reached, the
     /// durable state is whatever the fault left it as and the caller still reports honestly.
     /// </summary>
-    private async Task RestoreQueueFailureAsync(MovieAssembly assembly, string fingerprint, int attempts)
+    private async Task RestoreQueueFailureAsync(MovieAssembly assembly, string fingerprint, int attempts, string? expectedClaim = null)
     {
         var checkpoint = WriteQueueRedriveCheckpoint(attempts);
+        expectedClaim ??= checkpoint;
         var claimedAt = assembly.UpdatedAt;
         var now = DateTime.UtcNow;
         try
@@ -831,7 +836,7 @@ public sealed class MovieFinalAssemblyService(
                 .Where(item => item.Id == assembly.Id
                     && item.Status == MovieAssemblyStatuses.Planned
                     && item.GenerationJobId == null
-                    && item.CheckpointJson == checkpoint
+                    && item.CheckpointJson == expectedClaim
                     && item.UpdatedAt == claimedAt
                     && item.RequestFingerprint == fingerprint)
                 .ExecuteUpdateAsync(setters => setters
@@ -1644,11 +1649,17 @@ public sealed class MovieFinalAssemblyJobHandler(
             ?? throw new MovieFinalAssemblyExecutionException(GenerationJobErrorCodes.MovieAssemblyTargetInvalid);
         if (assembly.GenerationJobId is null)
         {
-            assembly.GenerationJobId = job.Id;
-            assembly.UpdatedAt = DateTime.UtcNow;
-            await db.SaveChangesAsync(cancellationToken);
+            // A legacy queue row can predate atomic publication. Only its own canonical
+            // input can adopt the unlinked target, even if a competing worker raced us.
+            await db.MovieAssemblies.Where(item => item.Id == assembly.Id && item.GenerationJobId == null
+                    && item.RequestFingerprint == input.RequestFingerprint && item.IdempotencyKey == input.IdempotencyKey
+                    && (item.Status == MovieAssemblyStatuses.Planned || item.Status == MovieAssemblyStatuses.Queued
+                        || (item.Status == MovieAssemblyStatuses.Failed && item.LastErrorCode == GenerationJobErrorCodes.MovieAssemblyQueueFailed)))
+                .ExecuteUpdateAsync(setters => setters.SetProperty(item => item.GenerationJobId, job.Id)
+                    .SetProperty(item => item.UpdatedAt, DateTime.UtcNow), cancellationToken);
+            await db.Entry(assembly).ReloadAsync(cancellationToken);
         }
-        else if (assembly.GenerationJobId != job.Id)
+        if (assembly.GenerationJobId != job.Id)
         {
             throw new MovieFinalAssemblyExecutionException(GenerationJobErrorCodes.MovieAssemblyTargetInvalid);
         }
