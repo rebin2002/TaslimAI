@@ -38,7 +38,7 @@
 // `documentElement.scrollWidth` unscaled, so assertions made through it can pass vacuously.
 //
 // THE THIRD CASE IS A DELIBERATE, SCOPED HANDOFF
-// A 320 CSS px phone raised to 200% zoom presents a 160 CSS px layout viewport, below both WCAG 2.1
+// A 320 CSS px browser canvas raised to 200% zoom presents a 160 CSS px layout viewport, below both WCAG 2.1
 // SC 1.4.10's 320-CSS-pixel reference viewport and the product's own documented floor
 // (`html { min-width: 320px }` in apps/web/src/app/globals.css). This spec does NOT demand that the
 // dialog reflow into 160px. It pins the two properties that are still wrong *inside* that state
@@ -52,15 +52,15 @@
 // - Hosted on `/projects`, so no billing route is mounted and no plan, price, allowance, credit
 //   balance or upgrade-enablement value is read, shaped or derived. The traffic census asserts that
 //   no billing, charging or provider endpoint is ever contacted.
-// - Synthetic identities only: an @example.invalid address and fixed UUIDv4 fixture ids. No real
-//   account, customer, database, migration, provider call, credential or secret is reachable. Every
-//   `/api/` request is fulfilled locally, any non-GET request is refused with 405 and recorded, any
-//   unlisted path is answered with 404 and recorded, and anything leaving the app origin is aborted.
-// - The flow is only walked forward with the keyboard. No workflow choice is activated and Skip is
-//   never pressed, so no onboarding completion is ever submitted and nothing is charged.
+// - Each run creates a disposable E2E account through the real registration UI against the local
+//   CI API/PostgreSQL service, with first-run onboarding still incomplete. No production account,
+//   production database, provider call, customer charge, or secret is reachable.
+// - After registration the test only walks forward with the keyboard; no workflow choice is
+//   activated and Skip is never pressed, so onboarding is never completed and nothing is charged.
 // - Step changes use `focus()` plus `Enter`, never pointer clicks, so the dev-only Next.js overlay
 //   cannot influence the result and no dev artifact has to be hidden or patched.
-import { test, expect, type Browser, type Page } from "@playwright/test";
+import { test, expect, type TestUser } from "./fixtures";
+import type { Browser, Page } from "@playwright/test";
 
 const APP_ORIGIN = new URL(process.env.E2E_WEB_URL ?? "http://localhost:3000").origin;
 const CONFIGURED_API_ORIGIN = new URL(process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:5000").origin;
@@ -70,9 +70,6 @@ const ZOOM = 2;
 const MINIMUM_CANVAS_CSS = 320;
 /** WCAG 2.5.8 minimum target size, in CSS pixels. */
 const MIN_TARGET_CSS = 24;
-
-const WORKSPACE_ID = "8d3c1f60-52b7-4a19-9e4d-6b0f2c8a5317";
-const USER_ID = "2b7f9c41-ae36-4d08-95a7-3f1c6d0b4e82";
 
 type LocaleCase = { code: "en" | "ar" | "ku"; label: string; dir: "ltr" | "rtl" };
 const LOCALES: readonly LocaleCase[] = [
@@ -87,92 +84,41 @@ const AT_OR_ABOVE_FLOOR = [
   { name: "tablet 768x1024 at 200%", deviceWidth: 768, deviceHeight: 1024 },
 ] as const;
 
-/** A 320 CSS px phone at 200% zoom: a 160 CSS px layout viewport, below the documented floor. */
-const SUB_FLOOR = { name: "phone 320x640 at 200%", deviceWidth: 320, deviceHeight: 640 } as const;
+/** A 320 CSS px desktop-browser canvas at 200% zoom: 160 CSS px, below the documented floor. */
+const SUB_FLOOR = { name: "320x640 browser canvas at 200%", deviceWidth: 320, deviceHeight: 640 } as const;
 
 type Traffic = {
   apiCalls: Array<{ method: string; path: string }>;
-  refusedMethods: string[];
-  unmockedPaths: string[];
   externalRequests: string[];
   nativeDialogs: string[];
 };
 
-function firstLoginSession(locale: LocaleCase) {
-  return {
-    user: {
-      id: USER_ID,
-      email: "first-login-700-zoom@example.invalid",
-      displayName: "First Login 700 Fixture",
-      // The gate initialises its preferences from the hydrated account rather than from a transient
-      // app locale (pinned by onboarding.test.ts), so the account field is the supported way to
-      // present the dialog in Arabic or Kurdish Sorani.
-      preferredLanguage: locale.code,
-      personalWorkspaceId: WORKSPACE_ID,
-      createdAt: "2026-11-01T00:00:00.000Z",
-      defaultGenerationLanguage: locale.code,
-      timeZone: "UTC",
-      outputPreference: "balanced" as const,
-      includeSourceLinks: false,
-      // null is the only value that opens the blocking gate: shouldShowOnboarding(user).
-      onboardingCompletedAt: null,
-      onboardingIntent: null,
-      isAdmin: false,
-    },
-    personalWorkspace: {
-      id: WORKSPACE_ID,
-      name: "First Login 700 Workspace",
-      slug: "first-login-700-zoom",
-      type: "Personal",
-      role: "Owner",
-    },
-  };
-}
-
-/**
- * Fulfils every `/api/` request locally with synthetic first-login data. Read-only by construction:
- * a non-GET request is refused with 405 and recorded, an unlisted path is answered with 404 and
- * recorded, and anything leaving the app origin is aborted and recorded.
- */
-async function interceptFirstLogin(page: Page, locale: LocaleCase): Promise<Traffic> {
-  const traffic: Traffic = { apiCalls: [], refusedMethods: [], unmockedPaths: [], externalRequests: [], nativeDialogs: [] };
-  const session = firstLoginSession(locale);
+/** Observe the real browser session without intercepting or fabricating its authentication. */
+function observeFirstLogin(page: Page): Traffic {
+  const traffic: Traffic = { apiCalls: [], externalRequests: [], nativeDialogs: [] };
   page.on("dialog", async (dialog) => {
     // "No unnecessary prompts": a blocking first-login flow must not raise a native
-    // alert/confirm/prompt of its own accord. Recorded, then dismissed so a failure cannot hang.
+    // alert/confirm/prompt of its own accord. Record then dismiss so a failure cannot hang.
     traffic.nativeDialogs.push(`${dialog.type()}:${dialog.message().slice(0, 80)}`);
     await dialog.dismiss();
   });
-  await page.route("**/*", async (route) => {
-    const url = new URL(route.request().url());
-    const method = route.request().method();
+  page.on("request", (request) => {
+    const url = new URL(request.url());
     if (url.pathname.startsWith("/api/") && (url.origin === APP_ORIGIN || url.origin === CONFIGURED_API_ORIGIN)) {
-      traffic.apiCalls.push({ method, path: url.pathname });
-      if (method !== "GET") {
-        traffic.refusedMethods.push(`${method} ${url.pathname}`);
-        await route.fulfill({ status: 405, contentType: "application/json", body: JSON.stringify({ error: "mock_only_read_test" }) });
-        return;
-      }
-      let body: unknown;
-      if (url.pathname === "/api/auth/me") body = session;
-      else if (url.pathname === "/api/notifications/unread-count") body = { unreadCount: 0 };
-      else if (url.pathname === `/api/workspaces/${WORKSPACE_ID}/projects`) body = { projects: [], items: [] };
-      else {
-        traffic.unmockedPaths.push(url.pathname);
-        await route.fulfill({ status: 404, contentType: "application/json", body: JSON.stringify({ error: "unmocked_test_endpoint" }) });
-        return;
-      }
-      await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(body) });
+      traffic.apiCalls.push({ method: request.method(), path: url.pathname });
       return;
     }
-    if (url.origin !== APP_ORIGIN) {
+    if ((url.protocol === "http:" || url.protocol === "https:") && url.origin !== APP_ORIGIN && url.origin !== CONFIGURED_API_ORIGIN) {
       traffic.externalRequests.push(url.href);
-      await route.abort();
-      return;
     }
-    await route.continue();
   });
   return traffic;
+}
+
+function scopedTestUser(user: TestUser, suffix: string): TestUser {
+  const at = user.email.lastIndexOf("@");
+  const safeSuffix = suffix.toLowerCase().replace(/[^a-z0-9-]+/g, "-");
+  return { ...user, displayName: "First Login Zoom Test", email: `${user.email.slice(0, at)}+${safeSuffix}${user.email.slice(at)}` };
 }
 
 type Box = { x: number; y: number; width: number; height: number };
@@ -287,23 +233,42 @@ async function measureDialog(page: Page): Promise<DialogGeometry> {
   });
 }
 
-/** Opens a page whose only job is to host the gate at one zoomed viewport in one locale. */
-async function openFirstLogin(browser: Browser, locale: LocaleCase, viewport: { width: number; height: number }): Promise<{ page: Page; traffic: Traffic }> {
+/** Register a disposable account through the real UI and leave first-login onboarding pending. */
+async function openFirstLogin(
+  browser: Browser,
+  locale: LocaleCase,
+  viewport: { width: number; height: number },
+  user: TestUser,
+): Promise<{ page: Page; traffic: Traffic }> {
   const page = await browser.newPage({ viewport });
-  const traffic = await interceptFirstLogin(page, locale);
-  // `browser.newPage()` deliberately bypasses the `use` fixtures, so the base URL is applied here.
-  await page.goto(new URL("/projects", APP_ORIGIN).href);
+  const traffic = observeFirstLogin(page);
+  await page.goto(new URL("/register", APP_ORIGIN).href);
+  await page.locator(".auth-language select").selectOption(locale.code);
+  await page.locator('input[autocomplete="name"]').fill(user.displayName);
+  await page.locator('input[type="email"]').fill(user.email);
+  const passwordFields = page.locator('input[type="password"]');
+  await passwordFields.nth(0).fill(user.password);
+  await passwordFields.nth(1).fill(user.password);
+  await page.locator("form.auth-form .auth-submit").click();
+  await expect(page).toHaveURL(/\/projects(?:[/?#]|$)/);
+  await expect(page.getByRole("dialog")).toBeVisible();
+  // Verify the login cookie through a true document request, not only a client-side route change.
+  await page.reload();
+  await expect(page).toHaveURL(/\/projects(?:[/?#]|$)/);
   await expect(page.getByRole("dialog")).toBeVisible();
   return { page, traffic };
 }
 
 test.describe("issue #700 section A: first-login onboarding at 200% browser zoom", () => {
-  test("centres the dialog, keeps it inner-scrolling and reveals every focused control at 200% zoom", async ({ browser }) => {
+  test.setTimeout(120_000);
+
+  test("centres the dialog, keeps it inner-scrolling and reveals every focused control at 200% zoom", async ({ browser, testUser }) => {
     for (const locale of LOCALES) {
       for (const state of AT_OR_ABOVE_FLOOR) {
         const viewport = { width: state.deviceWidth / ZOOM, height: state.deviceHeight / ZOOM };
         const context = `${locale.label} / ${state.name} -> ${viewport.width}x${viewport.height} CSS px`;
-        const { page, traffic } = await openFirstLogin(browser, locale, viewport);
+        const user = scopedTestUser(testUser, `above-floor-${locale.code}-${state.deviceWidth}`);
+        const { page, traffic } = await openFirstLogin(browser, locale, viewport, user);
 
         const dialog = page.getByRole("dialog");
         await expect(dialog, `the gate must expose dialog semantics (${context})`).toHaveAttribute("aria-modal", "true");
@@ -376,17 +341,18 @@ test.describe("issue #700 section A: first-login onboarding at 200% browser zoom
     }
   });
 
-  test("stays read-only, never enters billing and keeps every request local while the zoomed flow is walked", async ({ browser }) => {
-    const { page, traffic } = await openFirstLogin(browser, LOCALES[0], { width: 1280 / ZOOM, height: 900 / ZOOM });
+  test("keeps the real authenticated first-login flow read-only after signup and outside billing", async ({ browser, testUser }) => {
+    const user = scopedTestUser(testUser, "read-only-first-login");
+    const { page, traffic } = await openFirstLogin(browser, LOCALES[0], { width: 1280 / ZOOM, height: 900 / ZOOM }, user);
     await advanceStep(page);
     await advanceStep(page);
     await page.locator(".onboarding-skip").focus();
     await walkTabStops(page, 4);
 
-    expect(traffic.refusedMethods, `only GET requests may be attempted: ${JSON.stringify(traffic.refusedMethods)}`).toEqual([]);
-    expect(traffic.unmockedPaths, `only allow-listed endpoints may be read: ${JSON.stringify(traffic.unmockedPaths)}`).toEqual([]);
-    expect(traffic.externalRequests, `nothing may leave the app origin: ${JSON.stringify(traffic.externalRequests)}`).toEqual([]);
-    expect(traffic.apiCalls.map((call) => call.path), "the session endpoint must have been read").toContain("/api/auth/me");
+    const unexpectedWrites = traffic.apiCalls.filter((call) => !["GET", "HEAD"].includes(call.method) && call.path !== "/api/auth/register");
+    expect(unexpectedWrites, `the signed-in flow must not mutate after signup: ${JSON.stringify(unexpectedWrites)}`).toEqual([]);
+    expect(traffic.externalRequests, `nothing may leave the app or E2E API origins: ${JSON.stringify(traffic.externalRequests)}`).toEqual([]);
+    expect(traffic.apiCalls.map((call) => call.path), "the genuine session endpoint must have been read").toContain("/api/auth/me");
     expect(
       traffic.apiCalls.filter((call) => /billing|checkout|payment|subscription|credit|charge|provider|onboarding/i.test(call.path)).map((call) => `${call.method} ${call.path}`),
       "no billing, charging, provider or onboarding-write endpoint may be contacted",
@@ -394,11 +360,12 @@ test.describe("issue #700 section A: first-login onboarding at 200% browser zoom
     await page.close();
   });
 
-  test("pins the guided flow against the product's own 320px minimum canvas when a 320px phone is zoomed to 200%", async ({ browser }) => {
+  test("pins a real signed-in first-login flow against the 320px canvas at 200% zoom", async ({ browser, testUser }) => {
     const viewport = { width: SUB_FLOOR.deviceWidth / ZOOM, height: SUB_FLOOR.deviceHeight / ZOOM };
     for (const locale of LOCALES) {
       const context = `${locale.label} / ${SUB_FLOOR.name} -> ${viewport.width}x${viewport.height} CSS px`;
-      const { page, traffic } = await openFirstLogin(browser, locale, viewport);
+      const user = scopedTestUser(testUser, `subfloor-${locale.code}`);
+      const { page, traffic } = await openFirstLogin(browser, locale, viewport, user);
       // The finding concerns the choice grid, so the guided flow is walked to the workflow step
       // first, with the keyboard, exactly as a user at this zoom would have to do it.
       await advanceStep(page);
