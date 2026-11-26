@@ -775,6 +775,99 @@ export type AcademicSourceSearchParams = {
   dois?: string[];
   isbns?: string[];
 };
+export type AcademicProjectSummary = {
+  projectId: string;
+  workspaceId: string;
+  requestKey: string;
+  researchQuestion: string;
+  discipline: string;
+  level: string;
+  state: string;
+  stateCode: string | null;
+  revision: number;
+  createdAtUtc: string;
+  updatedAtUtc: string;
+};
+export type AcademicProjectStage = {
+  stage: string;
+  state: string;
+  attemptCount: number;
+  outputCheckpointRevision: number | null;
+  lastErrorCode: string | null;
+  lastErrorDetail: string | null;
+  startedAtUtc: string | null;
+  completedAtUtc: string | null;
+};
+export type AcademicProjectApproval = { kind: string; checkpointRevision: number; requestedAtUtc?: string; decision?: string; notes?: string | null; decidedAtUtc?: string };
+export type AcademicSearchSpecification = { collection: string; query: string; filters: string[] };
+export type AcademicResearchPlan = {
+  planVersion: number;
+  researchQuestion: string;
+  workingTitle: string | null;
+  level: string;
+  method: string;
+  methodologies: string[];
+  citationStyle: string;
+  objectives: string[];
+  inclusionCriteria: string[];
+  exclusionCriteria: string[];
+  searchStrategy: AcademicSearchSpecification[];
+  chapterOutline: string[];
+  geographicScope: string | null;
+  populationOrContext: string | null;
+  timePeriod: string | null;
+  subQuestions: string[];
+  keywords: string[];
+  minimumSources: number | null;
+  minimumPeerReviewed: number | null;
+  allowedSourceTypes: string[];
+  requireFullText: boolean;
+  programmeRequirements: string | null;
+};
+export type AcademicProjectDto = {
+  project: AcademicProjectSummary;
+  stages: AcademicProjectStage[];
+  activeAttemptId: string | null;
+  pendingApproval: { kind: string; approvalKey: string; checkpointRevision: number; requestedAtUtc: string; reviewerPrompts: string[] } | null;
+  approvals: AcademicProjectApproval[];
+  usage: { spentUsd: number; ceilingUsd: number; remainingUsd: number; callsUsed: number; callCeiling: number; callsRemaining: number };
+  connectedStages: string[];
+  missingStages: string[];
+  evidenceCurrent: boolean;
+  planVersion: number;
+  sourceCount: number;
+  includedCount: number;
+  excludedCount: number;
+  undeterminedCount: number;
+  evidenceCount: number;
+  themeCount: number;
+  chapterCount: number;
+  verification: unknown | null;
+  plan?: AcademicResearchPlan | null;
+  code: string | null;
+};
+export type AcademicProjectCreateInput = {
+  requestKey: string;
+  researchQuestion: string;
+  discipline: string;
+  level: "Masters" | "Doctoral";
+  method: string;
+  methodologies: string[];
+  citationStyle: string;
+  language: string;
+  targetChapterHeadings: string[];
+  workingTitle: string | null;
+  geographicScope: string | null;
+  populationOrContext: string | null;
+  timePeriod: string | null;
+  subQuestions: string[];
+  keywords: string[];
+  minimumSources: number | null;
+  minimumPeerReviewed: number | null;
+  allowedSourceTypes: string[];
+  requireFullText: boolean;
+  programmeRequirements: string | null;
+};
 export type AssetStatus = "Active" | "Archived";
 export type AssetType = "image" | "document" | "presentation" | "video" | "audio" | "music" | "research" | "social" | "file" | "other";
 export type Asset = {
@@ -1630,4 +1723,24 @@ export const api = {
     for (const isbn of params.isbns ?? []) query.append("isbn", isbn);
     return request<AcademicSourceSearchResponse>(`/api/workspaces/${encodeURIComponent(workspaceId)}/academic-sources/search?${query.toString()}`, { signal });
   },
+  listAcademicProjects: (workspaceId: string, page = 1, pageSize = 100) => request<AcademicProjectSummary[]>(`/api/workspaces/${encodeURIComponent(workspaceId)}/academic-projects?page=${page}&pageSize=${pageSize}`),
+  createAcademicProject: (workspaceId: string, input: AcademicProjectCreateInput) => request<AcademicProjectDto>(
+    `/api/workspaces/${encodeURIComponent(workspaceId)}/academic-projects`,
+    generationInit({ method: "POST", body: JSON.stringify(input) }, input.requestKey),
+    true,
+  ),
+  getAcademicProject: (projectId: string) => request<AcademicProjectDto>(`/api/academic-projects/${encodeURIComponent(projectId)}`),
+  runAcademicProject: (projectId: string) => request<AcademicProjectDto>(`/api/academic-projects/${encodeURIComponent(projectId)}/run`, { method: "POST", body: "{}" }, true),
+  submitAcademicApproval: (
+    projectId: string,
+    kind: string,
+    approvalKey: string,
+    checkpointRevision: number,
+    decision: "Approved" | "RequestRevision" | "Rejected",
+    notes?: string | null,
+  ) => request<AcademicProjectDto>(
+    `/api/academic-projects/${encodeURIComponent(projectId)}/approvals/${encodeURIComponent(kind)}`,
+    { method: "POST", body: JSON.stringify({ approvalKey, checkpointRevision, decision, notes: notes ?? null }) },
+    true,
+  ),
 };
