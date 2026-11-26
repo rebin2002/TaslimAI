@@ -14,7 +14,7 @@ workers.
 
 Everything below is what the code in this repository actually does today. The
 "Honest status" table at the end lists what is *not* implemented. The deterministic
-Plan stage is functional; downstream stages remain unconnected until they have real
+Plan stage is available only when the API opts in. Downstream stages remain unconnected until they have real
 handlers, and the API reports the first missing stage (HTTP 501 with a machine-readable
 stage list).
 
@@ -36,8 +36,8 @@ Composition (`Program.cs`): a single `builder.Services.AddAcademicProjects(build
 call pulls in `AddAcademicEvidence()` / `AddAcademicEvidencePersistence()` (previously
 defined-but-unwired), binds the `AcademicWorkflow` configuration section to the engine
 options, registers the EF state store, the projector, the service, and a per-scope
-`AcademicWorkflowOrchestrator` over the registered `IAcademicStageHandler`s. Production
-registers the deterministic local `AcademicPlanStageHandler`; discovery and later stage
+`AcademicWorkflowOrchestrator` over the registered `IAcademicStageHandler`s. The API registers
+the deterministic local `AcademicPlanStageHandler` only with `AcademicWorkflow__PlanEnabled=true`. Discovery and later stage
 handlers remain unconnected (see "Seams").
 
 Persistence (`TaslimDbContext` + migration
@@ -169,7 +169,7 @@ Phase B rows under fixed conventions:
 1. **`IAcademicWorkflowStateStore` (implemented)** — the Phase C engine port now has a
    durable implementation. Any lane that runs the orchestrator over this store gets
    the checkpoint/fence/idempotency guarantees above for free.
-2. **`AddAcademicStageHandler<THandler>()`** — production currently registers one
+2. **`AddAcademicStageHandler<THandler>()`** — the opt-in API composition registers one
    deterministic `AcademicPlanStageHandler` through this seam. It creates no network
    request, generation job or charge. Discovery and later handlers remain unregistered;
    `connectedStages`/`missingStages` therefore report `Plan` as connected and `Discover`
@@ -206,6 +206,7 @@ Phase B rows under fixed conventions:
 | Chapter drafting / real verification runs | **Not connected** — same handler seam; integrity guard runs on committed artifacts only | verification endpoint is recomputation, not execution |
 | Background execution of long runs (queue/worker) | **Not implemented** — `/run` advances through committed checkpoints within one request budget | stated in API docs |
 | Saved Plan UI from the Academic workspace and Standard Research entry | **Implemented** — create, reload, approve and attempt resume through the existing workspace-fenced API; late project responses are fenced by latest intent, and approval requires the selected project to match the displayed project; downstream actions remain unavailable | `AcademicWorkflowPanel`, mounted `AcademicWorkflowPanel.intentRace.test.tsx`, component tests, and the synthetic signed-in Playwright flow |
+| Server-side Plan switch | **Default OFF**. With `AcademicWorkflow__PlanEnabled` absent or false, authenticated intake and reads remain available. Calling `/run` reports HTTP 501 with missing stage `Plan`, leaves the revision intact, and makes no calls. Explicit `true` enables only the local Plan handler after an API restart. | Default-host API regression and synthetic opt-in save→approve→missing-Discover tests |
 | Academic visibility boundary | **Implemented, default OFF** — the exact public build-time value `NEXT_PUBLIC_ACADEMIC_RESEARCH_ENABLED=true` is required for the Standard Research link and authenticated studio/export routes; CI opts in only for synthetic Browser E2E | shared helper, Standard Research view tests, and authenticated route behavior tests |
 | Export re-render on evidence change | Not implemented (template worker owns it) | seam documented above |
 
@@ -220,7 +221,7 @@ missing and are reported exactly by the API.
   snapshot round-trip, both directions of the workspace fence, forward-only
   watermark, ledger ordering and scoping; verified recovery attestation is persisted,
   the reservation remains charged, and a synthetic late return cannot overwrite a retry.
-- `apps/api.Tests/AcademicProjectsApiTests.cs` — the production composition wires only
+- `apps/api.Tests/AcademicProjectsApiTests.cs` — the opt-in composition wires only
   `AcademicPlanStageHandler`; coverage includes auth/fences, saved Plan and approval,
   the missing-Discover 501 without terminal failure, zero usage, replay semantics,
   validation ceilings, antiforgery, privacy token scan and pagination.
@@ -277,7 +278,7 @@ missing and are reported exactly by the API.
 
 ## Controlled acceptance and rollback
 
-This is operator guidance for a future, explicitly approved cutover; it is not evidence that production acceptance or rollout has occurred. This task changed no production flags, and their live values were not reverified here. Before any cutover, verify the live state and keep Academic visibility, provider/search, and charging flags OFF until independent review and a separately authorized release; if any are on, treat that as a blocker rather than changing them in this task.
+This is operator guidance for a future, explicitly approved cutover; it is not evidence that production acceptance or rollout has occurred. This task changed no production flags, and their live values were not reverified here. Before any cutover, verify the running API's `AcademicWorkflow__PlanEnabled` is absent/false and the Web visibility, provider/search, and charging flags are OFF until independent review and a separately authorized release; if any are on, treat that as a blocker rather than changing them in this task.
 
 Before cutover, independently review the PR and confirm the deployed Web and API release metadata both identify the exact intended merge SHA; health checks alone do not prove version identity. Use a configured synthetic/non-billing test identity in a disposable environment (or an explicitly authorized equivalent), never a customer account or customer data. In one test workspace, open Academic Research from Standard Research, submit the synthetic Kurdistan Region pharmaceutical market-access/regulation brief with scholarly books and journal articles allowed, verify the saved Plan and keywords after reload, confirm approval is required before continuing, then confirm a resume attempt reports `ACADEMIC_STAGE_NOT_CONNECTED` for Discover without advancing the project, searching, generating, or charging. Run one bounded Standard/Business Research smoke test alongside it. Keep this to one synthetic project and remove it only through the environment's approved test-data cleanup procedure.
 

@@ -128,6 +128,7 @@ jobs:
           ConnectionStrings__Postgres: Host=localhost;Port=5432;Database=taslim_e2e;Username=taslim;Password=change-me
           Database__ApplyMigrations: "true"
           AllowedOrigins__0: http://localhost:3000
+          AcademicWorkflow__PlanEnabled: "true"
           Ai__OpenAI__Enabled: "false"
           Files__StorageProvider: Local
           Files__LocalRootPath: ${{ github.workspace }}/.e2e-files

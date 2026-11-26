@@ -16,7 +16,7 @@ namespace Taslim.Api.AcademicIntegration;
 /// <c>AddAcademicEvidence()</c> and <c>AddAcademicEvidencePersistence()</c>, registers
 /// the durable-state store over the shared context, builds the Phase C orchestrator per
 /// scope over the <em>registered</em> stage handlers, and wires the projection bridge.
-/// The deterministic Plan stage is registered here. Discovery, screening, extraction,
+/// An explicit API opt-in registers the deterministic Plan stage. Discovery, screening, extraction,
 /// synthesis, drafting and verification remain unregistered and are reported as the exact
 /// missing stage; the Plan handler does not call an external service or create a charge.
 /// </summary>
@@ -33,7 +33,8 @@ public static class AcademicIntegrationServiceCollectionExtensions
 
         services.AddAcademicEvidence();
         services.AddAcademicEvidencePersistence();
-        services.AddAcademicStageHandler<AcademicPlanStageHandler>();
+        if (string.Equals(configuration[AcademicWorkflowOptions.PlanEnabledKey], "true", StringComparison.OrdinalIgnoreCase))
+            services.AddAcademicStageHandler<AcademicPlanStageHandler>();
 
         services.Configure<AcademicWorkflowEngineOptions>(configuration.GetSection(AcademicWorkflowOptions.SectionName));
 
@@ -72,4 +73,5 @@ public static class AcademicIntegrationServiceCollectionExtensions
 public static class AcademicWorkflowOptions
 {
     public const string SectionName = "AcademicWorkflow";
+    public const string PlanEnabledKey = SectionName + ":PlanEnabled";
 }

@@ -4,6 +4,7 @@ using System.Reflection;
 using System.Text;
 using System.Text.Json;
 using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.Hosting;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
@@ -18,17 +19,28 @@ using Xunit;
 
 namespace Taslim.Api.Tests.AcademicIntegration;
 
+/// <summary>Opt in only this test host to the deterministic Plan handler.</summary>
+public sealed class AcademicPlanApiFactory : TaslimApiFactory
+{
+    protected override IHost CreateHost(IHostBuilder builder)
+    {
+        builder.ConfigureHostConfiguration(config => config.AddInMemoryCollection(
+            new Dictionary<string, string?> { [AcademicWorkflowOptions.PlanEnabledKey] = "true" }));
+        return base.CreateHost(builder);
+    }
+}
+
 /// <summary>
-/// The integration surface exactly as composed on this branch: authenticated and
+/// The integration surface with the API Plan switch enabled: authenticated and
 /// workspace-scoped, with one deterministic local Plan handler. These tests pin the
 /// honest staging contract — intake persists and replays idempotently, Plan is saved and
 /// gated for approval, and the next missing stage remains an explicit resumable 501.
 /// </summary>
-public class AcademicProjectsApiTests : IClassFixture<TaslimApiFactory>
+public class AcademicProjectsApiTests : IClassFixture<AcademicPlanApiFactory>
 {
     private readonly TaslimApiFactory _factory;
 
-    public AcademicProjectsApiTests(TaslimApiFactory factory)
+    public AcademicProjectsApiTests(AcademicPlanApiFactory factory)
     {
         _factory = factory;
         using var scope = factory.Services.CreateScope();
@@ -107,7 +119,7 @@ public class AcademicProjectsApiTests : IClassFixture<TaslimApiFactory>
     }
 
     [Fact]
-    public void Production_composition_registers_only_the_deterministic_plan_handler()
+    public void Enabled_composition_registers_only_the_deterministic_plan_handler()
     {
         using var scope = _factory.Services.CreateScope();
         var handlers = scope.ServiceProvider.GetServices<IAcademicStageHandler>().ToArray();
@@ -202,16 +214,52 @@ public class AcademicProjectsApiTests : IClassFixture<TaslimApiFactory>
         Assert.Contains("Plan approval checkpoint is required", await withoutPlanGate.Content.ReadAsStringAsync());
     }
 
-    [Fact]
-    public void Academic_composition_can_be_registered_repeatedly_without_duplicate_plan_handlers()
+    [Theory]
+    [InlineData(null, 0)]
+    [InlineData("false", 0)]
+    [InlineData("invalid", 0)]
+    [InlineData("true", 1)]
+    public void Academic_composition_registers_plan_only_on_explicit_opt_in(string? configured, int expected)
     {
         var services = new ServiceCollection();
-        var configuration = new ConfigurationBuilder().Build();
+        var configuration = new ConfigurationBuilder().AddInMemoryCollection(
+            new Dictionary<string, string?> { [AcademicWorkflowOptions.PlanEnabledKey] = configured }).Build();
 
         services.AddAcademicProjects(configuration);
         services.AddAcademicProjects(configuration);
 
-        Assert.Single(services.Where(descriptor => descriptor.ServiceType == typeof(IAcademicStageHandler)));
+        Assert.Equal(expected, services.Count(descriptor => descriptor.ServiceType == typeof(IAcademicStageHandler)));
+    }
+
+    [Fact]
+    public async Task Default_api_preserves_intake_and_blocks_plan_execution_without_advancing()
+    {
+        using var defaultHost = new TaslimApiFactory();
+        using var scope = defaultHost.Services.CreateScope();
+        scope.ServiceProvider.GetRequiredService<TaslimDbContext>().Database.EnsureCreated();
+        using var defaultClient = defaultHost.CreateClient();
+        var (client, workspace) = await RegisterAsync(defaultClient);
+        var created = await PostCreateAsync(client, workspace, new
+        {
+            requestKey = "academic-off-test",
+            researchQuestion = "How are sources catalogued?",
+            discipline = "History",
+        });
+        Assert.Equal(HttpStatusCode.Created, created.StatusCode);
+        var intake = await created.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Empty(intake.GetProperty("connectedStages").EnumerateArray());
+        var project = intake.GetProperty("project");
+        var path = $"/api/academic-projects/{project.GetProperty("projectId").GetGuid()}";
+
+        var run = await PostJsonAsync(client, $"{path}/run", new { });
+        Assert.Equal(HttpStatusCode.NotImplemented, run.StatusCode);
+        var error = (await run.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("error");
+        Assert.Equal("ACADEMIC_STAGE_NOT_CONNECTED", error.GetProperty("code").GetString());
+        Assert.Equal("Plan", error.GetProperty("missingStage").GetString());
+        var detail = await client.GetFromJsonAsync<JsonElement>(path);
+        Assert.Equal(project.GetProperty("revision").GetInt64(), detail.GetProperty("project").GetProperty("revision").GetInt64());
+        Assert.Equal(0, detail.GetProperty("planVersion").GetInt32());
+        Assert.Equal(0, detail.GetProperty("usage").GetProperty("callsUsed").GetInt32());
     }
 
     [Fact]
@@ -641,9 +689,9 @@ public class AcademicProjectsApiTests : IClassFixture<TaslimApiFactory>
 
     // --- helpers -------------------------------------------------------------------------------
 
-    private async Task<(HttpClient Client, Guid WorkspaceId)> RegisterAsync()
+    private async Task<(HttpClient Client, Guid WorkspaceId)> RegisterAsync(HttpClient? client = null)
     {
-        var client = _factory.CreateClient();
+        client ??= _factory.CreateClient();
         var csrf = await client.GetFromJsonAsync<JsonElement>("/api/auth/csrf");
         var token = csrf.GetProperty("token").GetString()!;
         using var request = new HttpRequestMessage(HttpMethod.Post, "/api/auth/register")
