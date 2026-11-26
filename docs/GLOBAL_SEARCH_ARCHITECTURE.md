@@ -34,6 +34,15 @@ The web route is `/search`. Its result links preserve the existing destinations:
 
 The search control is available in the authenticated global top bar on desktop and mobile. The page supports keyboard focus with `Cmd/Ctrl+K`, a compact mobile form, grouped cards, an initial empty state, a no-results state, loading/error states, and EN/AR/KU copy. Locale direction is inherited from the existing provider, including RTL layout adjustments.
 
+### What the results surface may claim
+
+`searchSurfaceState.ts` is the single decision the page renders from, so a search can only ever report one of five outcomes: `searching`, `populated`, `noResults`, `failed`, or `idle`. Two rules hold it together:
+
+- **A cancelled or superseded read settles the surface itself.** `runSearch` applies no state to a request the sequencer has fenced, so the gesture that fences it has to retire the busy flag that request raised. Cancelling therefore writes one whole settlement (`settleSearchCancellation`) rather than clearing fields by hand, and `aria-busy`, the spinner, and the blocked pagination retry all release with it.
+- **Rows only ever answer the term they were read for.** A failed read drops the rows on screen, because they were loaded for an earlier term and would otherwise be re-labelled as the answer to the term that never completed. A failed pagination append keeps them, since those pages were read for the same term and stay valid. A failure with nothing to show is reported as `failed`, with the term named and a retry offered; it is never reported as `noResults`, which would present a fault as an accurate "nothing found".
+
+Each outcome is announced from one polite live region that stays mounted for as long as the page does, because the outcomes used to carry their own semantics and every transition out of a populated result set unmounted the only announcing element. Its wording deliberately differs from the visible headings, which the browser tests resolve by name.
+
 ## Migration and indexing
 
 No migration is included. The first version uses existing workspace/time/status indexes and bounded per-type queries. The partial-match predicates intentionally use normalized `Contains` expressions so they work in the existing PostgreSQL production provider and SQLite integration test provider. Leading-wildcard substring search will not fully use ordinary B-tree name indexes, but the query is bounded, scoped by indexed workspace predicates, and capped before response materialization.
