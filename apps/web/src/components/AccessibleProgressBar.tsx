@@ -13,6 +13,7 @@ export function clampAccessibleProgress(value: number | null | undefined) {
 
 export function AccessibleProgressBar({ className, label, value }: AccessibleProgressBarProps) {
   const progress = clampAccessibleProgress(value);
+  const hasKnownProgress = Number.isFinite(value);
   const fillStyle: CSSProperties = { width: `${progress}%` };
 
   return (
@@ -22,8 +23,8 @@ export function AccessibleProgressBar({ className, label, value }: AccessiblePro
       aria-label={label}
       aria-valuemin={0}
       aria-valuemax={100}
-      aria-valuenow={progress}
-      aria-valuetext={`${progress}%`}
+      aria-valuenow={hasKnownProgress ? progress : undefined}
+      aria-valuetext={hasKnownProgress ? `${progress}%` : undefined}
     >
       <span style={fillStyle} />
     </div>

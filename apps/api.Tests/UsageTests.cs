@@ -187,26 +187,40 @@ public sealed class UsageTests : IClassFixture<TaslimApiFactory>
     {
         using var client = factory.CreateClient();
         var auth = await Register(client, "Usage History Over Reversed");
+        var now = DateTime.UtcNow;
+        var overReversed = CreateTransaction(auth, UsageTransactionStatus.Refunded, null, null, null, 1m, 2m, now);
+        var fullyRefunded = CreateTransaction(auth, UsageTransactionStatus.Refunded, null, null, null, 2m, 2m, now.AddSeconds(1));
+        var partialRefund = CreateTransaction(auth, UsageTransactionStatus.Refunded, null, null, null, 1m, 0.99999999m, now.AddSeconds(2));
+        var paid = CreateTransaction(auth, UsageTransactionStatus.Completed, null, null, null, 3m, 0m, now.AddSeconds(3));
+
         using (var scope = factory.Services.CreateScope())
         {
             var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
-            db.UsageTransactions.Add(CreateTransaction(
-                auth,
-                UsageTransactionStatus.Refunded,
-                null,
-                null,
-                null,
-                1m,
-                2m,
-                DateTime.UtcNow));
+            db.UsageTransactions.AddRange(overReversed, fullyRefunded, partialRefund, paid);
             await db.SaveChangesAsync();
         }
 
-        var history = await client.GetFromJsonAsync<UsageHistoryDto>($"/api/workspaces/{auth.PersonalWorkspace.Id}/usage?page=1&pageSize=10");
+        var route = $"/api/workspaces/{auth.PersonalWorkspace.Id}/usage";
+        var history = await client.GetFromJsonAsync<UsageHistoryDto>($"{route}?page=1&pageSize=10");
+        var summary = await client.GetFromJsonAsync<UsageSummaryDto>($"{route}/summary");
 
         Assert.NotNull(history);
-        var item = Assert.Single(history.Items);
-        Assert.Equal(0m, item.ChargedAmount);
+        Assert.NotNull(summary);
+        Assert.Equal(4, history.TotalCount);
+        var items = history.Items.ToDictionary(item => item.Id);
+        Assert.Equal("Refunded", items[overReversed.Id].Status);
+        Assert.Equal(0m, items[overReversed.Id].ChargedAmount);
+        Assert.Equal(0m, items[fullyRefunded.Id].ChargedAmount);
+        Assert.Equal(0.00000001m, items[partialRefund.Id].ChargedAmount);
+        Assert.Equal(3m, items[paid.Id].ChargedAmount);
+        Assert.Equal(3.00000001m, summary.CustomerChargedAmount);
+        Assert.Equal(summary.CustomerChargedAmount, items.Values.Sum(item => item.ChargedAmount));
+
+        using var readScope = factory.Services.CreateScope();
+        var stored = await readScope.ServiceProvider.GetRequiredService<TaslimDbContext>().UsageTransactions.FindAsync(overReversed.Id);
+        Assert.NotNull(stored);
+        Assert.Equal(1m, stored.ChargedAmount);
+        Assert.Equal(2m, stored.ReversedAmount);
     }
 
     private static UsageTransaction CreateTransaction(
