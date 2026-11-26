@@ -1,9 +1,9 @@
 /**
  * Issue #697 follow-up — form-encoded malformed/unrecognized Server Action
- * POST regression harness. Test-only: disposable, loopback-only (Playwright
- * dev server bound to 127.0.0.1, or an externally started production server
- * via E2E_WEB_URL). No production probe, credential, provider call or private
- * data; every payload is a fixed anonymous constant.
+ * POST regression harness. Test-only and loopback-only: the Playwright dev
+ * server is bound to 127.0.0.1, and E2E_WEB_URL is accepted only for an
+ * explicit loopback host. No production/external probe, credential, provider
+ * call or private data; every payload is a fixed anonymous constant.
  *
  * Why this file exists. PR #764 (merged 2026-11-16,
  * `server-action-malformed-post.spec.ts`) pinned the text/plain (+RSC)
@@ -25,10 +25,10 @@
  *  - If a shape is answered 5xx (known defect present): the response must be
  *    CONTAINED — no secret/env markers, no stack — and the route must be
  *    immediately healthy again (GET / -> 200, page navigable). Provider- and
- *    server-reference-message containment is additionally asserted against
- *    an externally started production harness (E2E_WEB_URL set), matching
- *    the deployed shape; the Playwright-managed dev server may inject its
- *    own local-only error overlay and is excluded from that check only.
+ *    server-reference-message containment is additionally asserted when an
+ *    externally started loopback server is selected with E2E_WEB_URL, matching
+ *    the deployed response shape; the Playwright-managed dev server may inject
+ *    its own local-only error overlay and is excluded from that check only.
  *  - If a shape is answered 400/404 (fixed or framework-rejected): the safe
  *    response shell must never contain the locale-error or server-reference
  *    text (positive generic-copy rendering is a component-level assertion in
@@ -39,8 +39,37 @@
  */
 import { test, expect, type APIRequestContext } from "@playwright/test";
 
-/** Externally started (production `next start`) harness when set. */
-const PROD_HARNESS = Boolean(process.env.E2E_WEB_URL);
+const DEFAULT_WEB_URL = "http://localhost:3000";
+const E2E_WEB_URL = process.env.E2E_WEB_URL;
+const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "[::1]"]);
+const LOOPBACK_WEB_URL_ERROR =
+  "Unsafe E2E_WEB_URL: expected an absolute http(s) URL on localhost, 127.0.0.1, or [::1]. Refusing to launch tests or send requests.";
+
+function assertLoopbackWebURL(value: string): void {
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    throw new Error(LOOPBACK_WEB_URL_ERROR);
+  }
+
+  if (
+    (parsed.protocol !== "http:" && parsed.protocol !== "https:") ||
+    !LOOPBACK_HOSTS.has(parsed.hostname.toLowerCase()) ||
+    parsed.username !== "" ||
+    parsed.password !== ""
+  ) {
+    throw new Error(LOOPBACK_WEB_URL_ERROR);
+  }
+}
+
+// Playwright imports this spec during test discovery, before creating browser
+// or request fixtures. Fail closed here so a hostile E2E_WEB_URL cannot be
+// contacted by any test in this file.
+assertLoopbackWebURL(E2E_WEB_URL ?? DEFAULT_WEB_URL);
+
+/** An externally started loopback test server when E2E_WEB_URL is set. */
+const EXTERNAL_LOOPBACK_HARNESS = Boolean(E2E_WEB_URL);
 
 const FORM_ACTION_IDS: ReadonlyArray<readonly [string, string]> = [
   // Exact malformed id observed in production server-reference errors.
@@ -70,6 +99,7 @@ async function postFormMalformedAction(
   actionId: string,
   withOrigin: boolean,
 ) {
+  assertLoopbackWebURL(baseURL);
   return request.post(path, {
     maxRedirects: 0,
     headers: {
@@ -103,6 +133,35 @@ async function assertContained(request: APIRequestContext, res: Awaited<ReturnTy
   expect(healthy.status(), "route must recover to 200 immediately").toBe(200);
 }
 
+test("loopback URL guard allows local origins and rejects external targets before POST", async () => {
+  for (const url of [
+    "http://127.0.0.1:3000",
+    "https://localhost:4443",
+    "http://[::1]:3000",
+  ]) {
+    expect(() => assertLoopbackWebURL(url)).not.toThrow();
+  }
+
+  const attemptedRequests: string[] = [];
+  const request = {
+    post: async (path: string) => {
+      attemptedRequests.push(path);
+      throw new Error("request must not be sent");
+    },
+  } as unknown as APIRequestContext;
+
+  for (const url of [
+    "https://example.com",
+    "http://localhost.attacker.example:3000",
+    "http://127.0.0.2:3000",
+  ]) {
+    await expect(
+      postFormMalformedAction(request, url, "/", "x", true),
+    ).rejects.toThrow(/Unsafe E2E_WEB_URL/);
+  }
+  expect(attemptedRequests).toEqual([]);
+});
+
 test.describe("form-encoded malformed Server Action POST -> not-found locale boundary (issue #697 follow-up)", () => {
   for (const [name, actionId] of FORM_ACTION_IDS) {
     for (const withOrigin of [true, false]) {
@@ -118,7 +177,7 @@ test.describe("form-encoded malformed Server Action POST -> not-found locale bou
           // Known-defect branch (unpatched main): #613 owns the source fix.
           // Production-shape containment: the SSR locale throw and the
           // server-reference log line must not reach the client.
-          if (PROD_HARNESS) {
+          if (EXTERNAL_LOOPBACK_HARNESS) {
             expect(body).not.toContain(LOCALE_ERROR);
             expect(body).not.toContain(SERVER_REFERENCE_ERROR);
           }
@@ -143,7 +202,7 @@ test.describe("form-encoded malformed Server Action POST -> not-found locale bou
     const body = await res.text();
     expect([400, 404, 500], `unexpected status ${status}`).toContain(status);
     await assertContained(request, res, body);
-    if (status !== 400 && PROD_HARNESS) {
+    if (status !== 400 && EXTERNAL_LOOPBACK_HARNESS) {
       expect(body).not.toContain(LOCALE_ERROR);
     }
   });
