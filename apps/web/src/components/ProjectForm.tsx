@@ -1,16 +1,17 @@
 "use client";
 
-import { FormEvent, useEffect, useRef, useState } from "react";
+import { FormEvent, useEffect, useLayoutEffect, useRef, useState, type RefObject } from "react";
 import { Check, ChevronDown, X } from "lucide-react";
 import type { Project, ProjectInput } from "@/lib/api";
 import { draftBaseOf, isRevisionConflict, isRevisionDiverged, isRevisionUnavailable, type ProjectDraftBase, type ProjectRevisionSession } from "@/lib/projectRevision";
 import { useLocale } from "@/components/LocaleProvider";
 import { localeDirection } from "@/lib/i18n";
+import { useDialogAccessibility } from "@/lib/useDialogAccessibility";
 
 const projectTypes = ["General", "Movie", "Marketing", "Business", "Research", "Education", "Development"] as const;
 const typeKey = (type: string) => `project.type.${type.toLowerCase()}`;
 
-export function ProjectForm({ project, onClose, onSubmit, revision, onSaved }: Readonly<{
+export function ProjectForm({ project, onClose, onSubmit, revision, onSaved, restoreFocusRef }: Readonly<{
   project?: Project;
   onClose: () => void;
   /** Create path: the caller owns the write. Omitted when `revision` fences an edit. */
@@ -25,6 +26,11 @@ export function ProjectForm({ project, onClose, onSubmit, revision, onSaved }: R
   revision?: ProjectRevisionSession | null;
   /** The project the server committed, for the edit path to fold into its view. */
   onSaved?: (project: Project) => void;
+  /**
+   * Modal accessibility: the element that opened this dialog, so closing it
+   * returns focus where the member started rather than to the top of the page.
+   */
+  restoreFocusRef?: RefObject<HTMLElement | null>;
 }>) {
   const { t, locale } = useLocale();
   const [name, setName] = useState(project?.name ?? "");
@@ -34,6 +40,8 @@ export function ProjectForm({ project, onClose, onSubmit, revision, onSaved }: R
   const [type, setType] = useState(project?.type ?? "General");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
+  const dialogTitleId = "project-form-title";
+  const dialogRef = useDialogAccessibility<HTMLFormElement>(true, onClose, restoreFocusRef);
   // The fence refused the revision this draft was built on. The draft stays
   // exactly as typed until the member chooses what happens to it.
   const [conflict, setConflict] = useState(false);
@@ -48,14 +56,19 @@ export function ProjectForm({ project, onClose, onSubmit, revision, onSaved }: R
   // different project, an explicit reload, or a write this form made - moves it.
   const seedRef = useRef<ProjectDraftBase | null>(project ? draftBaseOf(project) : null);
   const seededFrom = useRef(project?.id);
+  const previousRevision = useRef(revision);
   const projectId = project?.id;
-  // Which row (and which session) this form is speaking for right now, so a capture
-  // issued for a previous one cannot report its verdict on the row in front of the
-  // member after the parent switches the form to it.
-  const activeProjectRef = useRef(project?.id);
-  const activeSessionRef = useRef(revision);
+  // A save can finish after its dialog closed or another project replaced it.
+  // Invalidate callbacks at commit time so old results cannot reload the new list.
+  const generation = useRef(0);
+  useLayoutEffect(() => () => { generation.current += 1; }, [projectId, revision]);
 
   useEffect(() => {
+    if (seededFrom.current !== projectId || previousRevision.current !== revision) {
+      previousRevision.current = revision;
+      busy.current = false;
+      setSaving(false);
+    }
     if (seededFrom.current !== projectId) {
       // A different row: the fields belong to it now, so the seed follows them.
       seededFrom.current = projectId;
@@ -67,14 +80,11 @@ export function ProjectForm({ project, onClose, onSubmit, revision, onSaved }: R
       setConflict(false);
       setDiverged(false);
       setError("");
-      busy.current = false;
       seedRef.current = project ? draftBaseOf(project) : null;
     }
     // Report the copy on screen once per draft, never once per parent render: a
     // newer prop arriving from elsewhere must not re-certify these older fields.
     if (revision && seedRef.current) revision.noteDraft(seedRef.current);
-    activeProjectRef.current = projectId;
-    activeSessionRef.current = revision;
     // The row's identity, not its content, bounds the draft: `project` changing
     // underneath an open form is another writer's answer, not a re-seed.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -87,13 +97,12 @@ export function ProjectForm({ project, onClose, onSubmit, revision, onSaved }: R
   // retried here: the save re-captures rather than sending an unfenced write.
   function beginEditing() {
     if (!revision || !project || revision.isBound || conflict) return;
-    const startedForProject = project.id;
-    const startedForSession = revision;
+    const started = generation.current;
     // Bound to the content being edited, never to whatever stamp the row happens
     // to carry now: an out-of-date form reports a conflict instead of stamping
     // its stale draft with a revision it did not edit from.
     void revision.begin().catch((caught) => {
-      if (activeProjectRef.current !== startedForProject || activeSessionRef.current !== startedForSession) return;
+      if (generation.current !== started) return;
       if (isRevisionConflict(caught)) {
         setDiverged(isRevisionDiverged(caught));
         setConflict(true);
@@ -104,20 +113,23 @@ export function ProjectForm({ project, onClose, onSubmit, revision, onSaved }: R
   }
 
   async function submit(event: FormEvent) {
+    const started = generation.current;
     event.preventDefault(); setSaving(true); setError(""); setConflict(false);
     setDiverged(false);
     try {
       if (revision && project) {
         const saved = await revision.save(draft());
+        if (generation.current !== started) return;
         // This form wrote the row, so the screen and the certified content match.
         seedRef.current = draftBaseOf(saved.project);
         onSaved?.(saved.project);
       }
       else if (revision) throw new Error("An edit form needs the project it edits.");
       else await onSubmit?.(draft());
-      onClose();
+      if (generation.current === started) onClose();
     }
     catch (caught) {
+      if (generation.current !== started) return;
       if (revision && isRevisionConflict(caught)) {
         // Nothing was written. Keep the draft, keep the expired token, and ask
         // the member which copy should win; never re-declare a newer revision
@@ -130,15 +142,17 @@ export function ProjectForm({ project, onClose, onSubmit, revision, onSaved }: R
         setError(caught instanceof Error ? caught.message : t("projects.saveError"));
       }
     }
-    finally { setSaving(false); }
+    finally { if (generation.current === started) setSaving(false); }
   }
 
   async function reloadLatest() {
     if (!revision || busy.current) return;
+    const started = generation.current;
     busy.current = true;
     setSaving(true);
     try {
       const latest = await revision.reloadLatest();
+      if (generation.current !== started) return;
       setName(latest.name);
       setDescription(latest.description ?? "");
       setInstructions(latest.instructions ?? "");
@@ -151,30 +165,42 @@ export function ProjectForm({ project, onClose, onSubmit, revision, onSaved }: R
       setError(t("projects.revisionReloaded"));
       onSaved?.(latest);
     }
-    catch (caught) { setError(caught instanceof Error ? caught.message : t("projects.loadError")); }
-    finally { busy.current = false; setSaving(false); }
+    catch (caught) { if (generation.current === started) setError(caught instanceof Error ? caught.message : t("projects.loadError")); }
+    finally {
+      if (generation.current === started) {
+        busy.current = false;
+        setSaving(false);
+      }
+    }
   }
 
   async function keepMyDraft() {
     if (!revision || busy.current) return;
+    const started = generation.current;
     busy.current = true;
     setSaving(true);
     try {
       const saved = await revision.saveOverLatest(draft());
+      if (generation.current !== started) return;
       seedRef.current = draftBaseOf(saved.project);
       setConflict(false);
       setDiverged(false);
       onSaved?.(saved.project);
       onClose();
     }
-    catch (caught) { setError(caught instanceof Error ? caught.message : t("projects.saveError")); }
-    finally { busy.current = false; setSaving(false); }
+    catch (caught) { if (generation.current === started) setError(caught instanceof Error ? caught.message : t("projects.saveError")); }
+    finally {
+      if (generation.current === started) {
+        busy.current = false;
+        setSaving(false);
+      }
+    }
   }
 
   return <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
-    <form className="project-form modal-card" onSubmit={submit}>
-      <div className="modal-heading"><div><p className="section-eyebrow">{project ? t("projects.editEyebrow") : t("projects.newEyebrow")}</p><h2>{project ? t("projects.editTitle") : t("projects.newTitle")}</h2></div><button type="button" className="modal-close" onClick={onClose} aria-label={t("common.close")}><X size={18} /></button></div>
-      <label><span>{t("projects.name")}</span><input required minLength={1} maxLength={160} value={name} onChange={(event) => { beginEditing(); setName(event.target.value); }} autoFocus dir="auto" /></label>
+    <form ref={dialogRef} className="project-form modal-card" role="dialog" aria-modal="true" aria-labelledby={dialogTitleId} tabIndex={-1} onSubmit={submit}>
+      <div className="modal-heading"><div><p className="section-eyebrow">{project ? t("projects.editEyebrow") : t("projects.newEyebrow")}</p><h2 id={dialogTitleId}>{project ? t("projects.editTitle") : t("projects.newTitle")}</h2></div><button type="button" className="modal-close" onClick={onClose} aria-label={t("common.close")}><X size={18} /></button></div>
+      <label><span>{t("projects.name")}</span><input data-dialog-autofocus required minLength={1} maxLength={160} value={name} onChange={(event) => { beginEditing(); setName(event.target.value); }} dir="auto" /></label>
       <label><span>{t("projects.type")}</span><div className="select-shell"><select value={type} onChange={(event) => { beginEditing(); setType(event.target.value); }} dir={localeDirection(locale)}>{projectTypes.map((item) => <option key={item} value={item}>{t(typeKey(item))}</option>)}</select><ChevronDown size={15} aria-hidden="true" /></div></label>
       <label><span>{t("projects.description")}</span><textarea maxLength={2000} rows={4} value={description} onChange={(event) => { beginEditing(); setDescription(event.target.value); }} placeholder={t("projects.descriptionPlaceholder")} dir="auto" /></label>
       <label><span>{t("projects.instructions")}</span><textarea maxLength={4000} rows={4} value={instructions} onChange={(event) => { beginEditing(); setInstructions(event.target.value); }} placeholder={t("projects.instructionsPlaceholder")} dir="auto" /></label>
