@@ -100,13 +100,16 @@ public sealed class GlobalSearchController(TaslimDbContext db) : ControllerBase
         // Keep asset search aligned with the asset-library privacy boundary:
         // project assets are shared only when their backing file is also
         // workspace-shareable; personal and conversation-backed assets remain
-        // visible only to their creator. Since #936 the asset-library boundary is
-        // AssetVisibility.ForWorkspaceMember, which additionally keeps project-shared
-        // Research report assets creator-private; the same provenance guard is mirrored
-        // here so search cannot disclose report metadata to co-members (#1042).
+        // visible only to their creator. Generated Research report assets with a
+        // ResearchGenerate source job are creator-private; mirror that provenance check
+        // here so search cannot disclose report metadata to co-members (#1042). Other
+        // Research-typed project assets retain their existing sharing behavior.
         var assetQuery = db.Assets.AsNoTracking()
             .Where(asset => workspaceIds.Contains(asset.WorkspaceId)
-                && (asset.AssetType != AssetTypes.Research || asset.CreatedByUserId == userId)
+                && (asset.AssetType != AssetTypes.Research
+                    || asset.SourceGenerationJobId == null
+                    || asset.SourceGenerationJob!.JobType != GenerationJobTypes.ResearchGenerate
+                    || asset.CreatedByUserId == userId)
                 && (asset.CreatedByUserId == userId
                     || (asset.ProjectId.HasValue && asset.Project != null && asset.Project.WorkspaceId == asset.WorkspaceId))
                 && (asset.CreatedByUserId == userId

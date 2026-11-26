@@ -93,10 +93,13 @@ public sealed class ProjectsController(TaslimDbContext db, WorkspaceAccessServic
             .Where(file => file.ConversationId == null || file.UserId == userId);
         var assets = db.Assets.AsNoTracking()
             .Where(asset => asset.ProjectId == projectId && asset.WorkspaceId == project.WorkspaceId && asset.Status == AssetStatus.Active)
-            // The count must agree with AssetVisibility (#936): a creator-private
-            // Research report asset is not evidence of a visible resource for
-            // non-creators, so it stays uncounted for them (#1042).
-            .Where(asset => asset.AssetType != AssetTypes.Research || asset.CreatedByUserId == userId);
+            // Match AssetVisibility (#936): generated Research reports are private to
+            // their ResearchGenerate job creator, but Research-typed assets without that
+            // provenance remain shared and countable by project members (#1042).
+            .Where(asset => asset.AssetType != AssetTypes.Research
+                || asset.SourceGenerationJobId == null
+                || asset.SourceGenerationJob!.JobType != GenerationJobTypes.ResearchGenerate
+                || asset.CreatedByUserId == userId);
         var conversations = db.Conversations.AsNoTracking()
             .Where(conversation => conversation.ProjectId == projectId && conversation.WorkspaceId == project.WorkspaceId && conversation.UserId == userId);
         // Counts and recent rows share the same creator-private policy as the Activity Center.
