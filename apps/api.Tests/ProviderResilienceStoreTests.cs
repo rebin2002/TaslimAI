@@ -107,6 +107,108 @@ public sealed class ProviderResilienceStoreTests
         Assert.Null(persisted.CompletedAt);
     }
 
+    [Fact]
+    public async Task Successful_expired_takeover_completes_when_winner_context_preloaded_old_finalization()
+    {
+        var connectionString = $"Data Source=provider-finalization-tracked-{Guid.NewGuid():N};Mode=Memory;Cache=Shared";
+        var now = new DateTime(2026, 10, 26, 2, 0, 0, DateTimeKind.Utc);
+        var jobId = Guid.NewGuid();
+        var currentToken = Guid.NewGuid();
+        var previousToken = Guid.NewGuid();
+        var workspaceId = Guid.NewGuid();
+        var userId = Guid.NewGuid();
+        const string idempotencyKey = "tracked-finalization-takeover";
+        await using var keeper = new SqliteConnection(connectionString);
+        await keeper.OpenAsync();
+        await using (var schema = new TaslimDbContext(new DbContextOptionsBuilder<TaslimDbContext>().UseSqlite(keeper).Options))
+        {
+            await schema.Database.EnsureCreatedAsync();
+            schema.Users.Add(new ApplicationUser
+            {
+                Id = userId,
+                UserName = "tracked-provider-race@example.com",
+                NormalizedUserName = "TRACKED-PROVIDER-RACE@EXAMPLE.COM",
+                Email = "tracked-provider-race@example.com",
+                NormalizedEmail = "TRACKED-PROVIDER-RACE@EXAMPLE.COM",
+                DisplayName = "Tracked Provider Race",
+                CreatedAt = now,
+                UpdatedAt = now,
+            });
+            schema.Workspaces.Add(new Workspace
+            {
+                Id = workspaceId,
+                Name = "Tracked Provider Race Workspace",
+                Slug = $"tracked-provider-race-{workspaceId:N}",
+                Type = WorkspaceType.Personal,
+                CreatedAt = now,
+                UpdatedAt = now,
+            });
+            schema.WorkspaceMembers.Add(new WorkspaceMember
+            {
+                Id = Guid.NewGuid(),
+                WorkspaceId = workspaceId,
+                UserId = userId,
+                Role = WorkspaceRole.Owner,
+                JoinedAt = now,
+            });
+            schema.GenerationJobs.Add(new GenerationJob
+            {
+                Id = jobId,
+                WorkspaceId = workspaceId,
+                CreatedByUserId = userId,
+                JobType = GenerationJobTypes.SystemTest,
+                Status = GenerationJobStatus.Running,
+                InputJson = "{}",
+                ConcurrencyToken = currentToken,
+                CreatedAt = now,
+            });
+            schema.ProviderExecutionFinalizations.Add(new ProviderExecutionFinalization
+            {
+                Id = Guid.NewGuid(),
+                GenerationJobId = jobId,
+                JobConcurrencyToken = previousToken,
+                IdempotencyKey = idempotencyKey,
+                State = "claimed",
+                ClaimedAt = now.AddMinutes(-2),
+                ClaimExpiresAt = now.AddMinutes(-1),
+            });
+            await schema.SaveChangesAsync();
+        }
+
+        await using var workerConnection = new SqliteConnection(connectionString);
+        await workerConnection.OpenAsync();
+        await using var workerDb = new TaslimDbContext(CreateDb(workerConnection));
+        var trackedFinalization = await workerDb.ProviderExecutionFinalizations.SingleAsync(
+            item => item.GenerationJobId == jobId && item.IdempotencyKey == idempotencyKey);
+        var unrelatedTrackedWorkspace = await workerDb.Workspaces.SingleAsync(item => item.Id == workspaceId);
+        Assert.Equal(previousToken, trackedFinalization.JobConcurrencyToken);
+
+        var store = new EfProviderResilienceStore(workerDb);
+        var lease = TimeSpan.FromMinutes(2);
+        var claim = await store.TryClaimFinalizationAsync(jobId, currentToken, idempotencyKey, now, lease);
+
+        Assert.Equal(ProviderFinalizationClaimResult.Claimed, claim);
+        Assert.Same(unrelatedTrackedWorkspace, workerDb.Workspaces.Local.Single(item => item.Id == workspaceId));
+
+        await store.CompleteFinalizationAsync(
+            jobId,
+            currentToken,
+            idempotencyKey,
+            ProviderAttemptResultCategory.Success);
+
+        Assert.Equal("completed", trackedFinalization.State);
+        Assert.Equal(currentToken, trackedFinalization.JobConcurrencyToken);
+        Assert.Equal(now, trackedFinalization.ClaimedAt);
+        Assert.Null(trackedFinalization.ClaimExpiresAt);
+        await using var verify = new TaslimDbContext(CreateDb(keeper));
+        var persisted = await verify.ProviderExecutionFinalizations.AsNoTracking().SingleAsync(
+            item => item.GenerationJobId == jobId && item.IdempotencyKey == idempotencyKey);
+        Assert.Equal("completed", persisted.State);
+        Assert.Equal(currentToken, persisted.JobConcurrencyToken);
+        Assert.Null(persisted.ClaimExpiresAt);
+        Assert.NotNull(persisted.CompletedAt);
+    }
+
     private static DbContextOptions<TaslimDbContext> CreateDb(SqliteConnection connection, params IInterceptor[] interceptors) =>
         new DbContextOptionsBuilder<TaslimDbContext>()
             .UseSqlite(connection)

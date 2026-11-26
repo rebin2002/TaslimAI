@@ -235,9 +235,15 @@ public sealed class ProviderBenchmarkService(TaslimDbContext db, TimeProvider ti
             ?? throw new KeyNotFoundException("The benchmark run was not found.");
         if (run.Status != ProviderBenchmarkRunStatus.Running)
         {
-            if (run.Status != completion.Status)
+            var persisted = await db.ProviderBenchmarkRuns.AsNoTracking()
+                .SingleOrDefaultAsync(item => item.Id == runId, cancellationToken)
+                ?? throw new KeyNotFoundException("The benchmark run was not found.");
+            run = SynchronizeTrackedRun(persisted);
+            if (persisted.Status != ProviderBenchmarkRunStatus.Running
+                && persisted.Status != completion.Status)
                 throw new InvalidOperationException("The benchmark run has already reached a different terminal state.");
-            return run;
+            if (persisted.Status != ProviderBenchmarkRunStatus.Running)
+                return run;
         }
 
         var completionCode = ProviderBenchmarkValidation.Optional(completion.CompletionCode, nameof(completion.CompletionCode), 100);
@@ -250,10 +256,10 @@ public sealed class ProviderBenchmarkService(TaslimDbContext db, TimeProvider ti
                 .SetProperty(item => item.CompletedAt, completedAt), cancellationToken);
         if (updated == 1)
         {
-            run.Status = completion.Status;
-            run.CompletionCode = completionCode;
-            run.CompletedAt = completedAt;
-            return SynchronizeTrackedRun(run);
+            var persisted = await db.ProviderBenchmarkRuns.AsNoTracking()
+                .SingleOrDefaultAsync(item => item.Id == runId, cancellationToken)
+                ?? throw new KeyNotFoundException("The benchmark run was not found.");
+            return SynchronizeTrackedRun(persisted);
         }
 
         var existing = await db.ProviderBenchmarkRuns.AsNoTracking()

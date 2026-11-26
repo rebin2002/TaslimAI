@@ -26,7 +26,11 @@ public sealed class EfProviderResilienceStore(TaslimDbContext db) : IProviderRes
                     .SetProperty(item => item.JobConcurrencyToken, jobConcurrencyToken)
                     .SetProperty(item => item.ClaimedAt, now)
                     .SetProperty(item => item.ClaimExpiresAt, now.Add(lease)), cancellationToken);
-            if (claimed == 1) return ProviderFinalizationClaimResult.Claimed;
+            if (claimed == 1)
+            {
+                SynchronizeTrackedFinalizationClaim(existing.Id, jobConcurrencyToken, now, now.Add(lease));
+                return ProviderFinalizationClaimResult.Claimed;
+            }
 
             var currentState = await db.ProviderExecutionFinalizations.AsNoTracking()
                 .Where(item => item.Id == existing.Id)
@@ -265,6 +269,33 @@ public sealed class EfProviderResilienceStore(TaslimDbContext db) : IProviderRes
         var current = await db.GenerationJobs.AsNoTracking().Where(item => item.Id == generationJobId).Select(item => new { item.ConcurrencyToken, item.Status }).SingleOrDefaultAsync(cancellationToken);
         if (current is null || current.ConcurrencyToken != jobConcurrencyToken || current.Status != GenerationJobStatus.Running)
             throw new StaleProviderWorkerException(generationJobId);
+    }
+
+    private void SynchronizeTrackedFinalizationClaim(Guid finalizationId, Guid jobConcurrencyToken, DateTime claimedAt, DateTime claimExpiresAt)
+    {
+        var tracked = db.ProviderExecutionFinalizations.Local.SingleOrDefault(item => item.Id == finalizationId);
+        if (tracked is null) return;
+
+        var entry = db.Entry(tracked);
+        var state = entry.Property(item => item.State);
+        state.CurrentValue = "claimed";
+        state.OriginalValue = "claimed";
+        state.IsModified = false;
+
+        var token = entry.Property(item => item.JobConcurrencyToken);
+        token.CurrentValue = jobConcurrencyToken;
+        token.OriginalValue = jobConcurrencyToken;
+        token.IsModified = false;
+
+        var claimed = entry.Property(item => item.ClaimedAt);
+        claimed.CurrentValue = claimedAt;
+        claimed.OriginalValue = claimedAt;
+        claimed.IsModified = false;
+
+        var expires = entry.Property(item => item.ClaimExpiresAt);
+        expires.CurrentValue = claimExpiresAt;
+        expires.OriginalValue = claimExpiresAt;
+        expires.IsModified = false;
     }
 
     private static ProviderCircuitState ParseState(string state) => state switch

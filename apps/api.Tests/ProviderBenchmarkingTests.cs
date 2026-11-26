@@ -1,5 +1,6 @@
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
+using Npgsql;
 using Taslim.Api.Benchmarking;
 using Taslim.Api.Persistence;
 using Xunit;
@@ -154,6 +155,91 @@ public sealed class ProviderBenchmarkingTests
         await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() => service.UpsertMeasurementAsync(run.Id, scenario.Id, new ProviderBenchmarkMeasurementInput("bad-score", "route", "model", ProviderBenchmarkMeasurementStatus.Succeeded, QualityScore: 101m)));
 
         Assert.Equal(0, await db.ProviderBenchmarkMeasurements.CountAsync());
+    }
+
+    [Fact]
+    public async Task Same_terminal_replay_refreshes_persisted_metadata_before_skipping_validation()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = CreateDb(connection);
+        await db.Database.EnsureCreatedAsync();
+        var service = new ProviderBenchmarkService(db, TimeProvider.System);
+        var run = await service.GetOrCreateRunAsync(new ProviderBenchmarkRunRequest("persisted-replay-001", "provider-benchmark-replay"));
+        var requestedAt = new DateTime(2026, 10, 26, 2, 15, 0, DateTimeKind.Utc).AddTicks(1);
+
+        await service.CompleteRunAsync(run.Id,
+            new ProviderBenchmarkRunCompletion(ProviderBenchmarkRunStatus.Completed, "initial-completion", requestedAt));
+
+        var persistedAt = requestedAt.AddSeconds(1);
+        await using (var writer = CreateDb(connection))
+        {
+            var persisted = await writer.ProviderBenchmarkRuns.SingleAsync(item => item.Id == run.Id);
+            persisted.CompletionCode = "database-completion";
+            persisted.CompletedAt = persistedAt;
+            await writer.SaveChangesAsync();
+        }
+
+        var replay = await service.CompleteRunAsync(run.Id,
+            new ProviderBenchmarkRunCompletion(ProviderBenchmarkRunStatus.Completed, new string('x', 101)));
+
+        Assert.Equal("database-completion", replay.CompletionCode);
+        Assert.Equal(persistedAt, replay.CompletedAt);
+        Assert.Same(db.ProviderBenchmarkRuns.Local.Single(item => item.Id == run.Id), replay);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => service.CompleteRunAsync(run.Id,
+            new ProviderBenchmarkRunCompletion(ProviderBenchmarkRunStatus.Cancelled, new string('x', 101))));
+        await Assert.ThrowsAsync<KeyNotFoundException>(() => service.CompleteRunAsync(Guid.NewGuid(),
+            new ProviderBenchmarkRunCompletion(ProviderBenchmarkRunStatus.Completed, new string('x', 101))));
+        await Assert.ThrowsAsync<ArgumentException>(() => service.CompleteRunAsync(Guid.NewGuid(),
+            new ProviderBenchmarkRunCompletion(ProviderBenchmarkRunStatus.Running, new string('x', 101))));
+    }
+
+    [DisposablePostgresFact]
+    public async Task Completion_and_immediate_replay_return_postgres_persisted_timestamp_precision()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("ConnectionStrings__Postgres")!;
+        var schema = $"benchmark_replay_{Guid.NewGuid():N}";
+        var adminBuilder = new NpgsqlConnectionStringBuilder(connectionString);
+        await using (var admin = new NpgsqlConnection(adminBuilder.ConnectionString))
+        {
+            await admin.OpenAsync();
+            await using var create = admin.CreateCommand();
+            create.CommandText = $"CREATE SCHEMA \"{schema}\"";
+            await create.ExecuteNonQueryAsync();
+        }
+
+        try
+        {
+            var scopedBuilder = new NpgsqlConnectionStringBuilder(connectionString) { SearchPath = schema };
+            var options = new DbContextOptionsBuilder<TaslimDbContext>().UseNpgsql(scopedBuilder.ConnectionString).Options;
+            await using var db = new TaslimDbContext(options);
+            await db.Database.EnsureCreatedAsync();
+            var service = new ProviderBenchmarkService(db, TimeProvider.System);
+            var run = await service.GetOrCreateRunAsync(new ProviderBenchmarkRunRequest(
+                $"postgres-precision-{Guid.NewGuid():N}", "provider-benchmark-replay"));
+            var requestedAt = new DateTime(2026, 10, 26, 2, 30, 0, DateTimeKind.Utc).AddTicks(1);
+
+            var completed = await service.CompleteRunAsync(run.Id,
+                new ProviderBenchmarkRunCompletion(ProviderBenchmarkRunStatus.Completed, "postgres-precision", requestedAt));
+            var persisted = await db.ProviderBenchmarkRuns.AsNoTracking().SingleAsync(item => item.Id == run.Id);
+
+            Assert.NotNull(persisted.CompletedAt);
+            Assert.NotEqual(requestedAt, persisted.CompletedAt.Value);
+            Assert.Equal(persisted.CompletedAt, completed.CompletedAt);
+
+            var replay = await service.CompleteRunAsync(run.Id,
+                new ProviderBenchmarkRunCompletion(ProviderBenchmarkRunStatus.Completed, new string('x', 101)));
+            Assert.Equal(persisted.CompletionCode, replay.CompletionCode);
+            Assert.Equal(persisted.CompletedAt, replay.CompletedAt);
+        }
+        finally
+        {
+            await using var cleanup = new NpgsqlConnection(adminBuilder.ConnectionString);
+            await cleanup.OpenAsync();
+            await using var drop = cleanup.CreateCommand();
+            drop.CommandText = $"DROP SCHEMA IF EXISTS \"{schema}\" CASCADE";
+            await drop.ExecuteNonQueryAsync();
+        }
     }
 
     private static TaslimDbContext CreateDb(SqliteConnection connection) =>
