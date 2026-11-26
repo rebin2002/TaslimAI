@@ -204,6 +204,7 @@ public sealed class MovieStudioV2Controller(IMovieV2Service movies, IMovieScenes
     {
         try { return await action(); }
         catch (MovieV2ValidationException exception) { return ApiResults.Error(this, 400, "MOVIE_V2_REQUEST_INVALID", exception.Message); }
+        catch (MovieV2ConflictException exception) { return ApiResults.Error(this, 409, "MOVIE_V2_CONFLICT", exception.Message); }
         catch (MovieBudgetDirectorValidationException exception) { return ApiResults.Error(this, 400, exception.Code, exception.Message); }
         catch (MovieScenesWorkflowException exception) { return ApiResults.Error(this, 409, exception.Code, exception.Message); }
         catch (MovieFinalMasteringValidationException exception) { return ApiResults.Error(this, 409, exception.Code, exception.Message); }

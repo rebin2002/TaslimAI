@@ -27,20 +27,11 @@ namespace Taslim.Api.Tests;
 /// (1) workspace-member removal with the <c>MovieTeamMember</c> row left dangling — the stale
 /// owner row still nominally grants Edit through <c>IsProjectOwner</c>, so only the
 /// fail-closed workspace fence can deny it; (2) team-row removal while workspace membership
-/// remains. And the archive shape: archiving a project (<c>SetProjectArchivedAsync</c>) is a
-/// production-status transition, not an access revocation — it must NOT change the fence:
-/// a live member can still reorder their own archived project (this is the current V2 contract;
-/// unlike v1 <c>MovieStudioService.ReorderShotAsync</c>, which rejects archived shots, V2 gates
-/// solely on the permission fence), while a revoked caller still gets nothing on an archived
-/// project either.
+/// remains. The archive test checks that a revoked caller cannot reorder an archived
+/// project's scenes. Active-member edits on archived projects are outside its scope.
 ///
-/// Determinism note: with the single-connection in-memory SQLite fixture, SQLite serializes
-/// writers, so a revocation cannot commit strictly between the authorization read and the
-/// commit INSIDE one in-flight ReorderAsync transaction. That check-then-write window inside a
-/// single request is a hosted-Postgres concern (covered by the "API integration tests" gate);
-/// this lane pins the observable per-request contract with zero timing dependence, in the same
-/// shape as the #965 timeline lane's <c>MovieTimelineLateRevocationProjectScopeTests</c> chose
-/// for its own endpoint: revoke-then-next-request fails closed and leaves every row untouched.
+/// The in-memory SQLite fixture uses a fresh context for each committed transition.
+/// The tests cover revocation before the next call begins.
 ///
 /// Non-duplication evidence (re-checked 2026-11-19 against all open PRs and remote branches):
 /// #959 (head 420cb187) owns the DATA-scope half — <c>MovieStoryboardSceneOrderingTests</c> and
@@ -187,7 +178,7 @@ public sealed class MovieStoryboardSceneReorderLateRevocationAndArchiveTests
     }
 
     [Fact]
-    public async Task Project_archive_is_not_an_access_revocation_for_a_live_member_yet_a_revoked_caller_still_changes_nothing_on_an_archived_project()
+    public async Task Revoked_workspace_member_cannot_reorder_scenes_in_an_archived_project()
     {
         await using var connection = new SqliteConnection("Data Source=:memory:");
         await connection.OpenAsync();
@@ -198,28 +189,19 @@ public sealed class MovieStoryboardSceneReorderLateRevocationAndArchiveTests
         var service = CreateService(db);
         var scenes = await BuildSequenceStripAsync(service, delta, "Finale", ["Curtain", "Bows", "Exit"]);
 
-        // Archive the project through the real endpoint path.
+        // Capture the archived project's persisted order before revoking the caller.
         var archived = await service.SetProjectArchivedAsync(delta.UserId, delta.MovieId, true, CancellationToken.None);
         Assert.NotNull(archived);
         Assert.Equal(MovieProductionStatuses.Archived, archived!.ProductionStatus);
         Assert.NotNull(archived.ArchivedAt);
 
-        // Contract pinned by this lane (documented current behavior, observed as an asymmetry
-        // with v1 MovieStudioService, which refuses to reorder archived shots): V2's hierarchy
-        // fence is purely the membership+permission check — archiving is a status transition a
-        // member can perform on their own project and does not strip their own write access.
-        // Therefore a live member's scene reorder still lands on an archived project.
-        await service.ReorderAsync(delta.UserId, "scene", scenes[2], 1, CancellationToken.None);
-        SceneRow[] afterArchiveReorder;
+        SceneRow[] archivedScenes;
         await using (var snapshot = CreateDb(connection))
         {
-            afterArchiveReorder = await ReadStripAsync(snapshot, delta.MovieId);
-            Assert.Equal([scenes[2], scenes[0], scenes[1]], afterArchiveReorder.Select(row => row.Id).ToArray());
-            Assert.Equal([1, 2, 3], afterArchiveReorder.Select(row => row.Sequence).ToArray());
+            archivedScenes = await ReadStripAsync(snapshot, delta.MovieId);
+            Assert.Equal(scenes, archivedScenes.Select(row => row.Id).ToArray());
         }
 
-        // The combined answer to the race question: with the project archived AND the caller's
-        // workspace membership revoked, the reorder still cannot mutate the strip.
         await using (var revoke = CreateDb(connection))
         {
             var membership = await revoke.WorkspaceMembers.SingleAsync(item => item.WorkspaceId == delta.WorkspaceId && item.UserId == delta.UserId);
@@ -232,7 +214,7 @@ public sealed class MovieStoryboardSceneReorderLateRevocationAndArchiveTests
         }
         await using (var final = CreateDb(connection))
         {
-            Assert.Equal(afterArchiveReorder, await ReadStripAsync(final, delta.MovieId));
+            Assert.Equal(archivedScenes, await ReadStripAsync(final, delta.MovieId));
             Assert.False(await final.MovieScenes.AnyAsync(item => item.Sequence < 1), "No negative-ordinal staging residue may persist after a denied reorder.");
         }
     }

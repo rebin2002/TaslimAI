@@ -1,8 +1,17 @@
 using System.Net;
 using System.Net.Http.Json;
+using System.Runtime.CompilerServices;
 using System.Text.Json;
+using System.Threading.RateLimiting;
+using Microsoft.AspNetCore.Hosting;
+using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Mvc.Testing;
+using Microsoft.AspNetCore.RateLimiting;
+using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
+using Taslim.Api.Ai;
 using Taslim.Api.Contracts;
 using Taslim.Api.Domain;
 using Taslim.Api.Persistence;
@@ -10,13 +19,95 @@ using Xunit;
 
 namespace Taslim.Api.Tests;
 
-public sealed class ChatTests : IClassFixture<TaslimApiFactory>
+public sealed class ConcurrentChatApiFactory : WebApplicationFactory<Program>
+{
+    private readonly string databasePath = Path.Combine(Path.GetTempPath(), $"taslim-chat-concurrency-{Guid.NewGuid():N}.db");
+    public BlockingFailureAiProvider Provider { get; } = new();
+
+    public ConcurrentChatApiFactory()
+    {
+        using var connection = new SqliteConnection($"Data Source={databasePath}");
+        connection.Open();
+        using (var pragma = connection.CreateCommand())
+        {
+            pragma.CommandText = "PRAGMA journal_mode=WAL;";
+            pragma.ExecuteNonQuery();
+        }
+        var options = new DbContextOptionsBuilder<TaslimDbContext>().UseSqlite(connection).Options;
+        using var db = new TaslimDbContext(options);
+        db.Database.EnsureCreated();
+    }
+
+    protected override void ConfigureWebHost(IWebHostBuilder builder)
+    {
+        builder.UseEnvironment("Testing");
+        builder.ConfigureServices(services =>
+        {
+            services.RemoveAll<DbContextOptions<TaslimDbContext>>();
+            services.AddDbContext<TaslimDbContext>(options => options.UseSqlite($"Data Source={databasePath};Cache=Shared;Default Timeout=30"));
+            services.RemoveAll<IAiProvider>();
+            services.AddSingleton<IAiProvider>(Provider);
+            services.PostConfigure<RateLimiterOptions>(options =>
+                options.GlobalLimiter = PartitionedRateLimiter.Create<HttpContext, string>(_ => RateLimitPartition.GetNoLimiter("chat-concurrency-test")));
+        });
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        base.Dispose(disposing);
+        if (disposing) File.Delete(databasePath);
+    }
+}
+
+public sealed class BlockingFailureAiProvider : IAiProvider
+{
+    private int failureCalls;
+
+    public string Key => "mock";
+    public TaskCompletionSource RetryEntered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    public TaskCompletionSource ReleaseRetry { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+    public async IAsyncEnumerable<AiStreamEvent> StreamAsync(
+        AiChatRequest request,
+        AiProviderSelection selection,
+        [EnumeratorCancellation] CancellationToken cancellationToken = default)
+    {
+        var latestUserMessage = request.Messages.LastOrDefault(message => string.Equals(message.Role, "user", StringComparison.OrdinalIgnoreCase))?.Content ?? string.Empty;
+        if (latestUserMessage.Contains("[[mock-failure]]", StringComparison.OrdinalIgnoreCase))
+        {
+            if (Interlocked.Increment(ref failureCalls) == 2)
+            {
+                RetryEntered.TrySetResult();
+                await ReleaseRetry.Task.WaitAsync(cancellationToken);
+            }
+
+            throw new MockAiProviderException();
+        }
+
+        yield return new AiMessageDelta("safe test response");
+        yield return new AiMessageCompleted(new AiUsageMetadata(
+            selection.ProviderKey,
+            selection.ModelKey,
+            InputTokens: null,
+            CachedInputTokens: null,
+            OutputTokens: null,
+            EstimatedCost: 0m,
+            ActualCost: 0m,
+            LatencyMs: 0,
+            FinishReason: "mock-complete",
+            IsTestResponse: true));
+    }
+}
+
+public sealed class ChatTests : IClassFixture<TaslimApiFactory>, IClassFixture<ConcurrentChatApiFactory>
 {
     private readonly TaslimApiFactory factory;
+    private readonly ConcurrentChatApiFactory concurrentFactory;
 
-    public ChatTests(TaslimApiFactory factory)
+    public ChatTests(TaslimApiFactory factory, ConcurrentChatApiFactory concurrentFactory)
     {
         this.factory = factory;
+        this.concurrentFactory = concurrentFactory;
         using var scope = factory.Services.CreateScope();
         scope.ServiceProvider.GetRequiredService<TaslimDbContext>().Database.EnsureCreated();
     }
@@ -133,6 +224,26 @@ public sealed class ChatTests : IClassFixture<TaslimApiFactory>
     }
 
     [Fact]
+    public async Task Null_attachment_list_is_treated_as_no_attachments()
+    {
+        using var client = factory.CreateClient();
+        var auth = await Register(client, "Null Attachments Chat Owner");
+        var conversation = await CreateConversation(client, auth.PersonalWorkspace.Id);
+
+        var response = await SendWithCsrf(client, HttpMethod.Post, $"/api/conversations/{conversation.Id}/messages", new
+        {
+            content = "Message without attachments",
+            requestId = Guid.NewGuid().ToString("N"),
+            attachmentIds = (Guid[]?)null,
+        });
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var result = await response.Content.ReadFromJsonAsync<SendMessageResponse>();
+        Assert.NotNull(result);
+        Assert.Equal(ChatMessageStatus.Completed.ToString(), result.AssistantMessage.Status);
+    }
+
+    [Fact]
     public async Task Failed_mock_provider_marks_assistant_message_failed_and_preserves_user_message()
     {
         using var client = factory.CreateClient();
@@ -227,6 +338,65 @@ public sealed class ChatTests : IClassFixture<TaslimApiFactory>
     }
 
     [Fact]
+    public async Task Retrying_a_failed_stream_request_reuses_the_same_assistant_without_duplicate_messages()
+    {
+        using var client = factory.CreateClient();
+        var auth = await Register(client, "Failed Retry Chat Owner");
+        var conversation = await CreateConversation(client, auth.PersonalWorkspace.Id);
+        var requestId = Guid.NewGuid().ToString("N");
+
+        var first = await SendMessage(client, conversation.Id, "[[mock-failure]]", requestId, stream: true);
+        var firstBody = await first.Content.ReadAsStringAsync();
+        Assert.Equal(HttpStatusCode.OK, first.StatusCode);
+        Assert.Contains("event: message.failed", firstBody);
+
+        var retry = await SendMessage(client, conversation.Id, "[[mock-failure]]", requestId, stream: true);
+        var retryBody = await retry.Content.ReadAsStringAsync();
+        Assert.Equal(HttpStatusCode.OK, retry.StatusCode);
+        Assert.Contains("event: message.failed", retryBody);
+
+        var messages = await client.GetFromJsonAsync<List<ChatMessageDto>>($"/api/conversations/{conversation.Id}/messages");
+        Assert.NotNull(messages);
+        Assert.Equal(["User", "Assistant"], messages.Select(message => message.Role));
+        Assert.Equal(["Completed", "Failed"], messages.Select(message => message.Status));
+    }
+
+    [Fact]
+    public async Task Concurrent_failed_retries_have_one_provider_attempt_and_one_in_progress_terminal_event()
+    {
+        using var client = concurrentFactory.CreateClient();
+        var auth = await Register(client, "Concurrent Failed Retry Owner");
+        var conversation = await CreateConversation(client, auth.PersonalWorkspace.Id);
+        var requestId = Guid.NewGuid().ToString("N");
+
+        var initial = await SendMessage(client, conversation.Id, "[[mock-failure]]", requestId, stream: true);
+        Assert.Equal(HttpStatusCode.OK, initial.StatusCode);
+        Assert.Contains("event: message.failed", await initial.Content.ReadAsStringAsync());
+
+        var retries = new[]
+        {
+            SendMessage(client, conversation.Id, "[[mock-failure]]", requestId, stream: true),
+            SendMessage(client, conversation.Id, "[[mock-failure]]", requestId, stream: true),
+        };
+        await concurrentFactory.Provider.RetryEntered.Task.WaitAsync(TimeSpan.FromSeconds(10));
+
+        var completedLoser = await Task.WhenAny(retries);
+        var loserBody = await completedLoser.Result.Content.ReadAsStringAsync();
+        Assert.Equal(HttpStatusCode.OK, completedLoser.Result.StatusCode);
+        Assert.Contains("MESSAGE_IN_PROGRESS", loserBody);
+
+        concurrentFactory.Provider.ReleaseRetry.TrySetResult();
+        var responses = await Task.WhenAll(retries);
+        var bodies = await Task.WhenAll(responses.Select(response => response.Content.ReadAsStringAsync()));
+        Assert.All(bodies, body => Assert.Contains("event: message.failed", body));
+
+        var messages = await client.GetFromJsonAsync<List<ChatMessageDto>>($"/api/conversations/{conversation.Id}/messages");
+        Assert.NotNull(messages);
+        Assert.Equal(["User", "Assistant"], messages.Select(message => message.Role));
+        Assert.Equal(["Completed", "Failed"], messages.Select(message => message.Status));
+    }
+
+    [Fact]
     public async Task Latest_assistant_response_can_be_regenerated_idempotently_without_a_duplicate_user_message()
     {
         using var client = factory.CreateClient();
@@ -276,6 +446,56 @@ public sealed class ChatTests : IClassFixture<TaslimApiFactory>
     }
 
     [Fact]
+    public async Task Concurrent_new_turns_reserve_distinct_message_sequences()
+    {
+        using var client = concurrentFactory.CreateClient();
+        var auth = await Register(client, "Concurrent Ordering Chat Owner");
+        var conversation = await CreateConversation(client, auth.PersonalWorkspace.Id);
+        var csrf = await client.GetFromJsonAsync<JsonElement>("/api/auth/csrf");
+        var csrfToken = csrf.GetProperty("token").GetString()!;
+
+        var responses = await Task.WhenAll(
+            SendConcurrentMessage(client, conversation.Id, "Concurrent first", csrfToken),
+            SendConcurrentMessage(client, conversation.Id, "Concurrent second", csrfToken));
+
+        foreach (var response in responses)
+        {
+            var body = await response.Content.ReadAsStringAsync();
+            Assert.True(response.StatusCode == HttpStatusCode.OK, body);
+        }
+        var messages = await client.GetFromJsonAsync<List<ChatMessageDto>>($"/api/conversations/{conversation.Id}/messages");
+        Assert.NotNull(messages);
+        Assert.Equal(4, messages.Count);
+        Assert.Equal([1L, 2L, 3L, 4L], messages.Select(message => message.Sequence));
+        Assert.Equal(2, messages.Count(message => message.Role == "User"));
+        Assert.Equal(2, messages.Count(message => message.Role == "Assistant"));
+    }
+
+    [Fact]
+    public async Task High_contention_new_turns_eventually_reserve_distinct_message_sequences()
+    {
+        using var client = concurrentFactory.CreateClient();
+        var auth = await Register(client, "High Contention Ordering Chat Owner");
+        var conversation = await CreateConversation(client, auth.PersonalWorkspace.Id);
+        var csrf = await client.GetFromJsonAsync<JsonElement>("/api/auth/csrf");
+        var csrfToken = csrf.GetProperty("token").GetString()!;
+
+        var responses = await Task.WhenAll(Enumerable.Range(1, 9)
+            .Select(index => SendConcurrentMessage(client, conversation.Id, $"Concurrent burst {index}", csrfToken)));
+
+        foreach (var response in responses)
+        {
+            var body = await response.Content.ReadAsStringAsync();
+            Assert.True(response.StatusCode == HttpStatusCode.OK, body);
+        }
+
+        var messages = await client.GetFromJsonAsync<List<ChatMessageDto>>($"/api/conversations/{conversation.Id}/messages");
+        Assert.NotNull(messages);
+        Assert.Equal(18, messages.Count);
+        Assert.Equal(Enumerable.Range(1, 18).Select(value => (long)value), messages.Select(message => message.Sequence));
+    }
+
+    [Fact]
     public async Task Streaming_provider_failure_emits_failed_terminal_event_and_persists_failure()
     {
         using var client = factory.CreateClient();
@@ -316,6 +536,14 @@ public sealed class ChatTests : IClassFixture<TaslimApiFactory>
 
     private static async Task<HttpResponseMessage> SendMessage(HttpClient client, Guid conversationId, string content, string? requestId = null, bool stream = false) =>
         await SendWithCsrf(client, HttpMethod.Post, $"/api/conversations/{conversationId}/messages{(stream ? "/stream" : string.Empty)}", new { content, requestId });
+
+    private static async Task<HttpResponseMessage> SendConcurrentMessage(HttpClient client, Guid conversationId, string content, string csrfToken)
+    {
+        using var request = new HttpRequestMessage(HttpMethod.Post, $"/api/conversations/{conversationId}/messages");
+        request.Headers.Add("X-CSRF-TOKEN", csrfToken);
+        request.Content = JsonContent.Create(new { content, requestId = Guid.NewGuid().ToString("N") });
+        return await client.SendAsync(request);
+    }
 
     private static async Task<T> SendWithCsrf<T>(HttpClient client, HttpMethod method, string path, object? payload)
     {
