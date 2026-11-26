@@ -40,11 +40,13 @@ Taslim uses three internal tiers:
 | Smart | `gpt-5.6-terra` | Not exposed; default |
 | Advanced | `gpt-5.6-sol` | Not exposed |
 
-The default is configured with `Ai__DefaultChatTier=Smart`. The current router is deterministic and configuration-driven. It is intentionally not an automatic classifier. A future router can analyze task characteristics while retaining the same contract.
+The default is configured with `Ai__DefaultChatTier=Smart`. Chat output is bounded by the server-side `Ai__MaxChatOutputTokens` setting, which defaults to 2,048 and is clamped to 256–16,000 before a provider request is built. The Production configuration file declares `Ai:MaxChatOutputTokens` explicitly at the same value as the code default, so the live production cap is visible in the repository and can be raised or lowered through the `Ai__MaxChatOutputTokens` environment variable without a code change. The current router is deterministic and configuration-driven. It is intentionally not an automatic classifier. A future router can analyze task characteristics while retaining the same contract.
 
 ## OpenAI adapter
 
-`OpenAiProvider` is registered behind `IAiProvider`. It calls the official Responses API at the configured server-side base URL, sends the authoritative `instructions` value, passes original Unicode conversation content unchanged, requests `stream: true`, and converts OpenAI SSE events into Taslim events. It recognizes `response.output_text.delta`, `response.completed`, and provider error/failure events.
+`OpenAiProvider` is registered behind `IAiProvider`. It calls the official Responses API at the configured server-side base URL, sends the authoritative `instructions` value, passes original Unicode conversation content unchanged, requests `stream: true`, and converts OpenAI SSE events into Taslim events. It recognizes `response.output_text.delta`, `response.completed`, `response.incomplete`, and provider error/failure events.
+
+A `response.incomplete` terminal is a truncated success only when the provider has already delivered useful, non-whitespace assistant text. Those partial deltas remain the assistant response, the turn completes normally, and the finish reason is normalized to `incomplete:max_output_tokens`, `incomplete:content_filter`, or bare `incomplete` for an unknown/missing reason. An incomplete result with no useful output (for example, an empty filtered response) is undelivered: the assistant is marked `Failed`, the transaction follows the existing non-billable failure path, and provider usage is retained when available so the ledger can preserve known provider cost. Raw provider status/reason text is never persisted. A stream that closes without any terminal `response.completed`/`response.incomplete` event stays on the malformed-response failure path.
 
 The OpenAI API key is read only from `Ai__OpenAI__ApiKey` on the API service. It is never sent to the browser, compiled into Next.js, returned in a response, or written to logs. Provider errors are logged with provider/model identifiers and trace context, never with authorization headers or response secrets.
 
@@ -123,11 +125,11 @@ Regeneration is limited to the latest completed assistant response for a new req
 
 ## Usage and cost accounting
 
-The OpenAI adapter captures input tokens, cached input tokens where supplied, output tokens, latency, and finish status from the provider response. The AI Core calculates internal estimated/actual cost from the configuration-backed catalog. No fabricated usage is stored when a provider fails, and no user billing or credit deduction occurs.
+The OpenAI adapter captures input tokens, cached input tokens where supplied, output tokens, latency, and normalized finish status from the provider response. The AI Core and existing usage ledger calculate internal estimated/actual provider cost from the configuration-backed catalog. A failed response can retain provider-reported usage when available; no usage is fabricated, and failed transactions are never customer-billable.
 
 ## Failure, timeout, and cancellation behavior
 
-Provider requests use a bounded timeout configured by `Ai__ProviderTimeoutSeconds`. If the provider returns an error, times out, or emits a failure event, the API logs safe diagnostics, marks the pending assistant message as `Failed`, preserves the user message, and emits/returns `AI_GENERATION_FAILED`. If the browser disconnects, the linked cancellation token stops the provider stream and the persistence cleanup path marks the assistant failure state. No failed request is silently converted into a simulated response.
+Provider requests use a bounded timeout configured by `Ai__ProviderTimeoutSeconds`. If the provider returns an error, times out, emits a failure event, or ends incomplete without useful output, the API logs safe diagnostics, marks the pending assistant message as `Failed`, preserves the user message, and emits/returns `AI_GENERATION_FAILED`. When a failure includes provider usage, the existing ledger can retain its estimated provider cost while keeping customer charge at zero. If the browser disconnects, the linked cancellation token stops the provider stream and the persistence cleanup path marks the assistant failure state. No failed request is silently converted into a simulated response. Useful partial text cut short by the configured output budget remains a successful truncated completion with an `incomplete:*` finish reason.
 
 ## Security and privacy boundaries
 
@@ -143,6 +145,7 @@ The API service requires these Railway variables:
 Ai__OpenAI__Enabled=true
 Ai__OpenAI__ApiKey=<SECRET>
 Ai__DefaultChatTier=Smart
+Ai__MaxChatOutputTokens=2048
 ```
 
 The optional base URL is already defaulted to `https://api.openai.com/v1`; set `Ai__OpenAI__BaseUrl` only when a compatible server-side endpoint is intentionally used. Put these variables only on **Taslim API**, never on Taslim Web. The EF migrations `AddChatUsageAndIdempotency` and `AddDeterministicChatMessageOrdering` are applied through the existing Production startup migration runner.
