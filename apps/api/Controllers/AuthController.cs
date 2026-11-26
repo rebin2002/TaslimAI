@@ -84,16 +84,16 @@ public sealed class AuthController(
             return ApiResults.Validation(this, "Please enter a valid email address.");
 
         var requestTimer = Stopwatch.StartNew();
-        var user = await userManager.FindByEmailAsync(request.Email.Trim());
-        if (user is null || !user.IsActive)
-            return await PasswordResetRequestAcceptedAsync(requestTimer, cancellationToken);
-
         try
         {
-            await passwordResetOutbox.TryQueueAsync(
-                user.Id,
-                TimeSpan.FromMinutes(options.RequestCooldownMinutes),
-                cancellationToken);
+            var user = await userManager.FindByEmailAsync(request.Email.Trim());
+            if (user is not null && user.IsActive)
+            {
+                await passwordResetOutbox.TryQueueAsync(
+                    user.Id,
+                    TimeSpan.FromMinutes(options.RequestCooldownMinutes),
+                    cancellationToken);
+            }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -101,15 +101,12 @@ public sealed class AuthController(
         }
         catch (Exception exception)
         {
-            // Queuing is the only step that runs for an existing account and not for
-            // an unknown one, so an unmasked outbox or storage fault (missing table,
-            // unapplied migration, permission loss, constraint clash) answers 500 for
-            // exactly one class of address and becomes an account-enumeration oracle
-            // during an outage. The response is the same masked 202 as the unknown
-            // path; the fault is recorded server-side as a stable classification only,
-            // never an address, token or provider message.
+            // Lookup and queueing are account-dependent service work. Mask either
+            // failure behind the same generic acceptance used for unknown addresses;
+            // record only a stable classification, never an address, token or provider
+            // message. Request cancellation remains observable to the caller.
             logger.LogError(
-                "Password reset request queueing failed. TraceId={TraceId}; ErrorType={ErrorType}",
+                "Password reset request processing failed. TraceId={TraceId}; ErrorType={ErrorType}",
                 HttpContext.TraceIdentifier,
                 exception.GetType().Name);
         }

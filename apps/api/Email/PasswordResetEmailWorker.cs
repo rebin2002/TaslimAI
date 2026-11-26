@@ -146,6 +146,18 @@ public sealed class PasswordResetEmailWorker(
             var token = await userManager.GeneratePasswordResetTokenAsync(user);
             var resetUrl = PasswordResetLinkBuilder.Build(options.PublicBaseUrl, user.Email, token, user.PreferredLanguage);
             var email = PasswordResetEmailTemplate.Create(user.PreferredLanguage, resetUrl);
+
+            // Token generation can take long enough for a newer request or a completed
+            // reset to supersede this claim. Recheck immediately before the external
+            // handoff so that window does not produce an obsolete message. This read
+            // cannot be atomic with SMTP acceptance; delivery remains at-least-once.
+            if (await outbox.IsClaimSupersededAsync(userId, claimedLastRequestedAt, cancellationToken))
+            {
+                logger.LogInformation("Password reset delivery claim superseded before SMTP handoff; message not sent.");
+                db.Entry(entry).State = EntityState.Detached;
+                return;
+            }
+
             await emailSender.SendAsync(user.Email, email.Subject, email.Body, cancellationToken);
 
             entry.Status = PasswordResetDeliveryStates.Delivered;

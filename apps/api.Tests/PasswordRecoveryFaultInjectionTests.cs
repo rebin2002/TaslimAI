@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Data.Common;
 using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
@@ -7,6 +8,7 @@ using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Diagnostics;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
@@ -22,10 +24,10 @@ namespace Taslim.Api.Tests;
 
 /// <summary>
 /// Fault-injection evidence for the recovery paths that only misbehave when a
-/// dependency fails: the outbox storage outage that turned account existence into
-/// an observable difference, the pending-reset supersede rule, and the scope of the
-/// recovery token lifetime. Every case here runs against the real controller,
-/// worker service and Identity stack over a disposable SQLite database.
+/// dependency fails: lookup/outbox faults that could expose account existence, the
+/// pending-reset supersede rule, and the scope of the recovery token lifetime. Every
+/// case here runs against the real controller, worker service and Identity stack over
+/// a disposable SQLite database.
 /// </summary>
 public sealed class PasswordRecoveryFaultInjectionTests
 {
@@ -54,12 +56,43 @@ public sealed class PasswordRecoveryFaultInjectionTests
             .Where(entry => entry.Level >= LogLevel.Error)
             .Select(entry => entry.Message)
             .ToList();
-        Assert.Contains(errors, message => message.Contains("Password reset request queueing failed", StringComparison.Ordinal));
+        Assert.Contains(errors, message => message.Contains("Password reset request processing failed", StringComparison.Ordinal));
         Assert.Contains(errors, message => message.Contains("ErrorType=", StringComparison.Ordinal));
 
         // ...and nothing about the account, the address or a token reaches the log.
         Assert.DoesNotContain(errors, message => message.Contains(email, StringComparison.OrdinalIgnoreCase));
         Assert.DoesNotContain(factory.Logs.Entries, entry => entry.Message.Contains("token=", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public async Task Forgot_masks_a_user_lookup_fault_behind_the_same_generic_acceptance()
+    {
+        var email = $"lookup-fault-{Guid.NewGuid():N}@example.test";
+        using var factory = new FaultInjectionApiFactory(failLookupForEmail: email);
+        await CreateActiveUserAsync(factory, email);
+        factory.ArmLookupFault();
+        using var knownClient = factory.CreateClient();
+        using var unknownClient = factory.CreateClient();
+        var knownCsrf = await GetCsrfAsync(knownClient);
+        var unknownCsrf = await GetCsrfAsync(unknownClient);
+
+        using var known = await SendForgotAsync(knownClient, knownCsrf, email);
+        using var unknown = await SendForgotAsync(unknownClient, unknownCsrf, $"missing-{Guid.NewGuid():N}@example.test");
+
+        Assert.Equal(HttpStatusCode.Accepted, known.StatusCode);
+        Assert.Equal(HttpStatusCode.Accepted, unknown.StatusCode);
+        Assert.Equal(await known.Content.ReadAsStringAsync(), await unknown.Content.ReadAsStringAsync());
+        Assert.Equal(0, factory.Sender.SendCount);
+
+        var errors = factory.Logs.Entries
+            .Where(entry => entry.Category.StartsWith("Taslim.Api.Controllers.AuthController", StringComparison.Ordinal))
+            .Where(entry => entry.Level >= LogLevel.Error)
+            .Select(entry => entry.Message)
+            .ToList();
+        Assert.Contains(errors, message => message.Contains("Password reset request processing failed", StringComparison.Ordinal));
+        Assert.Contains(errors, message => message.Contains("ErrorType=InvalidOperationException", StringComparison.Ordinal));
+        Assert.DoesNotContain(errors, message => message.Contains(email, StringComparison.OrdinalIgnoreCase));
+        Assert.DoesNotContain(errors, message => message.Contains("Synthetic user lookup failure", StringComparison.Ordinal));
     }
 
     [Fact]
@@ -248,9 +281,9 @@ public sealed class PasswordRecoveryFaultInjectionTests
             resetToken));
     }
 
-    private static async Task<string> CreateActiveUserAsync(FaultInjectionApiFactory factory)
+    private static async Task<string> CreateActiveUserAsync(FaultInjectionApiFactory factory, string? requestedEmail = null)
     {
-        var email = $"fault-{Guid.NewGuid():N}@example.test";
+        var email = requestedEmail ?? $"fault-{Guid.NewGuid():N}@example.test";
         await using var scope = factory.Services.CreateAsyncScope();
         var userManager = scope.ServiceProvider.GetRequiredService<UserManager<ApplicationUser>>();
         var now = DateTime.UtcNow;
@@ -330,13 +363,17 @@ public sealed class PasswordRecoveryFaultInjectionTests
     {
         private readonly string databasePath = Path.Combine(Path.GetTempPath(), $"taslim-recovery-fault-{Guid.NewGuid():N}.db");
         private readonly bool outboxStorageUnavailable;
+        private readonly FaultingUserLookupInterceptor userLookupInterceptor;
         public string ConnectionString { get; }
         public FaultRecordingEmailSender Sender { get; } = new();
         public CapturingLoggerProvider Logs { get; } = new();
 
-        public FaultInjectionApiFactory(bool outboxStorageUnavailable = false)
+        public void ArmLookupFault() => userLookupInterceptor.Arm();
+
+        public FaultInjectionApiFactory(bool outboxStorageUnavailable = false, string? failLookupForEmail = null)
         {
             this.outboxStorageUnavailable = outboxStorageUnavailable;
+            userLookupInterceptor = new FaultingUserLookupInterceptor(failLookupForEmail);
             ConnectionString = new SqliteConnectionStringBuilder
             {
                 DataSource = databasePath,
@@ -372,7 +409,7 @@ public sealed class PasswordRecoveryFaultInjectionTests
             builder.ConfigureServices(services =>
             {
                 services.RemoveAll<DbContextOptions<TaslimDbContext>>();
-                services.AddDbContext<TaslimDbContext>(options => options.UseSqlite(ConnectionString));
+                services.AddDbContext<TaslimDbContext>(options => options.UseSqlite(ConnectionString).AddInterceptors(userLookupInterceptor));
                 services.RemoveAll<IEmailSender>();
                 services.AddSingleton<IEmailSender>(Sender);
                 services.AddSingleton<ILoggerProvider>(Logs);
@@ -395,6 +432,29 @@ public sealed class PasswordRecoveryFaultInjectionTests
                 try { File.Delete(databasePath + suffix); }
                 catch (IOException) { }
             }
+        }
+    }
+
+    private sealed class FaultingUserLookupInterceptor(string? failureEmail) : DbCommandInterceptor
+    {
+        private int armed;
+
+        public void Arm() => Interlocked.Exchange(ref armed, 1);
+
+        public override ValueTask<InterceptionResult<DbDataReader>> ReaderExecutingAsync(
+            DbCommand command,
+            CommandEventData eventData,
+            InterceptionResult<DbDataReader> result,
+            CancellationToken cancellationToken = default)
+        {
+            var isUserLookup = command.CommandText.Contains("AspNetUsers", StringComparison.OrdinalIgnoreCase)
+                && command.Parameters.Cast<DbParameter>().Any(parameter =>
+                    parameter.Value is string value
+                    && string.Equals(value, failureEmail, StringComparison.OrdinalIgnoreCase));
+            if (Volatile.Read(ref armed) == 1 && !string.IsNullOrWhiteSpace(failureEmail) && isUserLookup)
+                throw new InvalidOperationException("Synthetic user lookup failure.");
+
+            return base.ReaderExecutingAsync(command, eventData, result, cancellationToken);
         }
     }
 

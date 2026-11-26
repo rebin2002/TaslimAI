@@ -84,6 +84,52 @@ public sealed class PasswordResetEmailWorkerConcurrencyTests
     }
 
     [Fact]
+    public async Task Newer_request_during_token_generation_is_rechecked_before_fake_smtp_handoff()
+    {
+        var tokenProvider = new BlockingResetTokenProvider();
+        using var factory = new WorkerTestApiFactory(tokenProvider);
+        var sender = new ControlledEmailSender((controlled, _, _, _) =>
+        {
+            controlled.RecordAcceptedDelivery();
+            return Task.CompletedTask;
+        });
+        var logger = new CapturingWorkerLogger();
+        var userId = await CreateUserAndQueueAsync(factory);
+        var worker = CreateWorker(factory, sender, logger);
+        var workerStarted = false;
+
+        try
+        {
+            await worker.StartAsync(CancellationToken.None);
+            workerStarted = true;
+            await tokenProvider.GenerationStarted.Task.WaitAsync(WaitLimit);
+
+            await using (var scope = factory.Services.CreateAsyncScope())
+            {
+                var outbox = scope.ServiceProvider.GetRequiredService<PasswordResetOutboxService>();
+                Assert.True(await outbox.TryQueueAsync(userId, TimeSpan.Zero, CancellationToken.None));
+            }
+
+            tokenProvider.ReleaseGeneration.TrySetResult(true);
+            await logger.FirstMessageLogged.Task.WaitAsync(WaitLimit);
+            await StopWorkerAsync(worker);
+            workerStarted = false;
+
+            var current = await ReadEntryAsync(factory, userId);
+            Assert.Equal(PasswordResetDeliveryStates.Pending, current.Status);
+            Assert.Equal(0, current.AttemptCount);
+            Assert.Null(current.LeaseExpiresAt);
+            Assert.Equal(0, sender.Attempts);
+            Assert.Equal(0, sender.AcceptedDeliveries);
+        }
+        finally
+        {
+            tokenProvider.ReleaseGeneration.TrySetResult(true);
+            if (workerStarted) await StopWorkerAsync(worker);
+        }
+    }
+
+    [Fact]
     public async Task Transient_smtp_failure_is_sanitized_and_a_due_retry_delivers_once()
     {
         using var factory = CreateFactoryWithDefaultWorkerDisabled();
@@ -315,9 +361,11 @@ public sealed class PasswordResetEmailWorkerConcurrencyTests
             $"taslim-password-reset-worker-{Guid.NewGuid():N}.sqlite");
         private readonly string connectionString;
         private readonly RecordingEmailSender backgroundEmailSender = new();
+        private readonly BlockingResetTokenProvider? resetTokenProvider;
 
-        public WorkerTestApiFactory()
+        public WorkerTestApiFactory(BlockingResetTokenProvider? resetTokenProvider = null)
         {
+            this.resetTokenProvider = resetTokenProvider;
             backgroundEmailSender.SetConfigured(false);
             connectionString = new SqliteConnectionStringBuilder
             {
@@ -353,6 +401,13 @@ public sealed class PasswordResetEmailWorkerConcurrencyTests
                 services.AddDbContext<TaslimDbContext>(options => options.UseSqlite(connectionString));
                 services.RemoveAll<IEmailSender>();
                 services.AddSingleton<IEmailSender>(backgroundEmailSender);
+                if (resetTokenProvider is not null)
+                {
+                    services.AddSingleton(resetTokenProvider);
+                    services.Configure<IdentityOptions>(options =>
+                        options.Tokens.ProviderMap[PasswordResetTokenProviderOptions.ProviderName] =
+                            new TokenProviderDescriptor(typeof(BlockingResetTokenProvider)));
+                }
             });
         }
 
@@ -361,6 +416,25 @@ public sealed class PasswordResetEmailWorkerConcurrencyTests
             base.Dispose(disposing);
             if (disposing && File.Exists(databasePath)) File.Delete(databasePath);
         }
+    }
+
+    private sealed class BlockingResetTokenProvider : IUserTwoFactorTokenProvider<ApplicationUser>
+    {
+        public TaskCompletionSource<bool> GenerationStarted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource<bool> ReleaseGeneration { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public async Task<string> GenerateAsync(string purpose, UserManager<ApplicationUser> manager, ApplicationUser user)
+        {
+            GenerationStarted.TrySetResult(true);
+            await ReleaseGeneration.Task;
+            return "synthetic-reset-token";
+        }
+
+        public Task<bool> ValidateAsync(string purpose, string token, UserManager<ApplicationUser> manager, ApplicationUser user) =>
+            Task.FromResult(false);
+
+        public Task<bool> CanGenerateTwoFactorTokenAsync(UserManager<ApplicationUser> manager, ApplicationUser user) =>
+            Task.FromResult(false);
     }
 
     private sealed class ControlledEmailSender(
