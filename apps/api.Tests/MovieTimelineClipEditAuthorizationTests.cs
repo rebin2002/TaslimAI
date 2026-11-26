@@ -114,6 +114,80 @@ public sealed class MovieTimelineClipEditAuthorizationTests : IClassFixture<Tasl
         Assert.Equal(1, await ReadTimelineVersionAsync(world.TimelineId));
     }
 
+    [Fact]
+    public async Task EmptyProjectIdIsDeniedAndMalformedProjectIdReturnsNotFoundWithoutMutation()
+    {
+        var world = await CreateWorldAsync("clip-edit-invalid-project-id");
+        var request = BuildTransitionEditRequest(world.TimelineId, world.ShotIds, 1);
+        const string emptyProjectPath = "/api/movie-studio/projects/00000000-0000-0000-0000-000000000000/timeline/transition-edits";
+
+        using (var emptyIdResponse = await SendWithCsrfAsync(world.Editor, HttpMethod.Post, emptyProjectPath, request))
+        {
+            Assert.Equal(HttpStatusCode.Forbidden, emptyIdResponse.StatusCode);
+            var body = await emptyIdResponse.Content.ReadFromJsonAsync<JsonElement>();
+            Assert.Equal("MOVIE_PERMISSION_DENIED", body.GetProperty("error").GetProperty("code").GetString());
+        }
+
+        // A syntactically invalid route id cannot match the GUID-constrained API route.
+        using (var malformedIdResponse = await SendWithCsrfAsync(
+                   world.Editor,
+                   HttpMethod.Post,
+                   "/api/movie-studio/projects/not-a-guid/timeline/transition-edits",
+                   request))
+        {
+            Assert.Equal(HttpStatusCode.NotFound, malformedIdResponse.StatusCode);
+            Assert.True((int)malformedIdResponse.StatusCode < 500);
+        }
+
+        Assert.Equal(0, await CountEditsAsync(world.TimelineId));
+        Assert.Equal(1, await ReadTimelineVersionAsync(world.TimelineId));
+    }
+
+    [Fact]
+    public async Task EmptyTimelineIdIsRejectedAsAClientErrorWithoutMutation()
+    {
+        var world = await CreateWorldAsync("clip-edit-empty-timeline-id");
+        var request = BuildTransitionEditRequest(world.TimelineId, world.ShotIds, 1);
+        request.Timeline = request.Timeline with { TimelineId = Guid.Empty };
+
+        using var response = await SendWithCsrfAsync(
+            world.Editor,
+            HttpMethod.Post,
+            $"/api/movie-studio/projects/{world.MovieProjectId}/timeline/transition-edits",
+            request);
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        var body = await response.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal("TIMELINE_EDIT_TARGET_INVALID", body.GetProperty("error").GetProperty("code").GetString());
+        Assert.Equal(0, await CountEditsAsync(world.TimelineId));
+        Assert.Equal(1, await ReadTimelineVersionAsync(world.TimelineId));
+    }
+
+    [Fact]
+    public async Task EmptyClipIdIsRejectedAsAClientErrorWithoutMutation()
+    {
+        var world = await CreateWorldAsync("clip-edit-empty-clip-id");
+        var request = BuildTransitionEditRequest(world.TimelineId, world.ShotIds, 1);
+        request.Timeline = request.Timeline with
+        {
+            Clips = request.Timeline.Clips
+                .Select((clip, index) => index == 0 ? clip with { ClipId = Guid.Empty } : clip)
+                .ToArray(),
+        };
+
+        using var response = await SendWithCsrfAsync(
+            world.Editor,
+            HttpMethod.Post,
+            $"/api/movie-studio/projects/{world.MovieProjectId}/timeline/transition-edits",
+            request);
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        var body = await response.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal("TIMELINE_CLIP_ID_REQUIRED", body.GetProperty("error").GetProperty("code").GetString());
+        Assert.Equal(0, await CountEditsAsync(world.TimelineId));
+        Assert.Equal(1, await ReadTimelineVersionAsync(world.TimelineId));
+    }
+
     private sealed record World(
         HttpClient Owner,
         HttpClient Viewer,
