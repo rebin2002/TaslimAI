@@ -70,7 +70,7 @@ export function AcademicChaptersPanel({ chapters, level, wordCountLimit, onChang
                   id={`${chapter.id}-title`}
                   className={`${styles.control} ${styles.chapterTitle}`}
                   type="text"
-                  maxLength={160}
+                  maxLength={200}
                   value={chapter.title}
                   onChange={(event) => patch(chapter.id, { title: event.target.value, fromTemplate: template.includes(event.target.value) })}
                 />

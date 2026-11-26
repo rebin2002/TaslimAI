@@ -2,6 +2,7 @@ import { createSseParser, type TaslimSseEvent } from "./sse";
 import { API_URL, assetFileUrl, assetRepresentationUrl } from "./apiBase";
 import { awaitWithChatStreamWatchdog, CHAT_STREAM_WATCHDOG_TIMEOUT_MS, ChatStreamTransportError } from "./chatStreamTransport";
 import { collectAllProjectPages } from "./projectListPagination";
+import { isAbortError } from "./requestLifecycle";
 import {
   isIdempotentRead,
   isThrottleRetryStatus,
@@ -42,7 +43,6 @@ export type PasswordPolicy = {
   requireNonAlphanumeric: boolean;
   requiredUniqueChars: number;
 };
-
 export type Project = {
   id: string;
   workspaceId: string;
@@ -67,6 +67,8 @@ export type ProjectOverview = {
 
 export type RegisterInput = { displayName: string; email: string; password: string; preferredLanguage?: string };
 export type LoginInput = { email: string; password: string };
+export type PasswordResetRequestInput = { email: string };
+export type PasswordResetInput = { email: string; token: string; newPassword: string };
 export type OnboardingIntent = "project" | "chat" | "image" | "document" | "presentation" | "research";
 export type OnboardingInput = {
   displayName?: string;
@@ -724,6 +726,149 @@ export type ResearchSource = {
   evidence?: ResearchEvidence[];
 };
 export type ResearchEvidence = { topic: string; excerpt: string; context: string | null; publishedAt: string | null };
+// Issue #1267 slice 1 — scholarly source discovery. The shape mirrors the API's customer-facing
+// DTO exactly: there is no provider, model, routing or cost field to receive, and `accessLevel`
+// describes what this service holds (metadata or an abstract), never what the student has read.
+export type AcademicSearchSource = {
+  title: string;
+  authors: string[];
+  publicationYear: number | null;
+  sourceType: string;
+  containerTitle: string | null;
+  publisher: string | null;
+  volume: string | null;
+  issue: string | null;
+  pageRange: string | null;
+  pageCount: number | null;
+  language: string | null;
+  citationCount: number | null;
+  doi: string | null;
+  isbn13: string | null;
+  isbn10: string | null;
+  abstract: string | null;
+  publisherDescription: string | null;
+  landingUrl: string | null;
+  fullTextUrl: string | null;
+  accessLevel: "metadata" | "abstract";
+  fullTextIndicated: boolean;
+  provenance: { basis: string; retrievedAtUtc: string; accessDescription: string };
+  relevance: number | null;
+};
+export type AcademicDoiCheck = { submittedDoi: string; isRegistered: boolean; failureCode: string | null };
+export type AcademicSourceSearchResponse = {
+  workspaceId: string;
+  page: number;
+  pageSize: number;
+  totalMatched: number;
+  hasMore: boolean;
+  partial: boolean;
+  partialNotice: string | null;
+  sources: AcademicSearchSource[];
+  doiChecks: AcademicDoiCheck[];
+};
+export type AcademicSourceSearchParams = {
+  term: string;
+  page: number;
+  pageSize: number;
+  yearFrom?: number | null;
+  yearTo?: number | null;
+  openAccessOnly?: boolean;
+  dois?: string[];
+  isbns?: string[];
+};
+export type AcademicProjectSummary = {
+  projectId: string;
+  workspaceId: string;
+  requestKey: string;
+  researchQuestion: string;
+  discipline: string;
+  level: string;
+  state: string;
+  stateCode: string | null;
+  revision: number;
+  createdAtUtc: string;
+  updatedAtUtc: string;
+};
+export type AcademicProjectStage = {
+  stage: string;
+  state: string;
+  attemptCount: number;
+  outputCheckpointRevision: number | null;
+  lastErrorCode: string | null;
+  lastErrorDetail: string | null;
+  startedAtUtc: string | null;
+  completedAtUtc: string | null;
+};
+export type AcademicProjectApproval = { kind: string; checkpointRevision: number; requestedAtUtc?: string; decision?: string; notes?: string | null; decidedAtUtc?: string };
+export type AcademicSearchSpecification = { collection: string; query: string; filters: string[] };
+export type AcademicResearchPlan = {
+  planVersion: number;
+  researchQuestion: string;
+  workingTitle: string | null;
+  level: string;
+  method: string;
+  methodologies: string[];
+  citationStyle: string;
+  objectives: string[];
+  inclusionCriteria: string[];
+  exclusionCriteria: string[];
+  searchStrategy: AcademicSearchSpecification[];
+  chapterOutline: string[];
+  geographicScope: string | null;
+  populationOrContext: string | null;
+  timePeriod: string | null;
+  subQuestions: string[];
+  keywords: string[];
+  minimumSources: number | null;
+  minimumPeerReviewed: number | null;
+  allowedSourceTypes: string[];
+  requireFullText: boolean;
+  programmeRequirements: string | null;
+};
+export type AcademicProjectDto = {
+  project: AcademicProjectSummary;
+  stages: AcademicProjectStage[];
+  activeAttemptId: string | null;
+  pendingApproval: { kind: string; approvalKey: string; checkpointRevision: number; requestedAtUtc: string; reviewerPrompts: string[] } | null;
+  approvals: AcademicProjectApproval[];
+  usage: { spentUsd: number; ceilingUsd: number; remainingUsd: number; callsUsed: number; callCeiling: number; callsRemaining: number };
+  connectedStages: string[];
+  missingStages: string[];
+  evidenceCurrent: boolean;
+  planVersion: number;
+  sourceCount: number;
+  includedCount: number;
+  excludedCount: number;
+  undeterminedCount: number;
+  evidenceCount: number;
+  themeCount: number;
+  chapterCount: number;
+  verification: unknown | null;
+  plan?: AcademicResearchPlan | null;
+  code: string | null;
+};
+export type AcademicProjectCreateInput = {
+  requestKey: string;
+  researchQuestion: string;
+  discipline: string;
+  level: "Masters" | "Doctoral";
+  method: string;
+  methodologies: string[];
+  citationStyle: string;
+  language: string;
+  targetChapterHeadings: string[];
+  workingTitle: string | null;
+  geographicScope: string | null;
+  populationOrContext: string | null;
+  timePeriod: string | null;
+  subQuestions: string[];
+  keywords: string[];
+  minimumSources: number | null;
+  minimumPeerReviewed: number | null;
+  allowedSourceTypes: string[];
+  requireFullText: boolean;
+  programmeRequirements: string | null;
+};
 export type AssetStatus = "Active" | "Archived";
 export type AssetType = "image" | "document" | "presentation" | "video" | "audio" | "music" | "research" | "social" | "file" | "other";
 export type Asset = {
@@ -779,7 +924,13 @@ async function csrf(forceRefresh = false) {
     // token: an auth transition may have changed the antiforgery user binding
     // while the earlier request was still completing.
     if (forceRefresh && csrfRequest) await csrfRequest.catch(() => undefined);
-    const response = await fetch(`${API_URL}/api/auth/csrf`, { credentials: "include", cache: "no-store" });
+    let response: Response;
+    try {
+      response = await fetch(`${API_URL}/api/auth/csrf`, { credentials: "include", cache: "no-store" });
+    } catch (error) {
+      if (isAbortError(error)) throw error;
+      throw new ApiError(503, "The service is temporarily unavailable. Please try again.", undefined, "NETWORK_ERROR");
+    }
     if (!response.ok) throw new Error("CSRF token unavailable");
     const body = await response.json().catch(() => null) as { token?: unknown } | null;
     if (!body || typeof body.token !== "string" || body.token.length === 0) throw new Error("CSRF token unavailable");
@@ -817,7 +968,13 @@ async function request<T>(path: string, init: RequestInit = {}, withCsrf = false
   const headers = new Headers(init.headers);
   headers.set("Content-Type", "application/json");
   if (withCsrf) headers.set("X-CSRF-TOKEN", csrfToken ?? await csrf());
-  const response = await fetch(`${API_URL}${path}`, { ...init, headers, credentials: "include" });
+  let response: Response;
+  try {
+    response = await fetch(`${API_URL}${path}`, { ...init, headers, credentials: "include" });
+  } catch (error) {
+    if (isAbortError(error)) throw error;
+    throw new ApiError(503, "The service is temporarily unavailable. Please try again.", undefined, "NETWORK_ERROR");
+  }
   // Recorded before any early return, so a caller learns the revision the
   // server committed even when the answer is a 204 or a 409 rather than a body.
   if (revision) revision.etag = response.headers.get("ETag");
@@ -860,7 +1017,13 @@ async function request<T>(path: string, init: RequestInit = {}, withCsrf = false
 async function requestForm<T>(path: string, form: FormData, withCsrf = false, retryCsrf = true): Promise<T> {
   const headers = new Headers();
   if (withCsrf) headers.set("X-CSRF-TOKEN", csrfToken ?? await csrf());
-  const response = await fetch(`${API_URL}${path}`, { method: "POST", headers, credentials: "include", body: form });
+  let response: Response;
+  try {
+    response = await fetch(`${API_URL}${path}`, { method: "POST", headers, credentials: "include", body: form });
+  } catch (error) {
+    if (isAbortError(error)) throw error;
+    throw new ApiError(503, "The service is temporarily unavailable. Please try again.", undefined, "NETWORK_ERROR");
+  }
   const body = await response.json().catch(() => null) as T & ErrorBody | null;
   if (!response.ok) {
     if (response.status === 400 && withCsrf && retryCsrf && body?.error?.code === "CSRF_VALIDATION_FAILED") {
@@ -1221,6 +1384,8 @@ export type MovieCollaboration = { movieProjectId: string; team: MovieTeamMember
 export const api = {
   me: () => request<AuthResponse>("/api/auth/me"),
   passwordPolicy: () => request<PasswordPolicy>("/api/auth/password-policy"),
+  requestPasswordReset: (input: PasswordResetRequestInput) => request<{ message: string }>("/api/auth/password/forgot", { method: "POST", body: JSON.stringify(input) }, true),
+  resetPassword: (input: PasswordResetInput) => request<{ success: boolean }>("/api/auth/password/reset", { method: "POST", body: JSON.stringify(input) }, true),
   register: async (input: RegisterInput) => { const result = await request<AuthResponse>("/api/auth/register", { method: "POST", body: JSON.stringify(input) }, true); csrfToken = null; clearMovieWorkspaceRequests(); await csrf(true); return result; },
   login: async (input: LoginInput) => { const result = await request<AuthResponse>("/api/auth/login", { method: "POST", body: JSON.stringify(input) }, true); csrfToken = null; await csrf(true); return result; },
   logout: async () => { const result = await request<{ success: boolean }>("/api/auth/logout", { method: "POST" }, true); csrfToken = null; await csrf(true); return result; },
@@ -1544,4 +1709,41 @@ export const api = {
   resolveMovieComment: (projectId: string, commentId: string) => request<MovieCollaboration>(`/api/movie-studio/projects/${projectId}/collaboration/comments/${commentId}/resolve`, { method: "POST" }, true),
   requestMovieReview: (projectId: string, input: { targetType: string; targetId: string; reviewerUserId: string; isFinal: boolean; requestNote?: string | null }) => request<MovieCollaboration>(`/api/movie-studio/projects/${projectId}/collaboration/reviews`, { method: "POST", body: JSON.stringify(input) }, true),
   decideMovieReview: (projectId: string, reviewId: string, input: { status: string; decisionNote?: string | null }) => request<MovieCollaboration>(`/api/movie-studio/projects/${projectId}/collaboration/reviews/${reviewId}/decision`, { method: "POST", body: JSON.stringify(input) }, true),
+  // Issue #1267 slice 1: a read-only, workspace-scoped scholarly search. It is a GET with no
+  // CSRF token and no job creation, so it cannot spend credits or change any state; the abort
+  // signal lets a new page or a closed panel cancel the in-flight search. Note what a call is: one
+  // search, every time. The server keeps no cursor and caches no pool, so asking for page 2 is a
+  // second lookup rather than a slice of the answer to page 1, and the two answers can differ.
+  searchAcademicSources: (workspaceId: string, params: AcademicSourceSearchParams, signal?: AbortSignal) => {
+    const query = new URLSearchParams();
+    query.set("q", params.term.trim());
+    query.set("page", String(params.page));
+    query.set("pageSize", String(params.pageSize));
+    if (params.yearFrom) query.set("yearFrom", String(params.yearFrom));
+    if (params.yearTo) query.set("yearTo", String(params.yearTo));
+    if (params.openAccessOnly) query.set("openAccessOnly", "true");
+    for (const doi of params.dois ?? []) query.append("doi", doi);
+    for (const isbn of params.isbns ?? []) query.append("isbn", isbn);
+    return request<AcademicSourceSearchResponse>(`/api/workspaces/${encodeURIComponent(workspaceId)}/academic-sources/search?${query.toString()}`, { signal });
+  },
+  listAcademicProjects: (workspaceId: string, page = 1, pageSize = 100) => request<AcademicProjectSummary[]>(`/api/workspaces/${encodeURIComponent(workspaceId)}/academic-projects?page=${page}&pageSize=${pageSize}`),
+  createAcademicProject: (workspaceId: string, input: AcademicProjectCreateInput) => request<AcademicProjectDto>(
+    `/api/workspaces/${encodeURIComponent(workspaceId)}/academic-projects`,
+    generationInit({ method: "POST", body: JSON.stringify(input) }, input.requestKey),
+    true,
+  ),
+  getAcademicProject: (projectId: string) => request<AcademicProjectDto>(`/api/academic-projects/${encodeURIComponent(projectId)}`),
+  runAcademicProject: (projectId: string) => request<AcademicProjectDto>(`/api/academic-projects/${encodeURIComponent(projectId)}/run`, { method: "POST", body: "{}" }, true),
+  submitAcademicApproval: (
+    projectId: string,
+    kind: string,
+    approvalKey: string,
+    checkpointRevision: number,
+    decision: "Approved" | "RequestRevision" | "Rejected",
+    notes?: string | null,
+  ) => request<AcademicProjectDto>(
+    `/api/academic-projects/${encodeURIComponent(projectId)}/approvals/${encodeURIComponent(kind)}`,
+    { method: "POST", body: JSON.stringify({ approvalKey, checkpointRevision, decision, notes: notes ?? null }) },
+    true,
+  ),
 };

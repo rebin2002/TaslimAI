@@ -1,8 +1,10 @@
 import type { Metadata } from "next";
+import { notFound } from "next/navigation";
 import { ProtectedPage } from "@/components/ProtectedPage";
 import { AcademicReportExportPanel } from "@/components/academic/templates/AcademicReportExportPanel";
 import { academicExportRoute, academicRoute } from "@/components/academic/academicRoutes";
 import { internalReturnPath, requireAuthenticatedPage } from "@/lib/serverAuth";
+import { isAcademicResearchVisible } from "@/lib/academicResearchVisibility";
 
 /**
  * Issue #1267 (export slice) — route that connects the template gallery (#1265)
@@ -36,6 +38,7 @@ export default async function AcademicReportExportPage({
   // matches the browser-side boundary's instead of narrowing it.
   const query = await searchParams;
   await requireAuthenticatedPage(internalReturnPath(academicExportRoute, query));
+  if (!isAcademicResearchVisible()) notFound();
   // Validation stays where the value is consumed: the identifier is checked before it reaches the
   // panel, so a malformed parameter survives sign-in as text and is then refused as data.
   const job = Array.isArray(query.job) ? query.job[0] : query.job;

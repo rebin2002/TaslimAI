@@ -42,29 +42,44 @@ public sealed class AcademicWorkflowEngineTests
     }
 
     [Fact]
-    public async Task FullPipeline_Without_Required_Approvals_Still_Completes()
+    public async Task FullPipeline_Requires_Plan_Approval_Even_When_Later_Gates_Are_Disabled()
     {
-        var request = AcademicWorkflowFixtures.Request("no-gates") with { RequiredApprovals = [] };
+        var request = AcademicWorkflowFixtures.Request("plan-only-gate") with
+        {
+            RequiredApprovals = [AcademicApprovalKind.Plan],
+        };
         var harness = new AcademicWorkflowHarness(request);
 
-        var result = await harness.DrainWithApprovalsAsync("no-gates");
+        var result = await harness.DrainWithApprovalsAsync("plan-only-gate");
 
         Assert.Equal(AcademicWorkflowRunStatus.Completed, result.Status);
-        Assert.Empty(result.Snapshot!.Approvals);
+        Assert.Single(result.Snapshot!.Approvals);
+        Assert.Equal(AcademicApprovalKind.Plan, result.Snapshot.Approvals[0].Kind);
     }
 
     [Fact]
     public async Task Multi_Stage_Slice_Advances_Past_Non_Gated_Stages_In_One_Resume()
     {
-        // Production default: one resume call crosses every stage until a blocking point.
+        // Plan is the mandatory gate; after explicit approval, one resume crosses later ungated stages.
         var store = new InMemoryAcademicWorkflowStateStore();
         var handlers = AcademicStageOrder.Stages.Select(stage => (IAcademicStageHandler)new ScriptedStageHandler(stage)).ToList();
         var orchestrator = new AcademicWorkflowOrchestrator(store, handlers, new SteadyTimeProvider());
 
-        var started = await orchestrator.StartAsync(AcademicWorkflowFixtures.Request("slice") with { RequiredApprovals = [] }, CancellationToken.None);
+        var started = await orchestrator.StartAsync(AcademicWorkflowFixtures.Request("slice") with
+        {
+            RequiredApprovals = [AcademicApprovalKind.Plan],
+        }, CancellationToken.None);
 
-        Assert.Equal(AcademicWorkflowRunStatus.Completed, started.Status);
-        Assert.True(started.Snapshot!.Revision >= 7);
+        Assert.Equal(AcademicWorkflowRunStatus.AwaitingApproval, started.Status);
+        var projectId = started.Snapshot!.ProjectId;
+        var pending = started.Snapshot.PendingApproval!;
+        await orchestrator.SubmitApprovalDecisionAsync(
+            projectId, AcademicApprovalKind.Plan, pending.ApprovalKey, pending.CheckpointRevision,
+            AcademicApprovalDecision.Approved, null, Guid.NewGuid(), CancellationToken.None);
+        var resumed = await orchestrator.ResumeAsync(projectId, CancellationToken.None);
+
+        Assert.Equal(AcademicWorkflowRunStatus.Completed, resumed.Status);
+        Assert.True(resumed.Snapshot!.Revision >= 7);
     }
 
     [Fact]
@@ -95,8 +110,7 @@ public sealed class AcademicWorkflowEngineTests
         Assert.Equal(AcademicStageState.NotStarted, plan.Snapshot.Stage(AcademicStage.Discover).State);
         Assert.True(plan.Snapshot.Stage(AcademicStage.Plan).OutputCheckpointRevision > 0);
 
-        await harness.Orchestrator.SubmitApprovalDecisionAsync(
-            harness.ProjectId, AcademicApprovalKind.Plan, AcademicApprovalDecision.Approved, null, Guid.NewGuid(), CancellationToken.None);
+        await harness.ApprovePendingAsync();
         var sourceLibrary = await harness.ResumeUntilGateAsync(AcademicApprovalKind.SourceLibrary);
 
         Assert.Equal(AcademicWorkflowRunStatus.AwaitingApproval, sourceLibrary.Status);
@@ -155,9 +169,18 @@ public sealed class AcademicWorkflowEngineTests
         var planOnly = new IAcademicStageHandler[] { new ScriptedStageHandler(AcademicStage.Plan) };
         var orchestrator = new AcademicWorkflowOrchestrator(store, planOnly, new SteadyTimeProvider());
 
-        var result = await orchestrator.StartAsync(AcademicWorkflowFixtures.Request("no-handler") with { RequiredApprovals = [] }, CancellationToken.None);
-        // First slice ran Plan and stopped at the bound; the Discover attempt fails terminally.
-        result = await orchestrator.ResumeAsync(result.Snapshot!.ProjectId, CancellationToken.None);
+        var started = await orchestrator.StartAsync(AcademicWorkflowFixtures.Request("no-handler") with
+        {
+            RequiredApprovals = [AcademicApprovalKind.Plan],
+        }, CancellationToken.None);
+        Assert.Equal(AcademicWorkflowRunStatus.AwaitingApproval, started.Status);
+        var projectId = started.Snapshot!.ProjectId;
+        var pending = started.Snapshot.PendingApproval!;
+        await orchestrator.SubmitApprovalDecisionAsync(
+            projectId, AcademicApprovalKind.Plan, pending.ApprovalKey, pending.CheckpointRevision,
+            AcademicApprovalDecision.Approved, null, Guid.NewGuid(), CancellationToken.None);
+        // After the student approves the saved Plan, the missing Discover handler fails terminally.
+        var result = await orchestrator.ResumeAsync(projectId, CancellationToken.None);
 
         Assert.Equal(AcademicWorkflowRunStatus.ProjectFailed, result.Status);
         Assert.Equal("NO_STAGE_HANDLER", result.Snapshot!.StateCode);
