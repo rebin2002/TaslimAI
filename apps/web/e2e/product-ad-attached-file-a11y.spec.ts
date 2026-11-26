@@ -209,13 +209,17 @@ test.describe("Product Ad attached-file name reaches its upload control (PR #116
       await nameField.fill("Cedar & Silk");
       await photo.setInputFiles(pngFile(profile.photoFirst));
       await logo.setInputFiles(pngFile(profile.logoFile));
-      await page.waitForFunction((expected) => {
+      await page.waitForFunction(({ photoName, logoName }) => {
         for (let index = 0; index < window.sessionStorage.length; index++) {
           const key = window.sessionStorage.key(index);
-          if (key?.startsWith("taslim:draft:product-ad:") && window.sessionStorage.getItem(key)?.includes(expected)) return true;
+          if (!key?.startsWith("taslim:draft:product-ad:")) continue;
+          const saved = window.sessionStorage.getItem(key);
+          if (!saved) continue;
+          const draft = JSON.parse(saved);
+          if (draft?.productPhoto?.name === photoName && draft?.brandLogo?.name === logoName) return true;
         }
         return false;
-      }, profile.photoFirst);
+      }, { photoName: profile.photoFirst, logoName: profile.logoFile });
 
       // Reload: the names come back, the file bytes never do, so the wizard
       // must return to the unattached association shape.
