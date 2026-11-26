@@ -174,9 +174,11 @@ public sealed partial class MovieFinalAssemblyQueueRedrive696Tests
         };
         await Assert.ThrowsAsync<IOException>(() => jobs.RetryAsync(world.UserId, initialJob.Id, idempotencyKey: "explicit-retry"));
         commit.AfterCommit = null;
+        await writer.SaveChangesAsync();
         var retry = await jobs.RetryAsync(world.UserId, initialJob.Id, idempotencyKey: "explicit-retry");
         var inFlight = await observer.MovieAssemblies.AsNoTracking().SingleAsync();
         Assert.Equal(initialJob.Id, retry!.RetryOfJobId);
+        Assert.Equal(GenerationJobStatus.Running, retry.Status);
         Assert.Equal(retry.Id, inFlight.GenerationJobId);
         Assert.Equal(MovieAssemblyStatuses.Assembling, inFlight.Status);
         Assert.Equal(20, inFlight.ProgressPercent);
@@ -201,8 +203,10 @@ public sealed partial class MovieFinalAssemblyQueueRedrive696Tests
         };
         await Assert.ThrowsAsync<IOException>(() => service.RequestAsync(world.UserId, world.MovieId, AssemblyRequest(), secondKey, CancellationToken.None));
         commit.AfterCommit = null;
+        await writer.SaveChangesAsync();
         var replay = await service.RequestAsync(world.UserId, world.MovieId, AssemblyRequest(), secondKey, CancellationToken.None);
         Assert.Equal(MovieAssemblyStatuses.Assembling, replay!.Status);
+        Assert.Equal(GenerationJobStatus.Running, (await observer.GenerationJobs.AsNoTracking().SingleAsync(job => job.Id == replay.GenerationJobId)).Status);
         Assert.Equal(1, replay.AttemptCount);
         Assert.Equal(5, replay.ProgressPercent);
         Assert.Equal(4, enqueue.Calls);

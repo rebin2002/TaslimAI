@@ -95,6 +95,15 @@ public sealed class MovieFinalAssemblyQueueLinkRecoveryTests
         Assert.Null(repaired.LastErrorCode);
         Assert.Equal(stranded.GenerationJobId, repaired.GenerationJobId);
 
+        // A later SaveChanges in this request cannot undo a worker's newer state.
+        await fixture.Db.MovieAssemblies.Where(row => row.Id == repaired.Id).ExecuteUpdateAsync(set => set
+            .SetProperty(row => row.Status, MovieAssemblyStatuses.Assembling)
+            .SetProperty(row => row.ProgressPercent, 20));
+        await fixture.Db.SaveChangesAsync();
+        var advanced = await fixture.Db.MovieAssemblies.AsNoTracking().SingleAsync(row => row.Id == repaired.Id);
+        Assert.Equal(MovieAssemblyStatuses.Assembling, advanced.Status);
+        Assert.Equal(20, advanced.ProgressPercent);
+
         // The pre-existing committed job row is the canonical one: nothing new is queued and
         // nothing is published twice.
         Assert.Equal(1, fixture.Jobs.CreateCallCount);

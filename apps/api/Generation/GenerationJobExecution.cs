@@ -461,9 +461,13 @@ public sealed class GenerationJobService(
                 await LinkMovieAssemblyForPublicationAsync(assembly, job, cancellationToken);
             await usage.BeginAsync(job, request.EstimatedProviderCostUsd, cancellationToken);
             await queue.EnqueueAsync(job.Id, cancellationToken);
-            job.Status = GenerationJobStatus.Queued;
-            job.QueuedAt = DateTime.UtcNow;
+            var queuedAt = DateTime.UtcNow;
             await transaction.CommitAsync(cancellationToken);
+            // The queue wrote these columns in SQL. Returning an entity with a pending
+            // tracked update could re-queue a worker's already claimed assembly job.
+            if (assembly is not null) db.Entry(job).State = EntityState.Detached;
+            job.Status = GenerationJobStatus.Queued;
+            job.QueuedAt = queuedAt;
             return job;
         }
         catch (DbUpdateException) when (normalizedKey is not null)

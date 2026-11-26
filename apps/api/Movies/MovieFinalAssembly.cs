@@ -668,20 +668,10 @@ public sealed class MovieFinalAssemblyService(
             .SetProperty(item => item.LastErrorCode, (string?)null)
             .SetProperty(item => item.CheckpointJson, checkpoint)
             .SetProperty(item => item.UpdatedAt, now), cancellationToken);
-        if (repaired == 0)
-        {
-            // Another retry already owned this repair: publish the durable winner rather
-            // than the stale in-memory copy, and let the normal projection continue.
-            await db.Entry(assembly).ReloadAsync(cancellationToken);
-            return false;
-        }
-
-        assembly.GenerationJobId = canonical.Id;
-        assembly.Status = MovieAssemblyStatuses.Queued;
-        assembly.LastErrorCode = null;
-        assembly.CheckpointJson = checkpoint;
-        assembly.UpdatedAt = now;
-        return true;
+        // Reload either outcome so this request cannot flush a stale local projection
+        // over a worker which advances the assembly after the fenced write.
+        await db.Entry(assembly).ReloadAsync(cancellationToken);
+        return repaired == 1;
     }
 
     /// <summary>
@@ -832,7 +822,7 @@ public sealed class MovieFinalAssemblyService(
         {
             // Cancellation must not abandon this compensation: leaving a claimed Planned row with
             // no durable job and no marker is the stranding this issue is about.
-            var restored = await db.MovieAssemblies
+            await db.MovieAssemblies
                 .Where(item => item.Id == assembly.Id
                     && item.Status == MovieAssemblyStatuses.Planned
                     && item.GenerationJobId == null
@@ -844,21 +834,13 @@ public sealed class MovieFinalAssemblyService(
                     .SetProperty(item => item.LastErrorCode, GenerationJobErrorCodes.MovieAssemblyQueueFailed)
                     .SetProperty(item => item.CheckpointJson, checkpoint)
                     .SetProperty(item => item.UpdatedAt, now), CancellationToken.None);
-            if (restored == 0)
-            {
-                await db.Entry(assembly).ReloadAsync(CancellationToken.None);
-                return;
-            }
+            await db.Entry(assembly).ReloadAsync(CancellationToken.None);
         }
         catch (Exception)
         {
             // Keep the last observed state when the durable write could not be confirmed.
             return;
         }
-        assembly.Status = MovieAssemblyStatuses.Failed;
-        assembly.LastErrorCode = GenerationJobErrorCodes.MovieAssemblyQueueFailed;
-        assembly.CheckpointJson = checkpoint;
-        assembly.UpdatedAt = now;
     }
 
     /// <summary>
