@@ -1,4 +1,5 @@
 using Microsoft.Extensions.Options;
+using Taslim.Api.Ai;
 using Taslim.Api.Contracts;
 using Taslim.Api.Domain;
 using Taslim.Api.Voice;
@@ -42,6 +43,23 @@ public sealed class MovieDialogueVoiceProviderAdapter(
             cancellationToken);
         cancellationToken.ThrowIfCancellationRequested();
 
+        var providerUsage = generated.Usage;
+        var failureUsage = new AiUsageMetadata(
+            provider.Key,
+            string.IsNullOrWhiteSpace(providerUsage.ModelKey) ? provider.Key : providerUsage.ModelKey,
+            providerUsage.InputCharacters ?? request.Text.Length,
+            null,
+            providerUsage.OutputBytes ?? generated.Content.Length,
+            providerUsage.EstimatedCostUsd,
+            providerUsage.ActualCostUsd,
+            Math.Max(1, providerUsage.LatencyMs),
+            providerUsage.FinishReason,
+            false,
+            PricingVersion: providerUsage.PricingVersion,
+            PricingSnapshotJson: providerUsage.PricingSnapshotJson,
+            Currency: providerUsage.Currency,
+            CostBasis: providerUsage.CostBasis,
+            SafeMetadataJson: providerUsage.SafeMetadataJson);
         var duration = generated.DurationMilliseconds is > 0
             ? generated.DurationMilliseconds.Value
             : (long)expectedDuration;
@@ -49,7 +67,7 @@ public sealed class MovieDialogueVoiceProviderAdapter(
             || duration > expectedDuration
             || duration > Math.Max(1, movieSettings.MaxDurationMilliseconds)
             || duration > int.MaxValue)
-            throw new MovieDialogueVoiceOutputInvalidException();
+            throw new MovieDialogueVoiceOutputInvalidException(failureUsage);
 
         var contentType = generated.ContentType?.Trim().ToLowerInvariant() ?? string.Empty;
         var format = generated.Format?.Trim().TrimStart('.').ToLowerInvariant() ?? string.Empty;
@@ -57,7 +75,7 @@ public sealed class MovieDialogueVoiceProviderAdapter(
             || string.IsNullOrWhiteSpace(contentType)
             || !contentType.StartsWith("audio/", StringComparison.OrdinalIgnoreCase)
             || string.IsNullOrWhiteSpace(format))
-            throw new MovieDialogueVoiceOutputInvalidException();
+            throw new MovieDialogueVoiceOutputInvalidException(failureUsage);
 
         var usage = generated.Usage;
         return new MovieDialogueVoiceProviderResult(
