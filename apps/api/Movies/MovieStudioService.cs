@@ -177,7 +177,23 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
         var assetIds = locations.Select(item => item.ReferenceAssetId).Concat(geographyAssetIds).Concat(sets.Select(item => item.ReferenceAssetId)).Concat(sets.SelectMany(item => item.Variations.Select(variation => variation.ReferenceAssetId))).Concat(props.Select(item => item.ReferenceAssetId)).Concat(references.Select(item => item.AssetId)).Where(item => item.HasValue).Select(item => item!.Value).Distinct().ToArray();
         var assets = assetIds.Length == 0
             ? Array.Empty<MovieWorldAssetDto>()
-            : await db.Assets.AsNoTracking().Where(item => item.WorkspaceId == movie.WorkspaceId && assetIds.Contains(item.Id)).OrderBy(item => item.Name).Select(item => new MovieWorldAssetDto(item.Id, item.Name, item.AssetType, item.MimeType, item.StoredFileId.HasValue, item.StoredFileId.HasValue && (item.MimeType != null && (item.MimeType.StartsWith("image/") || item.MimeType.StartsWith("audio/") || item.MimeType.StartsWith("video/"))))).ToArrayAsync(cancellationToken);
+            : await db.Assets.AsNoTracking()
+                .Where(item => item.WorkspaceId == movie.WorkspaceId && assetIds.Contains(item.Id))
+                .OrderBy(item => item.Name)
+                .Select(item => new
+                {
+                    item.Id,
+                    item.Name,
+                    item.AssetType,
+                    item.MimeType,
+                    HasReadyFile = item.StoredFile != null && item.StoredFile.Status == StoredFileStatus.Ready,
+                })
+                .Select(item => new MovieWorldAssetDto(
+                    item.Id, item.Name, item.AssetType, item.MimeType,
+                    item.HasReadyFile,
+                    item.HasReadyFile && item.MimeType != null
+                        && (item.MimeType.StartsWith("image/", StringComparison.OrdinalIgnoreCase) || item.MimeType.StartsWith("audio/", StringComparison.OrdinalIgnoreCase) || item.MimeType.StartsWith("video/", StringComparison.OrdinalIgnoreCase))))
+                .ToArrayAsync(cancellationToken);
         return new MovieWorldWorkspaceDto(movie.Id, movie.WorkspaceId, movie.ProjectId, movie.Status, movie.Title, movie.Description, movie.DurationSeconds, movie.AspectRatio, movie.Style, movie.Language, world, usageDetails, assets);
     }
 
@@ -1133,7 +1149,13 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
         db.MovieClips.Add(clip);
         await db.SaveChangesAsync(cancellationToken);
 
-        var job = await jobs.CreateAsync(userId, new CreateGenerationJobRequest
+        // Validated with the same rule as the shared job service, before the provisional
+        // clip above can be orphaned by a key the job layer would refuse.
+        var effectiveIdempotencyKey = MovieStudioClipIdempotency.NormalizeKey(idempotencyKey) ?? $"movie-regeneration:{requestId:N}";
+        GenerationJob job;
+        try
+        {
+            job = await jobs.CreateAsync(userId, new CreateGenerationJobRequest
         {
             WorkspaceId = movie.WorkspaceId, ProjectId = movie.ProjectId, JobType = GenerationJobTypes.MovieClipGenerate,
             Title = $"Selective {regeneration.ActionType} for {movie.Title}", EstimatedProviderCostUsd = regeneration.EstimatedProviderCostUsd,
@@ -1146,7 +1168,15 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
                 SceneSnapshot(shot.Scene), ShotSnapshot(shot), WorldContextJson: await WorldContextSnapshotAsync(movie.Id, shot.Scene.Id, shot.Id, cancellationToken),
                 SelectiveRegenerationId: regeneration.Id, SourceProductionVersionId: source?.Id, ChangedInputsJson: regeneration.ChangedInputsJson,
                 SelectiveActionType: regeneration.ActionType, SelectiveReason: regeneration.Reason)),
-        }, cancellationToken, idempotencyKey ?? $"movie-regeneration:{requestId:N}");
+        }, cancellationToken, effectiveIdempotencyKey);
+        }
+        catch
+        {
+            // This provisional clip is committed before its job exists. A rejected key
+            // claim must not leave it behind as a second queued clip for one generation.
+            await TryDiscardSpeculativeClipAsync(clip);
+            throw;
+        }
         clip.GenerationJobId = job.Id;
 
         var version = new MovieProductionVersion
@@ -1271,25 +1301,25 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
 
     private async Task<MovieStudioGenerationResponse> QueueClipAsync(Guid userId, MovieProject movie, MovieScene scene, MovieShot? shot, MovieStudioGenerationRequest request, CancellationToken cancellationToken, string? idempotencyKey)
     {
-        if (!string.IsNullOrWhiteSpace(idempotencyKey))
-        {
-            var targetShotId = shot?.Id;
-            var existingClip = await db.MovieClips
-                .Include(item => item.GenerationJob)
-                .FirstOrDefaultAsync(item => item.MovieProjectId == movie.Id
-                    && item.MovieSceneId == scene.Id
-                    && item.MovieShotId == targetShotId
-                    && item.GenerationJob != null
-                    && item.GenerationJob.CreatedByUserId == userId
-                    && item.GenerationJob.IdempotencyKey == idempotencyKey.Trim(), cancellationToken);
-            if (existingClip?.GenerationJob is not null)
-                return new MovieStudioGenerationResponse(
-                    await GetAsync(userId, movie.Id, cancellationToken) ?? throw new InvalidOperationException("Movie project disappeared."),
-                    GenerationJobContractMapper.ToMovieDto(existingClip.GenerationJob),
-                    existingClip.Id);
-        }
+        // Normalize the key before the first write. The shared job service enforces the
+        // same limit, but it only sees the key after this method has already inserted the
+        // clip row, so its rejection used to strand an unlinked duplicate clip.
+        var normalizedKey = MovieStudioClipIdempotency.NormalizeKey(idempotencyKey);
+        // Identity inputs are resolved once here and reused by the replay lookup, the
+        // rejection rules and the job payload so a replay can never compare against a
+        // different derivation of the same value.
         var description = shot?.Description ?? scene.Summary;
-        var durationSeconds = Math.Clamp(shot?.DurationSeconds ?? scene.DurationSeconds ?? Math.Min(movie.DurationSeconds, 60), 1, 3600);
+        var durationSeconds = MovieStudioClipIdempotency.ResolveDurationSeconds(movie, scene, shot);
+        var sceneJson = SceneSnapshot(scene);
+        var shotJson = shot is null ? null : ShotSnapshot(shot);
+        if (normalizedKey is not null)
+        {
+            // The clip row is persisted before the job row, so a lookup that starts from
+            // the clip cannot see a key whose job already committed. Resolve from the job
+            // instead: it is the durable claim on the key and names the canonical clip.
+            var replay = await FindClipReplayAsync(userId, normalizedKey, movie, scene, shot, request, sceneJson, shotJson, true, cancellationToken);
+            if (replay is not null) return replay;
+        }
         var estimate = await movieCostEstimator.EstimateAsync(
             new MovieGenerationCostRequest(
                 durationSeconds,
@@ -1329,14 +1359,19 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
             CreatedAt = now,
             UpdatedAt = now,
         };
-        var continuitySnapshot = await continuity.BuildSnapshotForTargetAsync(movie.Id, scene.Id, shot?.Id, true, cancellationToken);
+        // Two identical concurrent retries number the same continuity snapshot, and the
+        // unique (project, scene, shot, version) index makes the loser fail here, before
+        // any clip row exists. Rebuilding against the committed version is the only way a
+        // duplicate request can reach the idempotent job claim at all.
+        var continuitySnapshot = await BuildClipSnapshotAsync(movie.Id, scene.Id, shot?.Id, cancellationToken);
         clip.ContinuitySnapshotJson = continuitySnapshot.SnapshotJson;
         clip.ContinuitySnapshotId = continuitySnapshot.SnapshotId;
         clip.ContinuitySnapshotVersion = continuitySnapshot.Version;
         clip.ContinuitySnapshotHash = continuitySnapshot.SnapshotHash;
         db.MovieClips.Add(clip);
         await db.SaveChangesAsync(cancellationToken);
-        var job = await jobs.CreateAsync(userId, new CreateGenerationJobRequest
+        GenerationJob job;
+        var jobRequest = new CreateGenerationJobRequest
         {
             WorkspaceId = movie.WorkspaceId,
             ProjectId = movie.ProjectId,
@@ -1358,16 +1393,157 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
                 movie.Language,
                 movie.AdditionalInstructions,
                 clip.ContinuitySnapshotJson,
-                SceneSnapshot(scene),
-                shot is null ? null : ShotSnapshot(shot),
+                sceneJson,
+                shotJson,
                 WorldContextJson: await WorldContextSnapshotAsync(movie.Id, scene.Id, shot?.Id, cancellationToken))),
-        }, cancellationToken, idempotencyKey);
+        };
+        // The job, its cost reservation and its queue entry commit in one transaction. A
+        // clip that never received a job must not survive the failure, otherwise the
+        // workspace keeps a queued duplicate that no attempt can finish or price.
+        try
+        {
+            job = await jobs.CreateAsync(userId, jobRequest, cancellationToken, normalizedKey);
+        }
+        catch (GenerationJobValidationException exception) when (normalizedKey is not null && exception.Code == MovieStudioClipIdempotency.ReusedCode)
+        {
+            // A concurrent request claimed the key between the lookup above and this
+            // insert. The identical request replays the canonical clip; a genuinely
+            // different request keeps the shared reuse rejection. Neither keeps this
+            // attempt's speculative clip.
+            var replay = await FindClipReplayAsync(userId, normalizedKey, movie, scene, shot, request, sceneJson, shotJson, false, cancellationToken);
+            await TryDiscardSpeculativeClipAsync(clip);
+            if (replay is null) throw;
+            return replay;
+        }
+        catch
+        {
+            await TryDiscardSpeculativeClipAsync(clip);
+            throw;
+        }
+
         // CreateAsync queues immediately; the worker may claim the job before this
         // context links the clip. Do not keep a stale tracked job row in this save.
         db.Entry(job).State = EntityState.Detached;
+        if (normalizedKey is not null && !MovieStudioClipIdempotency.JobTargetsClip(job, clip.Id))
+        {
+            // CreateAsync is idempotent at the job row only. When it hands back a job that
+            // belongs to another clip this attempt is the race loser, and linking its own
+            // clip as well would attach two clips to one paid generation.
+            var replay = await FindClipReplayAsync(userId, normalizedKey, movie, scene, shot, request, sceneJson, shotJson, false, cancellationToken);
+            await TryDiscardSpeculativeClipAsync(clip);
+            if (replay is null)
+                throw new GenerationJobValidationException(MovieStudioClipIdempotency.MissingTargetCode, MovieStudioClipIdempotency.MissingTargetMessage);
+            return replay;
+        }
+
         clip.GenerationJobId = job.Id;
         await db.SaveChangesAsync(cancellationToken);
         return new MovieStudioGenerationResponse(await GetAsync(userId, movie.Id, cancellationToken) ?? throw new InvalidOperationException("Movie project disappeared."), GenerationJobContractMapper.ToMovieDto(job), clip.Id);
+    }
+
+    /// <summary>
+    /// Builds and persists the continuity snapshot a queued clip records. The snapshot
+    /// service assigns its version from the current maximum, so concurrent identical
+    /// requests collide on that version index. Only the rows this attempt added are
+    /// released, and the bounded rebuild re-reads the committed version. No clip, job or
+    /// provider work is created here, and the snapshot contract itself is unchanged.
+    /// </summary>
+    private async Task<MovieCharacterContinuitySnapshotDto> BuildClipSnapshotAsync(
+        Guid movieProjectId, Guid sceneId, Guid? shotId, CancellationToken cancellationToken)
+    {
+        const int maxAttempts = 3;
+        for (var attempt = 1; ; attempt++)
+        {
+            try
+            {
+                return await continuity.BuildSnapshotForTargetAsync(movieProjectId, sceneId, shotId, true, cancellationToken);
+            }
+            catch (DbUpdateException) when (attempt < maxAttempts)
+            {
+                foreach (var entry in db.ChangeTracker.Entries<MovieCharacterContinuitySnapshot>()
+                             .Where(item => item.State == EntityState.Added).ToArray())
+                    entry.State = EntityState.Detached;
+                await Task.Delay(TimeSpan.FromMilliseconds(10 * attempt), cancellationToken);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Resolves the canonical clip generation for a key this user already claimed. The
+    /// claimed job is the authority: it names the canonical clip and carries the request
+    /// identity. A key owned by a different request never adopts another clip, and the
+    /// only write this method makes is repairing a job link the original attempt could
+    /// not finish, so no clip, job or cost reservation is ever created here.
+    /// </summary>
+    private async Task<MovieStudioGenerationResponse?> FindClipReplayAsync(
+        Guid userId,
+        string idempotencyKey,
+        MovieProject movie,
+        MovieScene scene,
+        MovieShot? shot,
+        MovieStudioGenerationRequest request,
+        string? sceneJson,
+        string? shotJson,
+        bool rejectDifferentRequest,
+        CancellationToken cancellationToken)
+    {
+        var claimedJob = await db.GenerationJobs.AsNoTracking()
+            .Include(item => item.Outputs)
+            .FirstOrDefaultAsync(item => item.CreatedByUserId == userId && item.IdempotencyKey == idempotencyKey, cancellationToken);
+        if (claimedJob is null) return null;
+        if (!MovieStudioClipIdempotency.MatchesRequest(claimedJob, movie, scene, shot, request.Title, sceneJson, shotJson))
+        {
+            if (!rejectDifferentRequest) return null;
+            throw new GenerationJobValidationException(MovieStudioClipIdempotency.ReusedCode, MovieStudioClipIdempotency.ReusedMessage);
+        }
+
+        var canonicalClipId = MovieStudioClipIdempotency.TryReadClipRequest(claimedJob, out var claimedInput) ? claimedInput.MovieClipId : Guid.Empty;
+        var canonicalClip = await db.MovieClips
+            .FirstOrDefaultAsync(item => item.Id == canonicalClipId && item.MovieProjectId == movie.Id, cancellationToken);
+        if (canonicalClip is null || !MovieStudioClipIdempotency.IsCompatibleClipLink(canonicalClip.GenerationJobId, claimedJob.Id))
+        {
+            if (!rejectDifferentRequest) return null;
+            throw new GenerationJobValidationException(MovieStudioClipIdempotency.MissingTargetCode, MovieStudioClipIdempotency.MissingTargetMessage);
+        }
+
+        if (canonicalClip.GenerationJobId is null)
+        {
+            // The job committed before its clip link could be written. Restoring that link
+            // is the only missing write; the clip keeps the status its queued request chose.
+            canonicalClip.GenerationJobId = claimedJob.Id;
+            canonicalClip.UpdatedAt = DateTime.UtcNow;
+            await db.SaveChangesAsync(cancellationToken);
+        }
+
+        return new MovieStudioGenerationResponse(
+            await GetAsync(userId, movie.Id, cancellationToken) ?? throw new InvalidOperationException("Movie project disappeared."),
+            GenerationJobContractMapper.ToMovieDto(claimedJob),
+            canonicalClip.Id);
+    }
+
+    /// <summary>
+    /// Removes a clip that never received a generation job. Only an unlinked clip is
+    /// deleted, because the job link is the durable ownership record that every other
+    /// Movie read model resolves. A delete that itself fails must not replace the
+    /// generation error the caller is surfacing, so the failure is reported by returning.
+    /// </summary>
+    private async Task<bool> TryDiscardSpeculativeClipAsync(MovieClip clip)
+    {
+        if (clip.GenerationJobId is not null) return false;
+        db.MovieClips.Remove(clip);
+        try
+        {
+            await db.SaveChangesAsync(CancellationToken.None);
+            return true;
+        }
+        catch (DbUpdateException)
+        {
+            // The row is unlinked and owns no job, reservation or provider work, so it can
+            // never be priced or rendered. Durable quarantine of a row that resists removal
+            // is a separate read-model contract and is intentionally not invented here.
+            db.Entry(clip).State = EntityState.Detached;
+            return false;
+        }
     }
 
     private IQueryable<MovieProject> Query() => db.MovieProjects.AsNoTracking().AsSplitQuery()

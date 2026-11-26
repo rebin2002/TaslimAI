@@ -17,6 +17,36 @@ export const REFERENCE_AUDIO_EXTENSION_MIME_TYPES: Readonly<Record<string, strin
   ".ogg": "audio/ogg",
 };
 
+/**
+ * Every declared MIME type the API treats as this container, copied from the
+ * server's per-extension accepted sets (`VoiceGenerationContracts`) plus the
+ * opaque value `FileValidationService` always tolerates. A browser reports the
+ * legacy alias, not the canonical type, for perfectly supported clips: Safari
+ * and WebKit on macOS label an .m4a as `audio/x-m4a`, and shared MIME databases
+ * on Linux can hand back `application/octet-stream`. The picker is the only
+ * boundary a local selection ever meets (this panel never uploads), so a strict
+ * canonical-only comparison rejects files the product itself declares
+ * supported, with a message the user cannot act on.
+ */
+export const REFERENCE_AUDIO_MIME_ALIASES: Readonly<Record<string, readonly string[]>> = {
+  ".mp3": ["audio/mpeg", "audio/mp3", "audio/x-mpeg"],
+  ".wav": ["audio/wav", "audio/x-wav", "audio/wave"],
+  ".m4a": ["audio/mp4", "audio/x-m4a"],
+  ".ogg": ["audio/ogg", "audio/vorbis", "audio/opus"],
+};
+
+/**
+ * True when a declared MIME type is a legitimate way of naming this container,
+ * or declares nothing the picker may trust. Only a type that names a different
+ * kind of content contradicts the extension.
+ */
+export function isReferenceAudioMimeForExtension(extension: string, mimeType: string | null): boolean {
+  if (mimeType === null) return true;
+  const declared = mimeType.trim().toLowerCase();
+  if (declared.length === 0 || declared === "application/octet-stream") return true;
+  return REFERENCE_AUDIO_MIME_ALIASES[extension]?.includes(declared) ?? false;
+}
+
 /** `accept` attribute for the picker; keeps unsupported files out of the path. */
 export const REFERENCE_AUDIO_ACCEPT = Object.keys(REFERENCE_AUDIO_EXTENSION_MIME_TYPES).join(",");
 
@@ -111,7 +141,7 @@ export function referenceAudioSupportCheck(candidate: ReferenceAudioCandidate | 
   }
   // Mirror the shared upload boundary: an audio MIME on a non-audio file (or a
   // non-audio MIME on an audio extension) is rejected before any preview work.
-  if (candidate.sourceKind === "local" && candidate.mimeType !== null && candidate.mimeType !== expected) {
+  if (candidate.sourceKind === "local" && !isReferenceAudioMimeForExtension(candidate.extension, candidate.mimeType)) {
     return { supported: false, reasonKey: "music.reference.reason.mimeMismatch", extension: candidate.extension };
   }
   if (candidate.sourceKind === "stored_asset") {

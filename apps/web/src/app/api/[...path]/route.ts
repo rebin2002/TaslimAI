@@ -4,6 +4,13 @@ if (process.env.NODE_ENV === "production" && (!configuredApiUrl || !configuredAp
 const apiOrigin = (configuredApiUrl ?? "http://localhost:5000").replace(/\/$/, "");
 const MAX_PROXY_BODY_BYTES = 25 * 1024 * 1024;
 const UPSTREAM_TIMEOUT_MS = 30_000;
+// Every extra percent-encoding round is another spelling of the same relative
+// segment (%2e%2e, %252e%252e, ...), so decoding is iterated a bounded number of
+// times instead of assumed to stop after one pass.
+const MAX_RELATIVE_DECODE_ROUNDS = 4;
+// The namespace this proxy may forward into, resolved once from the configured
+// origin so a base path in NEXT_PUBLIC_API_URL keeps being respected.
+const apiNamespacePathname = new URL(`${apiOrigin}/api/`).pathname;
 // Remove the entire client-controlled forwarding namespace, not just today's
 // commonly recognized names (e.g. X-Forwarded-Client-Cert and future variants).
 // The upstream HTTPS/cookie trust boundary must never depend on client metadata.
@@ -19,6 +26,46 @@ function stripUntrustedForwardingHeaders(headers: Headers): void {
 type RouteContext = { params: Promise<{ path: string[] }> };
 
 const bodyMethods = new Set(["POST", "PUT", "PATCH", "DELETE"]);
+
+// encodeURIComponent() leaves "." and ".." untouched, so a relative segment
+// supplied to the catch-all survives into the target string and the URL parser
+// collapses it out of the forwarded namespace: `/api/v1/../../admin` is parsed
+// as `/admin`, still carrying the caller's session cookie.
+//
+// Such a segment must be refused, never dropped. Removing it keeps the request
+// inside `/api/` but silently retargets it onto a *different* live endpoint
+// (`/api/users/../delete` -> `/api/users/delete`), so for a state-changing
+// method an authenticated request executes against a resource nobody
+// addressed. Refusal is the only outcome that preserves both containment and
+// the caller's intent.
+//
+// A percent-decode failure is treated as an ordinary segment: the encoded form
+// cannot be parsed as a dot segment by the URL parser.
+function isRelativePathSegment(segment: string): boolean {
+  let candidate = segment;
+  for (let round = 0; round < MAX_RELATIVE_DECODE_ROUNDS; round++) {
+    if (candidate === "." || candidate === "..") return true;
+    let decoded: string;
+    try {
+      decoded = decodeURIComponent(candidate);
+    } catch {
+      return false;
+    }
+    if (decoded === candidate) return false;
+    candidate = decoded;
+  }
+  return candidate === "." || candidate === "..";
+}
+
+// Fixed-text, non-disclosing envelope: it echoes neither the offending path nor
+// the segment nor the upstream origin, so it cannot be used to probe routing
+// internals the way the scanner traffic pinned by this lane does.
+function refuseInvalidPath(): Response {
+  return Response.json(
+    { error: { code: "INVALID_PATH", message: "The requested path is not valid." } },
+    { status: 400 },
+  );
+}
 
 function splitCombinedSetCookieHeader(value: string): string[] {
   return value.split(/,(?=\s*[^;,=\s]+=[^;,]*)/).map(cookie => cookie.trim()).filter(Boolean);
@@ -65,7 +112,21 @@ async function readBoundedBody(request: Request): Promise<ArrayBuffer | Response
 
 async function forward(request: Request, context: RouteContext): Promise<Response> {
   const { path } = await context.params;
+  // First guard: refuse dot-relative segments before the target is composed,
+  // before any header is copied and before the request body is read.
+  if (path.some(isRelativePathSegment)) return refuseInvalidPath();
   const target = `${apiOrigin}/api/${path.map((segment) => encodeURIComponent(segment)).join("/")}${new URL(request.url).search}`;
+  // Second, independent guard: if composition ever normalizes outside the
+  // forwarding namespace for any other reason, refuse before fetch() so neither
+  // the request line nor any credential header can leave it. Valid paths, auth
+  // forwarding and the existing 413/503/504 envelopes are unchanged.
+  let targetPathname: string;
+  try {
+    targetPathname = new URL(target).pathname;
+  } catch {
+    return refuseInvalidPath();
+  }
+  if (!targetPathname.startsWith(apiNamespacePathname)) return refuseInvalidPath();
   const headers = new Headers(request.headers);
   headers.delete("host");
   headers.delete("content-length");

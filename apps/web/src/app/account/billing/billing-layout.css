@@ -17,6 +17,16 @@
   border-bottom: 1px solid #e8edf2;
 }
 
+/* #700: the "Account" back link above the page title is the only enabled keyboard control on
+   this route, and the shared `.back-link` sizing paints it 17 CSS px tall -- below the 24x24
+   CSS px minimum WCAG 2.5.8 asks of a target, identically at 320px/100% and at 200% zoom. The
+   hit box is raised inside the billing scope only. Presentation only: no markup, label, href,
+   price, credit, ledger or charging semantics are involved, and the link text and its position
+   in the reading order are unchanged. */
+.billing-page .back-link {
+  min-height: 24px;
+}
+
 .billing-page .usage-header h1 {
   max-width: 100%;
   margin: 9px 0 8px;
