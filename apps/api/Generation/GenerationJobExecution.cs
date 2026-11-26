@@ -1802,6 +1802,7 @@ public sealed class GenerationJobWorker(
             failureUsage ??= (exception as PresentationGenerationStageException)?.Usage;
             failureUsage ??= (exception as ResearchGenerationStageException)?.Usage;
             failureUsage ??= (exception as SocialGenerationStageException)?.Usage;
+            failureUsage ??= ResolveMovieDialogueFailureUsage(exception);
 var qualityFailure = exception as GenerationQualityControlException ?? exception.InnerException as GenerationQualityControlException;
             if (qualityFailure is not null)
             {
@@ -2225,6 +2226,9 @@ var qualityFailure = exception as GenerationQualityControlException ?? exception
             : string.Equals(job.JobType, GenerationJobTypes.VoiceGenerate, StringComparison.OrdinalIgnoreCase)
                 ? GenerationJobErrorCodes.VoiceCancelled
             : GenerationJobErrorCodes.Cancelled;
+
+    internal static AiUsageMetadata? ResolveMovieDialogueFailureUsage(Exception exception) =>
+        (exception as MovieDialogueVoiceOutputInvalidException)?.Usage;
 
     private static string MapFailureCode(Exception exception, string jobType)
     {

@@ -187,11 +187,37 @@ public sealed record AcademicDiscoveryBatch
     /// <summary>True when at least one provider failed or was truncated, i.e. the batch is not exhaustive.</summary>
     public bool PartialResult => ProviderOutcomes.Any(outcome =>
         outcome.Status is AcademicProviderOutcomeStatus.Failed or AcademicProviderOutcomeStatus.Partial);
+
+    /// <summary>
+    /// True when this search is known to have been cut off by one of its own bounds: the combined
+    /// pool filled <see cref="AcademicSourceDiscoveryOptions.MaxCombinedResults"/>, or some provider
+    /// handed back exactly its
+    /// <see cref="AcademicSourceDiscoveryOptions.MaxResultsPerProvider"/> ceiling. In both cases the
+    /// catalogs hold more matches than this search was allowed to surface, and — because a small or
+    /// single-catalog deployment never reaches the combined bound — the combined bound alone is not
+    /// evidence of it either way. Surfacing this separately keeps "we fetched everything we were
+    /// allowed to fetch" apart from "there was nothing more to fetch".
+    /// </summary>
+    public bool ResultCapped { get; init; }
+
+    /// <summary>
+    /// True when the master switch is on but nothing in this deployment can answer: every work and
+    /// book catalog is switched off or incomplete (for example Google Books enabled without its
+    /// key) and no DOI validator is configured. Such a search returns no records for a reason that
+    /// is about the deployment, not about the query, so it must not be reported as an ordinary
+    /// empty result.
+    /// </summary>
+    public bool NoProvidersConfigured { get; init; }
 }
 
 /// <summary>Outcome of validating a DOI against authoritative registration metadata.</summary>
 public sealed record AcademicDoiValidationResult
 {
+    /// <summary>The DOI as the caller asked for it (set by the orchestrator), so a failed check can
+    /// be echoed back without guessing. Provider adapters leave this null; only the batch result
+    /// carries the caller-facing spelling.</summary>
+    public string? SubmittedDoi { get; init; }
+
     /// <summary>DOI exactly as registered (provider casing), null when not found.</summary>
     public string? ResolvedDoi { get; init; }
 
