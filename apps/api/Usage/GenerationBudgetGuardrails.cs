@@ -127,18 +127,110 @@ public sealed class GenerationBudgetService(
     public async Task CompleteAttemptAsync(GenerationProviderAttempt attempt, decimal? actualProviderCostUsd, bool actualCostKnown, GenerationProviderAttemptStatus status, string? failureCode = null, CancellationToken cancellationToken = default)
     {
         if (attempt.Status is GenerationProviderAttemptStatus.Succeeded or GenerationProviderAttemptStatus.Failed or GenerationProviderAttemptStatus.Cancelled) return;
-        attempt.Status = status;
-        attempt.ActualProviderCostUsd = actualCostKnown ? actualProviderCostUsd : null;
-        attempt.ActualProviderCostKnown = actualCostKnown && actualProviderCostUsd.HasValue;
-        attempt.FailureCode = failureCode;
-        attempt.ResultClassification = status.ToString();
-        attempt.RateLimited = HasFailureToken(failureCode, "RATE_LIMIT");
-        attempt.TimedOut = HasFailureToken(failureCode, "TIMEOUT") || HasFailureToken(failureCode, "TIMED_OUT");
-        attempt.QualityControlRejected = HasFailureToken(failureCode, "QUALITY")
+
+        var finalStatus = status;
+        var finalActualCost = actualCostKnown ? actualProviderCostUsd : null;
+        var finalActualCostKnown = actualCostKnown && actualProviderCostUsd.HasValue;
+        var finalFailureCode = failureCode;
+        var finalClassification = status.ToString();
+        var finalRateLimited = HasFailureToken(failureCode, "RATE_LIMIT");
+        var finalTimedOut = HasFailureToken(failureCode, "TIMEOUT") || HasFailureToken(failureCode, "TIMED_OUT");
+        var finalQualityRejected = HasFailureToken(failureCode, "QUALITY")
             || HasFailureToken(failureCode, "OUTPUT_INVALID")
             || HasFailureToken(failureCode, "CITATION_VALIDATION");
-        attempt.CompletedAt = DateTime.UtcNow;
+        var finalCompletedAt = DateTime.UtcNow;
+
+        // Atomic compare-and-set against the durable row. The UPDATE only lands while
+        // the attempt is still Started, so concurrent finalizers - a late provider
+        // success, a resilience-layer failure and a cancellation fence - elect exactly
+        // one winner: on PostgreSQL the loser blocks on the row lock, its
+        // Status = Started predicate is re-evaluated against the committed row and
+        // matches zero rows, so a stale reader can never overwrite the committed
+        // terminal status or misattribute the winning finalization's provider cost.
+        // The previous read-check-write guarded only on the caller's in-memory copy,
+        // which let two contexts that had each observed Started last-write-win the row.
+        var affectedRows = await db.GenerationProviderAttempts
+            .Where(item => item.Id == attempt.Id && item.Status == GenerationProviderAttemptStatus.Started)
+            .ExecuteUpdateAsync(setters => setters
+                .SetProperty(item => item.Status, finalStatus)
+                .SetProperty(item => item.ActualProviderCostUsd, finalActualCost)
+                .SetProperty(item => item.ActualProviderCostKnown, finalActualCostKnown)
+                .SetProperty(item => item.FailureCode, finalFailureCode)
+                .SetProperty(item => item.ResultClassification, finalClassification)
+                .SetProperty(item => item.RateLimited, finalRateLimited)
+                .SetProperty(item => item.TimedOut, finalTimedOut)
+                .SetProperty(item => item.QualityControlRejected, finalQualityRejected)
+                .SetProperty(item => item.CompletedAt, finalCompletedAt),
+                cancellationToken);
+
+        if (affectedRows == 1)
+        {
+            // This finalization is the committed winner; mirror it onto the local copy
+            // so the caller and any later flush of this context agree with the database.
+            ApplyFinalization(attempt, finalStatus, finalActualCost, finalActualCostKnown, finalFailureCode, finalClassification, finalRateLimited, finalTimedOut, finalQualityRejected, finalCompletedAt);
+        }
+        else
+        {
+            // Explicit zero-row behaviour: another finalizer committed a terminal
+            // outcome between this context's read and the compare-and-set. Adopt the
+            // durable winner so the tracked copy - and the flush below - repeats the
+            // committed outcome instead of overwriting it.
+            var committed = await db.GenerationProviderAttempts
+                .AsNoTracking()
+                .Where(item => item.Id == attempt.Id)
+                .Select(item => new
+                {
+                    item.Status,
+                    item.ActualProviderCostUsd,
+                    item.ActualProviderCostKnown,
+                    item.FailureCode,
+                    item.ResultClassification,
+                    item.RateLimited,
+                    item.TimedOut,
+                    item.QualityControlRejected,
+                    item.CompletedAt,
+                })
+                .SingleOrDefaultAsync(cancellationToken);
+            if (committed is not null)
+            {
+                logger.LogInformation(
+                    "Provider attempt finalization lost the finalization race; adopting the committed outcome. AttemptId={AttemptId}; JobId={JobId}; CommittedStatus={CommittedStatus}; SupersededStatus={SupersededStatus}",
+                    attempt.Id, attempt.GenerationJobId, committed.Status, status);
+                ApplyFinalization(attempt, committed.Status, committed.ActualProviderCostUsd, committed.ActualProviderCostKnown, committed.FailureCode, committed.ResultClassification, committed.RateLimited, committed.TimedOut, committed.QualityControlRejected, committed.CompletedAt);
+            }
+            else
+            {
+                // The row is not durable yet (an attempt its owning context has not
+                // saved). Preserve the previous behaviour and let the flush below
+                // persist this finalization together with the row.
+                ApplyFinalization(attempt, finalStatus, finalActualCost, finalActualCostKnown, finalFailureCode, finalClassification, finalRateLimited, finalTimedOut, finalQualityRejected, finalCompletedAt);
+            }
+        }
+
         await db.SaveChangesAsync(cancellationToken);
+    }
+
+    private static void ApplyFinalization(
+        GenerationProviderAttempt attempt,
+        GenerationProviderAttemptStatus status,
+        decimal? actualProviderCostUsd,
+        bool actualCostKnown,
+        string? failureCode,
+        string resultClassification,
+        bool rateLimited,
+        bool timedOut,
+        bool qualityControlRejected,
+        DateTime? completedAt)
+    {
+        attempt.Status = status;
+        attempt.ActualProviderCostUsd = actualProviderCostUsd;
+        attempt.ActualProviderCostKnown = actualCostKnown;
+        attempt.FailureCode = failureCode;
+        attempt.ResultClassification = resultClassification;
+        attempt.RateLimited = rateLimited;
+        attempt.TimedOut = timedOut;
+        attempt.QualityControlRejected = qualityControlRejected;
+        attempt.CompletedAt = completedAt;
     }
 
     private static bool HasFailureToken(string? value, string token) =>
