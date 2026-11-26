@@ -146,7 +146,11 @@ public sealed class MovieDirectorScenePlanValidator(
         AddIf(findings, !SupportedLanguage(context.Language, payload.Language), DirectorScenePlanValidationReasonCodes.LanguageMismatch, "language");
         AddIf(findings, string.IsNullOrWhiteSpace(payload.AspectRatio) || payload.AspectRatio.Length > 20 || !string.Equals(payload.AspectRatio, context.AspectRatio, StringComparison.OrdinalIgnoreCase), DirectorScenePlanValidationReasonCodes.SchemaInvalid, "aspectRatio");
 
-        var targetDuration = Math.Clamp(context.DurationSeconds, 1, Math.Max(1, settings.MaxDurationSeconds));
+        var maxDuration = Math.Max(1, settings.MaxDurationSeconds);
+        var targetDuration = Math.Clamp(context.DurationSeconds, 1, maxDuration);
+        // Reject unsupported source durations rather than accepting a truncated scene plan.
+        AddIf(findings, context.DurationSeconds < 1 || context.DurationSeconds > maxDuration,
+            DirectorScenePlanValidationReasonCodes.RuntimeMismatch, "targetDurationSeconds");
         AddIf(findings, payload.TargetDurationSeconds != targetDuration, DirectorScenePlanValidationReasonCodes.RuntimeMismatch, "targetDurationSeconds");
         AddIf(findings, payload.Scenes is null || payload.Scenes.Count == 0, DirectorScenePlanValidationReasonCodes.RequiredFieldMissing, "scenes");
         if (payload.Scenes is null || payload.Scenes.Count == 0) return Rejected(findings);
