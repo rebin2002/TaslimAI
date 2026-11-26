@@ -208,9 +208,14 @@ public static class GeneratedMediaSecurity
             var type = content[(start + 4)..(start + 8)];
             if (index == 8)
             {
-                // IHDR is mandatory and must open the chunk stream; without it the offsets below
-                // would describe an arbitrary byte sequence rather than an image.
-                if (!type.SequenceEqual("IHDR"u8) || length < 13) return false;
+                // IHDR is mandatory, must open the chunk stream, and has a fixed 13-byte payload;
+                // without it the offsets below would describe an arbitrary byte sequence.
+                if (!type.SequenceEqual("IHDR"u8) || length != 13) return false;
+            }
+            else if (type.SequenceEqual("IHDR"u8))
+            {
+                // PNG permits exactly one IHDR, at the start of the chunk stream.
+                return false;
             }
             else if (type.SequenceEqual("IDAT"u8))
             {
