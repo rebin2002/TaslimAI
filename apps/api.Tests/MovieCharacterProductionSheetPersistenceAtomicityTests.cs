@@ -533,5 +533,106 @@ public sealed class MovieCharacterProductionSheetPersistenceAtomicityTests
             Assert.Equal(Approved, storedVersion.Status);
             Assert.NotNull(storedVersion.ApprovedAt);
         }
+
+        [DisposablePostgresFact]
+        public async Task Default_read_and_save_return_the_same_persisted_initial_version()
+        {
+            Assert.True(ready);
+            await using var setup = new TaslimDbContext(options);
+            var seed = await SeedAsync(setup);
+            var service = CreateService(setup);
+
+            Assert.Null(await service.GetAsync(seed.UserId, seed.CharacterId));
+
+            var saved = await service.SaveDraftAsync(seed.UserId, seed.CharacterId, new MovieCharacterProductionSheetRequest());
+            Assert.NotNull(saved);
+            Assert.Equal(Draft, saved!.Status);
+            Assert.Equal(1, saved.CurrentVersionNumber);
+            Assert.Single(saved.Versions);
+            Assert.NotNull(saved.CurrentVersion);
+            Assert.Equal(1, saved.CurrentVersion!.VersionNumber);
+            Assert.Equal(Draft, saved.CurrentVersion.Status);
+            Assert.Null(saved.CurrentVersion.CanonicalIdentityFaceAssetId);
+            Assert.Null(saved.CurrentVersion.BodyReferenceAssetId);
+            Assert.Null(saved.CurrentVersion.FrontReferenceAssetId);
+            Assert.Null(saved.CurrentVersion.SideReferenceAssetId);
+            Assert.Null(saved.CurrentVersion.BackReferenceAssetId);
+            Assert.Empty(saved.CurrentVersion.Looks);
+
+            await using var verify = new TaslimDbContext(options);
+            var reread = await CreateService(verify).GetAsync(seed.UserId, seed.CharacterId);
+            Assert.NotNull(reread);
+            Assert.Equal(saved.Id, reread!.Id);
+            Assert.Equal(1, reread.CurrentVersionNumber);
+            Assert.Single(reread.Versions);
+            Assert.NotNull(reread.CurrentVersion);
+            Assert.Equal(saved.CurrentVersion.Id, reread.CurrentVersion!.Id);
+            Assert.Equal(Draft, reread.Status);
+            Assert.Empty(reread.CurrentVersion.Looks);
+        }
+
+        [DisposablePostgresFact]
+        public async Task Concurrent_saves_allocate_distinct_versions_and_reads_return_the_canonical_winner()
+        {
+            Assert.True(ready);
+            await using var setup = new TaslimDbContext(options);
+            var seed = await SeedAsync(setup);
+            var initial = await CreateService(setup).SaveDraftAsync(seed.UserId, seed.CharacterId, new MovieCharacterProductionSheetRequest
+            {
+                ProvenanceNote = "concurrency-baseline",
+            });
+            Assert.NotNull(initial);
+            Assert.Equal(1, initial!.CurrentVersionNumber);
+
+            var barrier = new FirstTwoSavesBarrierInterceptor();
+            async Task<MovieCharacterProductionSheetDto?> SaveAsync(string note)
+            {
+                await using var context = new TaslimDbContext(BuildOptions(barrier));
+                return await CreateService(context).SaveDraftAsync(seed.UserId, seed.CharacterId, new MovieCharacterProductionSheetRequest
+                {
+                    ProvenanceNote = note,
+                });
+            }
+
+            var firstSave = SaveAsync("concurrent-writer-a");
+            var secondSave = SaveAsync("concurrent-writer-b");
+            var results = await Task.WhenAll(firstSave, secondSave);
+
+            Assert.All(results, Assert.NotNull);
+            Assert.All(results, item => Assert.Equal(initial.Id, item!.Id));
+            Assert.All(results, item => Assert.InRange(item!.CurrentVersionNumber, 2, 3));
+
+            await using var verify = new TaslimDbContext(options);
+            var versions = await verify.MovieCharacterProductionSheetVersions.AsNoTracking()
+                .Where(item => item.MovieCharacterProductionSheetId == initial.Id)
+                .OrderBy(item => item.VersionNumber)
+                .ToListAsync();
+            Assert.Equal(new[] { 1, 2, 3 }, versions.Select(item => item.VersionNumber));
+            Assert.Contains(versions, item => item.ProvenanceJson.Contains("concurrent-writer-a", StringComparison.Ordinal));
+            Assert.Contains(versions, item => item.ProvenanceJson.Contains("concurrent-writer-b", StringComparison.Ordinal));
+
+            var canonical = await CreateService(verify).GetAsync(seed.UserId, seed.CharacterId);
+            Assert.NotNull(canonical);
+            Assert.Equal(3, canonical!.CurrentVersionNumber);
+            Assert.Equal(new[] { 3, 2, 1 }, canonical.Versions.Select(item => item.VersionNumber));
+            Assert.Equal(3, canonical.CurrentVersion!.VersionNumber);
+        }
+
+        private sealed class FirstTwoSavesBarrierInterceptor : SaveChangesInterceptor
+        {
+            private readonly TaskCompletionSource released = new(TaskCreationOptions.RunContinuationsAsynchronously);
+            private int arrivals;
+
+            public override async ValueTask<InterceptionResult<int>> SavingChangesAsync(
+                DbContextEventData eventData,
+                InterceptionResult<int> result,
+                CancellationToken cancellationToken = default)
+            {
+                var arrival = Interlocked.Increment(ref arrivals);
+                if (arrival == 2) released.TrySetResult();
+                if (arrival <= 2) await released.Task.WaitAsync(TimeSpan.FromSeconds(25), cancellationToken);
+                return result;
+            }
+        }
     }
 }
