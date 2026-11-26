@@ -249,6 +249,17 @@ public sealed class MubertMusicGenerationProvider(
                     logger.LogWarning(exception, "Mubert download stream failed.");
                     throw new MusicProviderUnavailableException();
                 }
+                catch (IOException exception)
+                {
+                    // A reset or aborted socket while the artifact body is still streaming surfaces
+                    // as IOException (SocketException derives from it) rather than HttpRequestException.
+                    // Without this the transport fault reaches the job handler unclassified, so it is
+                    // reported as the same transient provider outage a failed request produces.
+                    // MusicOutputInvalidException and FileUploadValidationException above are not
+                    // IOException-derived, so integrity rejections keep their existing categories.
+                    logger.LogWarning(exception, "Mubert download stream failed during transport.");
+                    throw new MusicProviderUnavailableException();
+                }
             }
         }
 

@@ -85,6 +85,17 @@ public sealed class StableAudioMusicGenerationProvider(
                     logger.LogWarning(exception, "Stable Audio result download failed.");
                     throw new MusicProviderUnavailableException();
                 }
+                catch (IOException exception)
+                {
+                    // A reset or aborted socket while the audio body is still streaming surfaces as
+                    // IOException (SocketException derives from it) rather than HttpRequestException.
+                    // Left unnormalised it reaches the job handler as an unclassified transport fault
+                    // instead of the same transient provider outage a failed request reports, so it
+                    // is classified identically. Integrity rejections stay MusicOutputInvalidException
+                    // and a cancelled timeout still surfaces as MusicProviderTimeoutException below.
+                    logger.LogWarning(exception, "Stable Audio result stream failed during download.");
+                    throw new MusicProviderUnavailableException();
+                }
                 break;
             }
 
