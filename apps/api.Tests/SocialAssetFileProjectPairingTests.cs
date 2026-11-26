@@ -13,29 +13,11 @@ using Xunit;
 namespace Taslim.Api.Tests;
 
 /// <summary>
-/// Issue #667, acceptance criterion 2 - companion regressions for the selection-side
-/// correction in <c>SocialGenerationJobHandler.LoadAssetsAsync</c>.
-///
-/// Synthetic, provider-free, two-project/two-user API tests for the pairing invariant
-/// <c>asset.ProjectId == asset.StoredFile.ProjectId</c>. These lanes were previously
-/// unclaimed and deliberately do NOT duplicate:
-/// - <c>SocialAssetSelectionTests</c> (main): unsupported asset type, creator-private
-///   asset selected by another workspace member.
-/// - <c>SocialAssetProjectScopeMismatchTests</c> (draft PR #766): mismatched and
-///   matching pairs requested by a non-creator member.
-/// - <c>SocialAssetStoredFileProjectScopePolicyTests</c> (draft PR #1065): creator
-///   selected mismatch, project asset with a personal or conversation-backed file,
-///   non-creator and creator-private matching positives.
-///
-/// Covered here instead:
-/// 1. mixed selections fail closed as a whole rather than silently dropping the
-///    mismatched asset and continuing with the valid one;
-/// 2. the inverse asymmetry, where the asset is unscoped (personal) but its backing
-///    file carries a project scope, which exercises the nullable comparison;
-/// 3. the authorized creator path over a correctly paired project asset, which must
-///    keep succeeding after the predicate is tightened.
-///
-/// No production data, no object storage, no provider calls, no migrations, no charges.
+/// Issue #667 acceptance coverage for Social asset selection. Project IDs on an Asset and its
+/// StoredFile may differ when both resources remain visible in the same workspace; visibility
+/// and ownership, not a duplicated equality rule, decide whether the selection is admissible.
+/// All rows and users are synthetic, the provider is deterministic, and no live storage or
+/// production service is contacted.
 /// </summary>
 public sealed class SocialAssetFileProjectPairingTests : IClassFixture<SocialGenerationApiFactory>
 {
@@ -49,132 +31,216 @@ public sealed class SocialAssetFileProjectPairingTests : IClassFixture<SocialGen
     }
 
     [Fact]
-    public async Task Social_job_fails_closed_when_one_of_several_selected_assets_has_a_mismatched_project_pair()
+    public async Task Social_job_allows_a_workspace_member_to_use_a_project_asset_backed_by_another_project_file()
     {
-        using var client = factory.CreateClient();
-        var auth = await Register(client, "Pairing Mixed Requester");
+        using var ownerClient = factory.CreateClient();
+        var owner = await Register(ownerClient, "Pairing Asset Owner");
+        using var memberClient = factory.CreateClient();
+        var member = await Register(memberClient, "Pairing Workspace Member");
         var projectAId = Guid.NewGuid();
         var projectBId = Guid.NewGuid();
-        var validAssetId = Guid.NewGuid();
-        var mismatchedAssetId = Guid.NewGuid();
-
-        using (var scope = factory.Services.CreateScope())
-        {
-            var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
-            AddProject(db, projectAId, auth.PersonalWorkspace.Id, "Pairing project A");
-            AddProject(db, projectBId, auth.PersonalWorkspace.Id, "Pairing project B");
-
-            // Correctly paired selection: asset and backing file both in project A.
-            AddPairedAsset(db, validAssetId, auth, projectAId, projectAId, "Paired launch image");
-            // Reassignment-shaped defect: the asset moved to project B while the file
-            // behind it remained in project A.
-            AddPairedAsset(db, mismatchedAssetId, auth, projectBId, projectAId, "Reassigned launch image");
-            await db.SaveChangesAsync();
-        }
-
-        var response = await SendWithCsrf(client, new
-        {
-            workspaceId = auth.PersonalWorkspace.Id,
-            prompt = "Announce the launch using both of the project images selected here.",
-            socialType = "announcement",
-            platform = "linkedin",
-            tone = "professional",
-            language = "en",
-            assetIds = new[] { validAssetId, mismatchedAssetId },
-            attachmentIds = Array.Empty<Guid>(),
-        });
-
-        Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
-        var created = (await response.Content.ReadFromJsonAsync<CreateSocialGenerationResponse>())!;
-        var terminal = await WaitForTerminal(client, created.Job.Id);
-
-        // Fail closed: the valid asset must not be quietly dropped and the job must not
-        // proceed on the remainder of the selection.
-        Assert.Equal("Failed", terminal.Status);
-        Assert.Equal(GenerationJobErrorCodes.SocialContextUnavailable, terminal.ErrorCode);
-        Assert.Empty(terminal.Outputs);
-    }
-
-    [Fact]
-    public async Task Social_job_rejects_personal_asset_whose_backing_file_carries_a_project_scope()
-    {
-        using var client = factory.CreateClient();
-        var auth = await Register(client, "Pairing Personal Requester");
-        var projectAId = Guid.NewGuid();
         var assetId = Guid.NewGuid();
-
         using (var scope = factory.Services.CreateScope())
         {
             var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
-            AddProject(db, projectAId, auth.PersonalWorkspace.Id, "Pairing project A");
-            // The opposite asymmetry from a project asset over a personal file: an
-            // unscoped (personal) asset whose backing file is project-scoped.
-            AddPairedAsset(db, assetId, auth, assetProjectId: null, fileProjectId: projectAId, name: "Personal asset over project file");
+            AddProject(db, projectAId, owner.PersonalWorkspace.Id, "Pairing project A");
+            AddProject(db, projectBId, owner.PersonalWorkspace.Id, "Pairing project B");
+            AddWorkspaceMember(db, owner.PersonalWorkspace.Id, member.User.Id);
+            // Same workspace and canonical visibility, different project columns: a legal
+            // reassignment/dedup shape, not an authorization mismatch.
+            AddAssetAndFile(db, owner.PersonalWorkspace.Id, owner.User.Id, assetId,
+                assetProjectId: projectBId, fileProjectId: projectAId, fileOwnerId: owner.User.Id,
+                name: "Shared launch image");
             await db.SaveChangesAsync();
         }
 
-        var response = await SendWithCsrf(client, new
-        {
-            workspaceId = auth.PersonalWorkspace.Id,
-            prompt = "Reuse the personal reference image for this announcement post.",
-            socialType = "announcement",
-            platform = "linkedin",
-            tone = "professional",
-            language = "en",
-            assetIds = new[] { assetId },
-            attachmentIds = Array.Empty<Guid>(),
-        });
-
+        var response = await Submit(memberClient, owner.PersonalWorkspace.Id, projectBId, assetId);
         Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
         var created = (await response.Content.ReadFromJsonAsync<CreateSocialGenerationResponse>())!;
-        var terminal = await WaitForTerminal(client, created.Job.Id);
-
-        Assert.Equal("Failed", terminal.Status);
-        Assert.Equal(GenerationJobErrorCodes.SocialContextUnavailable, terminal.ErrorCode);
-        Assert.Empty(terminal.Outputs);
-    }
-
-    [Fact]
-    public async Task Social_job_accepts_creator_selected_asset_with_matching_project_scoped_pair()
-    {
-        using var client = factory.CreateClient();
-        var auth = await Register(client, "Pairing Creator Requester");
-        var projectAId = Guid.NewGuid();
-        var assetId = Guid.NewGuid();
-
-        using (var scope = factory.Services.CreateScope())
-        {
-            var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
-            AddProject(db, projectAId, auth.PersonalWorkspace.Id, "Pairing project A");
-            AddPairedAsset(db, assetId, auth, projectAId, projectAId, "Creator project image");
-            await db.SaveChangesAsync();
-        }
-
-        var response = await SendWithCsrf(client, new
-        {
-            workspaceId = auth.PersonalWorkspace.Id,
-            prompt = "Announce the workshop to local business owners using the project image.",
-            socialType = "announcement",
-            platform = "linkedin",
-            tone = "professional",
-            language = "en",
-            assetIds = new[] { assetId },
-            attachmentIds = Array.Empty<Guid>(),
-        });
-
-        Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
-        var created = (await response.Content.ReadFromJsonAsync<CreateSocialGenerationResponse>())!;
-        var terminal = await WaitForTerminal(client, created.Job.Id);
-
+        var terminal = await WaitForTerminal(memberClient, created.Job.Id);
         Assert.Equal("Succeeded", terminal.Status);
         Assert.Null(terminal.ErrorCode);
         Assert.Single(terminal.Outputs);
+    }
 
-        using var check = factory.Services.CreateScope();
-        var verifyDb = check.ServiceProvider.GetRequiredService<TaslimDbContext>();
-        var asset = await verifyDb.Assets.FindAsync(assetId);
-        Assert.NotNull(asset);
-        Assert.Equal(projectAId, asset!.ProjectId);
+    [Fact]
+    public async Task Social_job_rejects_a_noncreator_members_project_asset_backed_by_another_members_personal_file()
+    {
+        using var ownerClient = factory.CreateClient();
+        var owner = await Register(ownerClient, "Private File Owner");
+        using var memberClient = factory.CreateClient();
+        var member = await Register(memberClient, "Private File Requester");
+        var projectId = Guid.NewGuid();
+        var assetId = Guid.NewGuid();
+        var privateText = $"private-file-text-{Guid.NewGuid():N}";
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            AddProject(db, projectId, owner.PersonalWorkspace.Id, "Private asset project");
+            AddWorkspaceMember(db, owner.PersonalWorkspace.Id, member.User.Id);
+            AddAssetAndFile(db, owner.PersonalWorkspace.Id, owner.User.Id, assetId,
+                assetProjectId: projectId, fileProjectId: null, fileOwnerId: owner.User.Id,
+                name: "Private reference image", extractedText: privateText);
+            await db.SaveChangesAsync();
+        }
+
+        var response = await Submit(memberClient, owner.PersonalWorkspace.Id, projectId, assetId);
+        Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
+        var created = (await response.Content.ReadFromJsonAsync<CreateSocialGenerationResponse>())!;
+        var terminal = await WaitForTerminal(memberClient, created.Job.Id);
+        var rawTerminal = await memberClient.GetStringAsync($"/api/generation/jobs/{created.Job.Id}");
+        Assert.Equal("Failed", terminal.Status);
+        Assert.Equal(GenerationJobErrorCodes.SocialContextUnavailable, terminal.ErrorCode);
+        Assert.Empty(terminal.Outputs);
+        Assert.DoesNotContain("Private reference image", rawTerminal, StringComparison.Ordinal);
+        Assert.DoesNotContain(privateText, rawTerminal, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Social_job_rejects_a_file_from_another_workspace_even_when_the_requester_owns_it()
+    {
+        using var workspaceOwnerClient = factory.CreateClient();
+        var workspaceOwner = await Register(workspaceOwnerClient, "Asset Workspace Owner");
+        using var memberClient = factory.CreateClient();
+        var member = await Register(memberClient, "Cross Workspace Asset Creator");
+        var projectId = Guid.NewGuid();
+        var assetId = Guid.NewGuid();
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            AddProject(db, projectId, workspaceOwner.PersonalWorkspace.Id, "Workspace project");
+            AddWorkspaceMember(db, workspaceOwner.PersonalWorkspace.Id, member.User.Id);
+            // The requester owns both the asset and file, but the file belongs to a different
+            // workspace; creator ownership must not bypass the workspace boundary.
+            AddAssetAndFile(db, workspaceOwner.PersonalWorkspace.Id, member.User.Id, assetId,
+                assetProjectId: projectId, fileProjectId: null, fileOwnerId: member.User.Id,
+                name: "Cross-workspace image", fileWorkspaceId: member.PersonalWorkspace.Id);
+            await db.SaveChangesAsync();
+        }
+
+        var response = await Submit(memberClient, workspaceOwner.PersonalWorkspace.Id, projectId, assetId);
+        Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
+        var created = (await response.Content.ReadFromJsonAsync<CreateSocialGenerationResponse>())!;
+        var terminal = await WaitForTerminal(memberClient, created.Job.Id);
+        Assert.Equal("Failed", terminal.Status);
+        Assert.Equal(GenerationJobErrorCodes.SocialContextUnavailable, terminal.ErrorCode);
+        Assert.Empty(terminal.Outputs);
+    }
+
+    [Fact]
+    public async Task Social_job_rejects_an_asset_whose_project_belongs_to_another_workspace()
+    {
+        using var workspaceOwnerClient = factory.CreateClient();
+        var workspaceOwner = await Register(workspaceOwnerClient, "Project Workspace Owner");
+        using var memberClient = factory.CreateClient();
+        var member = await Register(memberClient, "Foreign Project Creator");
+        var foreignProjectId = Guid.NewGuid();
+        var validFileProjectId = Guid.NewGuid();
+        var assetId = Guid.NewGuid();
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            AddProject(db, foreignProjectId, member.PersonalWorkspace.Id, "Foreign project");
+            AddProject(db, validFileProjectId, workspaceOwner.PersonalWorkspace.Id, "Local file project");
+            AddWorkspaceMember(db, workspaceOwner.PersonalWorkspace.Id, member.User.Id);
+            AddAssetAndFile(db, workspaceOwner.PersonalWorkspace.Id, member.User.Id, assetId,
+                assetProjectId: foreignProjectId, fileProjectId: validFileProjectId, fileOwnerId: member.User.Id,
+                name: "Foreign-project image");
+            await db.SaveChangesAsync();
+        }
+
+        var response = await Submit(memberClient, workspaceOwner.PersonalWorkspace.Id, null, assetId);
+        Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
+        var created = (await response.Content.ReadFromJsonAsync<CreateSocialGenerationResponse>())!;
+        var terminal = await WaitForTerminal(memberClient, created.Job.Id);
+        Assert.Equal("Failed", terminal.Status);
+        Assert.Equal(GenerationJobErrorCodes.SocialContextUnavailable, terminal.ErrorCode);
+        Assert.Empty(terminal.Outputs);
+    }
+
+    [Fact]
+    public async Task Social_job_keeps_a_creator_owned_personal_asset_and_personal_file_usable()
+    {
+        using var client = factory.CreateClient();
+        var auth = await Register(client, "Personal Asset Creator");
+        var assetId = Guid.NewGuid();
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            AddAssetAndFile(db, auth.PersonalWorkspace.Id, auth.User.Id, assetId,
+                assetProjectId: null, fileProjectId: null, fileOwnerId: auth.User.Id,
+                name: "Personal reference image");
+            await db.SaveChangesAsync();
+        }
+
+        var response = await Submit(client, auth.PersonalWorkspace.Id, null, assetId);
+        Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
+        var created = (await response.Content.ReadFromJsonAsync<CreateSocialGenerationResponse>())!;
+        var terminal = await WaitForTerminal(client, created.Job.Id);
+        Assert.Equal("Succeeded", terminal.Status);
+        Assert.Null(terminal.ErrorCode);
+        Assert.Single(terminal.Outputs);
+    }
+
+    [Fact]
+    public async Task Social_job_keeps_a_creator_owned_personal_asset_over_a_project_file_usable()
+    {
+        using var client = factory.CreateClient();
+        var auth = await Register(client, "Personal Asset With Shared File Creator");
+        var projectId = Guid.NewGuid();
+        var assetId = Guid.NewGuid();
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            AddProject(db, projectId, auth.PersonalWorkspace.Id, "Shared file project");
+            AddAssetAndFile(db, auth.PersonalWorkspace.Id, auth.User.Id, assetId,
+                assetProjectId: null, fileProjectId: projectId, fileOwnerId: auth.User.Id,
+                name: "Personal asset over project file");
+            await db.SaveChangesAsync();
+        }
+
+        var response = await Submit(client, auth.PersonalWorkspace.Id, null, assetId);
+        Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
+        var created = (await response.Content.ReadFromJsonAsync<CreateSocialGenerationResponse>())!;
+        var terminal = await WaitForTerminal(client, created.Job.Id);
+        Assert.Equal("Succeeded", terminal.Status);
+        Assert.Null(terminal.ErrorCode);
+        Assert.Single(terminal.Outputs);
+    }
+
+    [Fact]
+    public async Task Social_job_fails_the_entire_selection_when_one_asset_is_not_visible_to_the_member()
+    {
+        using var ownerClient = factory.CreateClient();
+        var owner = await Register(ownerClient, "Mixed Selection Owner");
+        using var memberClient = factory.CreateClient();
+        var member = await Register(memberClient, "Mixed Selection Member");
+        var projectAId = Guid.NewGuid();
+        var projectBId = Guid.NewGuid();
+        var visibleAssetId = Guid.NewGuid();
+        var privateAssetId = Guid.NewGuid();
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            AddProject(db, projectAId, owner.PersonalWorkspace.Id, "Mixed project A");
+            AddProject(db, projectBId, owner.PersonalWorkspace.Id, "Mixed project B");
+            AddWorkspaceMember(db, owner.PersonalWorkspace.Id, member.User.Id);
+            AddAssetAndFile(db, owner.PersonalWorkspace.Id, owner.User.Id, visibleAssetId,
+                assetProjectId: projectBId, fileProjectId: projectAId, fileOwnerId: owner.User.Id,
+                name: "Visible project image");
+            AddAssetAndFile(db, owner.PersonalWorkspace.Id, owner.User.Id, privateAssetId,
+                assetProjectId: projectBId, fileProjectId: null, fileOwnerId: owner.User.Id,
+                name: "Private personal-file image");
+            await db.SaveChangesAsync();
+        }
+
+        var response = await Submit(memberClient, owner.PersonalWorkspace.Id, projectBId, visibleAssetId, privateAssetId);
+        Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
+        var created = (await response.Content.ReadFromJsonAsync<CreateSocialGenerationResponse>())!;
+        var terminal = await WaitForTerminal(memberClient, created.Job.Id);
+        Assert.Equal("Failed", terminal.Status);
+        Assert.Equal(GenerationJobErrorCodes.SocialContextUnavailable, terminal.ErrorCode);
+        Assert.Empty(terminal.Outputs);
     }
 
     private static void AddProject(TaslimDbContext db, Guid projectId, Guid workspaceId, string name) =>
@@ -187,21 +253,35 @@ public sealed class SocialAssetFileProjectPairingTests : IClassFixture<SocialGen
             UpdatedAt = DateTime.UtcNow,
         });
 
-    private static void AddPairedAsset(
+    private static void AddWorkspaceMember(TaslimDbContext db, Guid workspaceId, Guid userId) =>
+        db.WorkspaceMembers.Add(new WorkspaceMember
+        {
+            Id = Guid.NewGuid(),
+            WorkspaceId = workspaceId,
+            UserId = userId,
+            Role = WorkspaceRole.Member,
+            JoinedAt = DateTime.UtcNow,
+        });
+
+    private static void AddAssetAndFile(
         TaslimDbContext db,
+        Guid assetWorkspaceId,
+        Guid assetCreatorId,
         Guid assetId,
-        AuthResponse auth,
         Guid? assetProjectId,
         Guid? fileProjectId,
-        string name)
+        Guid fileOwnerId,
+        string name,
+        string? extractedText = null,
+        Guid? fileWorkspaceId = null)
     {
         var storedFileId = Guid.NewGuid();
         var now = DateTime.UtcNow;
         db.StoredFiles.Add(new StoredFile
         {
             Id = storedFileId,
-            WorkspaceId = auth.PersonalWorkspace.Id,
-            UserId = auth.User.Id,
+            WorkspaceId = fileWorkspaceId ?? assetWorkspaceId,
+            UserId = fileOwnerId,
             ProjectId = fileProjectId,
             OriginalFileName = "pairing-reference.png",
             StoredFileName = "pairing-reference.png",
@@ -211,15 +291,17 @@ public sealed class SocialAssetFileProjectPairingTests : IClassFixture<SocialGen
             StorageProvider = FileStorageProviders.Local,
             StorageKey = $"tests/{storedFileId:N}",
             Status = StoredFileStatus.Ready,
-            TextExtractionStatus = FileExtractionStatus.NotApplicable,
+            TextExtractionStatus = extractedText is null ? FileExtractionStatus.NotApplicable : FileExtractionStatus.Ready,
+            ExtractedText = extractedText,
+            ExtractedTextLength = extractedText?.Length,
             CreatedAt = now,
         });
         db.Assets.Add(new Asset
         {
             Id = assetId,
-            WorkspaceId = auth.PersonalWorkspace.Id,
+            WorkspaceId = assetWorkspaceId,
             ProjectId = assetProjectId,
-            CreatedByUserId = auth.User.Id,
+            CreatedByUserId = assetCreatorId,
             StoredFileId = storedFileId,
             Name = name,
             AssetType = AssetTypes.Image,
@@ -242,6 +324,20 @@ public sealed class SocialAssetFileProjectPairingTests : IClassFixture<SocialGen
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         return (await response.Content.ReadFromJsonAsync<AuthResponse>())!;
     }
+
+    private static Task<HttpResponseMessage> Submit(HttpClient client, Guid workspaceId, Guid? projectId, params Guid[] assetIds) =>
+        SendWithCsrf(client, new
+        {
+            workspaceId,
+            projectId,
+            prompt = "Announce the product workshop using the selected reference images.",
+            socialType = "announcement",
+            platform = "linkedin",
+            tone = "professional",
+            language = "en",
+            assetIds,
+            attachmentIds = Array.Empty<Guid>(),
+        });
 
     private static async Task<HttpResponseMessage> SendWithCsrf(HttpClient client, object payload, string path = "/api/social-generation/jobs")
     {

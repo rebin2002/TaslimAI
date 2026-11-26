@@ -52,7 +52,8 @@ public sealed class SocialGenerationJobHandler(
         }
 
         var sources = files.Select(file => new SocialSourceContext(file.OriginalFileName, "source file", Trim(file.ExtractedText, settings.MaxContextCharacters), null, file.ContentType))
-            .Concat(assets.Select(asset => new SocialSourceContext(asset.Name, "asset", Trim(asset.StoredFile?.ExtractedText, settings.MaxContextCharacters), asset.AssetType, asset.MimeType)))
+            // Assets are media references only; extracted text is supplied only by explicit attachments.
+            .Concat(assets.Select(asset => new SocialSourceContext(asset.Name, "asset", null, asset.AssetType, asset.MimeType)))
             .ToArray();
 
         SocialGenerationPrompt prompt;
@@ -131,27 +132,25 @@ public sealed class SocialGenerationJobHandler(
     private async Task<IReadOnlyList<Asset>> LoadAssetsAsync(SocialGenerationInput input, Guid workspaceId, Guid userId, CancellationToken cancellationToken)
     {
         if (input.AssetIds.Count == 0) return [];
-        var assets = await db.Assets.AsNoTracking().Include(asset => asset.StoredFile).Where(asset => asset.WorkspaceId == workspaceId && input.AssetIds.Contains(asset.Id)).ToListAsync(cancellationToken);
+        // Project IDs need not match: reassignment and same-workspace dedup can leave a
+        // visible asset backed by a file scoped to another project in the same workspace.
+        // Use the canonical asset and file policies instead of duplicating their rules.
+        var visibleFileIds = db.StoredFiles.AsNoTracking()
+            .Where(StoredFileVisibility.ForWorkspaceMember(userId))
+            .Where(file => file.WorkspaceId == workspaceId)
+            .Where(file => !file.ProjectId.HasValue || (file.Project != null && file.Project.WorkspaceId == workspaceId))
+            .Select(file => file.Id);
+        var assets = await db.Assets.AsNoTracking()
+            .Include(asset => asset.StoredFile)
+            .Where(asset => asset.WorkspaceId == workspaceId && input.AssetIds.Contains(asset.Id))
+            .Where(AssetVisibility.ForWorkspaceMember(userId))
+            .Where(asset => asset.StoredFileId.HasValue && visibleFileIds.Contains(asset.StoredFileId.Value))
+            .ToListAsync(cancellationToken);
         if (assets.Count != input.AssetIds.Count || assets.Any(asset =>
                 asset.Status != AssetStatus.Active
                 || !SocialGenerationDefaults.SelectableAssetTypes.Contains(asset.AssetType)
                 || asset.StoredFileId is null
-                || asset.StoredFile is not { Status: StoredFileStatus.Ready }
-                || asset.StoredFile.WorkspaceId != workspaceId
-                // An asset and the file behind it must carry the same project
-                // scope. Asset reassignment can move Asset.ProjectId without
-                // moving StoredFile.ProjectId, and the extracted text of the
-                // backing file is fed into the prompt, so a mismatched pair is
-                // never an admissible selection - not even for the creator.
-                // Personal assets are unscoped on both sides and still match.
-                || asset.ProjectId != asset.StoredFile.ProjectId
-                // Project assets may be shared only when their backing file is
-                // also project-scoped. Personal and conversation-backed assets
-                // remain private to their creator.
-                || (asset.CreatedByUserId != userId && !asset.ProjectId.HasValue)
-                || (asset.CreatedByUserId != userId
-                    && (asset.StoredFile!.UserId != userId
-                        && (!asset.StoredFile.ProjectId.HasValue || asset.StoredFile.ConversationId.HasValue)))))
+                || asset.StoredFile is not { Status: StoredFileStatus.Ready }))
             throw new SocialGenerationStageException(SocialGenerationStages.Context, GenerationJobErrorCodes.SocialContextUnavailable, "One or more selected assets are unavailable.");
         return input.AssetIds.Select(id => assets.First(asset => asset.Id == id)).ToArray();
     }
