@@ -213,7 +213,10 @@ public sealed class MovieCharacterProductionSheetService(TaslimDbContext db, Mov
                 // sheet and its versions before allocating the next number.
                 db.ChangeTracker.Clear();
                 character = await db.MovieCharacters.Include(item => item.MovieProject).Include(item => item.ProductionSheet).ThenInclude(item => item!.Versions).ThenInclude(item => item.Looks).FirstOrDefaultAsync(item => item.Id == characterId, cancellationToken);
-                if (character is null || character.ProductionSheet?.Status == MovieCharacterProductionSheetStatuses.Locked) return null;
+                if (character is null || !await collaboration.HasPermissionAsync(userId, character.MovieProjectId, MoviePermissions.Edit, cancellationToken)) return null;
+                if (character.ProductionSheet?.Status == MovieCharacterProductionSheetStatuses.Locked) throw new MovieCharacterProductionSheetLockedException();
+                // The project's workspace (and therefore valid asset scope) may have changed while this allocation was contended.
+                await ValidateAssetsAsync(character.MovieProject.WorkspaceId, normalized.AssetIds, cancellationToken);
             }
 
             var now = DateTime.UtcNow;

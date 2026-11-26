@@ -141,6 +141,26 @@ public sealed class MovieCharacterProductionSheetPersistenceAtomicityTests
         }
     }
 
+    /// <summary>Injects one narrowly classified version-allocation conflict before any SQL write.</summary>
+    private sealed class InjectedVersionAllocationConflictInterceptor(Func<Task>? beforeConflict = null) : SaveChangesInterceptor
+    {
+        private int injected;
+
+        public override async ValueTask<InterceptionResult<int>> SavingChangesAsync(
+            DbContextEventData eventData,
+            InterceptionResult<int> result,
+            CancellationToken cancellationToken = default)
+        {
+            if (Interlocked.Exchange(ref injected, 1) == 0)
+            {
+                if (beforeConflict is not null) await beforeConflict();
+                throw new DbUpdateException("duplicate key value violates unique constraint \"IX_MovieCharacterProductionSheetVersions_MovieCharacterProducti\"");
+            }
+
+            return result;
+        }
+    }
+
     /// <summary>Seeds a persisted approved/locked DB state through a tracked context write, so the
     /// lock/unlock facts do not depend on the (broken) service transitions themselves.</summary>
     internal static async Task SeedPersistedStateAsync(TaslimDbContext db, Guid sheetId, Guid userId, string status)
@@ -362,6 +382,42 @@ public sealed class MovieCharacterProductionSheetPersistenceAtomicityTests
         finally { if (File.Exists(databasePath)) File.Delete(databasePath); }
     }
 
+    [Fact]
+    public async Task Cancelled_allocation_retry_stops_before_replaying_the_write()
+    {
+        var databasePath = Path.Combine(Path.GetTempPath(), $"taslim-sheet-retry-cancel-{Guid.NewGuid():N}.db");
+        try
+        {
+            var options = new DbContextOptionsBuilder<TaslimDbContext>()
+                .UseSqlite($"Data Source={databasePath};Default Timeout=30").Options;
+            await using var setup = new TaslimDbContext(options);
+            await setup.Database.EnsureCreatedAsync();
+            var seed = await SeedAsync(setup);
+            var initial = await CreateService(setup).SaveDraftAsync(seed.UserId, seed.CharacterId, new MovieCharacterProductionSheetRequest());
+            Assert.NotNull(initial);
+
+            using var cancellation = new CancellationTokenSource();
+            var conflict = new InjectedVersionAllocationConflictInterceptor(() =>
+            {
+                cancellation.Cancel();
+                return Task.CompletedTask;
+            });
+            await using (var retrying = new TaslimDbContext(new DbContextOptionsBuilder<TaslimDbContext>()
+                .UseSqlite($"Data Source={databasePath};Default Timeout=30").AddInterceptors(conflict).Options))
+            {
+                await Assert.ThrowsAnyAsync<OperationCanceledException>(() => CreateService(retrying).SaveDraftAsync(
+                    seed.UserId, seed.CharacterId, new MovieCharacterProductionSheetRequest { ProvenanceNote = "cancelled-retry" }, cancellation.Token));
+            }
+
+            await using var verify = new TaslimDbContext(options);
+            var stored = await verify.MovieCharacterProductionSheets.AsNoTracking().SingleAsync(item => item.Id == initial!.Id);
+            Assert.Equal(1, stored.CurrentVersionNumber);
+            Assert.False(await verify.MovieCharacterProductionSheetVersions.AsNoTracking()
+                .AnyAsync(item => item.MovieCharacterProductionSheetId == initial.Id && item.VersionNumber == 2));
+        }
+        finally { if (File.Exists(databasePath)) File.Delete(databasePath); }
+    }
+
     // ---------------------------------------------------------------------------------------------
     // Concurrency legs on real PostgreSQL: a committed lock/approval must never be erased by a
     // draft save that started before it, and the losing draft save must roll its version back.
@@ -509,6 +565,120 @@ public sealed class MovieCharacterProductionSheetPersistenceAtomicityTests
             Assert.Equal(1, stored.CurrentVersionNumber); // the racing allocation rolled back
             Assert.False(await verify.MovieCharacterProductionSheetVersions.AsNoTracking()
                 .AnyAsync(item => item.MovieCharacterProductionSheetId == sheetId && item.VersionNumber == 2));
+        }
+
+        [DisposablePostgresFact]
+        public async Task Allocation_retry_rechecks_edit_permission_after_movie_team_membership_is_revoked()
+        {
+            Assert.True(ready);
+            await using var setup = new TaslimDbContext(options);
+            var seed = await SeedAsync(setup);
+            var initial = await CreateService(setup).SaveDraftAsync(seed.UserId, seed.CharacterId, new MovieCharacterProductionSheetRequest());
+            Assert.NotNull(initial);
+
+            var conflict = new InjectedVersionAllocationConflictInterceptor(async () =>
+            {
+                await using var revoking = new TaslimDbContext(options);
+                var projectId = await revoking.MovieCharacters.AsNoTracking()
+                    .Where(item => item.Id == seed.CharacterId)
+                    .Select(item => item.MovieProjectId)
+                    .SingleAsync();
+                var removed = await revoking.MovieTeamMembers
+                    .Where(item => item.MovieProjectId == projectId && item.UserId == seed.UserId)
+                    .ExecuteDeleteAsync();
+                Assert.Equal(1, removed);
+            });
+            await using (var retrying = new TaslimDbContext(BuildOptions(conflict)))
+            {
+                var result = await CreateService(retrying).SaveDraftAsync(seed.UserId, seed.CharacterId,
+                    new MovieCharacterProductionSheetRequest { ProvenanceNote = "retry-after-membership-revocation" });
+                Assert.Null(result);
+            }
+
+            await using var verify = new TaslimDbContext(options);
+            Assert.True(await verify.WorkspaceMembers.AsNoTracking().AnyAsync(item => item.WorkspaceId == seed.WorkspaceId && item.UserId == seed.UserId));
+            Assert.False(await verify.MovieTeamMembers.AsNoTracking().AnyAsync(item => item.UserId == seed.UserId));
+            var stored = await verify.MovieCharacterProductionSheets.AsNoTracking().SingleAsync(item => item.Id == initial!.Id);
+            Assert.Equal(1, stored.CurrentVersionNumber);
+            Assert.False(await verify.MovieCharacterProductionSheetVersions.AsNoTracking()
+                .AnyAsync(item => item.MovieCharacterProductionSheetId == initial.Id && item.VersionNumber == 2));
+        }
+
+        [DisposablePostgresFact]
+        public async Task Allocation_retry_revalidates_assets_against_the_refreshed_movie_workspace()
+        {
+            Assert.True(ready);
+            await using var setup = new TaslimDbContext(options);
+            var seed = await SeedAsync(setup);
+            var assets = await SeedAssetsAsync(setup, seed);
+            var initial = await CreateService(setup).SaveDraftAsync(seed.UserId, seed.CharacterId, CompleteRequest(assets, "asset-scope-baseline"));
+            Assert.NotNull(initial);
+            var movedWorkspaceId = Guid.NewGuid();
+
+            var conflict = new InjectedVersionAllocationConflictInterceptor(async () =>
+            {
+                await using var moving = new TaslimDbContext(options);
+                var projectId = await moving.MovieCharacters.AsNoTracking()
+                    .Where(item => item.Id == seed.CharacterId)
+                    .Select(item => item.MovieProjectId)
+                    .SingleAsync();
+                var now = DateTime.UtcNow;
+                moving.Workspaces.Add(new Workspace
+                {
+                    Id = movedWorkspaceId, Name = "Moved Asset Scope", Slug = $"moved-scope-{Guid.NewGuid():N}",
+                    Type = WorkspaceType.Personal, CreatedAt = now, UpdatedAt = now,
+                });
+                moving.WorkspaceMembers.Add(new WorkspaceMember
+                {
+                    Id = Guid.NewGuid(), WorkspaceId = movedWorkspaceId, UserId = seed.UserId,
+                    Role = WorkspaceRole.Owner, JoinedAt = now,
+                });
+                await moving.SaveChangesAsync();
+                var changed = await moving.MovieProjects.Where(item => item.Id == projectId)
+                    .ExecuteUpdateAsync(setters => setters.SetProperty(item => item.WorkspaceId, movedWorkspaceId));
+                Assert.Equal(1, changed);
+            });
+
+            await using var retrying = new TaslimDbContext(BuildOptions(conflict));
+            var failure = await Assert.ThrowsAsync<MovieCharacterProductionSheetValidationException>(() =>
+                CreateService(retrying).SaveDraftAsync(seed.UserId, seed.CharacterId, CompleteRequest(assets, "stale-asset-scope")));
+            Assert.Equal("ASSET_NOT_IN_WORKSPACE", failure.Code);
+
+            await using var verify = new TaslimDbContext(options);
+            var project = await verify.MovieProjects.AsNoTracking().SingleAsync(item => item.WorkspaceId == movedWorkspaceId);
+            Assert.Equal(movedWorkspaceId, project.WorkspaceId);
+            var stored = await verify.MovieCharacterProductionSheets.AsNoTracking().SingleAsync(item => item.Id == initial!.Id);
+            Assert.Equal(1, stored.CurrentVersionNumber);
+            Assert.False(await verify.MovieCharacterProductionSheetVersions.AsNoTracking()
+                .AnyAsync(item => item.MovieCharacterProductionSheetId == initial.Id && item.VersionNumber == 2));
+        }
+
+        [DisposablePostgresFact]
+        public async Task Allocation_retry_throws_locked_exception_when_sheet_locks_before_reread()
+        {
+            Assert.True(ready);
+            await using var setup = new TaslimDbContext(options);
+            var seed = await SeedAsync(setup);
+            var initial = await CreateService(setup).SaveDraftAsync(seed.UserId, seed.CharacterId, new MovieCharacterProductionSheetRequest());
+            Assert.NotNull(initial);
+
+            var conflict = new InjectedVersionAllocationConflictInterceptor(async () =>
+            {
+                await using var locking = new TaslimDbContext(options);
+                await SeedPersistedStateAsync(locking, initial!.Id, seed.UserId, Locked);
+            });
+            await using (var retrying = new TaslimDbContext(BuildOptions(conflict)))
+            {
+                await Assert.ThrowsAsync<MovieCharacterProductionSheetLockedException>(() => CreateService(retrying).SaveDraftAsync(
+                    seed.UserId, seed.CharacterId, new MovieCharacterProductionSheetRequest { ProvenanceNote = "retry-after-lock" }));
+            }
+
+            await using var verify = new TaslimDbContext(options);
+            var stored = await verify.MovieCharacterProductionSheets.AsNoTracking().SingleAsync(item => item.Id == initial!.Id);
+            Assert.Equal(Locked, stored.Status);
+            Assert.Equal(1, stored.CurrentVersionNumber);
+            Assert.False(await verify.MovieCharacterProductionSheetVersions.AsNoTracking()
+                .AnyAsync(item => item.MovieCharacterProductionSheetId == initial.Id && item.VersionNumber == 2));
         }
 
         [DisposablePostgresFact]
