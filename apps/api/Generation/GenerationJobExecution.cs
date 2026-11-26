@@ -359,6 +359,7 @@ public sealed class GenerationJobService(
     IGenerationCostGuardrailService costGuardrails,
     IHttpContextAccessor httpContextAccessor,
     IOptions<ImageGenerationOptions> imageOptions,
+    IOptions<DocumentGenerationOptions> documentOptions,
     MovieCollaborationAccess? movieCollaboration = null) : IGenerationJobService
 {
     public async Task<GenerationJob> CreateAsync(Guid userId, CreateGenerationJobRequest request, CancellationToken cancellationToken = default, string? idempotencyKey = null, string? requestId = null, Guid? retryOfJobId = null)
@@ -486,6 +487,11 @@ public sealed class GenerationJobService(
             throw new GenerationJobValidationException("RETRY_IDEMPOTENCY_REQUIRED", "A retry idempotency key is required.");
         if (string.Equals(source.JobType, GenerationJobTypes.ImageGenerate, StringComparison.OrdinalIgnoreCase) && !imageOptions.Value.Enabled)
             throw new GenerationJobValidationException(GenerationJobErrorCodes.ImageStudioUnavailable, "Image generation is not available right now.");
+        // Same fail-closed boundary as the Image gate above. Every retry entry
+        // point inherits it, so a caller that bypasses the Document Studio route
+        // still cannot resume provider spend while the studio is disabled.
+        if (string.Equals(source.JobType, GenerationJobTypes.DocumentGenerate, StringComparison.OrdinalIgnoreCase) && !documentOptions.Value.Enabled)
+            throw new GenerationJobValidationException(DocumentStudioAvailability.UnavailableCode, DocumentStudioAvailability.UnavailableMessage);
 
         var retryInputJson = source.InputJson;
         MovieDialogueTake? pendingDialogueTake = null;
@@ -2179,11 +2185,28 @@ var qualityFailure = exception as GenerationQualityControlException ?? exception
         await finalization.CommitAsync(cancellationToken);
     }
 
-    private static async Task FailAsync(TaslimDbContext db, IGenerationJobUsageService usage, GenerationJob job, string code, string message, AiUsageMetadata? providerUsage, Guid concurrencyToken, CancellationToken cancellationToken)
+    internal static async Task FailAsync(TaslimDbContext db, IGenerationJobUsageService usage, GenerationJob job, string code, string message, AiUsageMetadata? providerUsage, Guid concurrencyToken, CancellationToken cancellationToken)
     {
+        // A cancellation recorded durably on this attempt is the user's decision and outranks a late
+        // stage failure, so settle it through the cancellation finalizer instead: that stamps the
+        // per-type cancelled code and releases the reservation as Cancelled rather than rewriting the
+        // job as Failed with the harvested provider usage. The success path already fences on this flag
+        // and the heartbeat monitor cancels on it, but the failure path consulted it not at all, so a
+        // cancellation recorded after the monitor's last poll - or a genuine provider error that simply
+        // won the race - replaced the outcome the cancellation contract promises.
+        var cancellationRecorded = await db.GenerationJobs.AsNoTracking().AnyAsync(item => item.ConcurrencyToken == concurrencyToken && item.Id == job.Id && item.Status == GenerationJobStatus.Running && item.CancellationRequested, cancellationToken);
+        if (cancellationRecorded)
+        {
+            await CancelRunningAsync(db, usage, job, concurrencyToken, cancellationToken);
+            return;
+        }
+
         var now = DateTime.UtcNow;
         await using var finalization = await db.Database.BeginTransactionAsync(cancellationToken);
-        var failed = await db.GenerationJobs.Where(item => item.Id == job.Id && item.Status == GenerationJobStatus.Running && item.ConcurrencyToken == concurrencyToken)
+        // The same fence inside the write: if a cancellation lands between the read above and this
+        // statement the update matches no row, and the job stays Running for the lease-recovery
+        // finalizer - which re-reads the durable flag - instead of being rewritten as Failed here.
+        var failed = await db.GenerationJobs.Where(item => item.Id == job.Id && item.Status == GenerationJobStatus.Running && item.ConcurrencyToken == concurrencyToken && !item.CancellationRequested)
             .ExecuteUpdateAsync(setters => setters
                 .SetProperty(item => item.Status, GenerationJobStatus.Failed)
                 .SetProperty(item => item.ErrorCode, code)

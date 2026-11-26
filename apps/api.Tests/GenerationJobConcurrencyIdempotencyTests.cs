@@ -703,6 +703,9 @@ public sealed class GenerationJobFinalizationSourceContractTests
     private const string RecoveryFence = "&& item.ConcurrencyToken == expired.ConcurrencyToken";
     private const string WorkerTokenFence = "job.Id == jobId && job.Status == GenerationJobStatus.Running && job.ConcurrencyToken == concurrencyToken";
     private const string TerminalFence = "item.Id == job.Id && item.Status == GenerationJobStatus.Running && item.ConcurrencyToken == concurrencyToken";
+    // The failure finalizer's durable-cancellation fence: a recorded cancellation must not be
+    // rewritten as a provider failure by a stage error that wins the race against the monitor.
+    private const string FailureCancellationFence = "item.Id == job.Id && item.Status == GenerationJobStatus.Running && item.ConcurrencyToken == concurrencyToken && !item.CancellationRequested";
 
     [Fact]
     public void Every_terminal_finalization_of_a_running_job_is_fenced_by_the_claim_token()
@@ -717,6 +720,9 @@ public sealed class GenerationJobFinalizationSourceContractTests
         Assert.Equal(1, CountOccurrences(source, CompletionFence));
         Assert.Equal(2, CountOccurrences(source, WorkerTokenFence));
         Assert.Equal(2, CountOccurrences(source, TerminalFence));
+        // The completion site has fenced on the durable flag from the start; the failure site must too,
+        // otherwise the cancellation contract holds only when the heartbeat monitor notices first.
+        Assert.Equal(1, CountOccurrences(source, FailureCancellationFence));
 
         // The lease-recovery finalizations filter across wrapped lines; assert every
         // Running-status guard inside RecoverExpiredClaimsAsync is paired with the

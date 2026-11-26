@@ -115,7 +115,7 @@ public sealed class FileProcessingService(
 
     private async Task<GeneratedFileStorageResult> FinalizeGeneratedFileAsync(StoredFile file, string storageKey, CancellationToken cancellationToken)
     {
-        var duplicate = await db.StoredFiles.AsNoTracking().FirstOrDefaultAsync(item => item.Id != file.Id
+        var duplicate = await db.StoredFiles.AsNoTracking().Include(item => item.Project).FirstOrDefaultAsync(item => item.Id != file.Id
             && item.WorkspaceId == file.WorkspaceId
             && item.Status == StoredFileStatus.Ready
             && item.ContentHashSha256 == file.ContentHashSha256, cancellationToken);
@@ -123,6 +123,18 @@ public sealed class FileProcessingService(
         {
             await db.SaveChangesAsync(cancellationToken);
             return new GeneratedFileStorageResult(file, true);
+        }
+
+        // Reuse is forced by the workspace-scoped unique index on ContentHashSha256: a second live
+        // row for the same bytes cannot exist, so an identical generation inside a workspace adopts
+        // whichever row already holds the key. When that row is private to someone else (personal or
+        // conversation-backed), the adopting member ends up with an asset they cannot open, because
+        // every consumer asks StoredFileVisibility. The reuse itself stays - it is the only outcome
+        // the schema permits - but the shape is recorded so the population can be sized before the
+        // scope model decision is taken (see GeneratedOutputCrossScopeAdoptionTests).
+        if (!new[] { duplicate }.AsQueryable().Any(StoredFileVisibility.ForWorkspaceMember(file.UserId)))
+        {
+            logger.LogWarning("Generated media duplicate reused outside the requester's file visibility. ExistingFileId={ExistingFileId}; DiscardedFileId={DiscardedFileId}; WorkspaceId={WorkspaceId}; RequesterId={RequesterId}; ExistingOwnerId={ExistingOwnerId}; ExistingProjectId={ExistingProjectId}; ExistingConversationId={ExistingConversationId}", duplicate.Id, file.Id, file.WorkspaceId, file.UserId, duplicate.UserId, duplicate.ProjectId, duplicate.ConversationId);
         }
 
         await TryDeleteGeneratedObjectAsync(storageKey, file.Id, file.WorkspaceId);

@@ -182,22 +182,105 @@ public sealed class AutopilotOrchestrator(
 
         // A wave whose tasks are all terminal but whose run never advanced means the
         // completion event was lost. Re-drive the run state machine from evidence.
+        // The pass is bounded twice over: a run is only re-driven until the documented
+        // watchdog budget is spent, and the pending-event test is evaluated against a
+        // materialized status list, because membership of a set-shaped constant cannot
+        // be translated to SQL, and an untranslatable predicate aborts this whole cycle.
+        var terminalEventStatuses = AutopilotEventStatuses.Terminal.ToArray();
+        var maxRunReconciliations = Math.Max(1, settings.MaxWatchdogReconciliations);
         var stalledRuns = await db.AutopilotRuns
             .Where(item => item.State == AutopilotRunStates.AwaitingEvents || item.State == AutopilotRunStates.InProgress)
             .Where(item => item.LastEventAt != null && item.LastEventAt < staleBefore)
+            .Where(item => item.ReconciliationCount < maxRunReconciliations)
             .OrderBy(item => item.UpdatedAt)
             .Take(100)
             .ToListAsync(cancellationToken);
 
         foreach (var run in stalledRuns)
         {
+            // Persisted statuses are only ever written from these same constants, so the
+            // translated membership test matches the set it is derived from.
+            // Intake persists the wave key with the spelling the signal carried, while
+            // the run row is keyed trimmed - which is why the event lease normalises the
+            // key and this test has to cover both spellings, or a padded key hides the
+            // outstanding evidence and the watchdog re-drives a wave whose task is still
+            // in flight, spending recovery budget on it.
+            var pendingEventKeys = run.WaveKey is null
+                ? Array.Empty<string>()
+                : new[] { run.WaveKey, run.WaveKey.Trim() }.Distinct().ToArray();
             var hasPendingEvent = await db.AutopilotEvents.AsNoTracking()
-                .AnyAsync(item => item.WaveKey == run.WaveKey
-                    && !AutopilotEventStatuses.Terminal.Contains(item.Status), cancellationToken);
+                .AnyAsync(item => pendingEventKeys.Contains(item.WaveKey)
+                    && !terminalEventStatuses.Contains(item.Status), cancellationToken);
             if (hasPendingEvent) continue;
 
-            await AdvanceRunAsync(run, context, recovered: true, cancellationToken);
-            await FlushAsync(context, cancellationToken);
+            // Recovery re-drives the same run row the event path writes, so it must
+            // hold the same exclusive wave lease: without it, a watchdog pass and a
+            // completion event applied by any controller instance can rewrite one run
+            // state machine concurrently, which is exactly what the fencing lease (and
+            // its documented single-writer contract) exists to prevent. A contended
+            // wave is left untouched for the next pass and spends no recovery budget.
+            var lease = await locks.AcquireAsync(EfAutopilotLockService.WaveResource(run.WaveKey), "autopilot-watchdog", cancellationToken);
+            if (!lease.IsAcquired)
+            {
+                Record(context, AutopilotAuditFactory.Create(
+                    AutopilotAuditActions.LockContended,
+                    AutopilotAuditOutcomes.Contended,
+                    reason: "watchdog_wave_lease_contended",
+                    waveKey: run.WaveKey,
+                    runState: run.State,
+                    targetId: run.Id,
+                    dryRun: settings.DryRun));
+                context.EventsSkipped++;
+                await FlushAsync(context, cancellationToken);
+                continue;
+            }
+
+            try
+            {
+                // The snapshot above can be minutes old by the time a late run in the
+                // batch is reached, because the pass walks up to a hundred of them
+                // serially while the event path writes this very row under this very
+                // lease. Reloading inside the lease is what makes the fence a fence:
+                // the state-machine guard below is evaluated against the value the
+                // exclusive section actually owns, so a run that already advanced -
+                // including one already Completed - cannot be committed back through
+                // the gate, handoff and next-wave path from a stale snapshot.
+                await db.Entry(run).ReloadAsync(cancellationToken);
+                if (run.State is not (AutopilotRunStates.AwaitingEvents or AutopilotRunStates.InProgress)
+                    || run.ReconciliationCount >= maxRunReconciliations)
+                {
+                    // The lease cost nothing further: the row moved on its own, so this
+                    // pass neither re-drives it nor spends its recovery budget.
+                    continue;
+                }
+
+                await AdvanceRunAsync(run, context, recovered: true, cancellationToken);
+                if (run.ReconciliationCount >= maxRunReconciliations)
+                {
+                    // Budget spent: the run stays where a human can see it, and the stop is
+                    // surfaced once instead of the watchdog re-driving it on every pass.
+                    Record(context, AutopilotAuditFactory.Create(
+                        AutopilotAuditActions.WatchdogReconciled,
+                        AutopilotAuditOutcomes.Failed,
+                        reason: "watchdog_reconciliation_exhausted",
+                        statusDetail: $"run_reconciliations:{run.ReconciliationCount}",
+                        waveKey: run.WaveKey,
+                        runState: run.State,
+                        targetId: run.Id,
+                        dryRun: settings.DryRun));
+                }
+
+                // The durable write is part of the exclusive section, not something
+                // done after it: the branches a stalled run really takes return
+                // without flushing, so a post-release flush committed the transition
+                // and the budget increment once ownership had already been dropped,
+                // where a second reconciler could overwrite them.
+                await FlushAsync(context, cancellationToken);
+            }
+            finally
+            {
+                await locks.ReleaseAsync(lease, CancellationToken.None);
+            }
         }
 
         context.EventsExamined = staleEvents.Count + expiredClaims.Count;
@@ -336,7 +419,11 @@ public sealed class AutopilotOrchestrator(
             return false;
         }
 
-        var lockHandle = await locks.AcquireAsync(EfAutopilotLockService.WaveResource(signal.WaveKey!), "autopilot-controller", cancellationToken);
+        // The run row is keyed by the trimmed wave key (see ApplySignalAsync), so the
+        // exclusive lease must cover that same trimmed resource. Leasing the raw signal
+        // spelling lets two paddings of one wave - and the watchdog, which only ever
+        // sees the trimmed run key - hold different leases while writing the same run.
+        var lockHandle = await locks.AcquireAsync(EfAutopilotLockService.WaveResource(signal.WaveKey!.Trim()), "autopilot-controller", cancellationToken);
         if (!lockHandle.IsAcquired)
         {
             intakeEvent.Status = AutopilotEventStatuses.Queued;
@@ -580,6 +667,10 @@ public sealed class AutopilotOrchestrator(
         intakeEvent.WaveTaskRecordId = task.Id;
 
         run.LastEventAt = now;
+        // Real evidence ends the stall episode, so the watchdog budget is spent per
+        // episode rather than per run lifetime. Only a fresh event re-arms it: the
+        // calendar never does.
+        run.ReconciliationCount = 0;
         run.UpdatedAt = now;
         if (run.Branch.Length == 0 && !string.IsNullOrWhiteSpace(signal.Branch)) run.Branch = signal.Branch!;
         if (run.BaseSha.Length == 0 && !string.IsNullOrWhiteSpace(signal.BaseSha)) run.BaseSha = signal.BaseSha!;

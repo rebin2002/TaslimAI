@@ -290,8 +290,15 @@ public sealed class SocialGenerationTests : IClassFixture<SocialGenerationApiFac
 
 internal sealed class DeterministicSocialProvider : ISocialGenerationProvider
 {
+    /// <summary>
+    /// The prompt of the most recent call, so selection-side tests can assert what actually
+    /// reached the provider (single instance per factory, tests in a class run sequentially).
+    /// </summary>
+    public SocialGenerationPrompt? LastPrompt { get; private set; }
+
     public Task<SocialProviderResult> GenerateAsync(SocialGenerationPrompt prompt, SocialGenerationOptions options, CancellationToken cancellationToken = default)
     {
+        LastPrompt = prompt;
         var draft = new SocialDraft
         {
             Title = "ڕۆژی کارگەی نوێ",

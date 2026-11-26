@@ -25,6 +25,11 @@ public sealed class MovieStudioBriefValidationTests : IClassFixture<GenerationJo
     private const int AdditionalInstructionsMax = 8_000;
     private const int DirectionFieldMax = 4_000;
     private const int ContinuityRulesMax = 8_000;
+    // Project.Description (the root row a brand-new Full-mode brief fans out into) is declared at
+    // 2,000 characters while MovieProject.Description is 8,000; #1087 narrows the brief contract to
+    // the lower ceiling only for the shapes that write that root row.
+    private const int RootProjectDescriptionMax = 2_000;
+    private const int MovieProjectDescriptionMax = 8_000;
     private readonly GenerationJobsApiFactory factory;
 
     public MovieStudioBriefValidationTests(GenerationJobsApiFactory factory)
@@ -125,6 +130,70 @@ public sealed class MovieStudioBriefValidationTests : IClassFixture<GenerationJo
         });
 
         Assert.True(response.IsSuccessStatusCode, await response.Content.ReadAsStringAsync());
+    }
+
+    [Fact]
+    public async Task BriefCreate_refusesTheWiderDescription_WhenTheShapeWritesARootProjectRow()
+    {
+        // Before #1087 a 2,001-character brief for a brand-new Full-mode movie passed the endpoint
+        // and aborted SaveChanges with a varchar length violation, i.e. a 500 INTERNAL_ERROR on the
+        // production provider. It must be refused inside the endpoint's own 400 envelope instead,
+        // and the bound must stay inclusive so a brief exactly at the root column limit still lands.
+        using var client = factory.CreateClient();
+        var auth = await Register(client, "Root Brief Bound Owner");
+
+        var atLimit = await SendWithCsrf(client, HttpMethod.Post, "/api/movie-studio/projects", new
+        {
+            workspaceId = auth.PersonalWorkspace.Id,
+            mode = MovieProjectModes.Full,
+            title = "Exactly At The Root Column Limit",
+            description = new string('d', RootProjectDescriptionMax),
+            durationSeconds = 60,
+            aspectRatio = "16:9",
+            style = "cinematic",
+            language = "en",
+        });
+        Assert.True(atLimit.IsSuccessStatusCode,
+            $"A {RootProjectDescriptionMax}-character brief for a new root project returned {(int)atLimit.StatusCode}: {await atLimit.Content.ReadAsStringAsync()}");
+
+        var overLimit = await SendWithCsrf(client, HttpMethod.Post, "/api/movie-studio/projects", new
+        {
+            workspaceId = auth.PersonalWorkspace.Id,
+            mode = MovieProjectModes.Full,
+            title = "One Over The Root Column Limit",
+            description = new string('d', RootProjectDescriptionMax + 1),
+            durationSeconds = 60,
+            aspectRatio = "16:9",
+            style = "cinematic",
+            language = "en",
+        });
+        Assert.Equal(HttpStatusCode.BadRequest, overLimit.StatusCode);
+        Assert.Equal("MOVIE_REQUEST_INVALID", await ReadErrorCode(overLimit));
+        Assert.Contains("Describe the movie", (await overLimit.Content.ReadAsStringAsync()));
+    }
+
+    [Fact]
+    public async Task BriefCreate_keepsTheWideDescription_WhenNoRootProjectRowIsWritten()
+    {
+        // The narrowing is shape-specific, not a repo-wide description limit: a Quick Movie brief is
+        // stored only on MovieProject.Description (8,000), so an 8,000-character brief must still be
+        // accepted. Without this case the #1087 guard could silently regress every other shape.
+        using var client = factory.CreateClient();
+        var auth = await Register(client, "Wide Brief Shape Owner");
+
+        var response = await SendWithCsrf(client, HttpMethod.Post, "/api/movie-studio/projects", new
+        {
+            workspaceId = auth.PersonalWorkspace.Id,
+            mode = MovieProjectModes.Quick,
+            title = "Quick Wide Brief",
+            description = new string('d', MovieProjectDescriptionMax),
+            durationSeconds = 60,
+            aspectRatio = "16:9",
+            style = "cinematic",
+            language = "en",
+        });
+        Assert.True(response.IsSuccessStatusCode,
+            $"An {MovieProjectDescriptionMax}-character Quick brief returned {(int)response.StatusCode}: {await response.Content.ReadAsStringAsync()}");
     }
 
     private static async Task<string?> ReadErrorCode(HttpResponseMessage response) =>
