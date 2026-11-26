@@ -1,12 +1,22 @@
 using System.Net;
 using System.Net.Http.Json;
+using System.Security.Claims;
+using System.Text;
 using System.Text.Json;
+using Microsoft.AspNetCore.Hosting;
+using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
+using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
+using Taslim.Api.Assets;
 using Taslim.Api.Contracts;
+using Taslim.Api.Controllers;
 using Taslim.Api.Domain;
 using Taslim.Api.Documents;
+using Taslim.Api.Files;
 using Taslim.Api.Persistence;
 using Xunit;
 
@@ -376,5 +386,412 @@ public sealed class DocumentGenerationEnabledRouteTests : IClassFixture<Document
         if (idempotencyKey is not null) request.Headers.Add("Idempotency-Key", idempotencyKey);
         if (payload is not null) request.Content = JsonContent.Create(payload);
         return await client.SendAsync(request);
+    }
+}
+
+
+/// <summary>
+/// Exercises the real worker claim/finalization path with Document Studio disabled.
+/// This proves that an already-queued job is terminally rejected without reaching a
+/// provider and that any usage reservation is finalized without a customer charge.
+/// </summary>
+public sealed class DocumentKillSwitchClaimOutcomeFactory : GenerationJobsApiFactory
+{
+    public KillSwitchCountingDocumentProvider Provider { get; } = new();
+
+    protected override void ConfigureWebHost(IWebHostBuilder builder)
+    {
+        base.ConfigureWebHost(builder);
+        builder.ConfigureServices(services =>
+        {
+            services.RemoveAll<IDocumentGenerationProvider>();
+            services.AddSingleton<IDocumentGenerationProvider>(Provider);
+        });
+    }
+}
+
+/// <summary>A provider that fails the test if disabled work reaches it.</summary>
+public sealed class KillSwitchCountingDocumentProvider : IDocumentGenerationProvider
+{
+    private int callCount;
+
+    public int CallCount => Volatile.Read(ref callCount);
+
+    public Task<DocumentProviderResult> GenerateAsync(DocumentGenerationPrompt prompt, DocumentGenerationOptions options, CancellationToken cancellationToken = default)
+    {
+        Interlocked.Increment(ref callCount);
+        throw new InvalidOperationException("The document provider must not be reached while Document Studio is disabled.");
+    }
+}
+
+public sealed class DocumentKillSwitchClaimOutcomeTests : IClassFixture<DocumentKillSwitchClaimOutcomeFactory>
+{
+    private readonly DocumentKillSwitchClaimOutcomeFactory factory;
+
+    public DocumentKillSwitchClaimOutcomeTests(DocumentKillSwitchClaimOutcomeFactory factory)
+    {
+        this.factory = factory;
+        using var scope = factory.Services.CreateScope();
+        scope.ServiceProvider.GetRequiredService<TaslimDbContext>().Database.EnsureCreated();
+    }
+
+    [Fact]
+    public async Task Queued_document_job_claimed_after_the_switch_is_pulled_fails_closed_with_zero_charge_and_no_provider_call()
+    {
+        using var client = factory.CreateClient();
+        var auth = await Register(client, $"killswitch-claim-{Guid.NewGuid():N}@example.com");
+        Assert.False(StudioEnabled());
+
+        // Seed a job that was queued before the switch was pulled. The worker is active,
+        // but every admission route correctly refuses new document work while disabled.
+        var jobId = Guid.NewGuid();
+        using (var seedScope = factory.Services.CreateScope())
+        {
+            var seedDb = seedScope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            seedDb.GenerationJobs.Add(new GenerationJob
+            {
+                Id = jobId,
+                WorkspaceId = auth.PersonalWorkspace.Id,
+                CreatedByUserId = auth.User.Id,
+                JobType = GenerationJobTypes.DocumentGenerate,
+                Status = GenerationJobStatus.Queued,
+                Title = "Queued before the switch was pulled",
+                InputJson = DocumentInput(auth.PersonalWorkspace.Id),
+                CreatedAt = DateTime.UtcNow.AddMinutes(-2),
+                QueuedAt = DateTime.UtcNow.AddMinutes(-1),
+                ConcurrencyToken = Guid.NewGuid(),
+            });
+            await seedDb.SaveChangesAsync();
+        }
+
+        var terminal = await WaitForTerminalStatusAsync(client, jobId);
+
+        Assert.Equal(nameof(GenerationJobStatus.Failed), terminal.Status);
+        Assert.Equal(GenerationJobErrorCodes.DocumentStudioUnavailable, terminal.ErrorCode);
+        Assert.Equal("Document generation is not available right now.", terminal.ErrorMessage);
+        Assert.DoesNotContain("provider", terminal.ErrorMessage, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("model", terminal.ErrorMessage, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(0, factory.Provider.CallCount);
+
+        using var verifyScope = factory.Services.CreateScope();
+        var db = verifyScope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        var usage = await db.UsageTransactions.AsNoTracking()
+            .SingleAsync(item => item.RequestId == $"generation:{jobId:N}");
+        Assert.Equal(UsageTransactionStatus.Failed, usage.Status);
+        Assert.Equal(0m, usage.ChargedAmount);
+    }
+
+    private bool StudioEnabled()
+    {
+        using var scope = factory.Services.CreateScope();
+        return scope.ServiceProvider.GetRequiredService<IOptions<DocumentGenerationOptions>>().Value.Enabled;
+    }
+
+    private static async Task<GenerationJobDto> WaitForTerminalStatusAsync(HttpClient client, Guid jobId)
+    {
+        GenerationJobDto? job = null;
+        for (var attempt = 0; attempt < 200; attempt++)
+        {
+            job = await client.GetFromJsonAsync<GenerationJobDto>($"/api/generation/jobs/{jobId}");
+            if (job is not null && job.Status is "Failed" or "Succeeded" or "Cancelled") return job;
+            await Task.Delay(50);
+        }
+        Assert.Fail($"The claimed document job never reached a terminal state. JobId={jobId}; LastStatus={job?.Status ?? "<null>"}");
+        throw new InvalidOperationException("unreachable");
+    }
+
+    private static string DocumentInput(Guid workspaceId) => DocumentGenerationContractMapper.SerializeInput(new DocumentGenerationInput(
+        workspaceId,
+        null,
+        "Claim-boundary QA fixture",
+        "Create a safe document for this deterministic test.",
+        "report",
+        "standard",
+        null,
+        null,
+        [],
+        "en",
+        "pdf",
+        "professional",
+        true));
+
+    private static async Task<AuthResponse> Register(HttpClient client, string email)
+    {
+        var response = await SendWithCsrf(client, HttpMethod.Post, "/api/auth/register", new
+        {
+            displayName = "Kill Switch Claim QA",
+            email,
+            password = "StrongPassword!123",
+            preferredLanguage = "en",
+        });
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        return (await response.Content.ReadFromJsonAsync<AuthResponse>())!;
+    }
+
+    private static async Task<HttpResponseMessage> SendWithCsrf(HttpClient client, HttpMethod method, string path, object? payload = null)
+    {
+        var csrf = await client.GetFromJsonAsync<JsonElement>("/api/auth/csrf");
+        using var request = new HttpRequestMessage(method, path);
+        request.Headers.Add("X-CSRF-TOKEN", csrf.GetProperty("token").GetString());
+        if (payload is not null) request.Content = JsonContent.Create(payload);
+        return await client.SendAsync(request);
+    }
+}
+
+/// <summary>
+/// Confirms that disabling Document Studio blocks new or resumed provider work without
+/// disabling legitimate cancellation, job-history, or already-published asset access.
+/// All rows and file bytes in these cases are synthetic and provider-free.
+/// </summary>
+public sealed class DocumentKillSwitchLifecycleContractTests : IClassFixture<GenerationJobsNoWorkerFactory>
+{
+    private const string StudioUnavailableCode = "DOCUMENT_STUDIO_UNAVAILABLE";
+    private const string StudioUnavailableMessage = "Document generation is not available right now.";
+
+    private readonly GenerationJobsNoWorkerFactory factory;
+
+    public DocumentKillSwitchLifecycleContractTests(GenerationJobsNoWorkerFactory factory)
+    {
+        this.factory = factory;
+        using var scope = factory.Services.CreateScope();
+        scope.ServiceProvider.GetRequiredService<TaslimDbContext>().Database.EnsureCreated();
+    }
+
+    [Fact]
+    public async Task Cancel_remains_available_for_a_queued_document_job_while_the_studio_is_disabled()
+    {
+        Assert.False(StudioEnabled());
+
+        using var client = factory.CreateClient();
+        var auth = await Register(client, $"killswitch-cancel-{Guid.NewGuid():N}@example.com");
+        var jobId = await SeedDocumentJob(auth, GenerationJobStatus.Queued);
+
+        var response = await SendWithCsrf(client, HttpMethod.Post, $"/api/generation/jobs/{jobId}/cancel");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var body = await response.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal(nameof(GenerationJobStatus.Cancelled), body.GetProperty("status").GetString());
+
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        var job = await db.GenerationJobs.AsNoTracking().SingleAsync(item => item.Id == jobId);
+        Assert.Equal(GenerationJobStatus.Cancelled, job.Status);
+        Assert.Equal(GenerationJobErrorCodes.DocumentCancelled, job.ErrorCode);
+        Assert.NotNull(job.CancelledAt);
+    }
+
+    [Fact]
+    public async Task Failed_document_job_stays_readable_through_get_and_list_while_the_studio_is_disabled()
+    {
+        using var client = factory.CreateClient();
+        var auth = await Register(client, $"killswitch-read-{Guid.NewGuid():N}@example.com");
+        var jobId = await SeedDocumentJob(auth, GenerationJobStatus.Failed);
+
+        var get = await client.GetAsync($"/api/generation/jobs/{jobId}");
+        Assert.Equal(HttpStatusCode.OK, get.StatusCode);
+        var getBody = await get.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal(jobId.ToString(), getBody.GetProperty("id").GetString());
+        Assert.Equal(nameof(GenerationJobStatus.Failed), getBody.GetProperty("status").GetString());
+
+        var list = await client.GetAsync($"/api/generation/jobs?workspaceId={auth.PersonalWorkspace.Id}&jobType={GenerationJobTypes.DocumentGenerate}");
+        Assert.Equal(HttpStatusCode.OK, list.StatusCode);
+        var listBody = await list.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Contains(listBody.GetProperty("items").EnumerateArray(),
+            item => item.GetProperty("id").GetString() == jobId.ToString());
+    }
+
+    [Fact]
+    public async Task Cancelling_a_queued_document_job_while_disabled_is_terminal_and_keeps_the_dedicated_route_refused()
+    {
+        using var client = factory.CreateClient();
+        var auth = await Register(client, $"killswitch-aftercancel-{Guid.NewGuid():N}@example.com");
+        var jobId = await SeedDocumentJob(auth, GenerationJobStatus.Queued);
+
+        var cancel = await SendWithCsrf(client, HttpMethod.Post, $"/api/generation/jobs/{jobId}/cancel");
+        Assert.Equal(HttpStatusCode.OK, cancel.StatusCode);
+
+        var dedicated = await SendWithCsrf(client, HttpMethod.Post, "/api/document-generation/jobs", new
+        {
+            workspaceId = auth.PersonalWorkspace.Id,
+            description = "A synthetic document brief that must stay refused while Document Studio is disabled.",
+        });
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, dedicated.StatusCode);
+        var body = await dedicated.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal(StudioUnavailableCode, body.GetProperty("error").GetProperty("code").GetString());
+        Assert.Equal(StudioUnavailableMessage, body.GetProperty("error").GetProperty("message").GetString());
+
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        Assert.Equal(1, await db.GenerationJobs.AsNoTracking().CountAsync(item => item.WorkspaceId == auth.PersonalWorkspace.Id));
+    }
+
+    [Fact]
+    public async Task Document_asset_download_stays_served_while_the_studio_is_disabled()
+    {
+        Assert.False(StudioEnabled());
+
+        using var client = factory.CreateClient();
+        var auth = await Register(client, $"killswitch-download-{Guid.NewGuid():N}@example.com");
+        var userId = auth.User.Id;
+        var workspaceId = auth.PersonalWorkspace.Id;
+
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        var jobId = Guid.NewGuid();
+        var assetId = Guid.NewGuid();
+        var storedFileId = Guid.NewGuid();
+        var syntheticPdf = Encoding.UTF8.GetBytes("%PDF-1.4 synthetic QA fixture, not a real document.");
+
+        db.GenerationJobs.Add(new GenerationJob
+        {
+            Id = jobId,
+            WorkspaceId = workspaceId,
+            CreatedByUserId = userId,
+            JobType = GenerationJobTypes.DocumentGenerate,
+            Status = GenerationJobStatus.Succeeded,
+            Title = "Completed before the switch",
+            InputJson = "{}",
+            CreatedAt = DateTime.UtcNow.AddMinutes(-10),
+            CompletedAt = DateTime.UtcNow.AddMinutes(-9),
+            ConcurrencyToken = Guid.NewGuid(),
+        });
+        db.StoredFiles.Add(new StoredFile
+        {
+            Id = storedFileId,
+            WorkspaceId = workspaceId,
+            UserId = userId,
+            OriginalFileName = "qa-synthetic-document.pdf",
+            StoredFileName = "qa-synthetic-document.pdf",
+            ContentType = "application/pdf",
+            Extension = ".pdf",
+            SizeBytes = syntheticPdf.LongLength,
+            StorageProvider = FileStorageProviders.Local,
+            StorageKey = $"qa/1005/{assetId:N}.pdf",
+            Status = StoredFileStatus.Ready,
+            CreatedAt = DateTime.UtcNow.AddMinutes(-9),
+        });
+        db.Assets.Add(new Asset
+        {
+            Id = assetId,
+            WorkspaceId = workspaceId,
+            CreatedByUserId = userId,
+            StoredFileId = storedFileId,
+            SourceGenerationJobId = jobId,
+            Name = "QA synthetic document",
+            AssetType = AssetTypes.Document,
+            MimeType = "application/pdf",
+            Status = AssetStatus.Active,
+            CreatedAt = DateTime.UtcNow.AddMinutes(-9),
+            UpdatedAt = DateTime.UtcNow.AddMinutes(-9),
+        });
+        await db.SaveChangesAsync();
+
+        var controller = new AssetsController(
+            scope.ServiceProvider.GetRequiredService<IAssetService>(),
+            new InMemoryStorage(syntheticPdf),
+            NullLogger<AssetsController>.Instance)
+        {
+            ControllerContext = new ControllerContext
+            {
+                HttpContext = new DefaultHttpContext
+                {
+                    User = new ClaimsPrincipal(new ClaimsIdentity(
+                        [new Claim(ClaimTypes.NameIdentifier, userId.ToString())],
+                        authenticationType: "test")),
+                },
+            },
+        };
+
+        var result = await controller.Download(assetId, cancellationToken: CancellationToken.None);
+
+        var file = Assert.IsType<FileStreamResult>(result);
+        await using var stream = file.FileStream;
+        using var buffer = new MemoryStream();
+        await stream.CopyToAsync(buffer);
+        Assert.Equal(syntheticPdf, buffer.ToArray());
+        Assert.Equal("application/pdf", file.ContentType);
+        Assert.IsNotType<ObjectResult>(result);
+    }
+
+    private bool StudioEnabled()
+    {
+        using var scope = factory.Services.CreateScope();
+        return scope.ServiceProvider.GetRequiredService<IOptions<DocumentGenerationOptions>>().Value.Enabled;
+    }
+
+    private async Task<Guid> SeedDocumentJob(AuthResponse auth, GenerationJobStatus status)
+    {
+        var jobId = Guid.NewGuid();
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        db.GenerationJobs.Add(new GenerationJob
+        {
+            Id = jobId,
+            WorkspaceId = auth.PersonalWorkspace.Id,
+            CreatedByUserId = auth.User.Id,
+            JobType = GenerationJobTypes.DocumentGenerate,
+            Status = status,
+            Title = "Kill-switch lifecycle QA fixture",
+            InputJson = DocumentInput(auth.PersonalWorkspace.Id),
+            CreatedAt = DateTime.UtcNow.AddMinutes(-2),
+            QueuedAt = status == GenerationJobStatus.Queued ? DateTime.UtcNow.AddMinutes(-1) : null,
+            FailedAt = status == GenerationJobStatus.Failed ? DateTime.UtcNow.AddSeconds(-30) : null,
+            ErrorCode = status == GenerationJobStatus.Failed ? GenerationJobErrorCodes.DocumentProviderUnavailable : null,
+            ErrorMessage = status == GenerationJobStatus.Failed ? "Document generation is temporarily unavailable. Please try again later." : null,
+            ConcurrencyToken = Guid.NewGuid(),
+        });
+        await db.SaveChangesAsync();
+        return jobId;
+    }
+
+    private static string DocumentInput(Guid workspaceId) => DocumentGenerationContractMapper.SerializeInput(new DocumentGenerationInput(
+        workspaceId,
+        null,
+        "Lifecycle QA fixture",
+        "Create a safe document for this deterministic test.",
+        "report",
+        "standard",
+        null,
+        null,
+        [],
+        "en",
+        "pdf",
+        "professional",
+        true));
+
+    private static async Task<AuthResponse> Register(HttpClient client, string email)
+    {
+        var response = await SendWithCsrf(client, HttpMethod.Post, "/api/auth/register", new
+        {
+            displayName = "Kill Switch Lifecycle QA",
+            email,
+            password = "StrongPassword!123",
+            preferredLanguage = "en",
+        });
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        return (await response.Content.ReadFromJsonAsync<AuthResponse>())!;
+    }
+
+    private static async Task<HttpResponseMessage> SendWithCsrf(HttpClient client, HttpMethod method, string path, object? payload = null)
+    {
+        var csrf = await client.GetFromJsonAsync<JsonElement>("/api/auth/csrf");
+        using var request = new HttpRequestMessage(method, path);
+        request.Headers.Add("X-CSRF-TOKEN", csrf.GetProperty("token").GetString());
+        if (payload is not null) request.Content = JsonContent.Create(payload);
+        return await client.SendAsync(request);
+    }
+
+    private sealed class InMemoryStorage(byte[] content) : IFileStorageService
+    {
+        public string ProviderKey => FileStorageProviders.Local;
+
+        public Task StoreAsync(string storageKey, Stream stream, CancellationToken cancellationToken = default) => Task.CompletedTask;
+
+        public Task<Stream?> OpenReadAsync(string storageKey, CancellationToken cancellationToken = default) =>
+            Task.FromResult<Stream?>(new MemoryStream(content));
+
+        public Task DeleteAsync(string storageKey, CancellationToken cancellationToken = default) => Task.CompletedTask;
+
+        public Task<bool> ExistsAsync(string storageKey, CancellationToken cancellationToken = default) => Task.FromResult(true);
     }
 }
