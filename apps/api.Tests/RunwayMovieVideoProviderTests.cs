@@ -240,7 +240,7 @@ public sealed class RunwayMovieVideoProviderTests
     public async Task Public_reference_url_passes_the_scope_policy_without_being_fetched()
     {
         var handler = new RecordingHandler(_ => JsonResponse($"{{\"id\":\"{TaskId}\"}}"));
-        var provider = CreateProvider(handler, EnabledOptions(), new ProviderUrlPolicy());
+        var provider = CreateProvider(handler, EnabledOptions(), new ProviderUrlPolicy(new PublicAddressResolver()));
 
         var submission = await provider.SubmitAsync(Request(sourceImageUri: "https://assets.example.test/frame.png"), CancellationToken.None);
 
@@ -320,6 +320,12 @@ public sealed class RunwayMovieVideoProviderTests
     private sealed class AllowAllProviderUrlPolicy : IProviderUrlPolicy
     {
         public Task EnsureSafeAsync(Uri uri, CancellationToken cancellationToken = default) => Task.CompletedTask;
+    }
+
+    private sealed class PublicAddressResolver : IProviderHostResolver
+    {
+        public Task<IReadOnlyList<IPAddress>> ResolveAsync(string host, CancellationToken cancellationToken) =>
+            Task.FromResult<IReadOnlyList<IPAddress>>([IPAddress.Parse("8.8.8.8")]);
     }
 
     private static MovieVideoOptions EnabledOptions() => new()
