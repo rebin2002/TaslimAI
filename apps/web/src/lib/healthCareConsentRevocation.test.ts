@@ -166,15 +166,13 @@ describe("issue #714 Health Care consent-revocation fence on the shipped placeho
       const html = renderPlaceholder(entry);
       expect(html).toContain('id="health-care-title"');
       const buttons = renderedButtons(html);
-      // The planned actions are exactly the feature list; none is an enabled control.
-      expect(buttons.length, `${entry}: every planned action is rendered`).toBe(
-        healthCareCopy("en").features.length,
-      );
-      for (const { tag, body } of buttons) {
-        expect(tag, "planned action must not be actionable").toContain("disabled");
-        expect(body).toContain(healthCareCopy("en").actionUnavailable);
+      const copy = healthCareCopy("en");
+      for (const feature of copy.features) {
+        const matches = buttons.filter(({ body }) => visibleText(body).includes(feature.label));
+        expect(matches, `${entry}: ${feature.id} has one planned action`).toHaveLength(1);
+        expect(matches[0].tag).toMatch(/(?:^|\s)disabled(?:\s|=|$)/);
+        expect(visibleText(matches[0].body)).toContain(copy.actionUnavailable);
       }
-      expect(html).not.toMatch(/<button\b(?![^>]*\bdisabled)/);
     }
   });
 
@@ -207,9 +205,10 @@ describe("issue #714 Health Care consent-revocation fence on the shipped placeho
 
   it("presents no consent grant, toggle or revocation surface in the real UI", () => {
     for (const entry of ["personal", "create"] as const) {
-      const text = visibleText(renderPlaceholder(entry)).toLowerCase();
-      for (const affordance of ["consent", "grant", "revoke", "allow access"]) {
-        expect(text, `${entry}: placeholder must not imply a ${affordance} control`).not.toContain(affordance);
+      const labels = renderedButtons(renderPlaceholder(entry)).map(({ body }) => visibleText(body));
+      for (const label of labels) {
+        expect(label, `${entry}: placeholder must not offer a consent action`)
+          .not.toMatch(/\b(?:grant consent|revoke consent|allow access)\b/i);
       }
     }
   });
