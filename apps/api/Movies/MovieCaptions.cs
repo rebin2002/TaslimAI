@@ -158,7 +158,7 @@ public sealed class SrtMovieCaptionFormatAdapter : IMovieCaptionFormatAdapter
             builder.Append(index + 1).Append("\r\n")
                 .Append(MovieCaptionTimecode.FormatSrt(cue.StartMilliseconds)).Append(" --> ")
                 .Append(MovieCaptionTimecode.FormatSrt(cue.EndMilliseconds)).Append("\r\n")
-                .Append(cue.Text.Replace("\r\n", "\n", StringComparison.Ordinal).Replace("\n", "\r\n", StringComparison.Ordinal))
+                .Append(MovieCaptionTextFolding.Fold(cue.Text).Replace("\n", "\r\n", StringComparison.Ordinal))
                 .Append("\r\n\r\n");
         }
         return builder.ToString().TrimEnd('\r', '\n') + (ordered.Length == 0 ? string.Empty : "\r\n");
@@ -219,8 +219,11 @@ public sealed class WebVttMovieCaptionFormatAdapter : IMovieCaptionFormatAdapter
             builder.Append(index + 1).Append("\r\n")
                 .Append(MovieCaptionTimecode.FormatVtt(cue.StartMilliseconds)).Append(" --> ")
                 .Append(MovieCaptionTimecode.FormatVtt(cue.EndMilliseconds)).Append("\r\n");
-            var text = cue.Text.Replace("&", "&amp;", StringComparison.Ordinal).Replace("<", "&lt;", StringComparison.Ordinal).Replace(">", "&gt;", StringComparison.Ordinal).Replace("\r\n", "\n", StringComparison.Ordinal).Replace("\n", "\r\n", StringComparison.Ordinal);
-            builder.Append(cue.SpeakerName is null ? text : $"<v {WebUtility.HtmlEncode(cue.SpeakerName)}>{text}</v>")
+            var text = MovieCaptionTextFolding.Fold(cue.Text).Replace("&", "&amp;", StringComparison.Ordinal).Replace("<", "&lt;", StringComparison.Ordinal).Replace(">", "&gt;", StringComparison.Ordinal).Replace("\n", "\r\n", StringComparison.Ordinal);
+            // A voice label is one VTT tag attribute, never a physical cue line.
+            // Encode after collapsing whitespace so a stored CR/LF cannot split the <v> tag.
+            var speakerName = cue.SpeakerName is null ? null : Regex.Replace(cue.SpeakerName, @"\s+", " ").Trim();
+            builder.Append(speakerName is null ? text : $"<v {WebUtility.HtmlEncode(speakerName)}>{text}</v>")
                 .Append("\r\n\r\n");
         }
         return builder.ToString();
@@ -237,7 +240,7 @@ public interface IMovieCaptionService
     Task<MovieCaptionTrackDto?> CreateTrackAsync(Guid userId, Guid movieProjectId, MovieCaptionTrackRequest request, CancellationToken cancellationToken);
     Task<MovieCaptionCueDto?> AddCueAsync(Guid userId, Guid trackId, MovieCaptionCueRequest request, CancellationToken cancellationToken);
     Task<MovieCaptionCueDto?> UpdateCueAsync(Guid userId, Guid cueId, MovieCaptionCueRequest request, CancellationToken cancellationToken);
-    Task DeleteCueAsync(Guid userId, Guid cueId, CancellationToken cancellationToken);
+    Task<bool> DeleteCueAsync(Guid userId, Guid cueId, CancellationToken cancellationToken);
     Task<MovieCaptionTrackDto?> ImportAsync(Guid userId, Guid movieProjectId, MovieCaptionImportRequest request, CancellationToken cancellationToken);
     Task<MovieCaptionExport?> ExportAsync(Guid userId, Guid trackId, string format, CancellationToken cancellationToken);
 }
@@ -330,14 +333,23 @@ public sealed class MovieCaptionService(
         return ToCueDto(savedCue);
     }
 
-    public async Task DeleteCueAsync(Guid userId, Guid cueId, CancellationToken cancellationToken)
+    public async Task<bool> DeleteCueAsync(Guid userId, Guid cueId, CancellationToken cancellationToken)
     {
         var cue = await db.MovieCaptionCues.Include(item => item.MovieCaptionTrack).FirstOrDefaultAsync(item => item.Id == cueId, cancellationToken);
-        if (cue is null) throw new MovieCaptionValidationException("Caption cue was not found.");
+        // Privacy contract: an unknown cue id and a cue whose owning project the caller
+        // cannot see must be indistinguishable, so both resolve to the same not-found
+        // outcome (404) rather than letting a permission answer confirm that the cue
+        // exists. This mirrors UpdateCueAsync, the sibling mutation of the same cue
+        // resource, which already collapses missing and foreign into a single null.
+        if (cue is null || !await collaboration.HasPermissionAsync(userId, cue.MovieCaptionTrack.MovieProjectId, MoviePermissions.View, cancellationToken)) return false;
+        // The cue is visible to this caller, so a missing edit right stays a
+        // legitimate permission denial (403): this caller can already enumerate the
+        // track's cues through the read routes, so nothing new is disclosed.
         await collaboration.RequireAsync(userId, cue.MovieCaptionTrack.MovieProjectId, MoviePermissions.Edit, cancellationToken);
         db.MovieCaptionCues.Remove(cue);
         cue.MovieCaptionTrack.UpdatedAt = DateTime.UtcNow;
         await db.SaveChangesAsync(cancellationToken);
+        return true;
     }
 
     public async Task<MovieCaptionTrackDto?> ImportAsync(Guid userId, Guid movieProjectId, MovieCaptionImportRequest request, CancellationToken cancellationToken)
@@ -353,13 +365,19 @@ public sealed class MovieCaptionService(
         var project = await db.MovieProjects.AsNoTracking().FirstOrDefaultAsync(item => item.Id == movieProjectId, cancellationToken);
         if (project is null || !await collaboration.HasPermissionAsync(userId, movieProjectId, MoviePermissions.Edit, cancellationToken)) return null;
         ValidateDocument(document, project.DurationSeconds);
+        await using var transaction = await db.Database.BeginTransactionAsync(cancellationToken);
         var track = await CreateTrackAsync(userId, movieProjectId, new MovieCaptionTrackRequest
         {
             Name = request.Name, Language = request.Language, IsRtl = request.IsRtl, TrackType = request.TrackType,
             MovieAssemblyId = request.MovieAssemblyId, IsDefault = request.IsDefault, Status = request.Status,
             SourceFormat = format, SourceFileName = request.SourceFileName,
         }, cancellationToken);
-        if (track is null) return null;
+        if (track is null)
+        {
+            await transaction.RollbackAsync(cancellationToken);
+            return null;
+        }
+
         var entity = await db.MovieCaptionTracks.FirstAsync(item => item.Id == track.Id, cancellationToken);
         var now = DateTime.UtcNow;
         var importedCues = document.Cues.Select((cue, index) => new MovieCaptionCue
@@ -370,6 +388,7 @@ public sealed class MovieCaptionService(
         db.MovieCaptionCues.AddRange(importedCues);
         entity.UpdatedAt = now;
         await db.SaveChangesAsync(cancellationToken);
+        await transaction.CommitAsync(cancellationToken);
         return (await GetTrackAsync(userId, entity.Id, cancellationToken))!;
     }
 
