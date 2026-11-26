@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using Microsoft.AspNetCore.Antiforgery;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Identity;
@@ -9,6 +10,7 @@ using Taslim.Api.Authorization;
 using Taslim.Api.Billing;
 using Taslim.Api.Contracts;
 using Taslim.Api.Domain;
+using Taslim.Api.Email;
 using Taslim.Api.Infrastructure;
 using Taslim.Api.Localization;
 using Taslim.Api.Persistence;
@@ -24,6 +26,10 @@ public sealed class AuthController(
     IAntiforgery antiforgery,
     IOptions<IdentityOptions> identityOptions,
     IBillingProvisioningService billingProvisioning,
+    IOptionsMonitor<PasswordRecoveryOptions> passwordRecoveryOptions,
+    IEmailSender emailSender,
+    PasswordResetOutboxService passwordResetOutbox,
+    IWebHostEnvironment environment,
     ILogger<AuthController> logger) : ControllerBase
 {
     [HttpGet("csrf")]
@@ -49,6 +55,144 @@ public sealed class AuthController(
             password.RequireDigit,
             password.RequireNonAlphanumeric,
             password.RequiredUniqueChars));
+    }
+
+    [HttpGet("password-recovery/availability")]
+    [AllowAnonymous]
+    public IActionResult PasswordRecoveryAvailability()
+    {
+        SetNoStoreHeaders();
+        var available = passwordRecoveryOptions.CurrentValue.IsReady(environment.IsProduction(), emailSender);
+        return Ok(new { available });
+    }
+
+    [HttpPost("password/forgot")]
+    [AllowAnonymous]
+    [ValidateAntiForgeryToken]
+    [EnableRateLimiting(RateLimiting.PasswordRecovery)]
+    public async Task<IActionResult> ForgotPassword(ForgotPasswordRequest request, CancellationToken cancellationToken)
+    {
+        SetNoStoreHeaders();
+        var options = passwordRecoveryOptions.CurrentValue;
+        if (!options.IsReady(environment.IsProduction(), emailSender))
+        {
+            logger.LogWarning("Password recovery request unavailable. TraceId={TraceId}; Reason=DeliveryNotConfigured", HttpContext.TraceIdentifier);
+            return ApiResults.Error(this, StatusCodes.Status503ServiceUnavailable, "PASSWORD_RECOVERY_UNAVAILABLE", "Password recovery is temporarily unavailable. Please try again later.");
+        }
+
+        if (!ModelState.IsValid)
+            return ApiResults.Validation(this, "Please enter a valid email address.");
+
+        var requestTimer = Stopwatch.StartNew();
+        var user = await userManager.FindByEmailAsync(request.Email.Trim());
+        if (user is null || !user.IsActive)
+            return await PasswordResetRequestAcceptedAsync(requestTimer, cancellationToken);
+
+        try
+        {
+            await passwordResetOutbox.TryQueueAsync(
+                user.Id,
+                TimeSpan.FromMinutes(options.RequestCooldownMinutes),
+                cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception exception)
+        {
+            // Queuing is the only step that runs for an existing account and not for
+            // an unknown one, so an unmasked outbox or storage fault (missing table,
+            // unapplied migration, permission loss, constraint clash) answers 500 for
+            // exactly one class of address and becomes an account-enumeration oracle
+            // during an outage. The response is the same masked 202 as the unknown
+            // path; the fault is recorded server-side as a stable classification only,
+            // never an address, token or provider message.
+            logger.LogError(
+                "Password reset request queueing failed. TraceId={TraceId}; ErrorType={ErrorType}",
+                HttpContext.TraceIdentifier,
+                exception.GetType().Name);
+        }
+
+        return await PasswordResetRequestAcceptedAsync(requestTimer, cancellationToken);
+    }
+
+    [HttpPost("password/reset")]
+    [AllowAnonymous]
+    [ValidateAntiForgeryToken]
+    [EnableRateLimiting(RateLimiting.PasswordRecovery)]
+    public async Task<IActionResult> ResetPassword(ResetPasswordRequest request, CancellationToken cancellationToken)
+    {
+        SetNoStoreHeaders();
+        cancellationToken.ThrowIfCancellationRequested();
+        if (!passwordRecoveryOptions.CurrentValue.IsReady(environment.IsProduction(), emailSender))
+        {
+            logger.LogWarning("Password recovery reset unavailable. TraceId={TraceId}; Reason=DeliveryNotConfigured", HttpContext.TraceIdentifier);
+            return ApiResults.Error(this, StatusCodes.Status503ServiceUnavailable, "PASSWORD_RECOVERY_UNAVAILABLE", "Password recovery is temporarily unavailable. Please try again later.");
+        }
+        if (!ModelState.IsValid)
+            return ApiResults.Validation(this, "Please provide the reset link and a new password.");
+
+        var user = await userManager.FindByEmailAsync(request.Email.Trim());
+        if (user is null || !user.IsActive)
+            return InvalidPasswordReset();
+
+        var result = await userManager.ResetPasswordAsync(user, request.Token, request.NewPassword);
+        if (!result.Succeeded)
+        {
+            var passwordErrors = ToPasswordFieldErrors(result.Errors);
+            if (passwordErrors.Length > 0)
+                return ApiResults.Validation(this, "Please choose a password that meets the requirements.",
+                    new Dictionary<string, string[]> { ["newPassword"] = passwordErrors });
+            return InvalidPasswordReset();
+        }
+
+        // ResetPasswordAsync rotates the Identity security stamp. Expiring the
+        // CSRF cookie ensures this response never leaves a request token bound
+        // to the pre-reset browser session. The response deliberately issues no
+        // authentication cookie; users must sign in again with the new password.
+        try
+        {
+            // The recovery is complete, so any still-queued or in-flight reset email
+            // for this account is obsolete and must not be delivered afterwards.
+            await passwordResetOutbox.CancelForUserAsync(user.Id, cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception exception)
+        {
+            // The password change already succeeded. Reporting a cancellation fault as
+            // a failed reset would mislead the user into retrying recovery, so it is
+            // logged as a classification only and the outcome of this request is not
+            // changed for any account, known or unknown.
+            logger.LogError(
+                "Password reset outbox cancellation failed. TraceId={TraceId}; ErrorType={ErrorType}",
+                HttpContext.TraceIdentifier,
+                exception.GetType().Name);
+        }
+
+        ExpireCsrfCookie();
+        return Ok(new { success = true });
+    }
+
+    private async Task<IActionResult> PasswordResetRequestAcceptedAsync(Stopwatch requestTimer, CancellationToken cancellationToken)
+    {
+        var privacyFloor = TimeSpan.FromMilliseconds(200);
+        var remaining = privacyFloor - requestTimer.Elapsed;
+        if (remaining > TimeSpan.Zero)
+            await Task.Delay(remaining, cancellationToken);
+        return Accepted(new { message = "If an account matches that email, password reset instructions will be sent." });
+    }
+
+    private IActionResult InvalidPasswordReset() =>
+        ApiResults.Error(this, StatusCodes.Status400BadRequest, "PASSWORD_RESET_INVALID", "This reset link is invalid or expired. Request a new one.");
+
+    private void SetNoStoreHeaders()
+    {
+        Response.Headers.CacheControl = "no-store, no-cache";
+        Response.Headers.Pragma = "no-cache";
     }
 
     [HttpPost("register")]

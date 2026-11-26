@@ -15,6 +15,8 @@ public sealed class ApiAbuseBoundaryTests
     [InlineData(typeof(AdminOperationsController), nameof(AdminOperationsController.Recover), RateLimiting.AccountSecurity)]
     [InlineData(typeof(AuthController), nameof(AuthController.ChangePassword), RateLimiting.AccountSecurity)]
     [InlineData(typeof(AuthController), nameof(AuthController.RevokeOtherSessions), RateLimiting.AccountSecurity)]
+    [InlineData(typeof(AuthController), nameof(AuthController.ForgotPassword), RateLimiting.PasswordRecovery)]
+    [InlineData(typeof(AuthController), nameof(AuthController.ResetPassword), RateLimiting.PasswordRecovery)]
     public void Sensitive_post_actions_use_safe_rate_policy(Type controllerType, string actionName, string expectedPolicy)
     {
         var action = controllerType.GetMethod(actionName, BindingFlags.Instance | BindingFlags.Public | BindingFlags.DeclaredOnly);
