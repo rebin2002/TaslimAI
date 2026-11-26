@@ -25,9 +25,21 @@ public sealed class ResearchGenerationOptions
     public int MaxReportBlockCharacters { get; set; } = 8_000;
     public int MaxHeadingCharacters { get; set; } = 240;
     public int ProviderTimeoutSeconds { get; set; } = 240;
-    public decimal? EstimatedOutputUsdPer1KTokens { get; set; }
+    private decimal? estimatedOutputUsdPer1KTokens;
+    public decimal? EstimatedOutputUsdPer1KTokens
+    {
+        get => estimatedOutputUsdPer1KTokens;
+        set => estimatedOutputUsdPer1KTokens = EnsureNonNegative(value, nameof(EstimatedOutputUsdPer1KTokens));
+    }
     public string DefaultFontFamily { get; set; } = "Lato";
     public string RtlFontFamily { get; set; } = "Noto Sans Arabic";
     public string? PricingVersion { get; set; }
     public string? PricingSource { get; set; }
+
+    private static decimal? EnsureNonNegative(decimal? value, string parameterName)
+    {
+        if (value < 0m)
+            throw new ArgumentOutOfRangeException(parameterName, value, "Research estimated output pricing cannot be negative.");
+        return value;
+    }
 }
