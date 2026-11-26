@@ -92,6 +92,8 @@ public sealed class VoiceGenerationJobHandler(
     {
         if (generated.Content.Length <= 0 || generated.Content.Length > Math.Min(10 * 1_048_576, Math.Max(1, settings.MaxOutputBytes)))
             throw new VoiceOutputInvalidException();
+        if (string.IsNullOrWhiteSpace(generated.Format))
+            throw new VoiceOutputInvalidException();
         // Compared as a bare type name so the gate judges the essence the header announces rather than
         // its formatting: it used to accept a trailing space and reject a leading one, and a response
         // annotated with parameters ("audio/ogg;codecs=opus") is the audio container being asked for.

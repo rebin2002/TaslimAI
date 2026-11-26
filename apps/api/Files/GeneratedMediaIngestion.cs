@@ -134,7 +134,7 @@ public static class GeneratedMediaInspector
             var height = BinaryPrimitives.ReadInt32BigEndian(bytes[20..24]);
             return width > 0 && height > 0 ? (width, height) : (null, null);
         }
-        if (contentType.Equals("image/webp", StringComparison.OrdinalIgnoreCase) && bytes.Length >= 30)
+        if (contentType.Equals("image/webp", StringComparison.OrdinalIgnoreCase) && bytes.Length >= 20)
             return ReadWebpDimensions(bytes);
         if (contentType.Equals("image/jpeg", StringComparison.OrdinalIgnoreCase) || contentType.Equals("image/jpg", StringComparison.OrdinalIgnoreCase))
             return ReadJpegDimensions(bytes);
@@ -168,19 +168,40 @@ public static class GeneratedMediaInspector
 
     private static (int? Width, int? Height) ReadWebpDimensions(ReadOnlySpan<byte> bytes)
     {
+        var riffSize = BinaryPrimitives.ReadUInt32LittleEndian(bytes[4..8]);
+        if (riffSize < 4 || (ulong)riffSize + 8 > (ulong)bytes.Length)
+            return (null, null);
+        var riffEnd = (ulong)riffSize + 8;
         var index = 12;
-        while (index + 8 <= bytes.Length)
+        while ((ulong)index + 8 <= riffEnd)
         {
             var chunkSize = BinaryPrimitives.ReadUInt32LittleEndian(bytes[(index + 4)..(index + 8)]);
             var dataStart = index + 8;
-            if ((ulong)dataStart + chunkSize > (ulong)bytes.Length) break;
+            var dataEnd = (ulong)dataStart + chunkSize;
+            if (dataEnd > riffEnd || dataEnd > (ulong)bytes.Length) return (null, null);
             if (bytes[index..(index + 4)].SequenceEqual("VP8X"u8) && chunkSize >= 10)
             {
                 var width = 1 + bytes[dataStart + 4] + (bytes[dataStart + 5] << 8) + (bytes[dataStart + 6] << 16);
                 var height = 1 + bytes[dataStart + 7] + (bytes[dataStart + 8] << 8) + (bytes[dataStart + 9] << 16);
-                return (width, height);
+                return width > 0 && height > 0 ? (width, height) : (null, null);
             }
-            index = dataStart + (int)chunkSize + (int)(chunkSize % 2);
+            if (bytes[index..(index + 4)].SequenceEqual("VP8L"u8) && chunkSize >= 5 && bytes[dataStart] == 0x2F)
+            {
+                var bits = BinaryPrimitives.ReadUInt32LittleEndian(bytes[(dataStart + 1)..(dataStart + 5)]);
+                var width = 1 + (int)(bits & 0x3FFF);
+                var height = 1 + (int)((bits >> 14) & 0x3FFF);
+                return width > 0 && height > 0 ? (width, height) : (null, null);
+            }
+            if (bytes[index..(index + 4)].SequenceEqual("VP8 "u8) && chunkSize >= 10
+                && bytes[(dataStart + 3)..(dataStart + 6)].SequenceEqual(new byte[] { 0x9D, 0x01, 0x2A }))
+            {
+                var width = BinaryPrimitives.ReadUInt16LittleEndian(bytes[(dataStart + 6)..(dataStart + 8)]) & 0x3FFF;
+                var height = BinaryPrimitives.ReadUInt16LittleEndian(bytes[(dataStart + 8)..(dataStart + 10)]) & 0x3FFF;
+                return width > 0 && height > 0 ? (width, height) : (null, null);
+            }
+            var next = dataEnd + (chunkSize & 1);
+            if (next > riffEnd || next > (ulong)bytes.Length) return (null, null);
+            index = (int)next;
         }
         return (null, null);
     }

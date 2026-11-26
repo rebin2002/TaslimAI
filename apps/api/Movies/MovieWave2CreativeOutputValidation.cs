@@ -426,7 +426,7 @@ public sealed class MovieWave2CreativeOutputValidator : IMovieWave2CreativeOutpu
             AddIf(findings, context.TargetSceneId.HasValue && !targetScene.HasValue, MovieWave2CreativeValidationReasonCodes.RequiredFieldMissing, "target.sceneId");
             AddIf(findings, context.TargetShotId.HasValue && !targetShot.HasValue, MovieWave2CreativeValidationReasonCodes.RequiredFieldMissing, "target.shotId");
         }
-        var baseRevision = output.BaseRevisionId ?? output.Source?.BaseRevisionId;
+        var baseRevision = ResolveGuidAlias(output.BaseRevisionId, output.Source?.BaseRevisionId, findings, "baseRevisionId");
         var baseVersion = output.BaseVersion ?? output.ContextVersion ?? output.Source?.BaseVersion;
         AddIf(findings, context.CurrentBaseRevisionId.HasValue && baseRevision != context.CurrentBaseRevisionId, MovieWave2CreativeValidationReasonCodes.StaleBase, "baseRevisionId");
         AddIf(findings, context.CurrentBaseVersion.HasValue && baseVersion != context.CurrentBaseVersion, MovieWave2CreativeValidationReasonCodes.StaleBase, "baseVersion");
@@ -542,6 +542,12 @@ public sealed class MovieWave2CreativeOutputValidator : IMovieWave2CreativeOutpu
     {
         AddIf(findings, first.HasValue && second.HasValue && first != second, MovieWave2CreativeValidationReasonCodes.SchemaInvalid, path);
         return first ?? second ?? Guid.Empty;
+    }
+
+    private static Guid? ResolveGuidAlias(Guid? first, Guid? second, List<MovieWave2CreativeValidationFinding> findings, string path)
+    {
+        AddIf(findings, first.HasValue && second.HasValue && first != second, MovieWave2CreativeValidationReasonCodes.SchemaInvalid, path);
+        return first ?? second;
     }
 
     private static int? ResolveOrder(int? first, int? second, List<MovieWave2CreativeValidationFinding> findings, string path)
