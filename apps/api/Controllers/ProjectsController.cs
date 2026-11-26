@@ -1,6 +1,7 @@
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
+using Taslim.Api.Activity;
 using Taslim.Api.Authorization;
 using Taslim.Api.Contracts;
 using Taslim.Api.Domain;
@@ -94,8 +95,11 @@ public sealed class ProjectsController(TaslimDbContext db, WorkspaceAccessServic
             .Where(asset => asset.ProjectId == projectId && asset.WorkspaceId == project.WorkspaceId && asset.Status == AssetStatus.Active);
         var conversations = db.Conversations.AsNoTracking()
             .Where(conversation => conversation.ProjectId == projectId && conversation.WorkspaceId == project.WorkspaceId && conversation.UserId == userId);
-        var activity = db.GenerationJobs.AsNoTracking()
-            .Where(job => job.ProjectId == projectId && job.WorkspaceId == project.WorkspaceId);
+        // Counts and recent rows share the same creator-private policy as the Activity Center.
+        var activity = CreatorPrivacyFence.VisibleToMember(
+            db.GenerationJobs.AsNoTracking()
+                .Where(job => job.ProjectId == projectId && job.WorkspaceId == project.WorkspaceId),
+            userId);
 
         var counts = new ProjectOverviewCountsDto(
             await files.CountAsync(cancellationToken),

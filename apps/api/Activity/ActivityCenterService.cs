@@ -23,7 +23,9 @@ public sealed class ActivityCenterService(TaslimDbContext db, WorkspaceAccessSer
 
         var page = ApiPagination.NormalizePage(filter.Page);
         var pageSize = ApiPagination.NormalizePageSize(filter.PageSize);
-        var query = db.GenerationJobs.AsNoTracking().Where(job => job.WorkspaceId == filter.WorkspaceId);
+        var query = VisibleToMember(
+            db.GenerationJobs.AsNoTracking().Where(job => job.WorkspaceId == filter.WorkspaceId),
+            userId);
         if (!string.IsNullOrWhiteSpace(filter.Status))
         {
             var status = filter.Status.Trim();
@@ -44,8 +46,9 @@ public sealed class ActivityCenterService(TaslimDbContext db, WorkspaceAccessSer
         }
 
         var totalCount = await query.CountAsync(cancellationToken);
-        var unreadCount = await db.GenerationJobs.AsNoTracking()
-            .Where(job => job.WorkspaceId == filter.WorkspaceId)
+        var unreadCount = await VisibleToMember(
+                db.GenerationJobs.AsNoTracking().Where(job => job.WorkspaceId == filter.WorkspaceId),
+                userId)
             .Where(job => !db.ActivityReadStates.Any(read => read.UserId == userId && read.GenerationJobId == job.Id))
             .CountAsync(cancellationToken);
         var jobs = await query
@@ -73,8 +76,9 @@ public sealed class ActivityCenterService(TaslimDbContext db, WorkspaceAccessSer
     public async Task<int?> GetUnreadCountAsync(Guid userId, Guid workspaceId, CancellationToken cancellationToken = default)
     {
         if (!await access.IsMemberAsync(userId, workspaceId, cancellationToken)) return null;
-        return await db.GenerationJobs.AsNoTracking()
-            .Where(job => job.WorkspaceId == workspaceId)
+        return await VisibleToMember(
+                db.GenerationJobs.AsNoTracking().Where(job => job.WorkspaceId == workspaceId),
+                userId)
             .Where(job => !db.ActivityReadStates.Any(read => read.UserId == userId && read.GenerationJobId == job.Id))
             .CountAsync(cancellationToken);
     }
@@ -82,7 +86,10 @@ public sealed class ActivityCenterService(TaslimDbContext db, WorkspaceAccessSer
     public async Task<bool> MarkReadAsync(Guid userId, Guid jobId, Guid workspaceId, CancellationToken cancellationToken = default)
     {
         if (!await access.IsMemberAsync(userId, workspaceId, cancellationToken)) return false;
-        var jobExists = await db.GenerationJobs.AsNoTracking().AnyAsync(job => job.Id == jobId && job.WorkspaceId == workspaceId, cancellationToken);
+        var jobExists = await VisibleToMember(
+                db.GenerationJobs.AsNoTracking().Where(job => job.Id == jobId && job.WorkspaceId == workspaceId),
+                userId)
+            .AnyAsync(cancellationToken);
         if (!jobExists) return false;
         var alreadyRead = await db.ActivityReadStates.AnyAsync(read => read.UserId == userId && read.GenerationJobId == jobId, cancellationToken);
         if (!alreadyRead)
@@ -113,8 +120,9 @@ public sealed class ActivityCenterService(TaslimDbContext db, WorkspaceAccessSer
     public async Task<bool> MarkAllReadAsync(Guid userId, Guid workspaceId, CancellationToken cancellationToken = default)
     {
         if (!await access.IsMemberAsync(userId, workspaceId, cancellationToken)) return false;
-        var unreadJobIds = await db.GenerationJobs.AsNoTracking()
-            .Where(job => job.WorkspaceId == workspaceId)
+        var unreadJobIds = await VisibleToMember(
+                db.GenerationJobs.AsNoTracking().Where(job => job.WorkspaceId == workspaceId),
+                userId)
             .Where(job => !db.ActivityReadStates.Any(read => read.UserId == userId && read.GenerationJobId == job.Id))
             .Select(job => job.Id)
             .ToListAsync(cancellationToken);
@@ -148,4 +156,8 @@ public sealed class ActivityCenterService(TaslimDbContext db, WorkspaceAccessSer
         }
         return true;
     }
+
+    // Apply the same item-level policy before filtering, counting, paging or acknowledging rows.
+    private static IQueryable<GenerationJob> VisibleToMember(IQueryable<GenerationJob> jobs, Guid userId) =>
+        CreatorPrivacyFence.VisibleToMember(jobs, userId);
 }
