@@ -8,6 +8,8 @@ namespace Taslim.Api.Infrastructure;
 public static class RateLimiting
 {
     public const string Authentication = "authentication";
+    public const string Health = "health";
+    public const string HealthLiveness = "health-live";
     public const string Chat = "chat-generation";
     public const string Generation = "generation-creation";
     public const string Upload = "uploads";
@@ -37,6 +39,8 @@ public static class RateLimiting
             var permitLimit = policyName switch
             {
                 Authentication => 4,
+                Health => 4,
+                HealthLiveness => 4,
                 Chat => 2,
                 Generation => 4,
                 Upload => 2,
@@ -64,6 +68,33 @@ public static class RateLimiting
             {
                 PermitLimit = 60,
                 Window = TimeSpan.FromMinutes(1),
+                QueueLimit = 0,
+                AutoReplenishment = true,
+            }));
+
+        // Keep cheap process checks independent from readiness work on database and storage.
+        // Anonymous requests behind the same ingress peer can share a partition. Four
+        // concurrent readiness checks allow the three overlapping requests observed at
+        // the production edge plus one spare. Excess requests never wait in a queue.
+        options.AddPolicy(HealthLiveness, httpContext => RateLimitPartition.GetTokenBucketLimiter(
+            Partition("health-live", httpContext),
+            _ => new TokenBucketRateLimiterOptions
+            {
+                TokenLimit = 60,
+                TokensPerPeriod = 60,
+                ReplenishmentPeriod = TimeSpan.FromMinutes(1),
+                QueueLimit = 0,
+                AutoReplenishment = true,
+            }));
+
+        // A short readiness burst may spend up to 60 tokens; replenishment is 30 per minute.
+        options.AddPolicy(Health, httpContext => RateLimitPartition.GetTokenBucketLimiter(
+            Partition("health", httpContext),
+            _ => new TokenBucketRateLimiterOptions
+            {
+                TokenLimit = 60,
+                TokensPerPeriod = 30,
+                ReplenishmentPeriod = TimeSpan.FromMinutes(1),
                 QueueLimit = 0,
                 AutoReplenishment = true,
             }));
