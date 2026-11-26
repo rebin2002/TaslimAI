@@ -8,11 +8,12 @@ import { translations } from "@/lib/i18n";
  * Independent synthetic QA lane for issue #1049 (asset-file-unavailable family): the
  * RESEARCH Studio click-time consumer contract.
  *
- * Scope. A previously selected Research report - restored from the active-job
- * sessionStorage entry exactly the way a returning authenticated session restores it -
- * keeps advertising its published `ResultJson` renditions. One of them has lost its
- * backing file after selection, so the click dies at the download route with
- * `409 ASSET_FILE_UNAVAILABLE`. Everything here is provider-free: fabricated job
+ * Scope. A Research job becomes a successful report in the active ResearchStudioView
+ * after polling. Its published `ResultJson` renditions remain advertised, and one loses
+ * its backing file after selection, so the click dies at the download route with
+ * `409 ASSET_FILE_UNAVAILABLE`. Current main intentionally does not restore terminal
+ * jobs across sessions; this fixture therefore completes an initially active synthetic
+ * job in-view. Everything here is provider-free: fabricated job
  * payloads, stubbed `api`, a hand-built DOM, no network, no stored file, no customer
  * data, no real translation catalog edits.
  *
@@ -33,14 +34,11 @@ import { translations } from "@/lib/i18n";
  *      the unavailable failure, and the report body (which needs no file) keeps
  *      rendering.
  *
- * Ownership audit (fresh scan 2026-11-19 against main `41f9fcc6` and every open PR):
- * #1126 owns the Research PRE-CLICK availability half (`ResearchStudioView.tsx` and its
- * `representationAvailability` test) and never exercises a download response; #1188 is
- * the same click-time leg for DOCUMENT Studio only; #1122 owns Document/Presentation
- * buttons and `studioRepresentationAvailability.*`; #1041/#1092 own the asset library
- * read model; #1050/#1117/#1124 own the API seams. No open PR and no test on main pins
- * the Research click-time 409 consumer behaviour, and nothing in this lane edits a file
- * claimed by those PRs: it adds exactly one new test filename and no production source.
+ * Ownership boundary: merged #1126 covers the pre-click availability gate; this existing
+ * #1192 lane covers the distinct click-time response. The updated source hunk is limited
+ * to Research rendition controls; it does not touch #1282's Academic Research header
+ * hunk/test or #1283's dependency paths. #1049 remains the source issue and no duplicate
+ * PR or API/provider change is introduced.
  */
 
 class TestNode {
@@ -228,10 +226,9 @@ function unavailableError() {
   return new shared.ApiError(409, RAW_MESSAGE, { file: [VAULT_PATH] }, CLIENT_CODE, 0);
 }
 
-/** The published snapshot of the previously selected report: both renditions are still
- *  advertised with identity only - no availability fact - exactly what a restoring client
- *  reads from `GET /api/generation/jobs/{id}` today. */
-function restoredResearchJob(): GenerationJob {
+/** The published snapshot of a completed report: both renditions remain advertised with
+ *  identity only - no availability fact - exactly what `GET /api/generation/jobs/{id}` returns. */
+function completedResearchJob(): GenerationJob {
   return {
     id: JOB_ID, workspaceId: WS.id, projectId: null, jobType: "research.generate", status: "Succeeded",
     title: "Synthetic market scan", progressPercent: 100, errorCode: null, errorMessage: null,
@@ -244,7 +241,7 @@ function restoredResearchJob(): GenerationJob {
       language: "en",
       executiveSummary: "Synthetic executive summary.",
       keyFindings: [{ type: "text", text: "Revenue held at twelve percent.", items: null, rows: null, citationIds: ["S1"] }],
-      sections: [],
+      sections: [{ heading: "Synthetic findings", blocks: [] }],
       conclusion: "Synthetic conclusion.",
       sourceCount: 1,
       sources: [{ citationId: "S1", url: "https://source.example/study", title: "Synthetic source", domain: "source.example", publisher: null, publishedAt: null, retrievedAt: PINNED, sourceType: "web", snippet: null, searchQuery: null, rank: 0, isSelected: false }],
@@ -281,7 +278,7 @@ function downloadButton(suffix: "DOCX" | "PDF"): TestNode {
 function accessibleName(node: TestNode): string {
   const label = node.getAttribute("aria-label");
   const text = (node.textContent ?? "").replace(/\s+/g, " ").trim();
-  return (label ? `${label} ${text}` : text).trim();
+  return label !== null ? label.trim() : text;
 }
 function clickedAnchors(): TestNode[] { return doc.createdElements.filter((n) => n.nodeName === "A" && n.clicked); }
 function downloadAlertNode(): TestNode | undefined {
@@ -298,8 +295,12 @@ async function mount() {
   runTimers();
   await settle();
 }
-/** Restore the previously selected report from the active-job entry a returning session writes. */
-async function restoreResultView() {
+/** Restore only an active synthetic job, then let polling complete it in the current view. */
+async function selectCompletedResultInView() {
+  const activeJob = { ...completedResearchJob(), status: "Running" as const, progressPercent: 80 };
+  harness.api.getGenerationJob.mockReset()
+    .mockResolvedValueOnce(activeJob)
+    .mockResolvedValue(completedResearchJob());
   storage.set(activeJobKey, JOB_ID);
   await mount();
   expect(findByClass(container, "research-report-shell")).toHaveLength(1);
@@ -341,9 +342,9 @@ beforeEach(() => {
   harness.api.listProjects.mockReset().mockResolvedValue([]);
   harness.api.listFiles.mockReset().mockResolvedValue([]);
   harness.api.listAssets.mockReset().mockResolvedValue({ items: [], page: 1, pageSize: 4, totalCount: 0, totalPages: 1 });
-  harness.api.getGenerationJob.mockReset().mockResolvedValue(restoredResearchJob());
+  harness.api.getGenerationJob.mockReset().mockResolvedValue(completedResearchJob());
   harness.api.getResearchSources.mockReset().mockResolvedValue({ jobId: JOB_ID, sources: [] });
-  harness.api.createResearchGenerationJob.mockReset().mockResolvedValue(restoredResearchJob());
+  harness.api.createResearchGenerationJob.mockReset().mockResolvedValue(completedResearchJob());
   harness.api.cancelGenerationJob.mockReset().mockResolvedValue({ status: "Cancelled" });
   harness.api.downloadAssetRepresentation.mockReset().mockResolvedValue(new Blob(["synthetic"], { type: DOCX_CONTENT_TYPE }));
   harness.api.downloadResearchSourcesExport.mockReset().mockResolvedValue(new Blob(["a,b\n1,2"], { type: "text/csv" }));
@@ -351,11 +352,11 @@ beforeEach(() => {
 });
 afterEach(() => { act(() => root?.unmount()); vi.unstubAllGlobals(); });
 
-describe("Research Studio click-time 409 ASSET_FILE_UNAVAILABLE consumer contract (#1049, test-only)", () => {
+describe("Research Studio click-time 409 ASSET_FILE_UNAVAILABLE consumer contract (#1049)", () => {
   it("turns the pruned backing file into a localized alert with no silent success and no payload leak", async () => {
     harness.api.downloadAssetRepresentation.mockImplementation((_assetId: string, representationId: string) =>
       representationId === DOCX_ID ? Promise.reject(unavailableError()) : Promise.resolve(new Blob(["synthetic"], { type: PDF_CONTENT_TYPE })));
-    await restoreResultView();
+    await selectCompletedResultInView();
 
     await settle(() => { downloadButton("DOCX").dispatchEvent({ type: "click", bubbles: true }); });
 
@@ -384,7 +385,7 @@ describe("Research Studio click-time 409 ASSET_FILE_UNAVAILABLE consumer contrac
   it.each(["en", "ar", "ku"] as const)("%S: the unavailable click is answered in locale with a live retry and a reselect exit", async (locale) => {
     harness.locale = locale;
     harness.api.downloadAssetRepresentation.mockRejectedValue(unavailableError());
-    await restoreResultView();
+    await selectCompletedResultInView();
 
     await settle(() => { downloadButton("DOCX").dispatchEvent({ type: "click", bubbles: true }); });
 
@@ -401,6 +402,9 @@ describe("Research Studio click-time 409 ASSET_FILE_UNAVAILABLE consumer contrac
     // drops the unavailable report so its dead-end control is not re-advertised.
     const reselect = findByClass(container, "primary-button").find((n) => (n.textContent ?? "").includes(translations[locale]["research.createAnother"]));
     expect(reselect, `${locale}: a localized reselect control must be offered`).toBeTruthy();
+    // Current main clears completed-job markers automatically; seed a legacy stale value to
+    // verify the explicit reselect action still removes it before returning to compose.
+    storage.set(activeJobKey, JOB_ID);
     await settle(() => { reselect!.dispatchEvent({ type: "click", bubbles: true }); });
     expect(findByClass(container, "research-studio-layout"), `${locale}: reselect must reach the compose surface`).toHaveLength(1);
     expect(findByClass(container, "research-report-shell")).toHaveLength(0);
@@ -410,21 +414,25 @@ describe("Research Studio click-time 409 ASSET_FILE_UNAVAILABLE consumer contrac
 
   it("keeps the ready sibling rendition downloadable and clears the stale banner", async () => {
     const order: string[] = [];
+    let resolvePdf: ((blob: Blob) => void) | undefined;
     harness.api.downloadAssetRepresentation.mockImplementation((_assetId: string, representationId: string) => {
       order.push(representationId === DOCX_ID ? "docx" : "pdf");
       return representationId === DOCX_ID
         ? Promise.reject(unavailableError())
-        : Promise.resolve(new Blob(["synthetic"], { type: PDF_CONTENT_TYPE }));
+        : new Promise<Blob>((resolve) => { resolvePdf = resolve; });
     });
-    await restoreResultView();
+    await selectCompletedResultInView();
 
     await settle(() => { downloadButton("DOCX").dispatchEvent({ type: "click", bubbles: true }); });
     expect(downloadAlertNode(), "the DOCX failure must be announced").toBeTruthy();
 
     // The unavailability is per representation: the ready PDF is untouched.
     await settle(() => { downloadButton("PDF").dispatchEvent({ type: "click", bubbles: true }); });
+    expect(downloadButton("PDF").getAttribute("aria-busy"), "the successful download must be busy while its response is pending").toBe("true");
+    await settle(() => { resolvePdf?.(new Blob(["synthetic"], { type: PDF_CONTENT_TYPE })); });
     await settle(() => { runTimers(); });
     expect(order).toEqual(["docx", "pdf"]);
+    expect(downloadButton("PDF").getAttribute("aria-busy"), "a successful download must leave the busy state").not.toBe("true");
     const clicked = clickedAnchors();
     expect(clicked, "the ready PDF must complete the anchor download").toHaveLength(1);
     expect(clicked[0].download).toBe("synthetic-market-scan.pdf");
@@ -432,16 +440,12 @@ describe("Research Studio click-time 409 ASSET_FILE_UNAVAILABLE consumer contrac
     expect(downloadAlertNode(), "a later success must not leave the stale unavailability banner up").toBeFalsy();
   });
 
-  it("RED: announces the in-flight rendition download with a busy state, as the sibling studios do", async () => {
-    // RED BY DESIGN (mechanism leg). `aria-busy` occurrences on main: DocumentStudioView.tsx
-    // = 3 (its download control carries `aria-busy={working}`), PresentationStudioView.tsx = 6,
-    // ResearchStudioView.tsx = 0. Research only flips `disabled={working}`, so the retry a
-    // user presses on the 409-bound control gives assistive technology no state at all -
-    // nothing announces that the dead-end request is running, and the rejection leaves the
-    // control in exactly the same unannounced shape.
+  it("announces the in-flight rendition download with a busy state, as the sibling studios do", async () => {
+    // Busy status belongs to the requested rendition, not the ready sibling, and must clear
+    // after either a successful response or the click-time unavailable-file rejection.
     let rejectDownload: ((cause: unknown) => void) | undefined;
     harness.api.downloadAssetRepresentation.mockImplementation(() => new Promise((_resolve, reject) => { rejectDownload = reject; }));
-    await restoreResultView();
+    await selectCompletedResultInView();
 
     await settle(() => { downloadButton("DOCX").dispatchEvent({ type: "click", bubbles: true }); });
 
@@ -454,26 +458,20 @@ describe("Research Studio click-time 409 ASSET_FILE_UNAVAILABLE consumer contrac
     expect(downloadButton("PDF").getAttribute("aria-busy"), "the sibling must never inherit the busy state").not.toBe("true");
   });
 
-  it("RED: names each Research download control as a download, not as a bare format token", async () => {
-    // RED BY DESIGN (naming leg). Document Studio names its rendition controls
-    // `aria-label={document.downloadLabel + " " + TYPE}` ("Download DOCX"); Research renders
-    // the uppercase format token as the whole accessible name, so a screen-reader user
-    // restoring a previously selected report cannot tell the 409-bound control from a static
-    // label before the click, and has nothing to re-press afterwards. The contract is stated
-    // behaviourally: the accessible name must carry the localized download verb already
-    // shipped for this studio family - it does not prescribe a specific new i18n key.
+  it.each(["en", "ar", "ku"] as const)("%s: names each Research download control as a download, not as a bare format token", async (locale) => {
+    // The action name uses the existing localized download verb from the studio catalog,
+    // and remains stable after an unavailable-file response so the same control can be retried.
+    harness.locale = locale;
     harness.api.downloadAssetRepresentation.mockRejectedValue(unavailableError());
-    await restoreResultView();
+    await selectCompletedResultInView();
 
-    const verb = translations.en["document.downloadLabel"];
+    const verb = translations[locale]["document.downloadLabel"];
     for (const suffix of ["DOCX", "PDF"] as const) {
       const name = accessibleName(downloadButton(suffix));
-      expect(name, `${suffix}: the control must be named by its action`).not.toBe(suffix);
-      expect(name.toLowerCase(), `${suffix}: the accessible name must state the download action (e.g. "${verb} ${suffix}")`)
-        .toContain(verb.toLowerCase());
+      expect(name, `${locale} ${suffix}: the accessible name must include its localized action and format`).toBe(`${verb} ${suffix}`);
     }
     // And the naming must survive the failure: the retry affordance keeps the same name.
     await settle(() => { downloadButton("DOCX").dispatchEvent({ type: "click", bubbles: true }); });
-    expect(accessibleName(downloadButton("DOCX")).toLowerCase()).toContain(verb.toLowerCase());
+    expect(accessibleName(downloadButton("DOCX"))).toBe(`${verb} DOCX`);
   });
 });

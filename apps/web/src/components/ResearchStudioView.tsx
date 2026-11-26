@@ -54,6 +54,7 @@ export function ResearchStudioView() {
   const [retryingCompleted, setRetryingCompleted] = useState(false);
   const [error, setError] = useState("");
   const [downloadError, setDownloadError] = useState("");
+  const [downloadingRepresentationId, setDownloadingRepresentationId] = useState<string | null>(null);
   const restoreJobId = useRef<string | null>(null);
   const observedWorkspaceId = useRef<string | null>(workspace?.id ?? null);
   const workspaceGeneration = useRef(0);
@@ -305,6 +306,7 @@ export function ResearchStudioView() {
     const jobId = current?.id;
     const workspaceVersion = workspaceGeneration.current;
     setWorking(true);
+    setDownloadingRepresentationId(representationId);
     setDownloadError("");
     try {
       const blob = await api.downloadAssetRepresentation(assetId, representationId);
@@ -318,7 +320,10 @@ export function ResearchStudioView() {
     } catch {
       if (workspaceGeneration.current === workspaceVersion && current?.id === jobId) setDownloadError(t("research.downloadError"));
     } finally {
-      if (workspaceGeneration.current === workspaceVersion && current?.id === jobId) setWorking(false);
+      if (workspaceGeneration.current === workspaceVersion && current?.id === jobId) {
+        setWorking(false);
+        setDownloadingRepresentationId((activeId) => activeId === representationId ? null : activeId);
+      }
     }
   }
 
@@ -429,7 +434,7 @@ export function ResearchStudioView() {
       ) : state === "failed" || state === "cancelled" ? (
         <section className="account-card research-generation-state research-terminal-state" aria-live="polite"><XCircle size={28} /><p className="section-eyebrow">{t(`jobs.status${statusKey}`)}</p><h2>{current.errorMessage || t("research.failedSafe")}</h2><div className="research-result-actions"><button className="primary-button" onClick={createAnother}><RefreshCw size={15} /> {t("research.createAnother")}</button><Link className="secondary-button" href="/assets">{t("research.openAssets")}</Link></div></section>
       ) : state === "succeeded" && result?.assetId ? (
-        <ResearchResultView result={result} downloadability={representationDownloadability} sourcesLoadStatus={sourcesLoadStatus} onRetrySources={() => void retrySources()} working={working} downloadError={downloadError} onDownload={(id, name) => void downloadRepresentation(id, name)} onExport={() => void downloadSourceManifest()} onCreateAnother={createAnother} t={t} />
+        <ResearchResultView result={result} downloadability={representationDownloadability} sourcesLoadStatus={sourcesLoadStatus} onRetrySources={() => void retrySources()} working={working} downloadingRepresentationId={downloadingRepresentationId} downloadError={downloadError} onDownload={(id, name) => void downloadRepresentation(id, name)} onExport={() => void downloadSourceManifest()} onCreateAnother={createAnother} t={t} />
       ) : state === "completed-unavailable" ? (
         <section className="account-card research-generation-state research-terminal-state"><RefreshCw size={28} /><p className="section-eyebrow">{t("jobs.statusSucceeded")}</p><h2>{t("research.completedLoadError")}</h2><p>{t("research.completedLoadHint")}</p><div className="research-result-actions"><button className="primary-button" onClick={() => void retryCompleted()} disabled={retryingCompleted}>{retryingCompleted ? t("research.working") : t("research.retry")}</button><Link className="secondary-button" href="/assets">{t("research.openAssets")}</Link><button className="secondary-button" onClick={createAnother}><RefreshCw size={15} /> {t("research.createAnother")}</button></div></section>
       ) : (
@@ -444,7 +449,7 @@ function ResearchProgressView({ current, statusKey, progress, error, working, on
   return <section className="account-card research-generation-state research-progress-state" aria-live="polite"><div className="research-progress-topline"><div className="research-progress-icon"><LoaderCircle size={24} aria-hidden="true" /></div><div><p className="section-eyebrow">{t("research.progressEyebrow")}</p><h2>{t(`jobs.status${statusKey}`)}</h2></div></div><p className="research-progress-copy">{t("research.progressText")}</p><div className="research-job-status-line"><span className={`research-job-dot research-job-dot-${current.status.toLowerCase()}`} aria-hidden="true" /><strong>{t(`jobs.status${statusKey}`)}</strong><span>{t("research.jobProgress")}</span><b>{progress}%</b></div><AccessibleProgressBar className="generation-progress-track" label={t("jobs.progress")} value={progress} />{error && <div className="form-error" role="alert"><XCircle size={15} /> {error}</div>}{canCancelResearchJob(current) && <button className="secondary-button generation-cancel-button" onClick={onCancel} disabled={working}><XCircle size={15} /> {t("research.cancel")}</button>}</section>;
 }
 
-export function ResearchResultView({ result, downloadability = null, sourcesLoadStatus, onRetrySources, working, downloadError, onDownload, onExport, onCreateAnother, t }: { result: ResearchJobResult; sourcesLoadStatus: ResearchSourcesLoadStatus; onRetrySources: () => void; working: boolean; downloadError: string; onDownload: (id: string, name: string) => void; onExport: () => void; onCreateAnother: () => void; t: Translate; downloadability?: StudioRepresentationAvailabilityFacts | null }) {
+export function ResearchResultView({ result, downloadability = null, sourcesLoadStatus, onRetrySources, working, downloadingRepresentationId = null, downloadError, onDownload, onExport, onCreateAnother, t }: { result: ResearchJobResult; sourcesLoadStatus: ResearchSourcesLoadStatus; onRetrySources: () => void; working: boolean; downloadError: string; onDownload: (id: string, name: string) => void; onExport: () => void; onCreateAnother: () => void; t: Translate; downloadability?: StudioRepresentationAvailabilityFacts | null; downloadingRepresentationId?: string | null }) {
   const sources = result.sources ?? [];
   // Only the report renditions the Research result advertises are download controls, and only
   // for as long as the API says their stored file is Ready. The gate runs after the type filter
@@ -466,7 +471,25 @@ export function ResearchResultView({ result, downloadability = null, sourcesLoad
     </div>
     <details className="research-mobile-sources"><summary><span>{t("research.sourcesTitle")}</span><strong>{sources.length}</strong></summary><ResearchSourcesPanel sources={sources} load={sourcesLoadStatus} onRetry={onRetrySources} t={t} /></details>
     {downloadError && <div className="form-error" role="alert"><XCircle size={15} /> {downloadError}</div>}
-    <div className="research-result-actions">{downloadableRepresentations.map((representation) => <button className="secondary-button" key={representation.id} type="button" onClick={() => onDownload(representation.id, representation.fileName)} disabled={working}><Download size={15} /> {representation.type.toUpperCase()}</button>)}{downloadableRepresentations.length === 0 && <span className="research-no-downloads">{t("research.noDownloads")}</span>}<button className="secondary-button" type="button" onClick={onExport} disabled={working}><Download size={15} /> {t("research.references")} CSV</button><Link className="secondary-button" href="/assets">{t("research.openAssets")}</Link><button className="primary-button" onClick={onCreateAnother}><RefreshCw size={15} /> {t("research.createAnother")}</button></div>
+    <div className="research-result-actions">
+      {downloadableRepresentations.map((representation) => (
+        <button
+          className="secondary-button"
+          key={representation.id}
+          type="button"
+          onClick={() => onDownload(representation.id, representation.fileName)}
+          disabled={working}
+          aria-label={`${t("document.downloadLabel")} ${representation.type.toUpperCase()}`}
+          aria-busy={downloadingRepresentationId === representation.id}
+        >
+          <Download size={15} /> {representation.type.toUpperCase()}
+        </button>
+      ))}
+      {downloadableRepresentations.length === 0 && <span className="research-no-downloads">{t("research.noDownloads")}</span>}
+      <button className="secondary-button" type="button" onClick={onExport} disabled={working}><Download size={15} /> {t("research.references")} CSV</button>
+      <Link className="secondary-button" href="/assets">{t("research.openAssets")}</Link>
+      <button className="primary-button" onClick={onCreateAnother}><RefreshCw size={15} /> {t("research.createAnother")}</button>
+    </div>
   </section>;
 }
 
