@@ -251,10 +251,9 @@ builder.Services.AddScoped<IProviderBenchmarkService, ProviderBenchmarkService>(
 builder.Services.AddSingleton<IProviderCostGuard, AllowAllProviderCostGuard>();
 builder.Services.AddSingleton(TimeProvider.System);
 // Academic Research Studio integration lane: Phase B evidence services + persistence and
-// the Phase C workflow engine over the shared context. Stage handlers (scholarly
-// discovery, screening, extraction, synthesis, drafting, verification) are registered by
-// their provider lanes through AddAcademicStageHandler; until then run/resume reports the
-// exact unconnected stage instead of executing stub work.
+// the Phase C workflow engine over the shared context. The deterministic Plan handler is
+// enabled only by an explicit API opt-in. Discovery, screening, extraction, synthesis, drafting and verification
+// remain unconnected and are reported as the exact missing stage.
 builder.Services.AddAcademicProjects(builder.Configuration);
 builder.Services.Configure<AutopilotOptions>(builder.Configuration.GetSection("Autopilot"));
 builder.Services.PostConfigure<AutopilotOptions>(options => options.Normalize());
@@ -595,10 +594,12 @@ static IResult LivenessEndpoint(OperationalHealthService health, HttpContext con
 app.MapGet("/health", LivenessEndpoint)
     .WithName("Health")
     .WithTags("System")
+    .RequireRateLimiting(RateLimiting.HealthLiveness)
     .AllowAnonymous();
 app.MapGet("/health/live", LivenessEndpoint)
     .WithName("HealthLive")
     .WithTags("System")
+    .RequireRateLimiting(RateLimiting.HealthLiveness)
     .AllowAnonymous();
 static async Task<IResult> ReadinessEndpoint(OperationalHealthService health, HttpContext context, CancellationToken cancellationToken)
 {
@@ -609,10 +610,12 @@ static async Task<IResult> ReadinessEndpoint(OperationalHealthService health, Ht
 app.MapGet("/health/ready", ReadinessEndpoint)
     .WithName("HealthReady")
     .WithTags("System")
+    .RequireRateLimiting(RateLimiting.Health)
     .AllowAnonymous();
 app.MapGet("/readiness", ReadinessEndpoint)
     .WithName("Readiness")
     .WithTags("System")
+    .RequireRateLimiting(RateLimiting.Health)
     .AllowAnonymous();
 app.MapControllers();
 
