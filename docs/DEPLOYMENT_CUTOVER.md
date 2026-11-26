@@ -144,6 +144,88 @@ observation. Confirm independently before acting on it.
    probe, the release smoke, and browser traffic. Compare `requestId`/`X-Request-ID`
    in the deployment logs against the reviewer's smoke run.
 
+### 1.4 Current-head qualification and hold (2026-11-26)
+
+This subsection separates readiness-tool preparation from permission to cut over.
+The prior current-head record is [PR comment #7203105747](https://github.com/rebin2002/TaslimAI/pull/1277#issuecomment-7203105747), recorded against PR head
+`ff65507b7ef5ae502fe5972843e2591753282c0f` and base `54bb501bd4dad690d81eb7bbe805c69dc8e37c70`.
+At this qualification, live `main` is
+`26f8e3e74f2a1b7c287dce8ad548229a33ed16a2`, which includes #1292, #1294, and #1298.
+The prior `61a8c781…` snapshot was superseded while this work was in progress; the
+new head has been fetched and is being used for the final merge and path check. The
+resulting PR source diff is expected to remain limited to `.github/workflows/ci.yml`,
+this document, and the two `scripts/deploy-readiness-gate*` files; see the verified
+merge result below.
+
+The separately owned [#1144](https://github.com/rebin2002/TaslimAI/pull/1144) remains
+open for review on `7afa4ac936e7562a9fea2d72dcdf76c0d1831ba0`. Its CI workflow patch
+also applies cleanly to current `main`; its branch and changes remain separate and
+untouched. The #1277 smoke-contract step stays anchored immediately after checkout;
+it does not overwrite the independently reviewed FFmpeg setup and real-media steps
+owned by #1144.
+
+**Hosted API test hold.** Job
+[`140157463873`](https://github.com/rebin2002/TaslimAI/actions/runs/45890269180/job/140157463873)
+ran the broad integration suite on merge candidate
+`9d3e77742ae6302bda3d5b63ef184a7ec45b3287` (PR head `ff65507…`, base
+`54bb501…`): 3,649 passed and 2 failed. The two failures were actual HTTP 500
+responses from `GenerationJobConcurrencyIdempotencyTests`:
+`Simultaneous_same_key_with_conflicting_payloads_never_double_queues` and
+`Simultaneous_terminal_retries_with_one_key_fan_into_one_child_with_one_reservation`.
+Both use the worker-disabled `GenerationJobsApiFactory` ordinary HTTP fixture backed
+by SQLite, not the hosted PostgreSQL service. The xUnit failure retained only the
+truncated `500 ... INTERNAL_ERROR` body and assertion stack; it did not retain the
+server exception or a correlated request log. The test fixture creates a per-factory
+SQLite file, enables WAL, replaces the API database context with `UseSqlite`, and
+disables its job worker (`apps/api.Tests/GenerationJobsTests.cs` and
+`GenerationJobConcurrencyIdempotencyTests.cs`). The test assembly also disables
+xUnit class parallelism (`apps/api.Tests/IdentityProjectsTests.cs`); only the
+requests inside each race are concurrent.
+
+The later PostgreSQL service messages are attributable to separate, deliberately
+exercised tests: the `GenerationJobs.ConcurrencyToken` lock timeout is the claim-fence
+test `Claim_takeover_serializes_behind_open_fence_and_stale_worker_cannot_stage_postgres`
+in `ResearchSourceLifecycleTests.cs`; the `MovieStoryRevisions` duplicate key is the
+expected losing writer in `MovieStoryRevisionAllocationConflictTests.cs` (the #1292
+barrier makes that allocation collision deterministic); and the `Title` length error
+is asserted by `The_unbounded_manifest_label_is_refused_by_the_job_title_column` in
+`MovieExportManifestSemanticsTests.cs`. All three messages are later than the two
+request failures and cannot explain the SQLite responses.
+
+Both request tests were run individually against fetched current `main`
+(`26f8e3e…`, with #1292, #1294, and #1298 present), using that isolated
+SQLite/WebApplicationFactory fixture; each passed **1/1**. #1298 moves the same-key
+precheck earlier in `CreateAsync` and atomically links MovieAssembly publication;
+the latter path is not exercised by these `SystemTest` jobs. #1292 changes Movie
+revision and Chat cancellation fixtures; #1294 serializes provider completion claims.
+These isolated passes do not explain the hosted full-suite 500s or clear the still-red
+hosted API integration check. Do not label the failures flaky or resolved until a
+correlated exception or an exact-head hosted API run establishes that. A review lead,
+not a finding, is that `GenerationJobService.CreateAsync` still starts its
+transaction before the `try` and catches only `DbUpdateException` in its same-key
+conflict recovery path; a SQLite contention exception escaping that boundary could
+produce a 500, but no captured exception ties this path to the hosted responses.
+This PR makes no application-code change.
+
+**Readiness rehearsal.** The shell contract suite uses loopback-only HTTP fixtures:
+ordinary healthy API/Web responses, an initial API proxy 502 followed by a healthy
+retry, required-dependency red, and matching/mismatching/unavailable revision
+identity. The local two-service candidate fixture supplies the expected revision in
+the API and Web response headers. This rehearses retry and identity behavior; it is
+not a deployed staging environment and does not establish platform configuration.
+On the current #1277 worktree, `bash -n scripts/deploy-readiness-gate.sh scripts/deploy-readiness-gate.test.sh` and `git diff --check` pass, and
+`bash scripts/deploy-readiness-gate.test.sh` reports **70 passed / 0 failed**.
+
+**Remaining cutover holds.** The readiness code and its loopback contract can be
+reviewed independently of platform changes, but the hosted API integration failure
+and independent-review requirement remain open. Actual isolated Railway staging has
+not been exercised; no service settings were changed. Production healthcheck values,
+staged no-op deployment and deployment-scoped logs must still be verified in a
+separate environment before any production apply. The shared production service
+domain exposes no candidate revision identity, so an unverified green remains
+shape-only and cannot authorize promotion. No Railway action or production probe is
+recorded by this qualification.
+
 ## 2. The gate contract
 
 `deploy-readiness-gate.sh` promotes a cutover only when both services are

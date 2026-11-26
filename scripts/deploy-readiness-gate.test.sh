@@ -10,6 +10,7 @@
 #
 # Scenario groups:
 #   - baseline behaviour (shape, per-service independence, usage guards)
+#   - retry recovery after an actual first no-upstream response
 #   - the four classifier edges reported as surviving mutants in the independent
 #     review of #1277 (comment 7141321366 section 3): empty required-check set,
 #     foreign service identity, 3xx redirect, and a 5xx carrying a ready body
@@ -37,6 +38,7 @@ start_server() {
     python3 - "$port" "$scenario" > "$temp_dir/server.$port.log" 2>&1 <<'PY' &
 import http.server, json, sys
 port, scenario = int(sys.argv[1]), sys.argv[2]
+request_count = 0
 
 READY = {"status": "ready", "service": "Taslim API", "requestId": "r1",
          "checks": [{"name": "database", "status": "available", "required": True},
@@ -91,6 +93,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.wfile.write(raw)
 
     def do_GET(self):
+        global request_count
+        if self.path == "/__wait__":
+            return self._send(204, "")
         if scenario == "ready":
             return self._send(200, json.dumps(READY))
         if scenario == "revision-body":
@@ -98,6 +103,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if scenario == "revision-header":
             return self._send(200, json.dumps(READY),
                               extra_headers={"X-Taslim-Revision": "cafe1234deadbeef"})
+        if scenario == "revision-html":
+            return self._send(200, "<!doctype html><html><body>ok</body></html>", "text/html",
+                              extra_headers={"X-Taslim-Revision": "cafe1234deadbeef"})
+        if scenario == "recover-after-502":
+            request_count += 1
+            if request_count == 1:
+                return self._send(502, "<html><body>Bad Gateway</body></html>", "text/html")
+            return self._send(200, json.dumps(READY))
         if scenario == "app-503":
             return self._send(503, json.dumps(NOT_READY))
         if scenario == "gateway-502":
@@ -138,7 +151,7 @@ http.server.ThreadingHTTPServer(("127.0.0.1", port), Handler).serve_forever()
 PY
     pids+=("$!")
     for _ in $(seq 1 50); do
-        curl -s -o /dev/null --connect-timeout 1 "http://127.0.0.1:${port}/health/ready" && return 0
+        curl -s -o /dev/null --connect-timeout 1 "http://127.0.0.1:${port}/__wait__" && return 0
         sleep 0.1
     done
     echo "scenario server on ${port} failed to start" >&2
@@ -281,6 +294,15 @@ start_server "$web" html
 expect "closed API port blocks" 1 "http://127.0.0.1:${api}" "http://127.0.0.1:${web}" 5
 expect_out "closed port" "never bound"
 
+echo "--- bounded failure recovery: first API probe has no upstream, next probe is ready"
+api_case recover-after-502
+run_case "transient 502 recovers within the readiness budget" 0
+expect_out "transient 502 is classified as no-upstream" "waiting: no-upstream"
+expect_out "recovery only follows a fresh successful probe" "api GREEN on attempt 2"
+expect_out "recovered readiness completes successfully" "PASS"
+expect_absent "gateway failure is not mislabeled as a dependency failure" "investigate database/storage"
+stop_servers
+
 echo "--- GATE_SKIP_WEB honours an API-only check"
 stop_servers
 api="$(free_port)"
@@ -394,6 +416,19 @@ expect_out "revision mismatch" "replacement is NOT serving"
 # Headers count as an identity source too, so no /version endpoint is required.
 api_only_case revision-header GATE_EXPECT_REVISION=cafe1234
 run_case "revision header verifies identity" 0
+expect_out "revision header identity" "revision identity verified"
+# A local isolated-candidate rehearsal: both services expose the expected build
+# token, API in its readiness header and Web in its response header. This is a
+# loopback fixture, not evidence of a Railway staging deployment.
+stop_servers
+api="$(free_port)"; web="$(free_port)"
+start_server "$api" revision-header
+start_server "$web" revision-html
+CASE_ARGS=("http://127.0.0.1:${api}" "http://127.0.0.1:${web}" 5)
+CASE_ENV="GATE_EXPECT_REVISION=cafe1234"
+expect "isolated candidate identity is proven for both services" 0 "${CASE_ARGS[@]}"
+expect_out "isolated candidate identity" "PASS — readiness green and revision identity verified"
+expect_absent "isolated candidate identity" "IDENTITY UNVERIFIED"
 # The demand applies to both services: a proven API does not excuse a Web
 # container that cannot identify itself.
 api_case revision-body GATE_EXPECT_REVISION=abc123def

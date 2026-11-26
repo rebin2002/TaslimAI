@@ -44,8 +44,9 @@
 #       identity-unavailable rather than a false green.
 #
 # Exit codes
-#   0  both gates green inside the budget; safe to promote. If identity was not
-#      demanded the PASS line states that identity is unverified.
+#   0  both requested probes are green inside the budget. This is a probe result,
+#      not deployment authority on a shared service domain: promotion still
+#      requires candidate identity by isolation or by an observable revision.
 #   1  budget exhausted or a red verdict: do not promote; keep the previous
 #      deployment serving.
 #   2  usage or argument error
