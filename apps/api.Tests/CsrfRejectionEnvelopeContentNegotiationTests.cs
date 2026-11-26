@@ -34,9 +34,10 @@ namespace Taslim.Api.Tests;
 ///      envelope body, on the middleware-routed and MVC-routed path spellings alike;
 ///   2. the rejection body stays free of internal exception / Problem Details / token
 ///      material under every Accept spelling;
-///   3. a refused mutation never persists (the rejection is observed before any action
-///      runs) and a valid double-submit pair is not mutated into a rejection by the
-///      envelope normalization when the caller advertises <c>text/html</c>.
+///   3. refused mutations with missing or stale pre-authentication request tokens never
+///      persist and return the same envelope under every Accept spelling; and
+///   4. a valid double-submit pair is not mutated into a rejection when the caller
+///      advertises <c>text/html</c>.
 ///
 /// All requests are synthetic against the in-memory test host: no live endpoint, no
 /// browser account, no provider, payment or billing path, and no customer data.
@@ -187,6 +188,40 @@ public sealed class CsrfRejectionEnvelopeContentNegotiationTests : IClassFixture
     }
 
     [Fact]
+    public async Task Missing_and_stale_tokens_keep_the_safe_envelope_across_accepts_and_do_not_mutate()
+    {
+        using var client = factory.CreateClient();
+        // Capture an anonymous request token, then change identity through the ordinary
+        // synthetic registration path. Registration expires the CSRF cookie; issuing a
+        // fresh authenticated pair makes the earlier request token stale by construction.
+        var staleRequestToken = await GetCsrfAsync(client);
+        var auth = await RegisterAsync(client, "Stale Token Refusal");
+        var workspaceId = auth.GetProperty("personalWorkspace").GetProperty("id").GetString();
+        _ = await GetCsrfAsync(client);
+        var projectName = "Must Not Exist After Stale Token";
+        var path = $"/api/workspaces/{workspaceId}/projects";
+
+        foreach (var accept in AcceptSpellings)
+        {
+            foreach (var requestToken in new string?[] { null, staleRequestToken })
+            {
+                using var rejection = await PostMutation(client, path, projectName, accept, requestToken);
+
+                Assert.Equal(HttpStatusCode.BadRequest, rejection.StatusCode);
+                Assert.Equal("application/json", rejection.Content.Headers.ContentType?.MediaType);
+                Assert.Equal(ExpectedEnvelope, await rejection.Content.ReadAsStringAsync());
+            }
+        }
+
+        // Both the missing-token and stale-token refusals happened before the action ran.
+        using var list = await client.GetAsync(path);
+        Assert.Equal(HttpStatusCode.OK, list.StatusCode);
+        var projects = await list.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.DoesNotContain(projects.EnumerateArray(), p =>
+            p.GetProperty("name").GetString() == projectName);
+    }
+
+    [Fact]
     public async Task Html_accepting_valid_pair_still_completes_and_is_not_rewritten_as_rejection()
     {
         using var client = factory.CreateClient();
@@ -220,6 +255,26 @@ public sealed class CsrfRejectionEnvelopeContentNegotiationTests : IClassFixture
         // Raw spelling, exactly as a browser or a bare client sends it, including the
         // comma-separated browser list that the typed header parser rejects on purpose.
         Assert.True(accept is null || request.Headers.TryAddWithoutValidation("Accept", accept));
+        return await client.SendAsync(request);
+    }
+
+    private static async Task<HttpResponseMessage> PostMutation(
+        HttpClient client, string path, string projectName, string? accept, string? requestToken)
+    {
+        using var request = new HttpRequestMessage(HttpMethod.Post, path)
+        {
+            Content = JsonContent.Create(new
+            {
+                name = projectName,
+                description = "synthetic CSRF negative-path test",
+                type = "Business",
+            }),
+        };
+        Assert.True(accept is null || request.Headers.TryAddWithoutValidation("Accept", accept));
+        if (requestToken is not null)
+        {
+            request.Headers.Add("X-CSRF-TOKEN", requestToken);
+        }
         return await client.SendAsync(request);
     }
 
