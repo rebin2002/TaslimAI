@@ -4,38 +4,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { MovieCast, MovieCharacterDetail, MovieWorldAsset, MovieWorldWorkspace } from "@/lib/api";
 import { assetFileUrl } from "@/lib/apiBase";
 
-// Lane: #1030 (hide unavailable or pruned representation download links), the characters room of
-// the Movie Studio Production Kit.
-//
-// #1176/#1177 correct what `MovieStudioService.GetWorldAsync` advertises for the assets it
-// projects; #1183 reproduces the consumer seam that leaves behind and #1185 closes it with
-//
-//   const selectedReferenceIsAdvertised = selectedAsset
-//     ? selectedAsset.hasFile && selectedAsset.canPreview
-//     : room === "characters";
-//
-// That `:` arm is the edge this file owns. It is a *correct* exemption for the reason #1185 gives
-// — `GetWorldAsync` builds `assetIds` from location, set, prop and world-reference ids only, so a
-// character reference never has a row there and treating "no row" as "gone" would take every
-// character preview in the product with it — but it is not a *complete* one. In the characters
-// room the predicate can only ever be `true`, because the two read models that room consumes
-// carry no readiness signal at all:
-//
-//   MovieCharacterDto  -> Guid? ReferenceAssetId, IReadOnlyList<Guid> ReferenceAssetIds   (ids only)
-//   MovieWorldAssetDto -> never populated for a character reference
-//
-// So `room === "characters"` does not mean "the reference is serveable". It means "the read model
-// is silent", which is equally true for a reference whose stored file was retention-pruned, whose
-// stored-file row is missing, or whose asset row was deleted outright. Those three states answer
-// `409 ASSET_FILE_UNAVAILABLE`, `409 ASSET_FILE_UNAVAILABLE` and `404 ASSET_NOT_FOUND` at the very
-// URL this component keeps binding into the DOM. #1183 case 6 pins the characters-room *guard*
-// (a Ready reference must keep working) and never moves the backing file, so the residual gap has
-// no owner today; nothing in #1177, #1183, #1184 or #1185 prunes a character reference.
-//
-// Synthetic DOM harness in the style established by the #1183 file, AssetsViewListing.test.tsx and
-// ActivityBell.badgeFence.test.tsx: the real component is mounted, no jsdom, no network, no
-// provider call, no credential, no customer data, no migration, no deploy. **Test-only: no file in
-// apps/api, no route, no DTO, no source file under apps/web is changed by this branch.**
+// Mount the real Production Kit with independent world, character and Asset Library fixtures.
+// The character models expose reference IDs. File readiness and visibility come from the
+// authorized asset-detail request when the world has no row for the selected character.
 class TestNode {
   nodeType: number;
   nodeName: string;
@@ -135,6 +106,7 @@ class TestDocument extends TestNode {
 
 const harness = vi.hoisted(() => ({
   api: {
+    getAsset: vi.fn(),
     getMovieCast: vi.fn(),
     getMovieWorld: vi.fn(),
     getMovieCharacterDetail: vi.fn(),
@@ -164,25 +136,8 @@ const COMPASS_ID = "asset-compass";
 const PROP_ID = "prop-compass";
 const FACE_URL = assetFileUrl(FACE_ID, true);
 
-// ---------------------------------------------------------------------------------------------
-// The authoritative download-readiness oracle. Every expectation below keys off this, not off a
-// flag the component happens to hold, so "ready" means "the route serves bytes" rather than "a
-// DTO says so".
-//
-// Source of truth, `apps/api/Assets/AssetService.cs` `GetDownloadAsync`:
-//
-//   if (asset.StoredFile is not { Status: StoredFileStatus.Ready } || !CanReadStoredFile(...))
-//       throw new AssetValidationException("ASSET_FILE_UNAVAILABLE", "This asset does not have an
-//                                           available file.");
-//   return new AssetDownload(asset, asset.StoredFile, ...);
-//
-// and `apps/api/Controllers/AssetsController.cs` `Download`, which maps that exception to
-// `409 Conflict` with its code, and a `null` download (asset row not visible to this user) to
-// `404 ASSET_NOT_FOUND`. `StoredFileStatus` has exactly `Uploading, Ready, Processing, Failed,
-// Deleted`, and the `is not { Status: Ready }` pattern also matches a null `StoredFile`, so
-// `Ready` is the only status that ever serves bytes. #1184 pins the same table server-side for the
-// *world* projection's rows; this file is the characters room, whose references never reach it.
-// ---------------------------------------------------------------------------------------------
+// These synthetic download responses match AssetService and AssetsController for the
+// fixture's visible files. A missing asset returns 404 and a non-Ready file returns 409.
 type StoredFileStatus = "Uploading" | "Ready" | "Processing" | "Failed" | "Deleted";
 type RouteAnswer = "200 bytes" | "409 ASSET_FILE_UNAVAILABLE" | "404 ASSET_NOT_FOUND";
 
@@ -216,7 +171,7 @@ function makeWorld(assets: MovieWorldAsset[], locked: boolean): MovieWorldWorksp
 // A character payload in exactly the shape `MovieCastCharacter` delivers. `lockedFactCount: 0`
 // makes the record `needs-approval`, which is what enables the control this file drives its
 // re-read through. Note what is *not* here: no `hasFile`, no `canPreview`, no media type, no
-// stored-file status. The reference arrives as a bare id, and that is the whole problem.
+// stored-file status. The component must resolve readiness using the asset endpoint.
 function makeCast(lockedFactCount: number, characters: Array<{ id: string; referenceAssetId: string | null }> = [{ id: CHARACTER_ID, referenceAssetId: FACE_ID }]): MovieCast {
   return {
     project: {},
@@ -330,6 +285,11 @@ beforeEach(() => {
   vi.stubGlobal("window", window);
   vi.stubGlobal("navigator", { userAgent: "test" });
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+  harness.api.getAsset.mockReset().mockImplementation(async (id: string) => {
+    if (!assetLibrary.has(id)) throw new Error("Asset not found");
+    const hasFile = assetLibrary.get(id) === "Ready";
+    return { id, hasFile, canPreview: hasFile };
+  });
   harness.api.getMovieCast.mockReset().mockImplementation(() => Promise.resolve(castReads[readCursor]));
   harness.api.getMovieWorld.mockReset().mockImplementation(() => Promise.resolve(worldReads[readCursor]));
   harness.api.getMovieCharacterDetail.mockReset().mockImplementation(() => Promise.resolve(detailReads[readCursor]));
@@ -348,10 +308,6 @@ afterEach(() => {
 
 describe("Production Kit characters-room reference against the download route", () => {
   it("serves bytes for a Ready reference and nothing else, which is what every case below keys off", () => {
-    // Contract pin for the oracle itself. `Ready` is the only member of `StoredFileStatus` that
-    // `GetDownloadAsync` will open, a missing stored-file row is refused by the same pattern, and
-    // an asset the caller cannot see is a 404 rather than a 409. If this drifts, the red below
-    // would no longer mean what it says.
     assetLibrary.set("probe", "Ready");
     expect(routeAnswerFor("probe")).toBe("200 bytes");
     for (const status of ["Uploading", "Processing", "Failed", "Deleted"] satisfies StoredFileStatus[]) {
@@ -365,10 +321,6 @@ describe("Production Kit characters-room reference against the download route", 
   });
 
   it("paints a genuinely Ready character reference that the world projection never describes", async () => {
-    // The preserve-the-existing-behaviour pin, and the reason #1185's exemption exists. A
-    // character reference has no row in `world.assets` even when it is perfectly serveable, so
-    // "no row" cannot be the signal to withhold. Any fix for the cases below has to keep this
-    // case green.
     assetLibrary.set(FACE_ID, "Ready");
     castReads = [makeCast(0)];
     worldReads = [makeWorld([], false)];
@@ -381,33 +333,26 @@ describe("Production Kit characters-room reference against the download route", 
     expect(worldReads[0].assets.map((asset) => asset.id), "the projection must not be relied on to describe a character reference").not.toContain(FACE_ID);
   });
 
-  it("offers the characters room no readiness signal in either read model it consumes", async () => {
-    // Why the red below cannot be closed in this component. The cast row and the character detail
-    // row carry the reference as bare ids, and the world `assets` array is built from location,
-    // set, prop and world-reference ids only. So `selectedAsset` is `null` here in both the Ready
-    // and the pruned state, and `room === "characters"` is the only thing the predicate has.
+  it("uses the Asset Library when the character and world carry no availability flags", async () => {
     assetLibrary.set(FACE_ID, "Deleted");
     castReads = [makeCast(0)];
     worldReads = [makeWorld([], false)];
     detailReads = [makeDetail(0)];
     await mountKit();
 
+    expect(harness.api.getAsset).toHaveBeenCalledWith(FACE_ID);
     const castKeys = Object.keys(castReads[0].characters[0] as object);
     const detailKeys = Object.keys((detailReads[0].character as unknown as object));
     expect(castKeys).toContain("referenceAssetId");
     expect(detailKeys).toContain("referenceAssetId");
     for (const key of ["hasFile", "canPreview", "storedFileStatus", "mimeType"]) {
-      expect(castKeys, `the cast payload must not grow a ${key} field while this lane is test-only`).not.toContain(key);
+      expect(castKeys, `the cast fixture has no ${key} field`).not.toContain(key);
       expect(detailKeys, `the character detail payload must not grow a ${key} field`).not.toContain(key);
     }
     expect(worldReads[0].assets).toHaveLength(0);
   });
 
   it("stops binding the character preview once the same live selection reports its file pruned", async () => {
-    // THE RESIDUAL GAP. Ready on the first read, retention-pruned (`Deleted`, the shape #1176
-    // produces) before the second, through the component's own re-read of one unchanged
-    // selection. `selectedAsset` stays `null`, the exemption arm returns `true`, and the preview
-    // element survives holding a URL that now answers `409 ASSET_FILE_UNAVAILABLE`.
     castReads = [makeCast(0), makeCast(1)];
     worldReads = [makeWorld([], false), makeWorld([], true)];
     detailReads = [makeDetail(0), makeDetail(1)];
@@ -426,7 +371,6 @@ describe("Production Kit characters-room reference against the download route", 
   });
 
   it("never binds a character preview whose file was already pruned before the first read", async () => {
-    // The same defect without a transition: a producer opening the Kit the day after a prune.
     assetLibrary.set(FACE_ID, "Deleted");
     castReads = [makeCast(1)];
     worldReads = [makeWorld([], true)];
@@ -438,9 +382,6 @@ describe("Production Kit characters-room reference against the download route", 
   });
 
   it("never binds a character preview whose stored-file row is missing", async () => {
-    // `asset.StoredFile is not { Status: Ready }` also matches a null `StoredFile`, so a dangling
-    // reference id is refused with the same 409 as a prune. #1184 row 2 reaches this predicate
-    // server-side for world rows; a character row cannot, because it is never projected.
     assetLibrary.set(FACE_ID, null);
     castReads = [makeCast(1)];
     worldReads = [makeWorld([], true)];
@@ -452,9 +393,6 @@ describe("Production Kit characters-room reference against the download route", 
   });
 
   it("never binds a character preview for a reference asset that has been deleted outright", async () => {
-    // Weakest shape, and the one a broken-link UI is least able to explain: the asset row is gone,
-    // so the route has nothing to authorise and answers `404 ASSET_NOT_FOUND`, while the
-    // character card still carries the id it can no longer serve.
     assetLibrary.set(FACE_ID, "Ready");
     assetLibrary.delete(FACE_ID);
     castReads = [makeCast(1)];
@@ -466,14 +404,37 @@ describe("Production Kit characters-room reference against the download route", 
     expect(doomedPreviewRequests(), `a deleted reference asset is still bound into the card as ${FACE_URL}`).toEqual([]);
   });
 
+  it("removes a preview when the file becomes unreadable after the metadata check", async () => {
+    assetLibrary.set(FACE_ID, "Ready");
+    castReads = [makeCast(1)];
+    worldReads = [makeWorld([], true)];
+    detailReads = [makeDetail(1)];
+    await mountKit();
+
+    const image = findTag(container, "IMG")[0];
+    expect(image.getAttribute("src")).toBe(FACE_URL);
+    await act(async () => { image.dispatchEvent({ type: "error", bubbles: false }); });
+    expect(previewRequests()).toEqual([]);
+    expect(renderedText()).toContain("assets.fileUnavailable");
+  });
+
+  it("ignores a late Ready answer after a newer read marks the same reference unavailable", async () => {
+    let finishOldRead!: (asset: { id: string; hasFile: boolean; canPreview: boolean }) => void;
+    harness.api.getAsset.mockImplementationOnce(() => new Promise(resolve => { finishOldRead = resolve; }));
+    assetLibrary.set(FACE_ID, "Deleted");
+    castReads = [makeCast(0), makeCast(1)];
+    worldReads = [makeWorld([], false), makeWorld([], true)];
+    detailReads = [makeDetail(0), makeDetail(1)];
+    await mountKit();
+    expect(previewRequests()).toEqual([]);
+    await reReadCharacterSelection();
+    await act(async () => { finishOldRead({ id: FACE_ID, hasFile: true, canPreview: true }); });
+    expect(harness.api.getAsset).toHaveBeenCalledTimes(2);
+    expect(previewRequests()).toEqual([]);
+    expect(renderedText()).toContain("assets.fileUnavailable");
+  });
+
   it("withholds the very same pruned reference when an unrelated world record shares its asset id", async () => {
-    // The asymmetry, pinned as a behaviour guard rather than an expectation. #1185's gate is
-    // driven by whether the id appears in `world.assets`, and a character reference can appear
-    // there by coincidence: `GetWorldAsync` projects prop reference ids, so when a prop and a
-    // character point at the same stored asset the characters room suddenly gets a row, and with
-    // it the correct withhold. Producers therefore get protection or a doomed request depending
-    // on data they never chose to share. This case is deliberately a PASS at the #1185 head so the
-    // contrast with the character-only fixture above is on the record.
     assetLibrary.set(FACE_ID, "Deleted");
     const sharedRow: MovieWorldAsset = { id: FACE_ID, name: "Mara face plate", assetType: "image", mimeType: "image/png", hasFile: false, canPreview: false };
     castReads = [makeCast(1)];
@@ -481,15 +442,13 @@ describe("Production Kit characters-room reference against the download route", 
     detailReads = [makeDetail(1)];
     await mountKit();
 
-    expect(doomedPreviewRequests(), "#1185's gate must suppress the doomed URL once a row exists").toEqual([]);
+    expect(harness.api.getAsset).not.toHaveBeenCalled();
+    expect(doomedPreviewRequests(), "the world row suppresses the unavailable URL").toEqual([]);
     expect(findClass(container, "movie-kit-reference-empty")).toHaveLength(1);
     expect(renderedText()).toContain("assets.fileUnavailable");
   });
 
   it("keeps a Ready character reference previewing beside an unrelated pruned world asset", async () => {
-    // Over-correction guard: the fix the red above is asking for must key off the character's own
-    // reference, not off the general health of the world projection. One pruned sibling row, the
-    // character's own reference still Ready, still painted.
     assetLibrary.set(FACE_ID, "Ready");
     assetLibrary.set(COMPASS_ID, "Deleted");
     const prunedSibling: MovieWorldAsset = { id: COMPASS_ID, name: "Compass reference", assetType: "image", mimeType: "image/png", hasFile: false, canPreview: false };

@@ -282,10 +282,33 @@ public sealed class MovieV2Service(TaslimDbContext db, WorkspaceAccessService ac
     {
         var take = await db.MovieTakes.Include(item => item.MovieShot).ThenInclude(item => item.Scene).ThenInclude(item => item.MovieProject).Include(item => item.GenerationJob).FirstOrDefaultAsync(item => item.Id == takeId, cancellationToken);
         await EnsureAuthorizedAsync(take?.MovieShot.Scene.MovieProject.WorkspaceId, userId, cancellationToken, take?.MovieShot.Scene.MovieProjectId, finalize ? MoviePermissions.FinalApproval : MoviePermissions.Approve);
-        if (take!.Status is MovieTakeStatuses.Archived or MovieTakeStatuses.Superseded or MovieTakeStatuses.LegacyArchived or MovieTakeStatuses.Failed or MovieTakeStatuses.Cancelled or MovieTakeStatuses.Rejected)
+        var shot = take!.MovieShot;
+        await using var transaction = await db.Database.BeginTransactionAsync(cancellationToken);
+        var shotRow = db.MovieShots.Where(item => item.Id == shot.Id);
+        if (finalize)
+        {
+            var claimed = await shotRow.Where(item => item.FinalTakeId == null)
+                .ExecuteUpdateAsync(setters => setters
+                    .SetProperty(item => item.FinalTakeId, takeId)
+                    .SetProperty(item => item.SelectedTakeId, takeId), cancellationToken);
+            if (claimed == 0)
+            {
+                var committed = await shotRow.Select(item => item.FinalTakeId).SingleAsync(cancellationToken);
+                if (committed == takeId) return;
+                throw new MovieV2ConflictException("A final take is already committed for this shot. Review it before requesting another finalization.");
+            }
+        }
+        else
+        {
+            // Serialize selection with finalization on this shot before changing either take's metadata.
+            await shotRow.ExecuteUpdateAsync(setters => setters.SetProperty(item => item.SelectedTakeId, takeId), cancellationToken);
+        }
+
+        // Another reviewer may have changed the take since the authorization read.
+        await db.Entry(take).ReloadAsync(cancellationToken);
+        if (take.Status is MovieTakeStatuses.Archived or MovieTakeStatuses.Superseded or MovieTakeStatuses.LegacyArchived or MovieTakeStatuses.Failed or MovieTakeStatuses.Cancelled or MovieTakeStatuses.Rejected)
             throw new MovieV2ValidationException("Only an active, successful take can be selected.");
         var now = DateTime.UtcNow;
-        var shot = take.MovieShot;
         if (take.GenerationJob is not null && take.GenerationJob.Status != GenerationJobStatus.Succeeded)
             throw new MovieV2ValidationException("A generated take must finish successfully before it can be selected.");
         if (take.GenerationJob is not null && take.AssetId.HasValue)
@@ -294,41 +317,40 @@ public sealed class MovieV2Service(TaslimDbContext db, WorkspaceAccessService ac
             if (selectedAsset is null || selectedAsset.Status != AssetStatus.Active || selectedAsset.ProjectId.HasValue && selectedAsset.ProjectId != take.MovieShot.Scene.MovieProject.ProjectId || selectedAsset.StoredFileId.HasValue && selectedAsset.StoredFile?.Status != StoredFileStatus.Ready)
                 throw new MovieV2ValidationException("A generated take must reference an active, ready asset before it can be selected.");
         }
-        var previous = await db.MovieTakes.Where(item => item.MovieShotId == shot.Id && item.Id != takeId && (finalize ? item.FinalizedAt != null : item.SelectedAt != null)).ToListAsync(cancellationToken);
+        if (finalize && take.Status is not (MovieTakeStatuses.Approved or MovieTakeStatuses.Selected))
+            throw new MovieV2ValidationException("A take must be approved before it can be finalized.");
+        await db.Entry(shot).ReloadAsync(cancellationToken);
+        var previous = await db.MovieTakes.Where(item => item.MovieShotId == shot.Id && item.Id != takeId
+            && (item.SelectedAt != null || (finalize && item.FinalizedAt != null))).ToListAsync(cancellationToken);
         foreach (var item in previous)
         {
-            if (finalize) item.FinalizedAt = null; else item.SelectedAt = null;
-            item.Status = MovieTakeStatuses.Superseded;
-            item.StatusChangedAt = now;
-            item.StatusChangedByUserId = userId;
+            // A request context may already track this take from before the shot write lock.
+            await db.Entry(item).ReloadAsync(cancellationToken);
+            item.SelectedAt = null;
+            if (finalize) item.FinalizedAt = null;
+            // The final take remains usable when a reviewer chooses a different working selection.
+            if (item.Id != shot.FinalTakeId)
+            {
+                item.Status = MovieTakeStatuses.Superseded;
+                item.StatusChangedAt = now;
+                item.StatusChangedByUserId = userId;
+            }
             item.UpdatedAt = now;
         }
         if (finalize)
         {
-            if (take.Status is not (MovieTakeStatuses.Approved or MovieTakeStatuses.Selected))
-                throw new MovieV2ValidationException("A take must be approved before it can be finalized.");
-            var previousSelected = await db.MovieTakes.Where(item => item.MovieShotId == shot.Id && item.Id != takeId && item.SelectedAt != null).ToListAsync(cancellationToken);
-            foreach (var item in previousSelected)
-            {
-                item.SelectedAt = null;
-                item.Status = MovieTakeStatuses.Superseded;
-                item.StatusChangedAt = now;
-                item.StatusChangedByUserId = userId;
-                item.UpdatedAt = now;
-            }
-            shot.SelectedTakeId = take.Id;
-            shot.FinalTakeId = take.Id;
             take.SelectedAt = take.SelectedAt ?? now;
             take.SelectedByUserId = take.SelectedByUserId ?? userId;
             take.FinalizedAt = now;
             take.FinalizedByUserId = userId;
         }
-        else { shot.SelectedTakeId = take.Id; take.SelectedAt = now; take.SelectedByUserId = userId; }
+        else { take.SelectedAt = now; take.SelectedByUserId = userId; }
         take.Status = MovieTakeStatuses.Selected;
         take.StatusChangedAt = now;
         take.StatusChangedByUserId = userId;
         shot.UpdatedAt = now; take.UpdatedAt = now;
         await db.SaveChangesAsync(cancellationToken);
+        await transaction.CommitAsync(cancellationToken);
     }
 
     public async Task<MovieV2TakeDto?> ApproveTakeAsync(Guid userId, Guid takeId, MovieV2ApprovalRequest request, CancellationToken cancellationToken)
@@ -467,4 +489,5 @@ public sealed class MovieV2Service(TaslimDbContext db, WorkspaceAccessService ac
 }
 
 public sealed class MovieV2ValidationException(string message) : Exception(message);
+public sealed class MovieV2ConflictException(string message) : Exception(message);
 public sealed class MovieV2NotFoundException : Exception;
