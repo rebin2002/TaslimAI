@@ -311,15 +311,25 @@ public sealed class OpenAiProvider(
         var status = response.TryGetProperty("status", out var statusElement) && statusElement.ValueKind == JsonValueKind.String
             ? statusElement.GetString()
             : null;
-        if (!isIncompleteEvent && !string.Equals(status, "incomplete", StringComparison.Ordinal))
-            return status ?? "completed";
-        if (response.TryGetProperty("incomplete_details", out var incompleteDetails)
-            && incompleteDetails.ValueKind == JsonValueKind.Object
-            && incompleteDetails.TryGetProperty("reason", out var reason)
-            && reason.ValueKind == JsonValueKind.String
-            && reason.GetString() is "max_output_tokens" or "content_filter")
-            return $"incomplete:{reason.GetString()}";
-        return "incomplete";
+        if (isIncompleteEvent || string.Equals(status, "incomplete", StringComparison.Ordinal))
+        {
+            if (response.TryGetProperty("incomplete_details", out var incompleteDetails)
+                && incompleteDetails.ValueKind == JsonValueKind.Object
+                && incompleteDetails.TryGetProperty("reason", out var reason)
+                && reason.ValueKind == JsonValueKind.String
+                && reason.GetString() is "max_output_tokens" or "content_filter")
+                return $"incomplete:{reason.GetString()}";
+            return "incomplete";
+        }
+
+        return status switch
+        {
+            null => "completed",
+            "completed" => "completed",
+            "failed" => "failed",
+            "cancelled" => "cancelled",
+            _ => "unknown",
+        };
     }
 
     private static int? ReadInt(JsonElement element, string property)
