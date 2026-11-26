@@ -12,6 +12,7 @@ using Microsoft.Extensions.Options;
 using System.Security.Claims;
 using Taslim.Api.Ai;
 using Taslim.Api.Activity;
+using Taslim.Api.AcademicSources;
 using Taslim.Api.Assets;
 using Taslim.Api.Autopilot;
 using Taslim.Api.Authorization;
@@ -250,10 +251,9 @@ builder.Services.AddScoped<IProviderBenchmarkService, ProviderBenchmarkService>(
 builder.Services.AddSingleton<IProviderCostGuard, AllowAllProviderCostGuard>();
 builder.Services.AddSingleton(TimeProvider.System);
 // Academic Research Studio integration lane: Phase B evidence services + persistence and
-// the Phase C workflow engine over the shared context. Stage handlers (scholarly
-// discovery, screening, extraction, synthesis, drafting, verification) are registered by
-// their provider lanes through AddAcademicStageHandler; until then run/resume reports the
-// exact unconnected stage instead of executing stub work.
+// the Phase C workflow engine over the shared context. The deterministic Plan handler is
+// enabled only by an explicit API opt-in. Discovery, screening, extraction, synthesis, drafting and verification
+// remain unconnected and are reported as the exact missing stage.
 builder.Services.AddAcademicProjects(builder.Configuration);
 builder.Services.Configure<AutopilotOptions>(builder.Configuration.GetSection("Autopilot"));
 builder.Services.PostConfigure<AutopilotOptions>(options => options.Normalize());
@@ -424,7 +424,9 @@ if (builder.Configuration.GetValue("GenerationJobs:WorkerEnabled", !builder.Envi
     builder.Services.AddHostedService<GenerationJobWorker>();
 }
 builder.Services.Configure<AiOptions>(builder.Configuration.GetSection("Ai"));
-builder.Services.Configure<ImageGenerationOptions>(builder.Configuration.GetSection("ImageGeneration"));
+builder.Services.AddOptions<ImageGenerationOptions>()
+    .Bind(builder.Configuration.GetSection("ImageGeneration"))
+    .ValidateOnStart();
 builder.Services.Configure<DocumentGenerationOptions>(builder.Configuration.GetSection("DocumentGeneration"));
 builder.Services.AddOptions<PresentationGenerationOptions>()
     .Bind(builder.Configuration.GetSection("PresentationGeneration"))
@@ -470,6 +472,12 @@ builder.Services.AddSingleton<IResearchPromptBuilder, ResearchPromptBuilder>();
 builder.Services.AddScoped<IResearchSearchProvider>(services => services.GetRequiredService<OpenAiResearchSearchProvider>());
 builder.Services.AddScoped<IResearchReportProvider, AiResearchReportProvider>();
 builder.Services.AddScoped<IGenerationJobHandler, ResearchGenerationJobHandler>();
+// Issue #1267 slice 1: scholarly source discovery for the Academic Research Studio. The standard
+// research pipeline above is untouched; this registers the Phase A (#1262) adapters behind the
+// workspace-scoped read-only endpoint only. With no AcademicSourceDiscovery section written,
+// every switch stays off, so this adds configuration-bound options and singletons but performs
+// no outbound calls; enabling egress remains an explicit deployment decision.
+builder.Services.AddAcademicSourceDiscovery(builder.Configuration);
 builder.Services.AddSingleton<ISocialPromptBuilder, SocialPromptBuilder>();
 builder.Services.AddScoped<ISocialGenerationProvider, AiSocialGenerationProvider>();
 builder.Services.AddScoped<IGenerationJobHandler, SocialGenerationJobHandler>();
@@ -586,10 +594,12 @@ static IResult LivenessEndpoint(OperationalHealthService health, HttpContext con
 app.MapGet("/health", LivenessEndpoint)
     .WithName("Health")
     .WithTags("System")
+    .RequireRateLimiting(RateLimiting.HealthLiveness)
     .AllowAnonymous();
 app.MapGet("/health/live", LivenessEndpoint)
     .WithName("HealthLive")
     .WithTags("System")
+    .RequireRateLimiting(RateLimiting.HealthLiveness)
     .AllowAnonymous();
 static async Task<IResult> ReadinessEndpoint(OperationalHealthService health, HttpContext context, CancellationToken cancellationToken)
 {
@@ -600,10 +610,12 @@ static async Task<IResult> ReadinessEndpoint(OperationalHealthService health, Ht
 app.MapGet("/health/ready", ReadinessEndpoint)
     .WithName("HealthReady")
     .WithTags("System")
+    .RequireRateLimiting(RateLimiting.Health)
     .AllowAnonymous();
 app.MapGet("/readiness", ReadinessEndpoint)
     .WithName("Readiness")
     .WithTags("System")
+    .RequireRateLimiting(RateLimiting.Health)
     .AllowAnonymous();
 app.MapControllers();
 
