@@ -49,6 +49,10 @@ case "$mode" in
         printf 'HTTP/1.1 301 Moved Permanently\r\nlocation: https://app.example.test/\r\ncontent-type: text/html; charset=utf-8\r\nx-content-type-options: nosniff\r\nx-frame-options: DENY\r\ncontent-length: 0\r\n\r\n' > "$headers"
         printf 'HTTP/1.1 200 OK\r\ncontent-type: text/html; charset=utf-8\r\ncontent-length: 64\r\n\r\n' >> "$headers"
         ;;
+    redirect-headerless-terminal)
+        printf 'HTTP/1.1 301 Moved Permanently\r\ncontent-type: text/html\r\nx-content-type-options: nosniff\r\nx-frame-options: DENY\r\nlocation: /final\r\n\r\n' > "$headers"
+        printf 'HTTP/1.1 200 OK\r\n\r\n' >> "$headers"
+        ;;
     redirect-partial)
         # Terminal response supplies the sniffing header only; X-Frame-Options comes
         # exclusively from the hop, so it must not be credited to the served document.
@@ -137,6 +141,8 @@ expect_rejected() {
 
 expect_rejected 'redirect-headers' \
     'web root terminal response is missing X-Content-Type-Options: nosniff'
+expect_rejected 'redirect-headerless-terminal' \
+    'web root terminal response did not return an HTML content type'
 expect_rejected 'redirect-partial' \
     'web root terminal response is missing X-Frame-Options: DENY'
 expect_rejected 'no-block' \

@@ -11,7 +11,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=scripts/lib/next-wave-refs.sh
 . "$ROOT_DIR/scripts/lib/next-wave-refs.sh"
 
-EXPECTED_BRANCH="feature/taslim-autopilot-next-wave"
+EXPECTED_BRANCH="${NEXT_WAVE_EXPECTED_BRANCH:-feature/taslim-autopilot-next-wave}"
 EXPECTED_BASE="main"
 
 pass=0
