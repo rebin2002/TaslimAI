@@ -200,7 +200,7 @@ public sealed class ChatController(
         var existingRequest = await db.ChatMessages.AsNoTracking().FirstOrDefaultAsync(message =>
             message.ConversationId == conversationId && message.RequestId == requestId,
             cancellationToken);
-        var existingRequestBelongsToTurn = await RequestBelongsToRegenerationTurnAsync(conversationId, assistant.Sequence, existingRequest, cancellationToken);
+        var existingRequestBelongsToTurn = await RequestBelongsToRegenerationTurnAsync(conversationId, assistant.Id, assistant.Sequence, existingRequest, cancellationToken);
         if (existingRequest is not null && !existingRequestBelongsToTurn)
         {
             await WriteEventAsync("message.failed", new { code = "REQUEST_ID_REUSED", message = "That regeneration request cannot be reused for a different response." }, cancellationToken);
@@ -228,10 +228,10 @@ public sealed class ChatController(
             return;
         }
 
-        await StreamRegenerationAsync(conversation, sourceUser, assistant.Sequence, requestId, cancellationToken);
+        await StreamRegenerationAsync(conversation, sourceUser, assistant.Id, assistant.Sequence, requestId, cancellationToken);
     }
 
-    private async Task StreamRegenerationAsync(Conversation conversation, ChatMessage sourceUser, long replacedAssistantSequence, string requestId, CancellationToken cancellationToken)
+    private async Task StreamRegenerationAsync(Conversation conversation, ChatMessage sourceUser, Guid replacedAssistantId, long replacedAssistantSequence, string requestId, CancellationToken cancellationToken)
     {
         ChatMessage? assistant = null;
         UsageTransaction? usageTransaction = null;
@@ -242,9 +242,13 @@ public sealed class ChatController(
             var existing = await db.ChatMessages.FirstOrDefaultAsync(message => message.ConversationId == conversation.Id && message.RequestId == requestId, cancellationToken);
             if (existing is not null)
             {
-                if (existing.Role != ChatMessageRole.Assistant)
+                // The controller's earlier lookup may have observed no row, then another request
+                // may have claimed this ID for a different turn before this second read. Reuse
+                // the same ownership fence as the unique-index collision path before inspecting
+                // or claiming the row's state.
+                if (!await RequestBelongsToRegenerationTurnAsync(conversation.Id, replacedAssistantId, replacedAssistantSequence, existing, cancellationToken))
                 {
-                    await WriteEventAsync("message.failed", new { code = "REQUEST_ID_REUSED", message = "That regeneration request cannot be reused." }, cancellationToken);
+                    await WriteEventAsync("message.failed", new { code = "REQUEST_ID_REUSED", message = "That regeneration request cannot be reused for a different response." }, cancellationToken);
                     return;
                 }
                 if (existing.Status == ChatMessageStatus.Completed)
@@ -319,7 +323,7 @@ public sealed class ChatController(
                     .FirstOrDefaultAsync(message => message.ConversationId == conversation.Id && message.RequestId == requestId, CancellationToken.None);
                 if (winner is null) throw;
                 if (assistant is not null) db.Entry(assistant).State = EntityState.Detached;
-                await WriteExistingRegenerationStateAsync(conversation, sourceUser, replacedAssistantSequence, winner, CancellationToken.None);
+                await WriteExistingRegenerationStateAsync(conversation, sourceUser, replacedAssistantId, replacedAssistantSequence, winner, CancellationToken.None);
                 return;
             }
             usageTransaction = await usageLedger.GetOrCreatePendingAsync(conversation.WorkspaceId, GetUserId(), conversation.ProjectId, conversation.Id, requestId, UsageFeature.Chat, cancellationToken);
@@ -377,9 +381,14 @@ public sealed class ChatController(
         }
     }
 
-    private async Task<bool> RequestBelongsToRegenerationTurnAsync(Guid conversationId, long replacedAssistantSequence, ChatMessage? requestRow, CancellationToken cancellationToken)
+    private async Task<bool> RequestBelongsToRegenerationTurnAsync(Guid conversationId, Guid replacedAssistantId, long replacedAssistantSequence, ChatMessage? requestRow, CancellationToken cancellationToken)
     {
-        if (requestRow is null || requestRow.Role != ChatMessageRole.Assistant || requestRow.Sequence <= replacedAssistantSequence) return false;
+        if (requestRow is null || requestRow.Role != ChatMessageRole.Assistant) return false;
+        // A completed request may be replayed against its own persisted winning assistant. Permit
+        // only that exact row identity at the replaced sequence; every different row must be later
+        // and remain in the same user turn.
+        if (requestRow.Id == replacedAssistantId) return true;
+        if (requestRow.Sequence <= replacedAssistantSequence) return false;
         // A completed/failed retry may follow a later user turn, but no user row may separate the
         // requested assistant from the claimed regeneration row.
         return !await db.ChatMessages.AnyAsync(message =>
@@ -390,9 +399,9 @@ public sealed class ChatController(
             cancellationToken);
     }
 
-    private async Task WriteExistingRegenerationStateAsync(Conversation conversation, ChatMessage sourceUser, long replacedAssistantSequence, ChatMessage existing, CancellationToken cancellationToken)
+    private async Task WriteExistingRegenerationStateAsync(Conversation conversation, ChatMessage sourceUser, Guid replacedAssistantId, long replacedAssistantSequence, ChatMessage existing, CancellationToken cancellationToken)
     {
-        if (!await RequestBelongsToRegenerationTurnAsync(conversation.Id, replacedAssistantSequence, existing, cancellationToken))
+        if (!await RequestBelongsToRegenerationTurnAsync(conversation.Id, replacedAssistantId, replacedAssistantSequence, existing, cancellationToken))
         {
             await WriteEventAsync("message.failed", new { code = "REQUEST_ID_REUSED", message = "That regeneration request cannot be reused for a different response." }, cancellationToken);
             return;

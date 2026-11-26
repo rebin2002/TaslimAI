@@ -320,6 +320,77 @@ public sealed class SupersededRegenerationStreamContextQaTests : IClassFixture<S
     }
 
     [Fact]
+    public async Task Concurrent_same_user_two_turn_regenerations_reject_a_cross_turn_row_found_on_the_second_lookup()
+    {
+        using var client = factory.CreateClient();
+        var auth = await Register(client, "Second Lookup Cross-Turn Race Owner");
+        var conversation = await CreateConversation(client, auth.PersonalWorkspace.Id);
+        var firstTurn = await SendMessage(client, conversation.Id, "SECOND_LOOKUP_FIRST_TURN_USER");
+        var requestId = Guid.NewGuid().ToString("N");
+        var saveGate = factory.Services.GetRequiredService<StreamQaSaveChangesGate>();
+        var lookupGate = factory.Services.GetRequiredService<StreamQaInterleavingGate>();
+        var recorder = factory.Services.GetRequiredService<StreamQaRecordingChatCompletionService>();
+        saveGate.ArmRequestIdInsertBarrier(requestId);
+        recorder.ArmStreamBarrier();
+
+        // This old-turn request passes both admission checks and reaches SaveChanges, but its row
+        // is not committed yet. The later ordinary turn can therefore finish before the row exists.
+        var firstTurnRegenerationTask = SendWithCsrf(client, HttpMethod.Post,
+            $"/api/conversations/{conversation.Id}/messages/{firstTurn.AssistantMessage.Id}/regenerate",
+            new { requestId });
+        Task<HttpResponseMessage>? secondTurnRegenerationTask = null;
+        try
+        {
+            await saveGate.WaitForFirstRequestIdInsertAsync(TimeSpan.FromSeconds(10));
+            var secondTurn = await SendMessage(client, conversation.Id, "SECOND_LOOKUP_SECOND_TURN_USER");
+
+            // The second-turn request's first controller lookup sees no row. Pause only its
+            // second StreamRegenerationAsync lookup, then let the old-turn claim commit as Pending.
+            lookupGate.ArmSecondRequestIdLookup(requestId);
+            secondTurnRegenerationTask = SendWithCsrf(client, HttpMethod.Post,
+                $"/api/conversations/{conversation.Id}/messages/{secondTurn.AssistantMessage.Id}/regenerate",
+                new { requestId });
+            await lookupGate.WaitForSecondRequestIdLookupAsync(TimeSpan.FromSeconds(10));
+
+            saveGate.ReleaseFirstRequestIdInsert();
+            await recorder.WaitForStreamStartAsync(TimeSpan.FromSeconds(10));
+            var callsWhileFirstTurnIsPending = recorder.CallCount;
+            lookupGate.ReleaseSecondRequestIdLookup();
+
+            using var secondTurnResponse = await secondTurnRegenerationTask;
+            var secondTurnBody = await secondTurnResponse.Content.ReadAsStringAsync();
+            Assert.Equal(HttpStatusCode.OK, secondTurnResponse.StatusCode);
+            Assert.Contains("REQUEST_ID_REUSED", secondTurnBody, StringComparison.Ordinal);
+            Assert.DoesNotContain("MESSAGE_IN_PROGRESS", secondTurnBody, StringComparison.Ordinal);
+            Assert.DoesNotContain("message.completed", secondTurnBody, StringComparison.Ordinal);
+            Assert.Equal(callsWhileFirstTurnIsPending, recorder.CallCount);
+        }
+        finally
+        {
+            saveGate.ReleaseFirstRequestIdInsert();
+            saveGate.ReleaseSecondRequestIdInsert();
+            lookupGate.ReleaseSecondRequestIdLookup();
+            recorder.ReleaseStream();
+        }
+
+        using var firstTurnResponse = await firstTurnRegenerationTask;
+        Assert.Contains("message.completed", await firstTurnResponse.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        var requestRows = await db.ChatMessages.AsNoTracking()
+            .Where(message => message.ConversationId == conversation.Id && message.RequestId == requestId)
+            .ToListAsync();
+        var requestRow = Assert.Single(requestRows);
+        Assert.Equal(ChatMessageStatus.Completed, requestRow.Status);
+        Assert.Equal(firstTurn.AssistantMessage.Sequence + 1, requestRow.Sequence);
+        var transcript = await db.ChatMessages.AsNoTracking()
+            .Where(message => message.ConversationId == conversation.Id)
+            .OrderBy(message => message.Sequence)
+            .ToListAsync();
+        Assert.Equal(new long[] { 1, 2, 3, 4, 5 }, transcript.Select(message => message.Sequence).ToArray());
+    }
+
+    [Fact]
     public async Task Failed_regeneration_retry_reuses_its_sequence_without_overwriting_a_later_turn_timestamp()
     {
         using var client = factory.CreateClient();
@@ -661,14 +732,25 @@ public sealed class StreamQaInterleavingGate : DbCommandInterceptor
     private int armed;
     private int gateSequenceReservation;
     private int gateContextRead;
+    private int gateSecondRequestIdLookup;
+    private int requestIdLookupOccurrence;
+    private string? gatedRequestId;
 
     public void ArmSequenceReservation() => Arm(ref gateSequenceReservation);
     public void ArmContextRead() => Arm(ref gateContextRead);
+    public void ArmSecondRequestIdLookup(string requestId)
+    {
+        gatedRequestId = requestId;
+        Volatile.Write(ref requestIdLookupOccurrence, 0);
+        Arm(ref gateSecondRequestIdLookup);
+    }
 
     public Task WaitForSequenceReservationAsync(TimeSpan timeout) => WaitForGateAsync(gateSequenceReservation, timeout);
     public Task WaitForContextReadAsync(TimeSpan timeout) => WaitForGateAsync(gateContextRead, timeout);
+    public Task WaitForSecondRequestIdLookupAsync(TimeSpan timeout) => WaitForGateAsync(gateSecondRequestIdLookup, timeout);
     public void ReleaseSequenceReservation() => ReleaseGate(gateSequenceReservation);
     public void ReleaseContextRead() => ReleaseGate(gateContextRead);
+    public void ReleaseSecondRequestIdLookup() => ReleaseGate(gateSecondRequestIdLookup);
 
     public override ValueTask<InterceptionResult<DbDataReader>> ReaderExecutingAsync(
         DbCommand command,
@@ -690,6 +772,7 @@ public sealed class StreamQaInterleavingGate : DbCommandInterceptor
         release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         Volatile.Write(ref gateSequenceReservation, 0);
         Volatile.Write(ref gateContextRead, 0);
+        Volatile.Write(ref gateSecondRequestIdLookup, 0);
         Volatile.Write(ref kind, 1);
         Volatile.Write(ref armed, 1);
     }
@@ -720,7 +803,13 @@ public sealed class StreamQaInterleavingGate : DbCommandInterceptor
             && sql.Contains("\"CreatedAt\"", StringComparison.OrdinalIgnoreCase)
             && sql.Contains("\"Content\"", StringComparison.OrdinalIgnoreCase)
             && !sql.Contains("DESC", StringComparison.OrdinalIgnoreCase);
-        if ((!isSequenceReservation && !isContextRead) || Interlocked.Exchange(ref armed, 0) != 1) return result;
+        var isTargetRequestIdLookup = Volatile.Read(ref gateSecondRequestIdLookup) == 1
+            && sql.Contains("FROM \"ChatMessages\"", StringComparison.OrdinalIgnoreCase)
+            && sql.Contains("\"RequestId\"", StringComparison.OrdinalIgnoreCase)
+            && command.Parameters.Cast<DbParameter>().Any(parameter =>
+                parameter.Value is string value && string.Equals(value, gatedRequestId, StringComparison.Ordinal));
+        if (isTargetRequestIdLookup && Interlocked.Increment(ref requestIdLookupOccurrence) == 1) return result;
+        if ((!isSequenceReservation && !isContextRead && !isTargetRequestIdLookup) || Interlocked.Exchange(ref armed, 0) != 1) return result;
 
         reached?.TrySetResult();
         if (release is not null) await release.Task.WaitAsync(cancellationToken);
