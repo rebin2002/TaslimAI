@@ -23,14 +23,14 @@ import { test, expect } from "@playwright/test";
  * The fix is a direction reversal on the authenticated surface: instead of
  * asking "is this call on a list of things we know are bad?", the authenticated
  * pre-consent gate asks "is this call on the list of app-shell traffic we have
- * actually seen and account for?". Every `/api/*` request whose *pathname* is
- * not explicitly allow-listed is a violation, so an unknown generic endpoint
+ * actually seen and account for. Every `/api/*` request whose method-and-path
+ * pair is not explicitly allow-listed is a violation, so an unknown endpoint
  * fails closed whether or not anyone thought to enumerate it.
  *
  *  1. the allow-list is pinned as data, derived from the real shell bootstrap
  *     (AuthProvider session, CSRF bootstrap, workspace resolution, the passive
- *     unread-count polls) and matched on pathname only, so a query string can
- *     never smuggle a record fetch past it;
+ *     unread-count polls) and matched on method and pathname, so a query string
+ *     or a write to a read-only path cannot smuggle a request past it;
  *  2. classifier specificity is proven both ways on synthetic URLs, including a
  *     direct cross-check against #1070's enumerated `dataPlanePath` regex that
  *     shows this gate catches requests that gate does not;
@@ -54,8 +54,8 @@ const HEALTH_ROUTE = "/create/health";
 /**
  * Known, accounted-for authenticated app-shell traffic on `/create/health`.
  *
- * Each entry is a *pathname*, matched exactly, never a prefix and never a
- * pattern that a caller-supplied segment could satisfy:
+ * Each entry is a method-and-*pathname* pair, matched exactly, never a prefix
+ * and never a pattern that a caller-supplied segment could satisfy:
  *  - `/api/auth/me`                   `AuthProvider` session bootstrap (`api.me`).
  *  - `/api/auth/csrf`                 CSRF bootstrap (`lib/api.ts`).
  *  - `/api/auth/password-policy`      passive policy fetch (`api.passwordPolicy`).
@@ -70,16 +70,13 @@ const HEALTH_ROUTE = "/create/health";
  * and must be justified by changing this list in review, not by shipping.
  */
 const AUTHENTICATED_SHELL_ALLOW_LIST = [
-  "/api/auth/me",
-  "/api/auth/csrf",
-  "/api/auth/password-policy",
-  "/api/workspaces",
-  "/api/notifications/unread-count",
-  "/api/activity/unread-count",
+  { method: "GET", pathname: "/api/auth/me" },
+  { method: "GET", pathname: "/api/auth/csrf" },
+  { method: "GET", pathname: "/api/auth/password-policy" },
+  { method: "GET", pathname: "/api/workspaces" },
+  { method: "GET", pathname: "/api/notifications/unread-count" },
+  { method: "GET", pathname: "/api/activity/unread-count" },
 ] as const;
-
-/** `/api/auth/*` is the one family allowed to carry path segments (session bootstrap). */
-const AUTHENTICATED_SHELL_SEGMENT_PREFIXES = ["/api/auth/"] as const;
 
 /**
  * #1070's enumerated data-plane regex, copied verbatim into this file for
@@ -108,11 +105,10 @@ type ShellRequestRecord = {
 /**
  * Classify one browser request against the authenticated app-shell allow-list.
  *
- * Only the pathname decides. `search` is recorded so a reviewer can see *why* a
+ * Method and pathname decide. `search` is recorded so a reviewer can see *why* a
  * request looks like a record fetch (`?kind=health`), but it never relaxes the
- * verdict: matching on pathname is what stops `/api/workspaces` from being
- * excused by a query string, and what stops `/api/search?kind=health` from
- * hiding behind a benign-looking parameter name.
+ * verdict: an exact pair stops writes inheriting GET permission, while pathname
+ * matching stops `/api/search?kind=health` hiding behind a benign query value.
  */
 function classifyShellRequest(url: string, method = "GET"): ShellRequestRecord {
   const parsed = new URL(url, "http://localhost:3000");
@@ -128,19 +124,21 @@ function classifyShellRequest(url: string, method = "GET"): ShellRequestRecord {
   if (!pathname.includes("/api/")) {
     return { ...base, kind: "non-api" as const };
   }
-  const isAuthSegment = AUTHENTICATED_SHELL_SEGMENT_PREFIXES.some((prefix) =>
-    pathname.toLowerCase().startsWith(prefix.toLowerCase()),
+  const knownPath = AUTHENTICATED_SHELL_ALLOW_LIST.some((allowed) => allowed.pathname === pathname);
+  const isAllowed = AUTHENTICATED_SHELL_ALLOW_LIST.some(
+    (allowed) => allowed.method === method && allowed.pathname === pathname,
   );
-  const isExact = (AUTHENTICATED_SHELL_ALLOW_LIST as readonly string[]).includes(pathname);
-  if (isExact || isAuthSegment) {
+  if (isAllowed) {
     return { ...base, kind: "allowed-shell" as const };
   }
   return {
     ...base,
     kind: "outside-allow-list" as const,
-    reason: enumeratedDataPlane
-      ? "enumerated data-plane path, not part of the authenticated app shell"
-      : "unknown API path: not in AUTHENTICATED_SHELL_ALLOW_LIST",
+    reason: knownPath
+      ? "method not allow-listed for this authenticated app-shell path"
+      : enumeratedDataPlane
+        ? "enumerated data-plane path, not part of the authenticated app shell"
+        : "unknown API path: not in AUTHENTICATED_SHELL_ALLOW_LIST",
   };
 }
 
@@ -166,7 +164,7 @@ function installAuthenticatedShellGate(page: import("@playwright/test").Page): S
       await testInfo.attach(`${name}.requests.json`, {
         body: JSON.stringify(
           {
-            policy: "deny-by-default over /api/*, allow-list by pathname",
+            policy: "deny-by-default over /api/*, allow-list by method and pathname",
             allowList: AUTHENTICATED_SHELL_ALLOW_LIST,
             recorded: requests,
             violations: requests.filter((entry) => entry.kind === "outside-allow-list"),
@@ -199,8 +197,8 @@ const syntheticSearchFixture = {
   totalCount: 1,
 };
 
-/** Every `/api/*` path a pristine authenticated shell may fetch, and only those. */
-const SYNTHETIC_SHELL_ROUTES: readonly string[] = AUTHENTICATED_SHELL_ALLOW_LIST;
+/** Every method-and-path pair a pristine authenticated shell may fetch, and only those. */
+const SYNTHETIC_SHELL_REQUESTS = AUTHENTICATED_SHELL_ALLOW_LIST;
 
 /**
  * Mount the fake authenticated Health Care surface.
@@ -223,7 +221,7 @@ async function mountSyntheticShell(page: import("@playwright/test").Page): Promi
       ].join(""),
     });
   });
-  for (const pathname of SYNTHETIC_SHELL_ROUTES) {
+  for (const { pathname } of SYNTHETIC_SHELL_REQUESTS) {
     await page.route(`**${pathname}*`, async (route) => {
       // Shape-agnostic: the shell bootstrap payloads differ, and none of them
       // may contain record content, which is the point of the leak check below.
@@ -237,30 +235,42 @@ async function mountSyntheticShell(page: import("@playwright/test").Page): Promi
 }
 
 /** Fire one fetch from inside the page so the browser network stack records it. */
-async function fetchFromPage(page: import("@playwright/test").Page, href: string): Promise<string> {
-  return page.evaluate(async (target) => {
-    const response = await fetch(target);
+async function fetchFromPage(
+  page: import("@playwright/test").Page,
+  href: string,
+  method = "GET",
+): Promise<string> {
+  return page.evaluate(async ({ target, requestMethod }) => {
+    const response = await fetch(target, { method: requestMethod });
     return await response.text();
-  }, href);
+  }, { target: href, requestMethod: method });
 }
 
 test.describe("Health Care authenticated pre-consent API allow-list (#714, #1070 review follow-up)", () => {
   test("allows every known app-shell path and accounts for the whole list", () => {
     // The allow-list is not decorative: each entry must classify as allowed.
-    const verdicts = AUTHENTICATED_SHELL_ALLOW_LIST.map((pathname) => ({
+    const verdicts = AUTHENTICATED_SHELL_ALLOW_LIST.map(({ method, pathname }) => ({
+      method,
       pathname,
-      kind: classifyShellRequest(`http://localhost:3000${pathname}?workspaceId=synthetic-ws`).kind,
+      kind: classifyShellRequest(`http://localhost:3000${pathname}?workspaceId=synthetic-ws`, method).kind,
     }));
     expect(
       verdicts.filter((entry) => entry.kind !== "allowed-shell"),
       `app-shell paths rejected by the gate: ${JSON.stringify(verdicts)}`,
     ).toEqual([]);
-    // Auth segment family stays open (session bootstrap carries ids), and the
-    // query string never changes a verdict.
-    expect(classifyShellRequest("http://localhost:3000/api/auth/logout").kind).toBe("allowed-shell");
-    expect(classifyShellRequest("http://localhost:3000/api/auth/me").kind).toBe(
-      classifyShellRequest("http://localhost:3000/api/auth/me?x=1&kind=health").kind,
+    // Exact method/path pairs are allowed, and the query string never changes a verdict.
+    expect(classifyShellRequest("http://localhost:3000/api/auth/me", "GET").kind).toBe("allowed-shell");
+    expect(classifyShellRequest("http://localhost:3000/api/auth/me", "GET").kind).toBe(
+      classifyShellRequest("http://localhost:3000/api/auth/me?x=1&kind=health", "GET").kind,
     );
+    expect(
+      classifyShellRequest("http://localhost:3000/api/auth/unrecognized-child", "GET").kind,
+      "an unknown auth child route was admitted",
+    ).toBe("outside-allow-list");
+    expect(
+      classifyShellRequest("http://localhost:3000/api/workspaces", "POST").kind,
+      "a write to a GET-only app-shell path was admitted",
+    ).toBe("outside-allow-list");
     // Non-API traffic is out of scope for an API gate; it is not silently
     // counted as allowed either, so a reviewer can see the three-way split.
     expect(classifyShellRequest("http://localhost:3000/_next/static/css/app.css").kind).toBe("non-api");
@@ -305,11 +315,11 @@ test.describe("Health Care authenticated pre-consent API allow-list (#714, #1070
     // A benign name is not an exemption: `/create/health`-adjacent paths that
     // merely *look* like the route are non-API and stay out of the ledger.
     expect(classifyShellRequest("http://localhost:3000/create/health/preview").kind).toBe("non-api");
-    // But an `/api` path that only *looks* allow-listed by prefix is flagged.
+    // Paths below a known entry are still unknown; there is no auth-family prefix exemption.
     expect(classifyShellRequest("http://localhost:3000/api/workspaces/synthetic-ws").kind).toBe(
       "outside-allow-list",
     );
-    expect(classifyShellRequest("http://localhost:3000/api/auth/me/records").kind).toBe("allowed-shell");
+    expect(classifyShellRequest("http://localhost:3000/api/auth/me/records").kind).toBe("outside-allow-list");
   });
 
   test("a pristine synthetic authenticated navigation stays inside the allow-list", async ({ page }, testInfo) => {
@@ -318,8 +328,8 @@ test.describe("Health Care authenticated pre-consent API allow-list (#714, #1070
     await page.goto(HEALTH_ROUTE);
     await expect(page.getByRole("heading", { name: "Health Care", level: 1 })).toBeVisible();
     // Replay the bootstrap the real shell performs, in its real method shapes.
-    for (const pathname of SYNTHETIC_SHELL_ROUTES) {
-      await fetchFromPage(page, pathname);
+    for (const { method, pathname } of SYNTHETIC_SHELL_REQUESTS) {
+      await fetchFromPage(page, pathname, method);
     }
     await expect(
       gate.violations(),
@@ -328,9 +338,9 @@ test.describe("Health Care authenticated pre-consent API allow-list (#714, #1070
     // Control for the lane below: this run must actually have recorded the
     // allow-listed API traffic, otherwise "zero violations" is vacuous.
     const allowed = gate.requests().filter((entry) => entry.kind === "allowed-shell");
-    const seenPathnames = new Set(allowed.map((entry) => entry.pathname));
+    const seenRequests = new Set(allowed.map((entry) => `${entry.method} ${entry.pathname}`));
     expect(
-      [...SYNTHETIC_SHELL_ROUTES].filter((pathname) => !seenPathnames.has(pathname)),
+      SYNTHETIC_SHELL_REQUESTS.filter(({ method, pathname }) => !seenRequests.has(`${method} ${pathname}`)),
       "the pristine control measured nothing",
     ).toEqual([]);
     // And the app shell it replayed carries no record content.
@@ -352,8 +362,8 @@ test.describe("Health Care authenticated pre-consent API allow-list (#714, #1070
       });
     });
     await page.goto(HEALTH_ROUTE);
-    for (const pathname of SYNTHETIC_SHELL_ROUTES) {
-      await fetchFromPage(page, pathname);
+    for (const { method, pathname } of SYNTHETIC_SHELL_REQUESTS) {
+      await fetchFromPage(page, pathname, method);
     }
     expect(gate.violations(), "pristine baseline before the injection").toEqual([]);
 
@@ -380,5 +390,39 @@ test.describe("Health Care authenticated pre-consent API allow-list (#714, #1070
       RECORD_CANARY,
     );
     await gate.attach(testInfo, "negative-control-generic-endpoint");
+  });
+
+  test("negative controls: unknown auth child and write to a GET path trip the gate", async ({ page }, testInfo) => {
+    const gate = installAuthenticatedShellGate(page);
+    await mountSyntheticShell(page);
+    // Keep this unknown route entirely synthetic too; the policy ledger still sees its request.
+    await page.route("**/api/auth/unrecognized-child", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ ok: true }),
+      });
+    });
+    await page.goto(HEALTH_ROUTE);
+    for (const { method, pathname } of SYNTHETIC_SHELL_REQUESTS) {
+      await fetchFromPage(page, pathname, method);
+    }
+    expect(gate.violations(), "pristine baseline before method/path controls").toEqual([]);
+
+    await fetchFromPage(page, "/api/auth/unrecognized-child", "GET");
+    await fetchFromPage(page, "/api/workspaces", "POST");
+
+    const violations = gate.violations();
+    expect(
+      violations.map((entry) => `${entry.method} ${entry.pathname}`).sort(),
+      "the gate did not name both method/path negative controls",
+    ).toEqual(["GET /api/auth/unrecognized-child", "POST /api/workspaces"]);
+    expect(violations.find((entry) => entry.pathname === "/api/auth/unrecognized-child")?.reason).toContain(
+      "unknown API path",
+    );
+    expect(violations.find((entry) => entry.pathname === "/api/workspaces")?.reason).toContain(
+      "method not allow-listed",
+    );
+    await gate.attach(testInfo, "negative-control-method-and-path");
   });
 });

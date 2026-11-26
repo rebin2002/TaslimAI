@@ -68,11 +68,13 @@ const RECORD_PAYLOAD_MARKERS = /healthDocumentId|patientRecord|prescriptionId|la
  * - `/api/search`, `/api/graphql`, `/api/generation/*`, `/api/projects/*`, `/api/workspaces/{id}/…`
  * and every data-plane family - is absent, so granting it is a reviewable edit to this list.
  */
-const SHELL_API_PATHS: readonly RegExp[] = [
-  /^\/api\/auth\/(?:csrf|login|logout|me|onboarding\/complete|password-policy|profile|sessions|sessions\/revoke)$/i,
-  /^\/api\/workspaces$/i,
-  /^\/api\/notifications\/unread-count$/i,
-  /^\/api\/activity\/unread-count$/i,
+const SHELL_API_ALLOW_LIST: readonly { method: string; pathname: string }[] = [
+  { method: "GET", pathname: "/api/auth/csrf" },
+  { method: "GET", pathname: "/api/auth/me" },
+  { method: "GET", pathname: "/api/auth/password-policy" },
+  { method: "GET", pathname: "/api/workspaces" },
+  { method: "GET", pathname: "/api/notifications/unread-count" },
+  { method: "GET", pathname: "/api/activity/unread-count" },
 ];
 /** Copy read verbatim from `src/lib/healthCareI18n.ts`; each locale is its own measurement. */
 const locales = [
@@ -137,7 +139,9 @@ function classify(url: string, method = "GET", body: string | null = null): Capt
     pathname,
     search: parsed.search,
     isApi,
-    appShell: isApi && SHELL_API_PATHS.some((pattern) => pattern.test(pathname)),
+    appShell:
+      isApi &&
+      SHELL_API_ALLOW_LIST.some((allowed) => allowed.method === method && allowed.pathname === pathname),
     enumeratedByPr1070: PR_1070_DATA_PLANE_PATH.test(pathname),
     bodyBytes: body ? body.length : 0,
     recordBearingBody: body ? RECORD_PAYLOAD_MARKERS.test(body) : false,
@@ -250,21 +254,25 @@ async function expectPreConsentSurface(page: Page, locale: (typeof locales)[numb
 }
 test.describe("Health Care authenticated route: deny-by-default API capture on the real mount (#714)", () => {
   test("allow-list is complete, query-blind and a strict superset of #1070's enumerated rule", () => {
-    const shell = [
-      "http://localhost:5000/api/auth/me",
-      "http://localhost:5000/api/auth/csrf",
-      "http://localhost:5000/api/auth/password-policy",
-      "http://localhost:5000/api/workspaces",
-      "http://localhost:5000/api/notifications/unread-count?workspaceId=synthetic-ws-1",
-      "http://localhost:3000/api/auth/me",
-    ];
+    const shell = SHELL_API_ALLOW_LIST.map(({ method, pathname }) => ({
+      method,
+      url: `http://localhost:5000${pathname}`,
+    })).concat([{ method: "GET", url: "http://localhost:3000/api/auth/me" }]);
     expect(
-      shell.filter((url) => !classify(url).appShell),
+      shell.filter(({ method, url }) => !classify(url, method).appShell),
       "app-shell traffic is not allow-listed, so every real navigation here would be RED",
     ).toEqual([]);
-    for (const url of shell.filter((entry) => !entry.includes("?"))) {
-      expect(classify(`${url}?kind=health`).appShell, `${url}: a query string changed the verdict`).toBe(true);
+    for (const { method, url } of shell) {
+      expect(classify(`${url}?kind=health`, method).appShell, `${method} ${url}: a query string changed the verdict`).toBe(true);
     }
+    expect(
+      classify("http://localhost:5000/api/auth/unrecognized-child", "GET").appShell,
+      "an unknown auth child route was admitted",
+    ).toBe(false);
+    expect(
+      classify("http://localhost:5000/api/workspaces", "POST").appShell,
+      "a write to a GET-only app-shell path was admitted",
+    ).toBe(false);
     // The gap statement, executable. These are the families #1070's review named and its
     // classifier cannot see; this policy refuses all three.
     for (const path of GENERIC_RECORD_BEARING_PATHS) {
@@ -338,17 +346,39 @@ test.describe("Health Care authenticated route: deny-by-default API capture on t
       }
       return out;
     }, [...GENERIC_RECORD_BEARING_PATHS]);
+    const policyAttempts = await page.evaluate(async () => {
+      const out: { target: string; outcome: string }[] = [];
+      for (const { target, method } of [
+        { target: "/api/auth/unrecognized-child", method: "GET" },
+        { target: "/api/workspaces", method: "POST" },
+      ]) {
+        try {
+          const response = await fetch(target, { method, credentials: "include" });
+          out.push({ target, outcome: `answered ${response.status}` });
+        } catch {
+          out.push({ target, outcome: "refused" });
+        }
+      }
+      return out;
+    });
     await page.waitForTimeout(500);
     const flagged = guard.offAllowList();
     const flaggedText = verdict(flagged);
     expect(flagged.map(shape), `${flaggedText}: an injected family was not flagged`).toEqual(
       expect.arrayContaining(["GET /api/search?kind=health", "GET /api/generation/jobs/synthetic-job-1", "POST /api/graphql"]),
     );
+    expect(flagged.map(shape), `${flaggedText}: a method/path negative control was not flagged`).toEqual(
+      expect.arrayContaining(["GET /api/auth/unrecognized-child", "POST /api/workspaces"]),
+    );
     expect(
       flagged.filter((entry) => !entry.enumeratedByPr1070).length,
       `${flaggedText}: every flagged request is one #1070 could already see, so this proves nothing`,
     ).toBeGreaterThanOrEqual(GENERIC_RECORD_BEARING_PATHS.length);
     expect(attempts.every((attempt) => attempt.outcome === "refused"), `${flaggedText}: a generic request was answered instead of refused`).toBe(true);
+    expect(
+      policyAttempts.every((attempt) => attempt.outcome === "refused"),
+      `${flaggedText}: an unknown auth child or disallowed write was answered instead of refused`,
+    ).toBe(true);
     // Refusal must not have cost the shell its own bootstrap, nor broken the surface.
     expect(
       guard.captured().filter((entry) => entry.appShell).map(shape),
