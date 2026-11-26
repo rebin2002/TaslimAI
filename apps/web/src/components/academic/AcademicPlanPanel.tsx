@@ -16,6 +16,7 @@ import {
   availableWorkflowStageCount,
 } from "./academicCapabilities";
 import { AcademicNotice, AcademicStatusBadge } from "./AcademicPrimitives";
+import { AcademicWorkflowPanel } from "./AcademicWorkflowPanel";
 import { asKey, type AcademicLabelers, type AcademicTranslate } from "./academicStrings";
 import styles from "./AcademicResearchStudio.module.css";
 
@@ -28,9 +29,12 @@ export type AcademicPlanPanelProps = {
   t: AcademicTranslate;
   labels: AcademicLabelers;
   onJumpToField: (field: string) => void;
+  workspaceId?: string | null;
+  chapterHeadings?: readonly string[];
+  language?: string;
 };
 
-export function AcademicPlanPanel({ brief, issues, sourceCount, fullTextCount, peerReviewedCount, t, labels, onJumpToField }: AcademicPlanPanelProps) {
+export function AcademicPlanPanel({ brief, issues, sourceCount, fullTextCount, peerReviewedCount, t, labels, onJumpToField, workspaceId = null, chapterHeadings = [], language = "en" }: AcademicPlanPanelProps) {
   const blocking = issues.filter((issue) => issue.severity === "error");
   const advisories = issues.filter((issue) => issue.severity === "warning");
   const rows = summarizeBrief(brief, labels);
@@ -139,6 +143,17 @@ export function AcademicPlanPanel({ brief, issues, sourceCount, fullTextCount, p
           {t("plan.jobBody")}
         </AcademicNotice>
       </section>
+
+      <AcademicWorkflowPanel
+        key={workspaceId ?? "no-workspace"}
+        workspaceId={workspaceId}
+        brief={brief}
+        chapterHeadings={chapterHeadings}
+        language={language}
+        canStart={blocking.length === 0}
+        t={t}
+        labels={labels}
+      />
     </div>
   );
 }
