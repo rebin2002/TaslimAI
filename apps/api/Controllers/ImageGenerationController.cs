@@ -40,6 +40,8 @@ public sealed class ImageGenerationController(
             var input = ImageGenerationContractMapper.ToInput(request);
             var provider = providers.FirstOrDefault(item => string.Equals(item.Key, options.Value.ProviderKey, StringComparison.OrdinalIgnoreCase));
             ImageGenerationRequestValidator.Validate(input, options.Value, (provider as IImageGenerationProviderCapabilities)?.Capabilities);
+            if (input.ReferenceFileId.HasValue)
+                throw new ImageRequestValidationException(GenerationJobErrorCodes.ImageReferenceNotSupported, "Reference images are not available for this image request.");
             if (provider is not IImageGenerationProviderReadiness { IsAvailable: true })
                 return ApiResults.Error(this, StatusCodes.Status503ServiceUnavailable, GenerationJobErrorCodes.ImageProviderUnavailable, "Image generation is temporarily unavailable. Please try again later.");
             var prompt = promptBuilder.Build(input);
