@@ -87,7 +87,7 @@ public sealed class DirectorScenePlanCreativeException(string code, string messa
 public sealed class MovieDirectorScenePlanningOptions
 {
     public int MaxScenes { get; set; } = 24;
-    public int MaxDurationSeconds { get; set; } = 3_600;
+    public int MaxDurationSeconds { get; set; } = MovieDurationBudgetPolicy.MaxMovieDurationSeconds;
     public int MaxRepairAttempts { get; set; }
 }
 

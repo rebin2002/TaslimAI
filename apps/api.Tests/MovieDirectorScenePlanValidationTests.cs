@@ -27,14 +27,13 @@ public sealed class MovieDirectorScenePlanValidationTests
     [Theory]
     [InlineData(-10)]
     [InlineData(0)]
-    [InlineData(3_601)]
-    [InlineData(7_200)]
+    [InlineData(7_201)]
     [InlineData(int.MaxValue)]
     public void Runtime_validator_never_accepts_an_out_of_range_context_as_a_clamped_plan(int requestedDurationSeconds)
     {
         var validator = CreateValidator();
         var context = CreateContext() with { DurationSeconds = requestedDurationSeconds };
-        var clampedDuration = Math.Clamp(requestedDurationSeconds, 1, 3_600);
+        var clampedDuration = Math.Clamp(requestedDurationSeconds, 1, MovieDurationBudgetPolicy.MaxMovieDurationSeconds);
         var payload = new DirectorScenePlanActionPayload(
             DirectorScenePlanActionTypes.PlanScenes, context.CurrentRevision!.RevisionId,
             "snapshot", "en", "16:9", clampedDuration, clampedDuration,
@@ -48,15 +47,20 @@ public sealed class MovieDirectorScenePlanValidationTests
             && finding.Field == "targetDurationSeconds");
     }
 
-    [Fact]
-    public void Runtime_validator_accepts_a_plan_at_the_configured_duration_ceiling()
+    [Theory]
+    [InlineData(3_600)]
+    [InlineData(7_200)]
+    public void Runtime_validator_accepts_a_plan_at_the_default_project_duration_ceiling(int targetDurationSeconds)
     {
         var validator = CreateValidator();
-        var context = CreateContext() with { DurationSeconds = 3_600 };
+        var context = CreateContext() with { DurationSeconds = targetDurationSeconds };
+        var scenes = Enumerable.Range(1, targetDurationSeconds / MovieDurationBudgetPolicy.MaxShotDurationSeconds)
+            .Select(sequence => Scene(MovieDurationBudgetPolicy.MaxShotDurationSeconds, sequence: sequence))
+            .ToArray();
         var payload = new DirectorScenePlanActionPayload(
             DirectorScenePlanActionTypes.PlanScenes, context.CurrentRevision!.RevisionId,
-            "snapshot", "en", "16:9", 3_600, 3_600,
-            DirectorQualityLevels.Fast, "Fast", null, [Scene(3_600)]);
+            "snapshot", "en", "16:9", targetDurationSeconds, targetDurationSeconds,
+            DirectorQualityLevels.Fast, "Fast", null, scenes);
 
         var result = validator.Validate(payload, context);
 
@@ -136,8 +140,8 @@ public sealed class MovieDirectorScenePlanValidationTests
         Options.Create(new MovieDirectorScenePlanningOptions { MaxDurationSeconds = maxDurationSeconds }),
         NullLogger<MovieDirectorScenePlanValidator>.Instance);
 
-    private static DirectorSceneProposal Scene(int duration, string title = "Seed at Dawn") => new(
-        1, title, "Mara protects the last seed.", "Mara discovers the seed at the dry riverbed.", "Dry riverbed", "Dawn", ["Mara"], "Move from fear to responsibility.", duration, "Open from silence into wind.", ["The last seed remains in Mara's left hand."], "Use blue hour naturalism.");
+    private static DirectorSceneProposal Scene(int duration, string title = "Seed at Dawn", int sequence = 1) => new(
+        sequence, title, "Mara protects the last seed.", "Mara discovers the seed at the dry riverbed.", "Dry riverbed", "Dawn", ["Mara"], "Move from fear to responsibility.", duration, "Open from silence into wind.", ["The last seed remains in Mara's left hand."], "Use blue hour naturalism.");
 
     private static DirectorStoryBoundedContextDto CreateContext() => new(
         Guid.NewGuid(), Guid.NewGuid(), "Mara protects the last seed at the dry riverbed.",

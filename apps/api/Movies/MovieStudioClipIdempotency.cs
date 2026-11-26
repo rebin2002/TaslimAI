@@ -129,12 +129,12 @@ internal static class MovieStudioClipIdempotency
     }
 
     /// <summary>
-    /// The duration this queue prices and persists for the current target. The identity
-    /// check and the clip insert share one derivation so a replay can never compare two
-    /// different readings of the same value.
+    /// The raw duration this queue prices and persists for the current target. Callers
+    /// validate it against the single-clip ceiling before replay lookup; leaving it
+    /// unclamped ensures an edited long shot cannot match a previously priced short clip.
     /// </summary>
     internal static int ResolveDurationSeconds(MovieProject movie, MovieScene scene, MovieShot? shot) =>
-        Math.Clamp(shot?.DurationSeconds ?? scene.DurationSeconds ?? Math.Min(movie.DurationSeconds, 60), 1, 3600);
+        shot?.DurationSeconds ?? scene.DurationSeconds ?? Math.Min(movie.DurationSeconds, 60);
 
     /// <summary>
     /// Drops the production-contract projection from a serialized shot snapshot. That

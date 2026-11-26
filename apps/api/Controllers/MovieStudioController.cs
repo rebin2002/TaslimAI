@@ -851,6 +851,10 @@ public sealed class MovieStudioController(IMovieStudioService movies, IMovieProd
     {
         try
         {
+            var durationSeconds = await movies.GetEffectiveShotDurationSecondsAsync(GetUserId(), shotId, cancellationToken);
+            if (!durationSeconds.HasValue) return ApiResults.Error(this, 404, "MOVIE_SHOT_NOT_FOUND", "Movie shot not found.");
+            if (!MovieDurationBudgetPolicy.IsSupportedSingleClipDuration(durationSeconds.Value))
+                return ApiResults.Error(this, 400, MovieDurationBudgetPolicy.SingleClipDurationUnsupportedCode, MovieDurationBudgetPolicy.SingleClipDurationUnsupportedMessage);
             var result = await productionPreflight.EvaluateAsync(
                 GetUserId(),
                 shotId,
