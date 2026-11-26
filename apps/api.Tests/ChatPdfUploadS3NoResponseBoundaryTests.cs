@@ -29,14 +29,14 @@ namespace Taslim.Api.Tests;
 /// Provider-free, in-process negative control raised by the release-QA review on PR #1134
 /// (review id 5971425637) for production incident #459: the Chat PDF upload half of the
 /// incident surfaced as an <see cref="AmazonS3Exception"/> with <c>StatusCode = 0</c>,
-/// <c>ErrorCode = null</c> and <c>RequestId = null</c> — a transport failure in which the
-/// S3-compatible provider never returned any HTTP response at all — while the user's API
+/// <c>ErrorCode = null</c> and <c>RequestId = null</c> — no HTTP response was reported.
+/// The incident record does not establish an underlying transport or other cause, while the user's API
 /// call still returned HTTP 503.
 ///
 /// Companion lanes, deliberately not duplicated here:
-/// - <c>ChatPdfUploadS3ServiceUnavailableTests</c> (open PR #1134) pins the *provider answered
-///   with HTTP 503* class at the Chat boundary. That fake proves the response-backed status;
-///   it does not reproduce the recorded incident exception, which had no HTTP response behind it.
+/// - <c>ChatPdfUploadS3ServiceUnavailableTests</c> (open PR #1134) pins a *synthetic
+///   response-backed 503 shape* at the Chat boundary. It does not prove a live provider receipt
+///   or reproduce the recorded incident exception, which had no HTTP response behind it.
 /// - <c>WorkspaceFileUploadStorageFailureTests</c> (open PR #768) pins this same no-response
 ///   class at the upload endpoint only. It asserts nothing about a subsequent Chat turn:
 ///   no conversation, no usage transaction and no credit-ledger assertions exist there.
@@ -47,18 +47,18 @@ namespace Taslim.Api.Tests;
 /// class carried through the real Chat flow, so the billing consequence of the original
 /// incident is pinned at the Chat boundary without reworking #768:
 /// 1. The upload must fail closed with the same stable 503 contract as the answered-503 lane
-///    (the transport class must not degrade into a 500 or a validation rejection), and no
+///    (the no-response class must not degrade into a 500 or a validation rejection), and no
 ///    successful asset identity may persist (no Ready row, no retained object).
 /// 2. The sanitized storage log line must record the incident's diagnostic shape
 ///    (<c>StatusCode=0</c>, <c>HasRequestId=False</c>, no raw provider identifiers,
-///    <c>FailureClass=transport</c>) while the bucket, endpoint, credentials and PUT token
+///    <c>FailureClass=s3_no_http_response</c>) while the bucket, endpoint, credentials and PUT token
 ///    riding inside the exception text never surface in the log or in any HTTP body.
 /// 3. A Chat message referencing the failed upload must be refused with 422
 ///    <c>ATTACHMENT_CONTENT_UNAVAILABLE</c> before any assistant turn starts: zero provider
-///    invocations, zero usage transactions and zero credit debits, so a no-response transport
-///    outage can never be billed.
+///    invocations, zero usage transactions and zero credit debits, so a no-response storage
+///    failure can never be billed.
 /// 4. Exactly one PUT attempt per upload request plus one bounded fail-closed cleanup DELETE;
-///    a connection-level failure must not fan out into uncontrolled retries.
+///    this status-zero/no-response shape must not fan out into uncontrolled retries.
 /// 5. Recovery must stay available: once the provider answers again the next upload reaches
 ///    <c>Ready</c> and the same Chat flow succeeds with exactly one usage record.
 ///
@@ -67,7 +67,7 @@ namespace Taslim.Api.Tests;
 /// R2/S3 endpoint, no real credentials, no provider traffic, no paid model call,
 /// no production or user data.
 /// </summary>
-public sealed class ChatPdfUploadS3NoResponseTransportTests
+public sealed class ChatPdfUploadS3NoResponseBoundaryTests
 {
     private const string SyntheticEndpoint = "https://synthetic-noresponse-account.r2.cloudflarestorage.invalid";
     private const string SyntheticBucket = "synthetic-noresponse-bucket";
@@ -78,7 +78,7 @@ public sealed class ChatPdfUploadS3NoResponseTransportTests
     private const string PdfTextMarker = "CHAT_PDF_NORESPONSE_SYNTHETIC_MARKER";
 
     [Fact]
-    public async Task Chat_pdf_upload_no_response_transport_failure_fails_safely_and_is_refused_by_chat_without_any_usage_charge()
+    public async Task Chat_pdf_upload_status_zero_no_http_response_fails_safely_and_is_refused_by_chat_without_any_usage_charge()
     {
         using var api = new NoResponseS3Api();
         api.EnsureDatabase();
@@ -86,26 +86,26 @@ public sealed class ChatPdfUploadS3NoResponseTransportTests
         var auth = await Register(client, "Chat No-Response Owner");
         var conversation = await CreateConversation(client, auth.PersonalWorkspace.Id);
 
-        // 1. The PDF upload reaches the real upload pipeline and the real S3 adapter, and
-        //    the fake provider reproduces the incident's no-response class: the connection
-        //    dies with StatusCode 0, ErrorCode null and RequestId null — no HTTP response.
+        // 1. The PDF upload reaches the real upload pipeline and the real S3 adapter. The
+        //    fake reproduces only the incident's observed outer exception shape: StatusCode
+        //    0, ErrorCode null and RequestId null. No inner cause is inferred or invented.
         api.ObjectClient.BeginRequest();
         var upload = await UploadPdf(client, auth.PersonalWorkspace.Id);
         var uploadBody = await upload.Content.ReadAsStringAsync();
         var uploadError = JsonSerializer.Deserialize<JsonElement>(uploadBody);
 
-        // The transport class must fail closed with the exact same stable 503 contract the
+        // The no-response class must fail closed with the exact same stable 503 contract the
         // answered-503 lane pins — not a 500, not a validation rejection.
         Assert.Equal(HttpStatusCode.ServiceUnavailable, upload.StatusCode);
         Assert.Equal("FILE_STORAGE_OPERATION_FAILED", uploadError.GetProperty("error").GetProperty("code").GetString());
         Assert.Equal(StableUploadFailureMessage, uploadError.GetProperty("error").GetProperty("message").GetString());
 
-        // No SDK or transport detail may ride out to the user for the no-response class.
+        // No SDK or provider-exception detail may ride out to the user for this class.
         Assert.DoesNotContain("AmazonS3", uploadBody, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("HttpRequestException", uploadBody, StringComparison.OrdinalIgnoreCase);
 
         // 2. Exactly one PUT attempt and one fail-closed cleanup DELETE for this one upload
-        //    request: a connection-level failure must not be retried uncontrolled.
+        //    request: a status-zero/no-response failure must not trigger uncontrolled retries.
         var attempts = api.ObjectClient.DrainOperations();
         Assert.Equal(["put", "delete"], attempts);
 
@@ -128,9 +128,9 @@ public sealed class ChatPdfUploadS3NoResponseTransportTests
             Assert.True(string.IsNullOrEmpty(row.ExtractedText));
         }
 
-        // 4. The sanitized log line records the incident's diagnostic shape — status 0,
-        //    no request ID or raw provider identifiers, transport failure class — so the no-response class
-        //    stays distinguishable from an answered 503 for incident response.
+        // 4. The sanitized log line records the observed no-response shape — status 0,
+        //    no request ID or raw provider identifiers. Since no inner cause was reported,
+        //    the current adapter must not guess a transport/DNS/TLS cause.
         var putLogs = api.CapturedLogs.Lines.Where(line =>
             line.Contains("S3-compatible storage operation failed", StringComparison.Ordinal) &&
             line.Contains("Operation=put", StringComparison.Ordinal)).ToList();
@@ -141,7 +141,7 @@ public sealed class ChatPdfUploadS3NoResponseTransportTests
         Assert.DoesNotContain("; ErrorCode=", putLog, StringComparison.Ordinal);
         Assert.DoesNotContain("; RequestId=", putLog, StringComparison.Ordinal);
         Assert.Contains("ErrorType=AmazonS3Exception", putLog, StringComparison.Ordinal);
-        Assert.Contains("FailureClass=transport", putLog, StringComparison.Ordinal);
+        Assert.Contains("FailureClass=s3_no_http_response", putLog, StringComparison.Ordinal);
         // The diagnostic fields above are the only provider detail allowed into the log:
         // the exception *message* carrying bucket, endpoint, credentials and PUT token must
         // stay out, which the canary sweep over every captured line proves below.
@@ -172,7 +172,7 @@ public sealed class ChatPdfUploadS3NoResponseTransportTests
         Assert.Equal(0, api.ChatCompletion.CallCount);
         Assert.Null(api.ChatCompletion.LastRequest);
 
-        // 7. Nothing may be billed for a no-response transport outage: not a credit debit,
+        // 7. Nothing may be billed for a no-response storage failure: not a credit debit,
         //    not even a pending usage transaction, not an attachment binding, and the
         //    refused message never became a persisted user turn.
         using (var scope = api.Services.CreateScope())
@@ -352,10 +352,10 @@ public sealed class ChatPdfUploadS3NoResponseTransportTests
 
     /// <summary>
     /// Fake S3-compatible object client: records every provider operation in order so the
-    /// test can prove bounded, single-attempt behaviour, and kills the PUT with the exact
-    /// no-response exception class #459 recorded — a transport abort behind the SDK wrapper
-    /// with no HTTP status, no S3 error code and no provider request id. The synthetic
-    /// credential canaries ride only in the exception text, never in the SDK fields.
+    /// test can prove bounded, single-attempt behaviour, and emits only the observed
+    /// status-zero/no-error-code/no-request-id outer shape. It deliberately supplies no
+    /// inner exception because #459's recorded evidence did not establish that cause.
+    /// Synthetic canaries ride only in the untrusted message, never in diagnostic fields.
     /// </summary>
     internal sealed class NoResponseObjectClient : IS3CompatibleObjectClient
     {
@@ -385,17 +385,16 @@ public sealed class ChatPdfUploadS3NoResponseTransportTests
 
             if (FailWithNoResponse)
             {
-                // The incident as recorded: the provider never returned an HTTP response.
-                // StatusCode stays 0 and ErrorCode/RequestId stay null — that null shape is
-                // what distinguishes this class from #1134's answered-503 fake.
+                // The incident's observed outer signature only: no HTTP response is
+                // reported, and no transport/root cause is inferred from the fake.
                 var failure = new AmazonS3Exception(
-                    $"synthetic transport abort bucket={bucket} key={key} endpoint={SyntheticEndpoint} token={SyntheticPutToken}",
-                    new HttpRequestException($"synthetic connection reset access={SyntheticAccessKey} secret={SyntheticSecretKey}"))
+                    $"synthetic no-response failure bucket={bucket} key={key} endpoint={SyntheticEndpoint} token={SyntheticPutToken} access={SyntheticAccessKey} secret={SyntheticSecretKey}")
                 {
                     StatusCode = (HttpStatusCode)0,
                 };
                 Assert.Null(failure.ErrorCode);
                 Assert.Null(failure.RequestId);
+                Assert.Null(failure.InnerException);
                 return Task.FromException(failure);
             }
 
