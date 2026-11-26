@@ -359,6 +359,7 @@ public sealed class GenerationJobService(
     IGenerationCostGuardrailService costGuardrails,
     IHttpContextAccessor httpContextAccessor,
     IOptions<ImageGenerationOptions> imageOptions,
+    IOptions<DocumentGenerationOptions> documentOptions,
     MovieCollaborationAccess? movieCollaboration = null) : IGenerationJobService
 {
     public async Task<GenerationJob> CreateAsync(Guid userId, CreateGenerationJobRequest request, CancellationToken cancellationToken = default, string? idempotencyKey = null, string? requestId = null, Guid? retryOfJobId = null)
@@ -486,6 +487,11 @@ public sealed class GenerationJobService(
             throw new GenerationJobValidationException("RETRY_IDEMPOTENCY_REQUIRED", "A retry idempotency key is required.");
         if (string.Equals(source.JobType, GenerationJobTypes.ImageGenerate, StringComparison.OrdinalIgnoreCase) && !imageOptions.Value.Enabled)
             throw new GenerationJobValidationException(GenerationJobErrorCodes.ImageStudioUnavailable, "Image generation is not available right now.");
+        // Same fail-closed boundary as the Image gate above. Every retry entry
+        // point inherits it, so a caller that bypasses the Document Studio route
+        // still cannot resume provider spend while the studio is disabled.
+        if (string.Equals(source.JobType, GenerationJobTypes.DocumentGenerate, StringComparison.OrdinalIgnoreCase) && !documentOptions.Value.Enabled)
+            throw new GenerationJobValidationException(DocumentStudioAvailability.UnavailableCode, DocumentStudioAvailability.UnavailableMessage);
 
         var retryInputJson = source.InputJson;
         MovieDialogueTake? pendingDialogueTake = null;
