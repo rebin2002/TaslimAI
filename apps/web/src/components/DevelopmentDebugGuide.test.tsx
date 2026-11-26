@@ -46,4 +46,9 @@ describe("DevelopmentDebugGuide", () => {
     expect(route).toContain('export const dynamic = "force-dynamic";');
     expect(route).toContain("return <ProtectedPage>");
   });
+  it("does not introduce a nested application landmark beneath AppShell", () => {
+    const html = renderToStaticMarkup(<LocaleProvider><DevelopmentDebugGuide /></LocaleProvider>);
+    expect((html.match(/<main\b/g) ?? [])).toHaveLength(0);
+  });
+
 });
