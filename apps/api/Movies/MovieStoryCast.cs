@@ -38,8 +38,13 @@ public sealed class MovieStoryCastService(TaslimDbContext db, MovieCollaboration
             .SingleOrDefaultAsync(item => item.MovieProjectId == movieProjectId, cancellationToken);
         if (story is null || !await collaboration.HasPermissionAsync(userId, movieProjectId, MoviePermissions.View, cancellationToken)) return null;
 
-        var revision = story.CurrentRevisionId is Guid currentId
+        var currentRevision = story.CurrentRevisionId is Guid currentId
             ? story.Revisions.SingleOrDefault(item => item.Id == currentId)
+            : null;
+        var revision = currentRevision is not null
+            && !string.Equals(currentRevision.Status, MovieStoryRevisionStatuses.Rejected, StringComparison.OrdinalIgnoreCase)
+            && !string.Equals(currentRevision.Status, MovieStoryRevisionStatuses.Superseded, StringComparison.OrdinalIgnoreCase)
+            ? currentRevision
             : story.ApprovedRevisionId is Guid approvedId
                 ? story.Revisions.SingleOrDefault(item => item.Id == approvedId)
                 : null;
