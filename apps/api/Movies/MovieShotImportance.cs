@@ -1,4 +1,6 @@
+using System.Collections.Concurrent;
 using System.Globalization;
+using System.Text.RegularExpressions;
 
 namespace Taslim.Api.Movies;
 
@@ -81,6 +83,9 @@ public sealed record MovieShotImportanceAssessment(
 /// </summary>
 public sealed class MovieShotImportanceClassifier
 {
+    // Keys come from the fixed signal lists in this classifier.
+    private static readonly ConcurrentDictionary<string, Regex> SignalPatterns = new(StringComparer.Ordinal);
+
     private static readonly string[] HeroSignals =
     [
         "climax", "final showdown", "major reveal", "truth is revealed", "reveals the truth",
@@ -192,28 +197,41 @@ public sealed class MovieShotImportanceClassifier
     {
         foreach (var signal in signals)
         {
-            if (text.IndexOf(signal, StringComparison.OrdinalIgnoreCase) < 0) continue;
+            if (FindSignalIndex(text, signal) < 0) continue;
             evidence.Add(source, code, Excerpt(text, signal));
         }
     }
 
-    private static bool HasAny(string text, IEnumerable<string> signals) => signals.Any(signal =>
-        text.IndexOf(signal, StringComparison.OrdinalIgnoreCase) >= 0);
+    private static bool HasAny(string text, IEnumerable<string> signals) => signals.Any(signal => FindSignalIndex(text, signal) >= 0);
 
     private static bool HasAny(string text, params string[] signals) => HasAny(text, (IEnumerable<string>)signals);
 
     private static string FirstMatchingExcerpt(string text, IEnumerable<string> signals) =>
-        signals.Select(signal => (signal, index: text.IndexOf(signal, StringComparison.OrdinalIgnoreCase)))
+        signals.Select(signal => (signal, index: FindSignalIndex(text, signal)))
             .Where(item => item.index >= 0)
             .OrderBy(item => item.index)
             .Select(item => Excerpt(text, item.signal))
             .FirstOrDefault() ?? Excerpt(text, null);
 
+    private static int FindSignalIndex(string text, string signal)
+    {
+        if (text.Length == 0) return -1;
+        var match = SignalPatterns.GetOrAdd(signal, CreateSignalPattern).Match(text);
+        return match.Success ? match.Index : -1;
+    }
+
+    private static Regex CreateSignalPattern(string signal)
+    {
+        var words = Regex.Split(signal, @"[^\p{L}\p{N}]+");
+        var pattern = @"(?<![\p{L}\p{N}])" + string.Join(@"[^\p{L}\p{N}]+", words.Select(Regex.Escape)) + @"(?![\p{L}\p{N}])";
+        return new Regex(pattern, RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+    }
+
     private static string Excerpt(string text, string? signal)
     {
         var normalized = string.Join(" ", text.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
         if (normalized.Length <= 240) return normalized;
-        var index = signal is null ? 0 : normalized.IndexOf(signal, StringComparison.OrdinalIgnoreCase);
+        var index = signal is null ? 0 : FindSignalIndex(normalized, signal);
         if (index < 0) index = 0;
         var start = Math.Max(0, index - 80);
         var length = Math.Min(240, normalized.Length - start);

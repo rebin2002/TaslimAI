@@ -142,6 +142,9 @@ public static class AcademicSourceConnectionPolicy
     /// it using the <em>original request hostname</em> for SNI and certificate-name validation, so
     /// pinning the IP does not weaken the identity check. No certificate callback is set anywhere
     /// in this module and automatic redirects stay off (the gateway revalidates each hop).
+    /// The handler also dials directly: an ambient proxy would replace the destination in
+    /// <c>context.DnsEndPoint</c>, so the allow-list check below would be judging the proxy's
+    /// hostname instead of the provider's.
     /// </summary>
     public static SocketsHttpHandler CreatePinnedHandler(IAcademicHostResolver resolver, AcademicSourceDiscoveryOptions options)
     {
@@ -151,6 +154,18 @@ public static class AcademicSourceConnectionPolicy
         {
             AllowAutoRedirect = false,
             UseCookies = false,
+            // Direct dialing is part of the admission model, not an optimization. The runtime
+            // default is UseProxy=true, which makes a proxy from HTTPS_PROXY/HTTP_PROXY (or an
+            // explicit Proxy below) the endpoint handed to ConnectCallback: the guard then
+            // classifies the proxy hostname, the resolver pins the proxy address, and the
+            // provider's address never passes through this method. Either the proxy host is not
+            // allow-listed and every provider call fails, or it happens to be allow-listed and the
+            // destination is chosen by a third party outside the pinned-dial rules. No scholarly
+            // route is meant to leave through a proxy — the only proxy configuration this service
+            // has is the inbound ForwardedHeaders:KnownProxies list for client-IP attribution — so
+            // ambient proxy settings are ignored here. TLS is untouched: the request hostname still
+            // drives SNI and certificate-name validation on the returned stream.
+            UseProxy = false,
             PooledConnectionLifetime = TimeSpan.FromSeconds(options.PooledConnectionLifetimeSeconds),
             MaxConnectionsPerServer = options.MaxConnectionsPerServer,
         };

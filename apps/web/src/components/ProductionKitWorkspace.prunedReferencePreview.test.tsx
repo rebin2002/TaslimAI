@@ -131,6 +131,7 @@ function deferred<T>(): Deferred<T> {
 
 const harness = vi.hoisted(() => ({
   api: {
+    getAsset: vi.fn(),
     getMovieCast: vi.fn(),
     getMovieWorld: vi.fn(),
     getMovieCharacterDetail: vi.fn(),
@@ -289,6 +290,7 @@ beforeEach(() => {
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
 
   let read = 0;
+  harness.api.getAsset.mockReset().mockResolvedValue({ id: FACE_ID, hasFile: true, canPreview: true });
   harness.api.getMovieCast.mockReset().mockResolvedValue(emptyCast);
   harness.api.getMovieWorld.mockReset().mockImplementation(() => worldReads[read++].promise);
   harness.api.getMovieCharacterDetail.mockReset().mockResolvedValue({
@@ -374,9 +376,7 @@ describe("Production Kit reference preview after a retention prune", () => {
   });
 
   it("leaves the characters room previewing a reference the world projection does not carry", async () => {
-    // Over-correction guard two: no availability signal exists for character references at all,
-    // so this must keep working exactly as it does today. The guard is "the read model says it is
-    // gone in a room it describes", never "the read model is silent".
+    // Character references can be absent from the world projection and still have a Ready asset.
     await mountKit(null, characterCast);
 
     expect(previewRequests()).toContain(FACE_URL);
