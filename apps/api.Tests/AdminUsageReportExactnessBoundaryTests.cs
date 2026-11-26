@@ -15,10 +15,11 @@ namespace Taslim.Api.Tests;
 /// <see cref="UsageTransactionStatus.Completed"/> rows with
 /// <c>ReversedAmount = 0</c>, and asserts rank order only on the workspace and feature
 /// lists. The admin report still projects three uncovered properties:
-/// 1. a negative net customer charge - the admin projection deliberately does not
-///    floor like the entity's <c>NetChargedAmount</c>, so over-reversal must survive
-///    the double accumulation sign-safely and pin at the ledger scale, not flip to
-///    zero or leak binary noise with a minus sign;
+/// 1. a synthetic over-reversal result: <c>UsageLedgerService</c> does not create this
+///    state, and the entity's <c>NetChargedAmount</c> clamps at zero. The report currently
+///    sums the raw operands, so this case isolates whether the precision pin preserves
+///    the signed numeric result. It does not declare a customer-accounting policy;
+///    any clamp-versus-signed decision for invalid ledger states needs owner review;
 /// 2. the status breakdown, which is now ordinal-ordered by its displayed name while
 ///    its Cancelled/Refunded legs carry zero net charges alongside positive provider
 ///    costs;
@@ -38,14 +39,14 @@ public sealed class AdminUsageReportExactnessBoundaryTests
     private static readonly DateTime WindowStart = new(2026, 11, 16, 12, 0, 0, DateTimeKind.Utc);
 
     /// <summary>
-    /// Every test in the repo seeds ReversedAmount <= ChargedAmount, so the negative
-    /// branch of (double)(ChargedAmount - ReversedAmount) never crosses LedgerAmount.
-    /// Over-reversal is exactly representable at the stored scale, so the reported net
-    /// must be exact and negative, not floored to zero (the entity clamps; the admin
-    /// projection intentionally does not) and not a noisy -2.000000020000001.
+    /// This synthetic fixture sets ReversedAmount > ChargedAmount, a state not produced
+    /// by the refund service. It verifies only that the current read projection's signed
+    /// arithmetic is pinned to the ledger scale, without binary noise. The negative
+    /// result is not approval of an accounting policy: whether the admin report should
+    /// clamp invalid over-reversal remains an owner decision.
     /// </summary>
     [Fact]
-    public async Task Negative_net_customer_charges_survive_the_ledger_pin_without_sign_or_scale_drift()
+    public async Task Synthetic_over_reversal_pins_signed_arithmetic_without_defining_policy()
     {
         await using var fixture = await BoundaryFixture.CreateAsync();
         var workspace = fixture.Workspaces[0];
