@@ -1,5 +1,6 @@
 using System.Net;
 using System.Net.Http.Json;
+using System.Net.Http.Headers;
 using System.Text.Json;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
@@ -50,6 +51,92 @@ public sealed class OpenAiVoiceGenerationProviderTests
         Assert.Equal(UsageCostBasis.Estimated, result.Usage.CostBasis);
         Assert.Null(result.Usage.ActualCostUsd);
         Assert.DoesNotContain("test-key", result.Usage.SafeMetadataJson ?? string.Empty);
+    }
+
+    [Fact]
+    public async Task Adapter_accepts_an_audio_content_type_that_matches_the_requested_format()
+    {
+        var handler = new StubHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = Audio([0x49, 0x44, 0x33, 0x01, 0x02], "audio/mpeg"),
+        });
+        using var client = new HttpClient(handler);
+        var provider = CreateProvider(client, new VoiceGenerationOptions
+        {
+            Enabled = true,
+            ProviderKey = "openai",
+            Model = "gpt-4o-mini-tts",
+            ResponseFormat = "mp3",
+        });
+
+        var result = await provider.GenerateAsync(Input());
+
+        Assert.Equal("audio/mpeg", result.ContentType);
+        Assert.Equal("mp3", result.Format);
+    }
+
+    [Theory]
+    [InlineData("mp3", "audio/mp3")]
+    [InlineData("ogg", "audio/opus")]
+    public async Task Adapter_accepts_registered_media_type_aliases(string responseFormat, string mediaType)
+    {
+        var handler = new StubHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = Audio([0x49, 0x44, 0x33, 0x01, 0x02], mediaType),
+        });
+        using var client = new HttpClient(handler);
+        var provider = CreateProvider(client, new VoiceGenerationOptions
+        {
+            Enabled = true,
+            ProviderKey = "openai",
+            Model = "gpt-4o-mini-tts",
+            ResponseFormat = responseFormat,
+        });
+
+        var result = await provider.GenerateAsync(Input());
+
+        Assert.Equal(mediaType, result.ContentType);
+        Assert.Equal(responseFormat, result.Format);
+    }
+
+    [Theory]
+    [InlineData("application/json")]
+    [InlineData("text/plain")]
+    [InlineData("audio/wav")]
+    public async Task Adapter_fails_closed_on_a_successful_response_with_the_wrong_media_type(string mediaType)
+    {
+        var handler = new StubHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent("{\"error\":\"not audio\"}", System.Text.Encoding.UTF8, mediaType),
+        });
+        using var client = new HttpClient(handler);
+        var provider = CreateProvider(client, new VoiceGenerationOptions
+        {
+            Enabled = true,
+            ProviderKey = "openai",
+            Model = "gpt-4o-mini-tts",
+            ResponseFormat = "mp3",
+        });
+
+        await Assert.ThrowsAsync<VoiceOutputInvalidException>(() => provider.GenerateAsync(Input()));
+    }
+
+    [Fact]
+    public async Task Adapter_rejects_successful_non_audio_content_before_persistence()
+    {
+        var handler = new StubHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent("{\"error\":\"not audio\"}", System.Text.Encoding.UTF8, "application/json"),
+        });
+        using var client = new HttpClient(handler);
+        var provider = CreateProvider(client, new VoiceGenerationOptions
+        {
+            Enabled = true,
+            ProviderKey = "openai",
+            Model = "gpt-4o-mini-tts",
+        });
+
+        await Assert.ThrowsAsync<VoiceOutputInvalidException>(() => provider.GenerateAsync(Input()));
     }
 
     [Fact]
@@ -124,6 +211,13 @@ public sealed class OpenAiVoiceGenerationProviderTests
             Options.Create(new AiOptions { OpenAI = new OpenAiOptions { Enabled = true, ApiKey = "test-key", BaseUrl = "https://example.test/v1" } }),
             Options.Create(settings),
             NullLogger<OpenAiVoiceGenerationProvider>.Instance);
+
+    private static ByteArrayContent Audio(byte[] payload, string mediaType)
+    {
+        var content = new ByteArrayContent(payload);
+        content.Headers.ContentType = new MediaTypeHeaderValue(mediaType);
+        return content;
+    }
 
     private static VoiceGenerationInput Input(string language = "ar") => new(
         Guid.NewGuid(),

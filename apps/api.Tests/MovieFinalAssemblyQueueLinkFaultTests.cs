@@ -1,6 +1,6 @@
+using System.Data.Common;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
-using Microsoft.EntityFrameworkCore.ChangeTracking;
 using Microsoft.EntityFrameworkCore.Diagnostics;
 using Taslim.Api.Authorization;
 using Taslim.Api.Contracts;
@@ -134,41 +134,32 @@ public sealed class MovieFinalAssemblyQueueLinkFaultTests
     /// Every other SaveChanges call, including the compensation write inside the service catch
     /// block, proceeds normally, so the injected fault is a transient link failure.
     /// </summary>
-    private sealed class AssemblyLinkWriteFault : SaveChangesInterceptor
+    private sealed class AssemblyLinkWriteFault : DbCommandInterceptor
     {
         public int FaultedLinkWrites { get; private set; }
 
-        public override InterceptionResult<int> SavingChanges(DbContextEventData eventData, InterceptionResult<int> result)
+        public override ValueTask<InterceptionResult<DbDataReader>> ReaderExecutingAsync(DbCommand command,
+            CommandEventData eventData, InterceptionResult<DbDataReader> result, CancellationToken cancellationToken = default)
         {
-            InjectFault(eventData.Context);
-            return base.SavingChanges(eventData, result);
+            FailFirstLink(command);
+            return base.ReaderExecutingAsync(command, eventData, result, cancellationToken);
         }
 
-        public override ValueTask<InterceptionResult<int>> SavingChangesAsync(DbContextEventData eventData, InterceptionResult<int> result, CancellationToken cancellationToken = default)
+        public override ValueTask<InterceptionResult<int>> NonQueryExecutingAsync(DbCommand command,
+            CommandEventData eventData, InterceptionResult<int> result, CancellationToken cancellationToken = default)
         {
-            InjectFault(eventData.Context);
-            return base.SavingChangesAsync(eventData, result, cancellationToken);
+            FailFirstLink(command);
+            return base.NonQueryExecutingAsync(command, eventData, result, cancellationToken);
         }
 
-        private void InjectFault(DbContext? context)
+        private void FailFirstLink(DbCommand command)
         {
-            if (context is null || FaultedLinkWrites > 0) return;
-            if (!context.ChangeTracker.Entries<MovieAssembly>().Any(IsLinkWrite)) return;
+            // SQLite uses a reader for UPDATE ... RETURNING and a non-query for ExecuteUpdate.
+            if (FaultedLinkWrites != 0 || !command.CommandText.StartsWith("UPDATE \"MovieAssemblies\"", StringComparison.Ordinal)
+                || !command.CommandText.Contains("\"GenerationJobId\" =", StringComparison.Ordinal)) return;
             FaultedLinkWrites++;
-            throw new DbUpdateException(
-                "Simulated transient failure while linking the durable final-assembly row to its committed job.",
-                new IOException("Simulated transient database write failure (issue #696 fault injection)."));
+            throw new IOException("Synthetic transient failure writing the assembly-to-job link.");
         }
-
-        private static bool IsLinkWrite(EntityEntry<MovieAssembly> entry)
-        {
-            if (entry.State != EntityState.Modified) return false;
-            if (entry.Entity.GenerationJobId is null) return false;
-            return OriginalLink(entry) is null;
-        }
-
-        private static Guid? OriginalLink(EntityEntry<MovieAssembly> entry) =>
-            entry.Property<Guid?>(nameof(MovieAssembly.GenerationJobId)).OriginalValue;
     }
 
     /// <summary>
@@ -218,6 +209,16 @@ public sealed class MovieFinalAssemblyQueueLinkFaultTests
             await db.SaveChangesAsync(cancellationToken);
             return job;
         }
+
+        public Task<GenerationJob> CreatePendingMovieProductionAsync(Guid userId, CreateGenerationJobRequest request,
+            string idempotencyKey, CancellationToken cancellationToken = default, string? requestId = null) =>
+            throw new NotSupportedException("The final assembly fixture only creates assembly jobs.");
+
+        public Task<GenerationJob?> PublishPendingMovieProductionAsync(Guid userId, Guid jobId, CancellationToken cancellationToken = default) =>
+            throw new NotSupportedException("The final assembly fixture only creates assembly jobs.");
+
+        public Task<bool> AbortPendingMovieProductionAsync(Guid userId, Guid jobId, CancellationToken cancellationToken = default) =>
+            throw new NotSupportedException("The final assembly fixture only creates assembly jobs.");
 
         public Task<GenerationJob?> RetryAsync(Guid userId, Guid jobId, CancellationToken cancellationToken = default, string? idempotencyKey = null, string? requestId = null) =>
             throw new NotSupportedException("Issue #696 link-fault coverage drives the request seam only.");
