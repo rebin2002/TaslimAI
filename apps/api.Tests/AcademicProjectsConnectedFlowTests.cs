@@ -83,6 +83,66 @@ public sealed class AcademicProjectsConnectedFlowTests : IClassFixture<AcademicC
     }
 
     [Fact]
+    public async Task Run_reports_live_owner_and_explicit_recovery_fences_the_blocked_request()
+    {
+        var (client, workspaceId) = await RegisterAsync();
+        var projectId = await CreateAsync(client, workspaceId, "api-live-attempt-recovery", "Live attempt recovery probe");
+        var handler = _factory.StageHandlers[AcademicStage.Plan];
+        var baselineCalls = handler.Calls.Count;
+        var entered = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var release = new ManualResetEventSlim(false);
+        handler.OnCall = _ =>
+        {
+            entered.TrySetResult(true);
+            release.Wait(TimeSpan.FromSeconds(10));
+        };
+
+        Task<HttpResponseMessage>? firstRun = null;
+        HttpResponseMessage? firstResponse = null;
+        try
+        {
+            firstRun = PostJsonAsync(client, $"/api/academic-projects/{projectId}/run", new { });
+            await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+            var inFlight = await DetailAsync(client, projectId);
+            var attemptId = inFlight.GetProperty("activeAttemptId").GetGuid();
+            var revision = inFlight.GetProperty("project").GetProperty("revision").GetInt64();
+            Assert.Equal("Running", State(inFlight));
+
+            var duplicateRun = await PostJsonAsync(client, $"/api/academic-projects/{projectId}/run", new { });
+            Assert.Equal(HttpStatusCode.Conflict, duplicateRun.StatusCode);
+            Assert.Equal("STAGE_ATTEMPT_IN_PROGRESS",
+                (await duplicateRun.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("error").GetProperty("code").GetString());
+            Assert.Equal(baselineCalls + 1, handler.Calls.Count);
+
+            var recovered = await PostJsonAsync(client, $"/api/academic-projects/{projectId}/recover-abandoned", new
+            {
+                attemptId,
+                expectedRevision = revision,
+            });
+            Assert.Equal(HttpStatusCode.OK, recovered.StatusCode);
+            var recoveredBody = await recovered.Content.ReadFromJsonAsync<JsonElement>();
+            Assert.Equal("STAGE_ATTEMPT_RECOVERED", recoveredBody.GetProperty("code").GetString());
+            Assert.Equal(JsonValueKind.Null, recoveredBody.GetProperty("activeAttemptId").ValueKind);
+            Assert.Equal("Failed", recoveredBody.GetProperty("stages").EnumerateArray()
+                .Single(stage => stage.GetProperty("stage").GetString() == "Plan")
+                .GetProperty("state").GetString());
+        }
+        finally
+        {
+            release.Set();
+            if (firstRun is not null) firstResponse = await firstRun;
+            handler.OnCall = null;
+        }
+
+        Assert.NotNull(firstResponse);
+        Assert.Equal(HttpStatusCode.Conflict, firstResponse!.StatusCode);
+        var staleBody = await firstResponse.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal("CHECKPOINT_CONFLICT", staleBody.GetProperty("error").GetProperty("code").GetString());
+        Assert.Equal(baselineCalls + 1, handler.Calls.Count);
+    }
+
+    [Fact]
     public async Task Full_gated_run_completes_projects_and_projects_the_evidence_matrix()
     {
         var (client, workspaceId) = await RegisterAsync();

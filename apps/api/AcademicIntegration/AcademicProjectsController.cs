@@ -56,6 +56,10 @@ public sealed record AcademicApprovalRequest(
     string? ApprovalKey,
     long? CheckpointRevision);
 
+public sealed record AcademicAttemptRecoveryRequest(
+    Guid? AttemptId,
+    long? ExpectedRevision);
+
 public sealed record AcademicStageDto(
     string Stage,
     string State,
@@ -104,6 +108,7 @@ public sealed record AcademicProjectSummaryDto(
 public sealed record AcademicProjectDto(
     AcademicProjectSummaryDto Project,
     IReadOnlyList<AcademicStageDto> Stages,
+    Guid? ActiveAttemptId,
     AcademicPendingApprovalDto? PendingApproval,
     IReadOnlyList<AcademicApprovalDto> Approvals,
     AcademicUsageDto Usage,
@@ -208,11 +213,12 @@ public sealed record AcademicCheckpointDto(
 /// CSRF like the rest of the API, and every mutation carries the same existing
 /// abuse-boundary policies the comparable lanes use: intake and checkpoint decisions sit
 /// behind the generation policy, a resume (which spends stage work when lanes connect)
-/// behind the expensive-AI policy, and a spend-ceiling raise behind account security.
-/// Reads stay on the global limiter only. None of these routes reaches a scholarly catalog or an
-/// export renderer: <c>run</c> can prepare and checkpoint the deterministic Plan stage;
-/// until downstream lanes register stage handlers, it reports the exact missing stage
-/// instead of pretending, and reads return whatever the committed checkpoints actually hold.
+/// behind the expensive-AI policy, and budget changes plus explicit abandoned-attempt
+/// recovery behind account security. Recovery is revision/attempt fenced and never calls
+/// a stage handler. Reads stay on the global limiter only. None of these routes reaches a
+/// scholarly catalog or an export renderer: <c>run</c> can prepare and checkpoint the
+/// deterministic Plan stage; until downstream lanes register stage handlers, it reports
+/// the exact missing stage instead of pretending, and reads return committed checkpoints.
 /// </summary>
 [ApiController]
 [Authorize]
@@ -303,6 +309,33 @@ public sealed class AcademicProjectsController(
                         resumableAtRevision = outcome.Snapshot?.Revision,
                     },
                 }),
+            AcademicProjectServiceStatus.Conflict => ApiResults.Error(this, 409, outcome.Code, outcome.Detail),
+            _ => Ok(await BuildDtoAsync(outcome, cancellationToken)),
+        };
+    }
+
+    [HttpPost("api/academic-projects/{projectId:guid}/recover-abandoned")]
+    [ValidateAntiForgeryToken]
+    [EnableRateLimiting(RateLimiting.AccountSecurity)]
+    public async Task<IActionResult> RecoverAbandoned(
+        Guid projectId,
+        AcademicAttemptRecoveryRequest request,
+        CancellationToken cancellationToken)
+    {
+        var (snapshot, failure) = await FencedLoadAsync(projectId, cancellationToken);
+        if (failure is not null) return failure;
+        if (request.ExpectedRevision is null or <= 0)
+            return ApiResults.Validation(this, "A positive ExpectedRevision is required for abandoned-attempt recovery.");
+
+        var outcome = await service.RecoverAbandonedAsync(
+            snapshot!.WorkspaceId,
+            projectId,
+            request.ExpectedRevision.Value,
+            request.AttemptId,
+            cancellationToken);
+        return outcome.Status switch
+        {
+            AcademicProjectServiceStatus.NotFound => ApiResults.Error(this, 404, "PROJECT_NOT_FOUND", "Project not found."),
             AcademicProjectServiceStatus.Conflict => ApiResults.Error(this, 409, outcome.Code, outcome.Detail),
             _ => Ok(await BuildDtoAsync(outcome, cancellationToken)),
         };
@@ -496,6 +529,7 @@ public sealed class AcademicProjectsController(
                 stage.LastErrorDetail is null ? null : AcademicProjectTextPolicy.Sanitize(stage.LastErrorDetail),
                 stage.StartedAtUtc,
                 stage.CompletedAtUtc))],
+            snapshot.ActiveAttempt?.AttemptId,
             snapshot.PendingApproval is null ? null : new AcademicPendingApprovalDto(
                 snapshot.PendingApproval.Kind.ToString(),
                 snapshot.PendingApproval.ApprovalKey,

@@ -24,6 +24,13 @@ public sealed class AcademicWorkflowSnapshot
     public required AcademicWorkflowRequest Request { get; init; }
     public AcademicProjectState State { get; set; } = AcademicProjectState.Running;
 
+    /// <summary>
+    /// Durable owner of the currently executing stage attempt. Older snapshots omit this
+    /// property; a legacy stage still marked Running without an owner is held for explicit
+    /// recovery rather than being assumed safe to execute again.
+    /// </summary>
+    public AcademicLiveAttempt? ActiveAttempt { get; set; }
+
     /// <summary>Committed checkpoint revision; starts at 0 and only ever increases.</summary>
     public long Revision { get; set; }
 
@@ -67,6 +74,19 @@ public sealed class AcademicWorkflowSnapshot
     /// <summary>Deep copy through the canonical serializer; used before every mutation.</summary>
     public AcademicWorkflowSnapshot Clone() =>
         AcademicWorkflowSerialization.Deserialize(AcademicWorkflowSerialization.Serialize(this));
+}
+
+/// <summary>
+/// The worker identity and fencing token committed before a stage handler is entered.
+/// Only the worker holding <see cref="AttemptId"/> may commit that attempt's outcome.
+/// </summary>
+public sealed record AcademicLiveAttempt
+{
+    public required Guid AttemptId { get; init; }
+    public required Guid OwnerId { get; init; }
+    public required AcademicStage Stage { get; init; }
+    public required int Attempt { get; init; }
+    public required DateTime StartedAtUtc { get; init; }
 }
 
 public sealed record AcademicStageRecord

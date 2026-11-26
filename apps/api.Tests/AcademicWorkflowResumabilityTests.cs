@@ -50,6 +50,42 @@ public sealed class AcademicWorkflowResumabilityTests
                 commitGate.Release();
             }
         }
+
+        public async Task<AcademicCommitOutcome> TryCommitAttemptAsync(
+            AcademicWorkflowSnapshot snapshot,
+            long expectedRevision,
+            string checkpointKey,
+            Guid expectedAttemptId,
+            CancellationToken cancellationToken)
+        {
+            await commitGate.WaitAsync(cancellationToken);
+            try
+            {
+                return await inner.TryCommitAttemptAsync(snapshot, expectedRevision, checkpointKey, expectedAttemptId, cancellationToken);
+            }
+            finally
+            {
+                commitGate.Release();
+            }
+        }
+
+        public async Task<AcademicCommitOutcome> TryRecoverAttemptAsync(
+            AcademicWorkflowSnapshot snapshot,
+            long expectedRevision,
+            string checkpointKey,
+            Guid? expectedAttemptId,
+            CancellationToken cancellationToken)
+        {
+            await commitGate.WaitAsync(cancellationToken);
+            try
+            {
+                return await inner.TryRecoverAttemptAsync(snapshot, expectedRevision, checkpointKey, expectedAttemptId, cancellationToken);
+            }
+            finally
+            {
+                commitGate.Release();
+            }
+        }
     }
 
     private sealed class DuplicatePlanCompletionStore(IAcademicWorkflowStateStore inner) : IAcademicWorkflowStateStore
@@ -78,6 +114,29 @@ public sealed class AcademicWorkflowResumabilityTests
                     ? new AcademicCommitOutcome(AcademicCommitStatus.DuplicateCheckpoint)
                     : outcome;
         }
+
+        public async Task<AcademicCommitOutcome> TryCommitAttemptAsync(
+            AcademicWorkflowSnapshot snapshot,
+            long expectedRevision,
+            string checkpointKey,
+            Guid expectedAttemptId,
+            CancellationToken cancellationToken)
+        {
+            var outcome = await inner.TryCommitAttemptAsync(snapshot, expectedRevision, checkpointKey, expectedAttemptId, cancellationToken);
+            return expectedRevision == 1
+                && snapshot.State == AcademicProjectState.AwaitingApproval
+                && outcome.Status == AcademicCommitStatus.Committed
+                    ? new AcademicCommitOutcome(AcademicCommitStatus.DuplicateCheckpoint)
+                    : outcome;
+        }
+
+        public Task<AcademicCommitOutcome> TryRecoverAttemptAsync(
+            AcademicWorkflowSnapshot snapshot,
+            long expectedRevision,
+            string checkpointKey,
+            Guid? expectedAttemptId,
+            CancellationToken cancellationToken) =>
+            inner.TryRecoverAttemptAsync(snapshot, expectedRevision, checkpointKey, expectedAttemptId, cancellationToken);
     }
 
     [Fact]
@@ -156,31 +215,32 @@ public sealed class AcademicWorkflowResumabilityTests
     }
 
     [Fact]
-    public async Task Concurrent_Writer_Produces_Revision_Conflict_Not_Corruption()
+    public async Task Generic_writer_cannot_advance_a_durably_claimed_live_attempt()
     {
         var harness = new AcademicWorkflowHarness();
         var rogueWriterFired = false;
+        AcademicCommitStatus? rogueCommitStatus = null;
         harness.Handlers[AcademicStage.Discover].OnCall = context =>
         {
             if (rogueWriterFired)
                 return;
             rogueWriterFired = true;
-            // Rogue writer commits an unrelated checkpoint at the engine's revision,
-            // so the engine's stage-complete commit must find the head moved under it.
+            // Generic commits cannot mutate a snapshot while a live attempt owns it.
             var hijacked = context.Snapshot.Clone();
             hijacked.Revision = context.Snapshot.Revision + 1;
             hijacked.StateDetail = "rogue writer";
-            _ = harness.Store.TryCommitAsync(
-                hijacked, context.Snapshot.Revision, "rogue|checkpoint", CancellationToken.None).Result;
+            rogueCommitStatus = harness.Store.TryCommitAsync(
+                hijacked, context.Snapshot.Revision, "rogue|checkpoint", CancellationToken.None).Result.Status;
         };
 
         await harness.StartAsync("conflict");
         await harness.ApprovePendingAsync();
         var raced = await harness.Orchestrator.ResumeAsync(harness.ProjectId, CancellationToken.None);
 
-        Assert.Equal(AcademicWorkflowRunStatus.RevisionConflict, raced.Status);
+        Assert.Equal(AcademicCommitStatus.RevisionConflict, rogueCommitStatus);
+        Assert.Equal(AcademicWorkflowRunStatus.AwaitingApproval, raced.Status);
 
-        // No lost writes: the engine reloads the committed head and finishes normally.
+        // The owning worker remains able to commit; no stale generic write interrupted it.
         var after = await harness.DrainFromCurrentAsync();
         Assert.Equal(AcademicWorkflowRunStatus.Completed, after.Status);
         Assert.Equal(4, (await harness.Store.LoadAsync(harness.ProjectId, CancellationToken.None))!.Sources.Count);

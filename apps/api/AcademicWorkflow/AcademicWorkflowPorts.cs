@@ -25,6 +25,31 @@ public interface IAcademicWorkflowStateStore
         long expectedRevision,
         string checkpointKey,
         CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Commits a stage outcome only while the durable snapshot still names
+    /// <paramref name="expectedAttemptId"/> as its active owner, in addition to the
+    /// ordinary revision compare-and-swap. Recovery or a replacement attempt fences a
+    /// delayed worker even if it later returns successfully.
+    /// </summary>
+    Task<AcademicCommitOutcome> TryCommitAttemptAsync(
+        AcademicWorkflowSnapshot snapshot,
+        long expectedRevision,
+        string checkpointKey,
+        Guid expectedAttemptId,
+        CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Explicitly releases an abandoned attempt only if the stored owner still equals
+    /// <paramref name="expectedAttemptId"/> (including null for pre-token legacy snapshots),
+    /// while also applying the ordinary revision compare-and-swap.
+    /// </summary>
+    Task<AcademicCommitOutcome> TryRecoverAttemptAsync(
+        AcademicWorkflowSnapshot snapshot,
+        long expectedRevision,
+        string checkpointKey,
+        Guid? expectedAttemptId,
+        CancellationToken cancellationToken);
 }
 
 public enum AcademicCommitStatus
@@ -97,6 +122,9 @@ public enum AcademicWorkflowRunStatus
     RevisionConflict = 6,
 
     NotFound = 7,
+
+    /// <summary>A durable active attempt already owns the Running stage; no handler was entered.</summary>
+    AttemptInProgress = 8,
 }
 
 public sealed record AcademicWorkflowRunResult

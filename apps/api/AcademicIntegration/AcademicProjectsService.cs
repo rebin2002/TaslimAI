@@ -248,7 +248,12 @@ public sealed class AcademicProjectsService(
         if (snapshot is null) return AcademicProjectServiceResult.NotFound();
 
         var nextStage = FirstActionableStage(snapshot);
-        if (snapshot.State == AcademicProjectState.Running && nextStage is AcademicStage stage && !ConnectedStages.Contains(stage))
+        var hasRunningAttempt = snapshot.ActiveAttempt is not null
+            || snapshot.Stages.Any(record => record.State == AcademicStageState.Running);
+        if (snapshot.State == AcademicProjectState.Running
+            && !hasRunningAttempt
+            && nextStage is AcademicStage stage
+            && !ConnectedStages.Contains(stage))
         {
             return new AcademicProjectServiceResult
             {
@@ -273,14 +278,16 @@ public sealed class AcademicProjectsService(
             };
         }
 
-        if (run.Status == AcademicWorkflowRunStatus.RevisionConflict)
+        if (run.Status is AcademicWorkflowRunStatus.RevisionConflict or AcademicWorkflowRunStatus.AttemptInProgress)
         {
             return new AcademicProjectServiceResult
             {
                 Status = AcademicProjectServiceStatus.Conflict,
                 Snapshot = run.Snapshot,
-                Code = run.Code ?? "CHECKPOINT_CONFLICT",
-                Detail = run.Detail ?? "Another writer advanced the project first; reload and retry.",
+                Code = run.Code ?? (run.Status == AcademicWorkflowRunStatus.AttemptInProgress
+                    ? "STAGE_ATTEMPT_IN_PROGRESS"
+                    : "CHECKPOINT_CONFLICT"),
+                Detail = run.Detail ?? "Another worker owns the current stage attempt; reload and retry later.",
             };
         }
 
@@ -297,6 +304,46 @@ public sealed class AcademicProjectsService(
             EvidenceProjected = projected,
             Code = run.Code ?? string.Empty,
             Detail = run.Detail ?? string.Empty,
+        };
+    }
+
+    /// <summary>
+    /// Explicitly releases a persisted attempt after its worker is known to be abandoned.
+    /// Recovery only writes a failure checkpoint and never invokes a stage handler; the
+    /// next ordinary Run call is a separate action and the prior budget reservation remains.
+    /// </summary>
+    public async Task<AcademicProjectServiceResult> RecoverAbandonedAsync(
+        Guid workspaceId,
+        Guid projectId,
+        long expectedRevision,
+        Guid? attemptId,
+        CancellationToken cancellationToken)
+    {
+        var snapshot = await LoadFencedAsync(workspaceId, projectId, cancellationToken);
+        if (snapshot is null) return AcademicProjectServiceResult.NotFound();
+
+        var recovered = await engine.RecoverAbandonedAttemptAsync(
+            projectId, expectedRevision, attemptId, cancellationToken);
+        if (recovered.Snapshot is null)
+            return AcademicProjectServiceResult.NotFound(recovered.Code ?? "PROJECT_NOT_FOUND");
+
+        if (recovered.Status == AcademicWorkflowRunStatus.RevisionConflict)
+        {
+            return new AcademicProjectServiceResult
+            {
+                Status = AcademicProjectServiceStatus.Conflict,
+                Snapshot = recovered.Snapshot,
+                Code = recovered.Code ?? "CHECKPOINT_CONFLICT",
+                Detail = recovered.Detail ?? "Reload the project before recovering its active attempt.",
+            };
+        }
+
+        return new AcademicProjectServiceResult
+        {
+            Status = AcademicProjectServiceStatus.Ok,
+            Snapshot = recovered.Snapshot,
+            Code = recovered.Code ?? string.Empty,
+            Detail = recovered.Detail ?? string.Empty,
         };
     }
 

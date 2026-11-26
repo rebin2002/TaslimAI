@@ -112,17 +112,105 @@ public sealed class AcademicWorkflowStoreTests
                 databaseGate.Release();
             }
         }
+
+        public async Task<AcademicCommitOutcome> TryCommitAttemptAsync(
+            AcademicWorkflowSnapshot snapshot,
+            long expectedRevision,
+            string checkpointKey,
+            Guid expectedAttemptId,
+            CancellationToken cancellationToken)
+        {
+            await databaseGate.WaitAsync(cancellationToken);
+            try
+            {
+                return await inner.TryCommitAttemptAsync(snapshot, expectedRevision, checkpointKey, expectedAttemptId, cancellationToken);
+            }
+            finally
+            {
+                databaseGate.Release();
+            }
+        }
+
+        public async Task<AcademicCommitOutcome> TryRecoverAttemptAsync(
+            AcademicWorkflowSnapshot snapshot,
+            long expectedRevision,
+            string checkpointKey,
+            Guid? expectedAttemptId,
+            CancellationToken cancellationToken)
+        {
+            await databaseGate.WaitAsync(cancellationToken);
+            try
+            {
+                return await inner.TryRecoverAttemptAsync(snapshot, expectedRevision, checkpointKey, expectedAttemptId, cancellationToken);
+            }
+            finally
+            {
+                databaseGate.Release();
+            }
+        }
+    }
+
+    private sealed class SerializedStore(IAcademicWorkflowStateStore inner) : IAcademicWorkflowStateStore
+    {
+        private readonly SemaphoreSlim gate = new(1, 1);
+
+        public Task<AcademicWorkflowSnapshot?> LoadAsync(Guid projectId, CancellationToken cancellationToken) =>
+            RunAsync(() => inner.LoadAsync(projectId, cancellationToken), cancellationToken);
+
+        public Task<AcademicWorkflowSnapshot?> FindByRequestKeyAsync(Guid workspaceId, string requestKey, CancellationToken cancellationToken) =>
+            RunAsync(() => inner.FindByRequestKeyAsync(workspaceId, requestKey, cancellationToken), cancellationToken);
+
+        public Task<bool> TryCreateAsync(AcademicWorkflowSnapshot snapshot, CancellationToken cancellationToken) =>
+            RunAsync(() => inner.TryCreateAsync(snapshot, cancellationToken), cancellationToken);
+
+        public Task<AcademicCommitOutcome> TryCommitAsync(
+            AcademicWorkflowSnapshot snapshot,
+            long expectedRevision,
+            string checkpointKey,
+            CancellationToken cancellationToken) =>
+            RunAsync(() => inner.TryCommitAsync(snapshot, expectedRevision, checkpointKey, cancellationToken), cancellationToken);
+
+        public Task<AcademicCommitOutcome> TryCommitAttemptAsync(
+            AcademicWorkflowSnapshot snapshot,
+            long expectedRevision,
+            string checkpointKey,
+            Guid expectedAttemptId,
+            CancellationToken cancellationToken) =>
+            RunAsync(() => inner.TryCommitAttemptAsync(snapshot, expectedRevision, checkpointKey, expectedAttemptId, cancellationToken), cancellationToken);
+
+        public Task<AcademicCommitOutcome> TryRecoverAttemptAsync(
+            AcademicWorkflowSnapshot snapshot,
+            long expectedRevision,
+            string checkpointKey,
+            Guid? expectedAttemptId,
+            CancellationToken cancellationToken) =>
+            RunAsync(() => inner.TryRecoverAttemptAsync(snapshot, expectedRevision, checkpointKey, expectedAttemptId, cancellationToken), cancellationToken);
+
+        private async Task<T> RunAsync<T>(Func<Task<T>> operation, CancellationToken cancellationToken)
+        {
+            await gate.WaitAsync(cancellationToken);
+            try
+            {
+                return await operation();
+            }
+            finally
+            {
+                gate.Release();
+            }
+        }
     }
 
     private sealed class BlockingPlanHandler : IAcademicStageHandler
     {
         private readonly TaskCompletionSource<bool> entered = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource<bool> secondEntered = new(TaskCreationOptions.RunContinuationsAsynchronously);
         private readonly TaskCompletionSource<bool> release = new(TaskCreationOptions.RunContinuationsAsynchronously);
         private int calls;
 
         public AcademicStage Stage => AcademicStage.Plan;
         public int CallCount => Volatile.Read(ref calls);
         public Task Started => entered.Task;
+        public Task SecondStarted => secondEntered.Task;
         public void Release() => release.TrySetResult(true);
 
         public AcademicStageEstimate Estimate(AcademicStageContext context) => new()
@@ -133,8 +221,9 @@ public sealed class AcademicWorkflowStoreTests
 
         public async Task<AcademicStageOutcome> ExecuteAsync(AcademicStageContext context, CancellationToken cancellationToken)
         {
-            Interlocked.Increment(ref calls);
+            var call = Interlocked.Increment(ref calls);
             entered.TrySetResult(true);
+            if (call == 2) secondEntered.TrySetResult(true);
             await release.Task.WaitAsync(cancellationToken);
             return AcademicWorkflowFixtures.OutcomeFor(
                 AcademicStage.Plan,
@@ -205,6 +294,49 @@ public sealed class AcademicWorkflowStoreTests
     }
 
     [Fact]
+    public async Task Attempt_completion_requires_the_exact_durable_owner_token()
+    {
+        using var fixture = new Fixture();
+        var initial = Snapshot(WorkspaceA, "sqlite-attempt-token-fence");
+        Assert.True(await fixture.Store.TryCreateAsync(initial, default));
+
+        var attemptId = Guid.Parse("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa");
+        var claimed = initial.Clone();
+        claimed.Revision = 1;
+        claimed.Stage(AcademicStage.Plan).State = AcademicStageState.Running;
+        claimed.Stage(AcademicStage.Plan).AttemptCount = 1;
+        claimed.ActiveAttempt = new AcademicLiveAttempt
+        {
+            AttemptId = attemptId,
+            OwnerId = Guid.Parse("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"),
+            Stage = AcademicStage.Plan,
+            Attempt = 1,
+            StartedAtUtc = initial.CreatedAtUtc,
+        };
+        Assert.Equal(AcademicCommitStatus.Committed,
+            (await fixture.Store.TryCommitAsync(claimed, 0, $"{initial.ProjectId:N}|1|attempt-start", default)).Status);
+
+        var completion = claimed.Clone();
+        completion.Revision = 2;
+        completion.State = AcademicProjectState.AwaitingApproval;
+        completion.Stage(AcademicStage.Plan).State = AcademicStageState.Completed;
+        completion.Plan = AcademicWorkflowFixtures.Plan();
+        completion.ActiveAttempt = null;
+
+        var wrongOwner = await fixture.Store.TryCommitAttemptAsync(
+            completion, 1, $"{initial.ProjectId:N}|2|wrong-owner", Guid.NewGuid(), default);
+        Assert.Equal(AcademicCommitStatus.RevisionConflict, wrongOwner.Status);
+        var stillOwned = await fixture.Store.LoadAsync(initial.ProjectId, default);
+        Assert.Equal(1, stillOwned!.Revision);
+        Assert.Equal(attemptId, stillOwned.ActiveAttempt!.AttemptId);
+
+        var validOwner = await fixture.Store.TryCommitAttemptAsync(
+            completion, 1, $"{initial.ProjectId:N}|2|right-owner", attemptId, default);
+        Assert.Equal(AcademicCommitStatus.Committed, validOwner.Status);
+        Assert.Null((await fixture.Store.LoadAsync(initial.ProjectId, default))!.ActiveAttempt);
+    }
+
+    [Fact]
     public async Task Concurrent_resumes_on_disposable_sqlite_allow_only_the_stage_start_claim_winner_to_execute()
     {
         using var fixture = new Fixture();
@@ -254,6 +386,103 @@ public sealed class AcademicWorkflowStoreTests
         Assert.Equal(AcademicProjectState.AwaitingApproval, durable!.State);
         Assert.Equal(AcademicApprovalKind.Plan, durable.PendingApproval!.Kind);
         Assert.Equal(2, durable.Revision);
+    }
+
+    [Fact]
+    public async Task Resume_that_reads_committed_running_snapshot_does_not_start_a_second_live_attempt()
+    {
+        using var fixture = new Fixture();
+        var snapshot = Snapshot(WorkspaceA, "sqlite-live-attempt-owner");
+        Assert.True(await fixture.Store.TryCreateAsync(snapshot, default));
+
+        var handler = new BlockingPlanHandler();
+        var serializedStore = new SerializedStore(fixture.Store);
+        var firstWorker = new AcademicWorkflowOrchestrator(serializedStore, [handler]);
+        var secondWorker = new AcademicWorkflowOrchestrator(serializedStore, [handler]);
+        var first = firstWorker.ResumeAsync(snapshot.ProjectId, CancellationToken.None);
+
+        await handler.Started.WaitAsync(TimeSpan.FromSeconds(5));
+        var committedRunning = await fixture.Store.LoadAsync(snapshot.ProjectId, default);
+        Assert.Equal(AcademicProjectState.Running, committedRunning!.State);
+        Assert.Equal(AcademicStageState.Running, committedRunning.Stage(AcademicStage.Plan).State);
+        var owner = Assert.IsType<AcademicLiveAttempt>(committedRunning.ActiveAttempt);
+        Assert.Equal(1, owner.Attempt);
+        Assert.NotEqual(Guid.Empty, owner.OwnerId);
+        Assert.Equal(1, handler.CallCount);
+
+        var second = secondWorker.ResumeAsync(snapshot.ProjectId, CancellationToken.None);
+        try
+        {
+            var completedFirst = await Task.WhenAny(second, handler.SecondStarted).WaitAsync(TimeSpan.FromSeconds(5));
+            Assert.Same(second, completedFirst);
+            var blockedResult = await second;
+            Assert.Equal(AcademicWorkflowRunStatus.AttemptInProgress, blockedResult.Status);
+            Assert.Equal("STAGE_ATTEMPT_IN_PROGRESS", blockedResult.Code);
+            Assert.Equal(committedRunning.Revision, blockedResult.Snapshot!.Revision);
+            Assert.Equal(1, handler.CallCount);
+        }
+        finally
+        {
+            handler.Release();
+        }
+
+        Assert.Equal(AcademicWorkflowRunStatus.AwaitingApproval, (await first).Status);
+        var durable = await fixture.Store.LoadAsync(snapshot.ProjectId, default);
+        Assert.Equal(2, durable!.Revision);
+        Assert.Equal(AcademicProjectState.AwaitingApproval, durable.State);
+        Assert.Null(durable.ActiveAttempt);
+        Assert.Equal(1, handler.CallCount);
+    }
+
+    [Fact]
+    public async Task Explicit_recovery_preserves_charge_and_fences_a_late_completion_after_retry()
+    {
+        using var fixture = new Fixture();
+        var snapshot = Snapshot(WorkspaceA, "sqlite-abandoned-attempt-recovery");
+        Assert.True(await fixture.Store.TryCreateAsync(snapshot, default));
+
+        var serializedStore = new SerializedStore(fixture.Store);
+        var blockedHandler = new BlockingPlanHandler();
+        var abandonedWorker = new AcademicWorkflowOrchestrator(serializedStore, [blockedHandler]);
+        var abandonedRun = abandonedWorker.ResumeAsync(snapshot.ProjectId, CancellationToken.None);
+        await blockedHandler.Started.WaitAsync(TimeSpan.FromSeconds(5));
+
+        var inFlight = await fixture.Store.LoadAsync(snapshot.ProjectId, default);
+        var attemptId = Assert.IsType<AcademicLiveAttempt>(inFlight!.ActiveAttempt).AttemptId;
+        var recovered = await abandonedWorker.RecoverAbandonedAttemptAsync(
+            snapshot.ProjectId, inFlight.Revision, attemptId, CancellationToken.None);
+
+        Assert.Equal(AcademicWorkflowRunStatus.StageFailure, recovered.Status);
+        Assert.Equal("STAGE_ATTEMPT_RECOVERED", recovered.Code);
+        Assert.Equal(AcademicStageState.Failed, recovered.Snapshot!.Stage(AcademicStage.Plan).State);
+        Assert.Null(recovered.Snapshot.ActiveAttempt);
+        var abandonedReservation = Assert.Single(recovered.Snapshot.Budget);
+        Assert.Null(abandonedReservation.Committed);
+        Assert.Equal(abandonedReservation.ReservedUsd, abandonedReservation.ChargedUsd);
+        Assert.Equal(abandonedReservation.ReservedProviderCalls, abandonedReservation.ChargedProviderCalls);
+
+        var retryHandler = new ScriptedStageHandler(AcademicStage.Plan);
+        retryHandler.QueueOutput(new AcademicStageOutput
+        {
+            Plan = AcademicWorkflowFixtures.Plan() with { WorkingTitle = "retry attempt wins" },
+        });
+        var retryWorker = new AcademicWorkflowOrchestrator(serializedStore, [retryHandler]);
+        var retryResult = await retryWorker.ResumeAsync(snapshot.ProjectId, CancellationToken.None);
+        Assert.Equal(AcademicWorkflowRunStatus.AwaitingApproval, retryResult.Status);
+        Assert.Equal(1, retryHandler.Calls.Count);
+
+        blockedHandler.Release();
+        var staleResult = await abandonedRun;
+        Assert.Equal(AcademicWorkflowRunStatus.RevisionConflict, staleResult.Status);
+        Assert.Equal("CHECKPOINT_CONFLICT", staleResult.Code);
+
+        var durable = await fixture.Store.LoadAsync(snapshot.ProjectId, default);
+        Assert.Equal("retry attempt wins", durable!.Plan!.WorkingTitle);
+        Assert.Equal(2, durable.Stage(AcademicStage.Plan).AttemptCount);
+        Assert.Equal(2, durable.Budget.Count);
+        Assert.Null(durable.ActiveAttempt);
+        Assert.Null(durable.Budget[0].Committed);
+        Assert.NotNull(durable.Budget[1].Committed);
     }
 
     [Fact]

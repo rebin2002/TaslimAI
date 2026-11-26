@@ -17,6 +17,7 @@ public sealed partial class AcademicWorkflowOrchestrator
     private readonly Dictionary<AcademicStage, IAcademicStageHandler> handlers;
     private readonly TimeProvider clock;
     private readonly AcademicWorkflowEngineOptions options;
+    private readonly Guid workerId = Guid.NewGuid();
 
     public AcademicWorkflowOrchestrator(
         IAcademicWorkflowStateStore store,
@@ -96,6 +97,21 @@ public sealed partial class AcademicWorkflowOrchestrator
                     code: loaded.StateCode,
                     detail: loaded.StateDetail);
 
+            var runningStage = loaded.ActiveAttempt?.Stage
+                ?? loaded.Stages.FirstOrDefault(record => record.State == AcademicStageState.Running)?.Stage;
+            if (runningStage is { } activeStage)
+            {
+                var hasOwner = loaded.ActiveAttempt is not null;
+                return AcademicWorkflowRunResult.From(
+                    AcademicWorkflowRunStatus.AttemptInProgress,
+                    loaded,
+                    activeStage,
+                    hasOwner ? "STAGE_ATTEMPT_IN_PROGRESS" : "STAGE_ATTEMPT_OWNERSHIP_UNKNOWN",
+                    hasOwner
+                        ? $"The {activeStage} attempt is durably owned by another worker. Resume will not start another attempt."
+                        : $"The {activeStage} stage was already Running without an ownership token; explicitly recover it before retrying.");
+            }
+
             var next = FirstActionableStage(loaded);
             if (next is null)
             {
@@ -124,6 +140,79 @@ public sealed partial class AcademicWorkflowOrchestrator
             stalled,
             code: "SLICE_BOUND_EXCEEDED",
             detail: "The resume slice reached its stage bound without a blocking point; call resume again.");
+    }
+
+    /// <summary>
+    /// Explicitly marks a durably Running attempt as abandoned. This never runs a handler;
+    /// it keeps the old reservation charged, clears ownership, and records a retryable
+    /// failure checkpoint. The caller must subsequently invoke Resume to start a new attempt.
+    /// A supplied attempt id and checkpoint revision make stale recovery commands harmless.
+    /// </summary>
+    public async Task<AcademicWorkflowRunResult> RecoverAbandonedAttemptAsync(
+        Guid projectId,
+        long expectedRevision,
+        Guid? expectedAttemptId,
+        CancellationToken cancellationToken)
+    {
+        var loaded = await store.LoadAsync(projectId, cancellationToken);
+        if (loaded is null)
+            return AcademicWorkflowRunResult.From(AcademicWorkflowRunStatus.NotFound, null, code: "PROJECT_NOT_FOUND");
+
+        if (loaded.State != AcademicProjectState.Running || loaded.Revision != expectedRevision)
+            return AcademicWorkflowRunResult.From(
+                AcademicWorkflowRunStatus.RevisionConflict,
+                loaded,
+                code: "CHECKPOINT_CONFLICT",
+                detail: "The project changed or is no longer Running; reload before recovering an attempt.");
+
+        var active = loaded.ActiveAttempt;
+        if (active is not null && active.AttemptId != expectedAttemptId)
+            return AcademicWorkflowRunResult.From(
+                AcademicWorkflowRunStatus.RevisionConflict,
+                loaded,
+                active.Stage,
+                "ATTEMPT_OWNERSHIP_CHANGED",
+                "The active attempt id does not match; reload the project before recovery.");
+        if (active is null && expectedAttemptId is not null)
+            return AcademicWorkflowRunResult.From(
+                AcademicWorkflowRunStatus.RevisionConflict,
+                loaded,
+                code: "ATTEMPT_OWNERSHIP_CHANGED",
+                detail: "This checkpoint has no matching active attempt; reload the project before recovery.");
+
+        var stage = active?.Stage
+            ?? loaded.Stages.FirstOrDefault(record => record.State == AcademicStageState.Running)?.Stage;
+        if (stage is null || loaded.Stage(stage.Value).State != AcademicStageState.Running)
+            return AcademicWorkflowRunResult.From(
+                AcademicWorkflowRunStatus.RevisionConflict,
+                loaded,
+                code: "NO_ABANDONED_ATTEMPT",
+                detail: "There is no Running stage attempt to recover.");
+
+        var recovered = loaded.Clone();
+        var record = recovered.Stage(stage.Value);
+        record.State = AcademicStageState.Failed;
+        record.LastErrorCode = "STAGE_ATTEMPT_ABANDONED";
+        record.LastErrorDetail = "The previous worker was explicitly marked abandoned; its reserved usage remains charged.";
+        recovered.ActiveAttempt = null;
+
+        var attemptLabel = active?.AttemptId.ToString("N") ?? "legacy-unowned";
+        var commit = await CommitAsync(
+            recovered,
+            loaded.Revision,
+            $"stage-abandoned|{stage}|{attemptLabel}",
+            cancellationToken,
+            expectedAttemptId: active?.AttemptId,
+            recoveryAttempt: true);
+        if (commit != AcademicCommitStatus.Committed)
+            return await CheckpointConflictAsync(projectId, stage, cancellationToken);
+
+        return AcademicWorkflowRunResult.From(
+            AcademicWorkflowRunStatus.StageFailure,
+            recovered,
+            stage,
+            "STAGE_ATTEMPT_RECOVERED",
+            "The abandoned attempt was released without retrying it. Resume explicitly to start a new attempt.");
     }
 
     private static AcademicStage? FirstActionableStage(AcademicWorkflowSnapshot snapshot)
@@ -168,11 +257,18 @@ public sealed partial class AcademicWorkflowOrchestrator
         AcademicWorkflowSnapshot working,
         long expectedRevision,
         string reason,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        Guid? expectedAttemptId = null,
+        bool recoveryAttempt = false)
     {
         working.Revision = expectedRevision + 1;
         working.UpdatedAtUtc = clock.GetUtcNow().UtcDateTime;
-        var outcome = await store.TryCommitAsync(working, expectedRevision, BuildCheckpointKey(working.ProjectId, working.Revision, reason), cancellationToken);
+        var checkpointKey = BuildCheckpointKey(working.ProjectId, working.Revision, reason);
+        var outcome = recoveryAttempt
+            ? await store.TryRecoverAttemptAsync(working, expectedRevision, checkpointKey, expectedAttemptId, cancellationToken)
+            : expectedAttemptId is { } attemptId
+                ? await store.TryCommitAttemptAsync(working, expectedRevision, checkpointKey, attemptId, cancellationToken)
+                : await store.TryCommitAsync(working, expectedRevision, checkpointKey, cancellationToken);
         return outcome.Status;
     }
 
@@ -224,6 +320,16 @@ public sealed partial class AcademicWorkflowOrchestrator
         if (!AcademicBudgetLedger.TryPreflight(working, stage, estimate, out var budgetCode, out var budgetDetail))
             return (true, await PauseForBudgetAsync(working, stage, budgetCode, budgetDetail, cancellationToken));
 
+        var attemptId = Guid.NewGuid();
+        var startedAtUtc = clock.GetUtcNow().UtcDateTime;
+        working.ActiveAttempt = new AcademicLiveAttempt
+        {
+            AttemptId = attemptId,
+            OwnerId = workerId,
+            Stage = stage,
+            Attempt = attempt,
+            StartedAtUtc = startedAtUtc,
+        };
         AcademicBudgetLedger.Reserve(working, attemptKey, stage, attempt, estimate);
         record.State = AcademicStageState.Running;
         record.AttemptCount = attempt;
@@ -231,7 +337,7 @@ public sealed partial class AcademicWorkflowOrchestrator
         record.InputFingerprint = fingerprint;
         record.LastErrorCode = null;
         record.LastErrorDetail = null;
-        record.StartedAtUtc ??= clock.GetUtcNow().UtcDateTime;
+        record.StartedAtUtc ??= startedAtUtc;
 
         // Commit the reservation before the provider call so an attempt that dies
         // mid-flight leaves an auditable, already-charged reservation on resume.
@@ -250,8 +356,13 @@ public sealed partial class AcademicWorkflowOrchestrator
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
-            // Durable state already records the running attempt; leave it resumable.
-            return (true, AcademicWorkflowRunResult.From(AcademicWorkflowRunStatus.StageFailure, working, stage, "STAGE_CANCELLED", "The stage worker was cancelled; resume re-runs it."));
+            // The durable owner remains until an operator explicitly recovers this attempt.
+            return (true, AcademicWorkflowRunResult.From(
+                AcademicWorkflowRunStatus.StageFailure,
+                working,
+                stage,
+                "STAGE_CANCELLED",
+                "The stage worker was cancelled; explicitly recover the abandoned attempt before retrying."));
         }
         catch (Exception exception)
         {
@@ -260,18 +371,18 @@ public sealed partial class AcademicWorkflowOrchestrator
         }
 
         if (meterUsage && !AcademicBudgetLedger.Meter(working, attemptKey, outcome.Usage, out budgetCode, out budgetDetail))
-            return (true, await PauseForBudgetAsync(working, stage, budgetCode, budgetDetail, cancellationToken));
+            return (true, await PauseForBudgetAsync(working, stage, budgetCode, budgetDetail, cancellationToken, attemptId));
 
         if (!outcome.Succeeded)
-            return (true, await RecordStageFailureAsync(working, stage, attemptKey, outcome.ErrorCode ?? "STAGE_FAILED", outcome.ErrorDetail ?? "The stage failed.", outcome.Retryable, cancellationToken));
+            return (true, await RecordStageFailureAsync(working, stage, attemptKey, attemptId, outcome.ErrorCode ?? "STAGE_FAILED", outcome.ErrorDetail ?? "The stage failed.", outcome.Retryable, cancellationToken));
 
         var contract = ValidateOutputContract(stage, outcome.Output);
         if (contract is not null)
-            return (true, await RecordStageFailureAsync(working, stage, attemptKey, contract.Value.Code, contract.Value.Detail, retryable: true, cancellationToken));
+            return (true, await RecordStageFailureAsync(working, stage, attemptKey, attemptId, contract.Value.Code, contract.Value.Detail, retryable: true, cancellationToken));
 
         var candidate = working.Clone();
         if (!TryMergeOutput(candidate, stage, outcome.Output!, clock.GetUtcNow().UtcDateTime, out var mergeCode, out var mergeDetail))
-            return (true, await RecordStageFailureAsync(working, stage, attemptKey, mergeCode, mergeDetail, retryable: true, cancellationToken));
+            return (true, await RecordStageFailureAsync(working, stage, attemptKey, attemptId, mergeCode, mergeDetail, retryable: true, cancellationToken));
 
         var blocking = AcademicIntegrityGuard.Validate(candidate)
             .Where(issue => issue.Severity == AcademicIssueSeverity.Blocking)
@@ -283,10 +394,11 @@ public sealed partial class AcademicWorkflowOrchestrator
             var detail = blocking.Count == 1
                 ? $"{first.Code}: {first.Detail}"
                 : $"{first.Code}: {first.Detail} (+{blocking.Count - 1} further integrity findings)";
-            return (true, await RecordStageFailureAsync(working, stage, attemptKey, "ACADEMIC_INTEGRITY_VIOLATION", detail, retryable: true, cancellationToken));
+            return (true, await RecordStageFailureAsync(working, stage, attemptKey, attemptId, "ACADEMIC_INTEGRITY_VIOLATION", detail, retryable: true, cancellationToken));
         }
 
         // Commit the stage completion and any approval gate in one checkpoint.
+        candidate.ActiveAttempt = null;
         record = candidate.Stage(stage);
         record.State = AcademicStageState.Completed;
         record.CompletedAtUtc = clock.GetUtcNow().UtcDateTime;
@@ -310,7 +422,7 @@ public sealed partial class AcademicWorkflowOrchestrator
             };
             record.OutputCheckpointRevision = checkpointRevision;
             candidate.State = AcademicProjectState.AwaitingApproval;
-            var gateCommit = await CommitAsync(candidate, working.Revision, $"stage-complete|{attemptKey}", cancellationToken);
+            var gateCommit = await CommitAsync(candidate, working.Revision, $"stage-complete|{attemptKey}", cancellationToken, attemptId);
             if (gateCommit != AcademicCommitStatus.Committed)
                 return (true, await CheckpointConflictAsync(working.ProjectId, stage, cancellationToken));
             return (true, AcademicWorkflowRunResult.From(AcademicWorkflowRunStatus.AwaitingApproval, candidate, stage, "APPROVAL_REQUIRED", ReviewerPromptsFor(gateKind.Value).FirstOrDefault()));
@@ -320,14 +432,14 @@ public sealed partial class AcademicWorkflowOrchestrator
         {
             candidate.State = AcademicProjectState.Completed;
             record.OutputCheckpointRevision = candidate.Revision + 1;
-            var finalCommit = await CommitAsync(candidate, working.Revision, $"stage-complete|{attemptKey}", cancellationToken);
+            var finalCommit = await CommitAsync(candidate, working.Revision, $"stage-complete|{attemptKey}", cancellationToken, attemptId);
             if (finalCommit != AcademicCommitStatus.Committed)
                 return (true, await CheckpointConflictAsync(working.ProjectId, stage, cancellationToken));
             return (true, AcademicWorkflowRunResult.From(AcademicWorkflowRunStatus.Completed, candidate, stage));
         }
 
         record.OutputCheckpointRevision = candidate.Revision + 1;
-        var commit = await CommitAsync(candidate, working.Revision, $"stage-complete|{attemptKey}", cancellationToken);
+        var commit = await CommitAsync(candidate, working.Revision, $"stage-complete|{attemptKey}", cancellationToken, attemptId);
         if (commit != AcademicCommitStatus.Committed)
             return (true, await CheckpointConflictAsync(working.ProjectId, stage, cancellationToken));
 
@@ -338,6 +450,7 @@ public sealed partial class AcademicWorkflowOrchestrator
         AcademicWorkflowSnapshot working,
         AcademicStage stage,
         string attemptKey,
+        Guid attemptId,
         string code,
         string detail,
         bool retryable,
@@ -347,14 +460,17 @@ public sealed partial class AcademicWorkflowOrchestrator
         record.State = AcademicStageState.Failed;
         record.LastErrorCode = code;
         record.LastErrorDetail = detail;
+        working.ActiveAttempt = null;
 
         if (retryable && record.AttemptCount < working.Request.MaxStageAttempts)
         {
-            await CommitAsync(working, working.Revision, $"stage-failure|{attemptKey}", cancellationToken);
+            var failureCommit = await CommitAsync(working, working.Revision, $"stage-failure|{attemptKey}", cancellationToken, attemptId);
+            if (failureCommit != AcademicCommitStatus.Committed)
+                return await CheckpointConflictAsync(working.ProjectId, stage, cancellationToken);
             return AcademicWorkflowRunResult.From(AcademicWorkflowRunStatus.StageFailure, working, stage, code, detail);
         }
 
-        return await FailProjectAsync(working, code, detail, cancellationToken);
+        return await FailProjectAsync(working, code, detail, cancellationToken, attemptId);
     }
 
     private async Task<AcademicWorkflowRunResult> PauseForBudgetAsync(
@@ -362,12 +478,17 @@ public sealed partial class AcademicWorkflowOrchestrator
         AcademicStage stage,
         string code,
         string detail,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        Guid? expectedAttemptId = null)
     {
+        if (expectedAttemptId is not null)
+            working.ActiveAttempt = null;
         working.State = AcademicProjectState.PausedBudget;
         working.StateCode = code;
         working.StateDetail = detail;
-        await CommitAsync(working, working.Revision, $"budget-pause|{code}|r{working.Revision + 1}", cancellationToken);
+        var commit = await CommitAsync(working, working.Revision, $"budget-pause|{code}|r{working.Revision + 1}", cancellationToken, expectedAttemptId);
+        if (commit != AcademicCommitStatus.Committed)
+            return await CheckpointConflictAsync(working.ProjectId, stage, cancellationToken);
         return AcademicWorkflowRunResult.From(AcademicWorkflowRunStatus.PausedBudget, working, stage, code, detail);
     }
 
@@ -375,14 +496,18 @@ public sealed partial class AcademicWorkflowOrchestrator
         AcademicWorkflowSnapshot snapshot,
         string code,
         string detail,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        Guid? expectedAttemptId = null)
     {
         var failed = snapshot.Clone();
         failed.State = AcademicProjectState.Failed;
         failed.StateCode = code;
         failed.StateDetail = detail;
         failed.PendingApproval = null;
-        await CommitAsync(failed, snapshot.Revision, $"project-failed|{code}|r{failed.Revision}", cancellationToken);
+        failed.ActiveAttempt = null;
+        var commit = await CommitAsync(failed, snapshot.Revision, $"project-failed|{code}|r{failed.Revision}", cancellationToken, expectedAttemptId);
+        if (commit != AcademicCommitStatus.Committed)
+            return await CheckpointConflictAsync(snapshot.ProjectId, null, cancellationToken);
         return AcademicWorkflowRunResult.From(AcademicWorkflowRunStatus.ProjectFailed, failed, code: code, detail: detail);
     }
 
