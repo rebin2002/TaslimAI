@@ -1,6 +1,7 @@
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using Microsoft.EntityFrameworkCore;
 using Taslim.Api.Authorization;
 using Taslim.Api.Persistence;
@@ -86,6 +87,233 @@ public static class MovieReferenceReadinessPolicy
 
     public static bool IsOverrideAllowed(IReadOnlyCollection<MovieReferenceReadinessItemDto> items) =>
         items.Any(item => item.BlocksGeneration) && items.Where(item => item.BlocksGeneration).All(item => item.OverrideAllowed);
+
+    public static MovieReferenceReadinessItemDto EvaluatePropReference(
+        string? shotText,
+        IReadOnlyCollection<MovieProductionPropReferenceDto> props,
+        bool important)
+    {
+        var raw = shotText ?? string.Empty;
+        var enumerated = EnumeratedPropRequirements(raw);
+        if (enumerated.Count > 0)
+        {
+            // An explicit Director prop list is a set of named requirements: every
+            // enumerated prop must have a canonical World reference that covers it,
+            // otherwise the item fails closed for the unmatched names.
+            // Covering is directional and exclusive: a canonical reference satisfies
+            // a requirement only when its name is the requirement itself or more
+            // specific (its name tokens contain the requirement sequence), and each
+            // canonical prop can be spent on at most one requirement. A generic
+            // "compass" therefore cannot satisfy "brass compass", and one "compass"
+            // cannot satisfy "compass, compass".
+            // Matching is order-independent maximum bipartite matching (Kuhn's
+            // augmenting paths): "compass, brass compass" against
+            // ["Brass Compass", "Silver Compass"] satisfies the shot via the valid
+            // assignment compass→Silver Compass, brass compass→Brass Compass;
+            // naive greedy consumption would falsely block it.
+            var propList = props.ToList();
+            var covers = enumerated
+                .Select(requirement => Enumerable.Range(0, propList.Count)
+                    .Where(index => ContainsWord(propList[index].Name, requirement))
+                    .ToArray())
+                .ToArray();
+            var propToRequirement = new int[propList.Count];
+            Array.Fill(propToRequirement, -1);
+            bool TryAssign(int requirementIndex, bool[] visited)
+            {
+                foreach (var propIndex in covers[requirementIndex])
+                {
+                    if (visited[propIndex]) continue;
+                    visited[propIndex] = true;
+                    if (propToRequirement[propIndex] == -1 || TryAssign(propToRequirement[propIndex], visited))
+                    {
+                        propToRequirement[propIndex] = requirementIndex;
+                        return true;
+                    }
+                }
+                return false;
+            }
+            for (var requirementIndex = 0; requirementIndex < enumerated.Count; requirementIndex++)
+                TryAssign(requirementIndex, new bool[propList.Count]);
+            var assignedRequirements = propToRequirement.Where(index => index >= 0).ToHashSet();
+            var unsatisfied = enumerated
+                .Where((_, requirementIndex) => !assignedRequirements.Contains(requirementIndex))
+                .ToList();
+            if (unsatisfied.Count > 0)
+                return new("props", "Prop references", MovieReferenceReadinessItemStates.Missing, important, important, !important, $"The shot explicitly requires {string.Join(", ", unsatisfied)}, but no named canonical World prop reference matches every required prop.", "world_prop");
+            var representativeIndex = Array.IndexOf(propToRequirement, 0);
+            var representative = propList[representativeIndex >= 0 ? representativeIndex : 0];
+            return new("props", "Prop references", MovieReferenceReadinessItemStates.Complete, true, false, true, $"Canonical prop reference '{representative.Name}' is attached to this shot.", "world_prop", representative.PropId);
+        }
+
+        var cleaned = SignalText(raw);
+        var matched = props.FirstOrDefault(prop => ContainsWord(cleaned, prop.Name));
+        // English terms match whole tokens; CJK/Hangul/Thai terms match as
+        // contiguous character sequences (compact scripts); Arabic terms match
+        // whole tokens after diacritic folding.
+        var propMentioned = ContainsAny(cleaned,
+            "prop", "props", "object", "notebook", "compass", "key", "seed", "weapon",
+            "道具", "物品", "笔记本", "罗盘", "指南针", "钥匙", "种子", "武器",
+            "مفتاح", "أداة", "سلاح");
+
+        if (!propMentioned && matched is null)
+            return new("props", "Prop references", MovieReferenceReadinessItemStates.Complete, false, false, true, "No prop reference is applicable to this shot.");
+        if (matched is not null)
+            return new("props", "Prop references", MovieReferenceReadinessItemStates.Complete, true, false, true, $"Canonical prop reference '{matched.Name}' is attached to this shot.", "world_prop", matched.PropId);
+        return new("props", "Prop references", MovieReferenceReadinessItemStates.Missing, important, important, !important, "The shot calls for a prop, but no named canonical World prop reference matches the shot.", "world_prop");
+    }
+
+    private static readonly Regex EnumeratedPropsHeader = new(
+        @"\bImportant\s+props:\s*(?<items>[^.\n]+)\.",
+        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+
+    private static List<string> EnumeratedPropRequirements(string text)
+    {
+        var match = EnumeratedPropsHeader.Match(text);
+        if (!match.Success) return [];
+        return match.Groups["items"].Value
+            .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .ToList();
+    }
+
+    // The Director shot-plan apply executor always emits an "Important props: ." header
+    // even when the approved plan carries no canonical props, so the empty placeholder
+    // must not count as a genuine prop requirement. Headers that list real props keep
+    // the signal and remain effective.
+    private static readonly Regex EmptyPropRequirementHeader = new(
+        @"\bImportant\s+props:\s*\.(?=\s|$)",
+        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+
+    private static string SignalText(string text) =>
+        text.Length == 0 ? text : EmptyPropRequirementHeader.Replace(text, " ");
+
+    // Prop names and requirement signals match whole tokens inside Unicode words only,
+    // so unrelated substrings such as "key" inside "monkey" or "compass" inside
+    // "compassion" cannot falsely satisfy a prop reference. A multi-word prop name
+    // matches when its token sequence appears contiguously in the shot text.
+    private static bool ContainsWord(string? text, string? value)
+    {
+        if (string.IsNullOrWhiteSpace(text) || string.IsNullOrWhiteSpace(value)) return false;
+        value = value.Trim();
+        // Scripts that do not separate words with spaces (Han, Kana, Hangul with
+        // agglutinative particles, Thai, Lao, Khmer, Myanmar) must match by
+        // contiguous character sequence, ignoring combining marks; a whole Chinese
+        // sentence tokenizes as one "word", so token equality alone would miss
+        // canonical props such as "指南针" inside "玛拉拿起指南针然后离开".
+        // Space-delimited scripts (Latin, Cyrillic, Greek, Arabic, Hebrew, Indic)
+        // keep strict token boundaries, preserving the key/monkey fix.
+        if (IsCompactPhrase(value))
+            return FoldText(text).Contains(FoldText(value), StringComparison.OrdinalIgnoreCase);
+        var phrase = Tokenize(value);
+        if (phrase.Count == 0) return false;
+        var tokens = Tokenize(text);
+        for (var start = 0; start + phrase.Count <= tokens.Count; start++)
+        {
+            var matches = true;
+            for (var index = 0; index < phrase.Count; index++)
+            {
+                if (!string.Equals(tokens[start + index], phrase[index], StringComparison.OrdinalIgnoreCase))
+                {
+                    matches = false;
+                    break;
+                }
+            }
+            if (matches) return true;
+        }
+        return false;
+    }
+
+    private static bool IsCompactPhrase(string value)
+    {
+        var sawCompact = false;
+        foreach (var character in value)
+        {
+            if (IsCompactScriptCharacter(character)) { sawCompact = true; continue; }
+            if (IsCombiningMark(character) || character is ' ' or '\'' or '\u2019' or '\u200C') continue;
+            return false;
+        }
+        return sawCompact;
+    }
+
+    // CJK, Kana, Hangul, Thai, Lao, Khmer and Myanmar ranges: written without
+    // inter-word spaces.
+    private static bool IsCompactScriptCharacter(char value) =>
+        value is >= '\u0E00' and <= '\u0E7F'   // Thai
+            or >= '\u0E80' and <= '\u0EFF'     // Lao
+            or >= '\u1000' and <= '\u109F'     // Myanmar
+            or >= '\u1780' and <= '\u17FF'     // Khmer
+            or >= '\u2E80' and <= '\u303F'     // CJK radicals, Kangxi, punctuation
+            or >= '\u3040' and <= '\u30FF'     // Hiragana, Katakana
+            or >= '\u3100' and <= '\u312F'     // Bopomofo
+            or >= '\u3400' and <= '\u4DBF'     // Han extension A
+            or >= '\u4E00' and <= '\u9FFF'     // Han
+            or >= '\uAC00' and <= '\uD7A3'     // Hangul
+            or >= '\uF900' and <= '\uFAFF';    // CJK compatibility
+
+    private static string FoldText(string value)
+    {
+        var builder = new StringBuilder(value.Length);
+        foreach (var character in value)
+        {
+            if (!IsCombiningMark(character)) builder.Append(character);
+        }
+        return builder.ToString();
+    }
+
+    private static bool ContainsAny(string? text, params string[] terms) => terms.Any(term => ContainsWord(text, term));
+
+    private static List<string> Tokenize(string value)
+    {
+        var tokens = new List<string>();
+        var runStart = -1;
+        for (var index = 0; index <= value.Length; index++)
+        {
+            if (index < value.Length && IsWordCharacter(value[index]))
+            {
+                if (runStart < 0) runStart = index;
+            }
+            else if (runStart >= 0)
+            {
+                tokens.Add(FoldToken(value.Substring(runStart, index - runStart)));
+                runStart = -1;
+            }
+        }
+        return tokens;
+    }
+
+    // Intra-word Unicode marks (apostrophe, curly apostrophe, zero-width non-joiner)
+    // stay inside a token so names like "Mara's notebook" match as written, and
+    // combining marks attach to their base token and are then folded away, so an
+    // accented decomposed mention ("cafe" + U+0301) still matches the plain or
+    // identically marked canonical name. A full composed/decomposed equivalence
+    // map is unavailable here because this toolchain's reference assemblies omit
+    // System.Globalization normalization types.
+    private static string FoldToken(string token)
+    {
+        var anyMark = false;
+        foreach (var character in token)
+        {
+            if (IsCombiningMark(character)) { anyMark = true; break; }
+        }
+        if (!anyMark) return token;
+        var builder = new StringBuilder(token.Length);
+        foreach (var character in token)
+        {
+            if (!IsCombiningMark(character)) builder.Append(character);
+        }
+        return builder.ToString();
+    }
+
+    private static bool IsCombiningMark(char value) =>
+        System.Globalization.CharUnicodeInfo.GetUnicodeCategory(value)
+            is System.Globalization.UnicodeCategory.NonSpacingMark
+            or System.Globalization.UnicodeCategory.SpacingCombiningMark
+            or System.Globalization.UnicodeCategory.EnclosingMark;
+
+    private static bool IsWordCharacter(char value) =>
+        char.IsLetterOrDigit(value)
+        || value is '\'' or '\u2019' or '\u200C'
+        || IsCombiningMark(value);
 }
 
 public sealed class MovieReferenceReadinessOverrideRequest
@@ -360,10 +588,10 @@ public sealed class MovieReferenceReadinessService(
 
     private static MovieReferenceReadinessItemDto EvaluateProps(MovieShot shot, MovieProductionReferencePackageDto package, bool important)
     {
-        var propMentioned = package.Props.Count > 0 || ContainsAny(string.Join(" ", shot.Description, shot.Subjects, shot.ProductionRequirements), "prop", "object", "notebook", "compass", "key", "seed", "weapon");
-        if (!propMentioned) return Complete("props", "Prop references", false, "No prop reference is applicable to this shot.");
-        if (package.Props.Count > 0) return Complete("props", "Prop references", true, $"{package.Props.Count} canonical prop reference{(package.Props.Count == 1 ? " is" : "s are")} attached.", "world_prop");
-        return Item("props", "Prop references", MovieReferenceReadinessItemStates.Missing, important, important, !important, "The shot calls for a prop, but no canonical World prop usage is attached.");
+        return MovieReferenceReadinessPolicy.EvaluatePropReference(
+            string.Join(" ", shot.Description, shot.Subjects, shot.Purpose, shot.ProductionRequirements),
+            package.Props,
+            important);
     }
 
     private static MovieReferenceReadinessItemDto EvaluateSpatialOrientation(MovieShot shot, CinematographyShotPlan? plan, bool important)
