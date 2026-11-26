@@ -32,8 +32,10 @@ namespace Taslim.Api.Tests;
 /// </summary>
 public sealed class BillingGrantReversalExpiryAttributionTests
 {
-    [Fact]
-    public async Task Sqlite_reversed_grant_attribution_survives_expiry_for_read_model_and_admission()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Sqlite_reversed_grant_attribution_survives_expiry_for_read_model_and_admission(bool includeNonzeroExpiredControl)
     {
         await using var connection = new SqliteConnection("Data Source=:memory:");
         await connection.OpenAsync();
@@ -99,6 +101,19 @@ public sealed class BillingGrantReversalExpiryAttributionTests
 
         var reversalBeforeExpiry = await CaptureAttributionSnapshotAsync(db, reversal.Entry.Id);
 
+        // A fully reversed grant necessarily nets to zero. Add an independent
+        // nonzero expired purchased lot in the second case so removing the
+        // expiry filter cannot be masked by that arithmetic cancellation.
+        const long expiredControlCredits = 17;
+        if (includeNonzeroExpiredControl)
+        {
+            var control = await service.GrantAsync(
+                workspace.Id, CreditEntitlementType.Purchased, expiredControlCredits,
+                "expiryattribution:control:grant", "Synthetic nonzero expiry control",
+                expiresAt: DateTime.UtcNow.AddMinutes(-1));
+            Assert.True(control.Created);
+        }
+
         // Simulate the calendar crossing the lot's expiry, exactly as the
         // #690 contract fixture does: move the entitlement clock, mutate
         // nothing else.
@@ -127,16 +142,18 @@ public sealed class BillingGrantReversalExpiryAttributionTests
             Options.Create(new BillingOptions { CustomerChargingEnabled = false, Provider = "unconfigured" }));
         var account = await accountService.GetAccountAsync(workspace.Id);
 
-        Assert.Equal(
-            new[]
-            {
-                (Type: "Grant", Amount: 40L, Reason: "Synthetic regrant"),
-                (Type: "Reversal", Amount: -40L, Reason: "Admin reversal of synthetic purchase"),
-                (Type: "Grant", Amount: 40L, Reason: "Synthetic first-period purchase"),
-            },
-            account.Transactions.Select(item => (Type: item.Type, Amount: item.Amount, Reason: item.Reason)).ToArray());
-        Assert.True(account.Transactions[0].CreatedAt >= account.Transactions[1].CreatedAt);
-        Assert.True(account.Transactions[1].CreatedAt >= account.Transactions[2].CreatedAt);
+        var expectedHistory = new List<(string Type, long Amount, string Reason)>
+        {
+            ("Grant", 40L, "Synthetic regrant"),
+        };
+        if (includeNonzeroExpiredControl)
+            expectedHistory.Add(("Grant", expiredControlCredits, "Synthetic nonzero expiry control"));
+        expectedHistory.Add(("Reversal", -40L, "Admin reversal of synthetic purchase"));
+        expectedHistory.Add(("Grant", 40L, "Synthetic first-period purchase"));
+        Assert.Equal(expectedHistory.ToArray(),
+            account.Transactions.Select(item => (Type: item.Type, item.Amount, item.Reason)).ToArray());
+        for (var index = 1; index < account.Transactions.Count(); index++)
+            Assert.True(account.Transactions[index - 1].CreatedAt >= account.Transactions[index].CreatedAt);
         Assert.Equal(0, account.Credits.IncludedRemaining);
         Assert.Equal(40, account.Credits.PurchasedRemaining);
         Assert.Equal(0, account.Credits.AdjustmentBalance);
@@ -177,8 +194,8 @@ public sealed class BillingGrantReversalExpiryAttributionTests
         Assert.Equal(reversalBeforeExpiry, await CaptureAttributionSnapshotAsync(db, reversal.Entry.Id));
 
         // Append-only, mutation-free invariants of the whole scenario.
-        Assert.Equal(2, await db.CreditEntitlements.CountAsync(item => item.WorkspaceId == workspace.Id));
-        Assert.Equal(4, await db.CreditLedgerEntries.CountAsync(item => item.WorkspaceId == workspace.Id));
+        Assert.Equal(includeNonzeroExpiredControl ? 3 : 2, await db.CreditEntitlements.CountAsync(item => item.WorkspaceId == workspace.Id));
+        Assert.Equal(includeNonzeroExpiredControl ? 5 : 4, await db.CreditLedgerEntries.CountAsync(item => item.WorkspaceId == workspace.Id));
         Assert.Equal(0, await db.PaymentAttempts.CountAsync(item => item.WorkspaceId == workspace.Id));
     }
 
