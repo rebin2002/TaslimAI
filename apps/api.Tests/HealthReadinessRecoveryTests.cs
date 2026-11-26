@@ -51,7 +51,9 @@ public sealed class HealthReadinessRecoveryTests : IClassFixture<HealthReadiness
         {
             Assert.Equal("not_ready", body.RootElement.GetProperty("status").GetString());
             Assert.Equal(unavailableRequestId, body.RootElement.GetProperty("requestId").GetString());
-            Assert.Equal("unconfigured", body.RootElement.GetProperty("checks")[1].GetProperty("status").GetString());
+            var storageCheck = Assert.Single(body.RootElement.GetProperty("checks").EnumerateArray(), check => check.GetProperty("name").GetString() == "storage");
+            Assert.True(storageCheck.GetProperty("required").GetBoolean());
+            Assert.Equal("unavailable", storageCheck.GetProperty("status").GetString());
             var raw = body.RootElement.GetRawText();
             Assert.DoesNotContain("test-storage-private-id", raw, StringComparison.OrdinalIgnoreCase);
             Assert.DoesNotContain("FileStorageUnavailableException", raw, StringComparison.Ordinal);
@@ -68,7 +70,9 @@ public sealed class HealthReadinessRecoveryTests : IClassFixture<HealthReadiness
         {
             Assert.Equal("ready", body.RootElement.GetProperty("status").GetString());
             Assert.Equal(recoveredRequestId, body.RootElement.GetProperty("requestId").GetString());
-            Assert.Equal("available", body.RootElement.GetProperty("checks")[1].GetProperty("status").GetString());
+            var storageCheck = Assert.Single(body.RootElement.GetProperty("checks").EnumerateArray(), check => check.GetProperty("name").GetString() == "storage");
+            Assert.True(storageCheck.GetProperty("required").GetBoolean());
+            Assert.Equal("available", storageCheck.GetProperty("status").GetString());
         }
 
         Assert.Equal(2, storage.ProbeCount);
