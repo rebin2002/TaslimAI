@@ -155,7 +155,8 @@ internal sealed class ReadbackCancellationFactory : WebApplicationFactory<Progra
 {
     private readonly ReadbackCancellationStyle style;
     private readonly int storageOperationTimeoutSeconds;
-    private readonly SqliteConnection connection = new("DataSource=:memory:");
+    // Keep the shared in-memory database alive while each request or polling scope opens its own connection.
+    private readonly SqliteConnection connection = new($"Data Source=readback-{Guid.NewGuid():N};Mode=Memory;Cache=Shared;Pooling=False");
 
     internal ReadbackCancellationFactory(ReadbackCancellationStyle style, int storageOperationTimeoutSeconds)
     {
@@ -191,8 +192,7 @@ internal sealed class ReadbackCancellationFactory : WebApplicationFactory<Progra
         builder.ConfigureServices(services =>
         {
             services.RemoveAll<DbContextOptions<TaslimDbContext>>();
-            services.AddSingleton(connection);
-            services.AddDbContext<TaslimDbContext>(options => options.UseSqlite(connection));
+            services.AddDbContext<TaslimDbContext>(options => options.UseSqlite(connection.ConnectionString));
 
             Storage = new ReadbackCancellationStorageService(style);
             services.RemoveAll<IFileStorageService>();

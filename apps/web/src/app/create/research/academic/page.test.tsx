@@ -14,8 +14,13 @@ describe("Academic Research Studio route authentication boundary", () => {
 
   it("checks the session on the server before rendering the academic studio", () => {
     expect(route).toContain('import { requireAuthenticatedPage } from "@/lib/serverAuth";');
+    expect(route).toContain('import { isAcademicResearchVisible } from "@/lib/academicResearchVisibility";');
+    expect(route).toContain('import { notFound } from "next/navigation";');
     expect(route).toContain('export const dynamic = "force-dynamic";');
     expect(route).toContain("await requireAuthenticatedPage(academicRoute);");
+    const authenticated = route.indexOf("await requireAuthenticatedPage(academicRoute);");
+    const visibilityGate = route.indexOf("if (!isAcademicResearchVisible()) notFound();");
+    expect(visibilityGate).toBeGreaterThan(authenticated);
     expect(route).toContain('import { academicRoute } from "@/components/academic/academicRoutes";');
     expect(route).toContain("export default async function AcademicResearchStudioPage()");
     expect(route).toContain("<ProtectedPage>");
