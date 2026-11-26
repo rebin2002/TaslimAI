@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { ArrowUpRight, Check, Compass, DoorOpen, Image as ImageIcon, LockKeyhole, MapPin, Package, Pencil, Plus, Route, Save, ShieldCheck, Sparkles, Sun, Theater } from "lucide-react";
 import { useLocale } from "@/components/LocaleProvider";
 import { api, type MovieLocation, type MovieLocationGeographyEntry, type MovieLocationGeographyOpening, type MovieLocationGeographyPath, type MovieLocationGeographySheet, type MovieProp, type MovieSet, type MovieWorldAsset, type MovieWorldReference, type MovieWorldWorkspace as WorldData } from "@/lib/api";
@@ -20,6 +20,27 @@ const rooms: { id: Room; label: string; icon: typeof MapPin; hint: string }[] = 
 
 const emptyForm: FormState = { name: "", description: "", visualContinuityNotes: "", category: "", environmentType: "practical", movieLocationId: "", visualDescription: "", timeOfDay: "", weather: "", continuityNotes: "", referenceAssetId: "" };
 
+export function isMovieWorldForProject(data: Pick<WorldData, "movieProjectId"> | null, requestedMovieProjectId: string): boolean {
+  return data?.movieProjectId === requestedMovieProjectId;
+}
+
+export function movieWorldProjectSwitchReset() {
+  return {
+    data: null as WorldData | null,
+    room: "locations" as Room,
+    selectedId: null as string | null,
+    form: { ...emptyForm },
+    editing: false,
+    creating: false,
+    saving: false,
+    addingReference: false,
+    referenceName: "",
+    referenceKind: "moodboard",
+    referenceAssetId: "",
+    error: "",
+  };
+}
+
 function formFor(room: Room, selected: Entity): FormState {
   if (room === "locations") { const location = selected as MovieLocation; return { ...emptyForm, name: location.name, description: location.description, visualContinuityNotes: location.visualContinuityNotes ?? "", referenceAssetId: location.referenceAssetId ?? "" }; }
   if (room === "sets") { const set = selected as MovieSet; return { ...emptyForm, name: set.name, description: set.description, environmentType: set.environmentType, movieLocationId: set.movieLocationId ?? "", visualDescription: set.visualDescription ?? "", timeOfDay: set.timeOfDay ?? "", weather: set.weather ?? "", continuityNotes: set.continuityNotes ?? "", referenceAssetId: set.referenceAssetId ?? "" }; }
@@ -33,6 +54,13 @@ function assetLabel(assetId: string | null | undefined, assets: MovieWorldAsset[
 
 export function MovieWorldWorkspace({ projectId }: { projectId: string }) {
   const { t } = useLocale();
+  // Round-20 review fence: one token object is minted per project (re)load by the effect below.
+  // Continuations of requests that started under an older token (a save() or saveReference() that
+  // is still in flight when the user switches to another movie project) compare against it and
+  // drop their success/error/finally writes instead of stamping the previous project's records,
+  // selection, edit flags, or errors into the newly loaded project. The API call itself keeps the
+  // originating projectId argument - only the state application is fenced.
+  const worldLoadRef = useRef({ projectId, generation: 0 });
   const [data, setData] = useState<WorldData | null>(null);
   const [room, setRoom] = useState<Room>("locations");
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -47,13 +75,30 @@ export function MovieWorldWorkspace({ projectId }: { projectId: string }) {
   const [error, setError] = useState("");
 
   useEffect(() => {
+    worldLoadRef.current = { projectId, generation: worldLoadRef.current.generation + 1 };
     let mounted = true;
     void api.getMovieWorld(projectId).then((result) => {
       if (!mounted) return;
+      const reset = movieWorldProjectSwitchReset();
       setData(result);
+      setRoom(reset.room);
+      setSelectedId(reset.selectedId);
+      setForm(reset.form);
+      setEditing(reset.editing);
+      setCreating(reset.creating);
+      setSaving(reset.saving);
+      setAddingReference(reset.addingReference);
+      setReferenceName(reset.referenceName);
+      setReferenceKind(reset.referenceKind);
+      setReferenceAssetId(reset.referenceAssetId);
+      setError(reset.error);
       const first = result.world.locations[0];
       if (first) { setSelectedId(first.id); setForm(formFor("locations", first)); }
-    }).catch((cause) => mounted && setError(cause instanceof Error ? cause.message : "The World room could not be loaded."));
+    }).catch((cause) => {
+      if (!mounted) return;
+      setSaving(false);
+      setError(cause instanceof Error ? cause.message : "The World room could not be loaded.");
+    });
     return () => { mounted = false; };
   }, [projectId]);
 
@@ -77,6 +122,8 @@ export function MovieWorldWorkspace({ projectId }: { projectId: string }) {
 
   async function save() {
     if (!data || !form.name.trim() || !form.description.trim()) return;
+    const origin = worldLoadRef.current;
+    const stale = () => worldLoadRef.current !== origin;
     setSaving(true); setError("");
     try {
       const referenceAssetId = form.referenceAssetId.trim() || null;
@@ -86,6 +133,11 @@ export function MovieWorldWorkspace({ projectId }: { projectId: string }) {
           : room === "sets"
             ? await api.addMovieSet(projectId, { name: form.name, description: form.description, environmentType: form.environmentType, movieLocationId: form.movieLocationId || null, visualDescription: form.visualDescription || null, timeOfDay: form.timeOfDay || null, weather: form.weather || null, continuityNotes: form.continuityNotes || null, referenceAssetId })
             : await api.addMovieProp(projectId, { name: form.name, description: form.description, category: form.category || null, continuityNotes: form.continuityNotes || null, referenceAssetId });
+        // The create was answered after the user moved to another project: the durable write
+        // already happened server-side under the originating project, but appending its record
+        // (or stealing the selection/edit state) into whatever data is loaded now is the wrong
+        // project's view. Drop the frame; the next project's own load renders the truth.
+        if (stale()) return;
         setData((current) => current ? { ...current, world: { ...current.world, [room]: [...(current.world[room] as Entity[]), created] } } : current);
         setSelectedId(created.id); setCreating(false); setEditing(false);
       } else if (selected) {
@@ -94,25 +146,37 @@ export function MovieWorldWorkspace({ projectId }: { projectId: string }) {
           : room === "sets"
             ? await api.updateMovieSet(selected.id, { name: form.name, description: form.description, environmentType: form.environmentType, movieLocationId: form.movieLocationId || null, visualDescription: form.visualDescription || null, timeOfDay: form.timeOfDay || null, weather: form.weather || null, continuityNotes: form.continuityNotes || null, referenceAssetId })
             : await api.updateMovieProp(selected.id, { name: form.name, description: form.description, category: form.category || null, continuityNotes: form.continuityNotes || null, referenceAssetId });
+        if (stale()) return; // see the create arm above: never rewrites the newly loaded project
         setData((current) => current ? { ...current, world: { ...current.world, [room]: (current.world[room] as Entity[]).map((item) => item.id === updated.id ? updated : item) } } : current);
         setEditing(false);
       }
-    } catch (cause) { setError(cause instanceof Error ? cause.message : "The World record could not be saved."); }
-    finally { setSaving(false); }
+    } catch (cause) {
+      // A failure of the old project's request must not paint an error onto the new project.
+      if (!stale()) setError(cause instanceof Error ? cause.message : "The World record could not be saved.");
+    } finally {
+      // The new project may itself be mid-save; only the request that owned the spinner clears it.
+      if (!stale()) setSaving(false);
+    }
   }
 
   async function saveReference() {
     if (!data || !referenceName.trim()) return;
+    const origin = worldLoadRef.current;
+    const stale = () => worldLoadRef.current !== origin;
     setSaving(true); setError("");
     try {
       const reference = await api.addMovieWorldReference(projectId, { name: referenceName.trim(), kind: referenceKind, assetId: referenceAssetId || null });
+      if (stale()) return; // the reference belongs to the project we left, not the one now shown
       setData((current) => current ? { ...current, world: { ...current.world, references: [...current.world.references, reference] } } : current);
       setReferenceName(""); setReferenceAssetId(""); setAddingReference(false);
-    } catch (cause) { setError(cause instanceof Error ? cause.message : "The visual reference could not be registered."); }
-    finally { setSaving(false); }
+    } catch (cause) {
+      if (!stale()) setError(cause instanceof Error ? cause.message : "The visual reference could not be registered.");
+    } finally {
+      if (!stale()) setSaving(false);
+    }
   }
 
-  if (!data) return <div className="movie-world-loading"><span className="loading-spinner" /><p>{error || t("movieBody.loading")}</p></div>;
+  if (!data || !isMovieWorldForProject(data, projectId)) return <div className="movie-world-loading"><span className="loading-spinner" /><p>{error || t("movieBody.loading")}</p></div>;
 
   const usages = data.usageDetails.filter((usage) => usage.entityType === (room === "locations" ? "location" : room === "sets" ? "set" : "prop") && usage.entityId === selected?.id);
   const refs = data.world.references;
