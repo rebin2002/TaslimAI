@@ -380,4 +380,43 @@ public sealed class AcademicSourceRedirectCredentialTests
         await Assert.ThrowsAsync<AcademicSourceRejectedException>(() => gateway.GetJsonAsync(Endpoint(), CancellationToken.None));
         Assert.Equal(1, handler.RequestCount);
     }
+
+    /// <summary>
+    /// Reviewer residual R7. `Reject(host, reason)` is handed the host and the reason that made it
+    /// refuse, and builds its details from neither; those details are what travel into the exception
+    /// every caller can see, and a refusal of an address is exactly the thing that must not be echoed
+    /// into text that reaches a log, a job diagnostic, or a student's screen. Today that holds by
+    /// construction, which is precisely the kind of property a later "helpful" edit can break, so it
+    /// is pinned here across all three forms a consumer can read off the exception: the message, the
+    /// category, and the whole rendered exception a logger would print.
+    /// </summary>
+    [Fact]
+    public async Task Refusal_message_and_category_stay_host_free()
+    {
+        foreach (var (answer, host) in new[]
+        {
+            ("169.254.169.254", "api.openalex.org"),
+            ("10.1.2.3", "api.openalex.org"),
+            ("::1", "api.crossref.org"),
+            ("127.9.9.9", "www.googleapis.com"),
+            ("fd00::1", "openlibrary.org"),
+        })
+        {
+            var resolver = new AcademicFixture.StubResolver(answer);
+            var transport = new AcademicFixture.RecordingTransport();
+            var exception = await Assert.ThrowsAsync<AcademicSourceRejectedException>(() =>
+                AcademicSourceConnectionPolicy.OpenConnectionAsync(host, 443, resolver, transport.ConnectAsync, CancellationToken.None));
+            foreach (var text in new[] { exception.Message, exception.Details?.FailureCategory ?? string.Empty, exception.ToString() })
+            {
+                Assert.DoesNotContain(answer, text, StringComparison.Ordinal);
+                Assert.DoesNotContain(host, text, StringComparison.OrdinalIgnoreCase);
+                Assert.DoesNotContain("host_not_allowed", text, StringComparison.OrdinalIgnoreCase);
+                Assert.DoesNotContain("non_public", text, StringComparison.OrdinalIgnoreCase);
+                Assert.DoesNotContain("openalex", text, StringComparison.OrdinalIgnoreCase);
+                Assert.DoesNotContain("crossref", text, StringComparison.OrdinalIgnoreCase);
+                Assert.DoesNotContain("googleapis", text, StringComparison.OrdinalIgnoreCase);
+                Assert.DoesNotContain("openlibrary", text, StringComparison.OrdinalIgnoreCase);
+            }
+        }
+    }
 }

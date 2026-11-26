@@ -3,7 +3,9 @@
 Backend scholarly discovery adapters for the Academic Research Studio upgrade
 (issue #1259, Phase A). This folder is deliberately self-contained and
 file-disjoint from the standard Research Studio pipeline: nothing here imports
-`ResearchGenerationJobHandler`, and `Program.cs` is untouched.
+`ResearchGenerationJobHandler`. `Program.cs` is no longer untouched — this slice
+registers the feature (see Wiring below) — but registration is not activation:
+every switch still defaults to off.
 
 ## What is here
 
@@ -102,6 +104,66 @@ identifier lookups by `MaxIdentifierLookups`, and every call by
 `RequestTimeoutSeconds`/`OperationTimeoutSeconds` on top of caller cancellation.
 OpenAlex/Crossref polite-pool contact registration is via `ContactMailto`.
 
+Redirects are followed manually, so a hop is another send: one logical provider
+call is at most `1 + MaxRedirectHops + (MaxAttempts - 1)` = 6 sends with the
+defaults, and each of those is a separate resolve-verify-pin connection.
+A provider header that cannot be resolved into an address — `Location: //`,
+`Location: //:80/x` — is refused as `malformed_redirect` rather than escaping as
+an unlabelled HTTP 500, and its response is released before the resolution is
+attempted, so the malformed header cannot hold a payload stream or a pooled
+connection.
+
+### Provider key quota — arithmetic to settle before activation
+
+`RateLimiting.Search` bounds a *caller*: 120 permits per minute per
+`user:<id>` (or per client IP before authentication) plus a concurrency limit of
+8 in-flight searches per the same partition. Nothing in this build bounds what a
+caller may cost a *provider key*, so with the shipped defaults the arithmetic an
+operator has to compare against the quota of the project that owns
+`GoogleBooksApiKey` is:
+
+| Shape | Key-bearing calls |
+| --- | --- |
+| One search term (Google Books is registered as both a work-search and a book-catalog provider, so it answers twice) | ≤ `MaxPages` × 2 = **4** |
+| One request carrying ISBN lookups as well | + ≤ min(`MaxIdentifierLookups`=25, accepted list=10) = ≤ **14** total |
+| Worst case with redirects and retries | ≤ 14 × 6 = **84 sends** |
+| One user, one minute, at the 120/min ceiling | ≤ 14 × 120 = **1,680 calls** (10,080 sends) |
+| One user, one day, at that rate | ≤ **2,419,200 calls** |
+| Whole deployment | above × number of concurrently active users; the limiter is per user, so total fan-out scales with usage and is **not** capped anywhere |
+
+Consequences to accept or mitigate **before** setting `GoogleBooksEnabled` to
+true in a deployment, since none of them is enforced in code:
+
+1. There is no daily or per-key budget in this slice: no counter, no reservation,
+   no circuit breaker on quota exhaustion. A 403/429 from Google surfaces as a
+   provider outcome category and degrades the batch to a partial result; it does
+   not stop the next caller from spending more of the same key.
+2. One key is one quota shared by every workspace. The per-user limiter protects
+   each student from *another student's* click rate only in the sense that it
+   bounds that student; it does not protect the key from the sum of students.
+3. Mitigations available to an operator, in the order they should be considered:
+   keep `GoogleBooksEnabled` false (the shipped default) and run on the keyless
+   catalogs, which need only `ContactMailto` for polite pooling; set a project
+   quota ceiling on the Google Cloud side below the contract's allowance; lower
+   `MaxPages` (each page is a call) or `MaxResultsPerProvider`; or serve Google
+   Books through a caching/egress proxy with its own budget. A per-key daily
+   budget enforced inside this service would be the complete answer and belongs
+   to a later phase — it is deliberately not approximated here.
+4. Whatever is chosen must be recorded against the activation decision, not
+   inferred from the config: `Enabled`/`GoogleBooksEnabled` default to false, and
+   the section written in `appsettings` is the only place the choice lives.
+
+### What paging does not promise
+
+`totalMatched` and `hasMore` are honest **inside one response**: the pool was
+fetched once for that request, and the reported window agrees with the reported
+count. Across two responses — a page turn, or a retry — the endpoint keeps no
+cursor, no session and no cached pool, so page 2 is a second independent search.
+A catalog that added a record, re-ranked the topic, or answered differently this
+time can hand back a page that repeats an item the reader already saw or omits
+one they had not. The studio says this in `sources.findLimits`; a stable snapshot
+would need a server-side cursor, which this slice does not claim.
+
 ## Credentials and redirects
 
 The Google Books key rides the query string because the volumes API has no
@@ -119,7 +181,7 @@ header auth. That makes a redirect a credential-leak path, so:
 - Same-authority hops (normal provider behaviour such as
   `/works` → `/works-v2`) are left exactly as the provider specified.
 
-## Wiring (integration step, deliberately not part of this PR)
+## Wiring (performed by this slice)
 
 ```csharp
 // Program.cs, alongside the other feature registrations:
@@ -152,6 +214,17 @@ non-public address fails at options resolution instead of at request time;
 the same applies to an `EndpointHostExceptions` entry with a single label, which
 would otherwise admit every domain under it.
 
+The call above is in `apps/api/Program.cs` and `Controllers/AcademicSourcesController.cs`
+is mapped, so the endpoint exists in the build and the studio can reach it.
+Nothing is fetched until an operator writes the section: with the shipped
+configuration the endpoint answers `503 ACADEMIC_SEARCH_UNAVAILABLE` and zero
+catalog requests leave the process. Because the pinned-dial transport is now
+reachable in production, `UseProxy = false` in
+`AcademicSourceConnectionPolicy.CreatePinnedHandler` is load-bearing: the .NET
+default (`true`) would let an ambient `HTTP_PROXY`/`HTTPS_PROXY` become the dial
+endpoint, and the guard would then classify the proxy hostname rather than the
+provider's.
+
 Google Books participates only when both `GoogleBooksEnabled` is true and a key
 is configured through environment/secret settings — never committed.
 
@@ -169,9 +242,16 @@ is configured through environment/secret settings — never committed.
   `Isbn13`, `Isbn10`, ...). A second record shape in another phase should be an
   adapter over this one, not a parallel model, so DOI/ISBN dedup keys stay
   comparable across providers.
-- Nothing in this PR calls `AddAcademicSourceDiscovery`; that call, the
-  `AcademicSourceDiscovery` config section and the research-studio consumer all
-  belong to the wiring PR. Until then the feature is present but dormant.
+- Provider-issued addresses are admitted twice over, for two different
+  questions. Persistence uses the shared research predicate (unchanged by this
+  slice); display uses `AcademicProviderLinkPolicy`, applied where the DTO is
+  built, which additionally refuses machine-local hostnames (`.local`,
+  `.internal`, `.test`, `.lan`, `.home`, `.intranet`, `.invalid`,
+  `.localdomain`, `localhost` and `.localhost`), single-label names, userinfo,
+  and IP literals the guard does not classify as publicly routable — including
+  decimal/octal/hex IPv4 and NAT64/6to4/v4-mapped spellings. Neither layer
+  claims to stop a hostname that rebinds after the check: server-side DNS
+  validation does not pin what the browser resolves when the reader clicks.
 
 ## Tests
 

@@ -46,12 +46,27 @@ public static class AcademicSourceServiceCollectionExtensions
 
     private static void RegisterProviderClient<TAdapter>(IServiceCollection services)
         where TAdapter : class
-        => services.AddHttpClient<TAdapter>((services, client) => ConfigureClient(services, client))
+    {
+        var builder = services.AddHttpClient<TAdapter>((services, client) => ConfigureClient(services, client))
             .ConfigurePrimaryHttpMessageHandler(services =>
             {
                 var options = services.GetRequiredService<IOptions<AcademicSourceDiscoveryOptions>>().Value.Normalize();
                 return AcademicSourceConnectionPolicy.CreatePinnedHandler(services.GetRequiredService<IAcademicHostResolver>(), options);
             });
+        // Built-in HttpClientFactory request logging writes the request target at Information level
+        // ("Start processing HTTP request GET <url>") under the category
+        // `System.Net.Http.HttpClient.<name>.<stage>`, and every scholarly request target IS a query
+        // string: the reader's research topic in `q=`, and for Google Books the deployment's
+        // configured key in `key=` as well. Neither belongs in a log sink the deployment ships to,
+        // and neither is recoverable from a line that was redacted badly, so each provider client
+        // gets its own transport-log filter at LogLevel.None. The category is the client's name plus
+        // a pipeline stage, so matching on the name covers both stages now and any stage a future
+        // runtime adds, and it leaves every other client's transport logging untouched. What an
+        // operator needs about a provider call — status plus a coarse failure category, never a
+        // URL, payload or credential — is recorded by the feature's own loggers instead.
+        services.AddLogging(logging =>
+            logging.AddFilter($"System.Net.Http.HttpClient.{builder.Name}", LogLevel.None));
+    }
 
     private static void ConfigureClient(IServiceProvider services, HttpClient client)
     {

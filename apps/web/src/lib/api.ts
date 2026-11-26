@@ -725,6 +725,56 @@ export type ResearchSource = {
   evidence?: ResearchEvidence[];
 };
 export type ResearchEvidence = { topic: string; excerpt: string; context: string | null; publishedAt: string | null };
+// Issue #1267 slice 1 — scholarly source discovery. The shape mirrors the API's customer-facing
+// DTO exactly: there is no provider, model, routing or cost field to receive, and `accessLevel`
+// describes what this service holds (metadata or an abstract), never what the student has read.
+export type AcademicSearchSource = {
+  title: string;
+  authors: string[];
+  publicationYear: number | null;
+  sourceType: string;
+  containerTitle: string | null;
+  publisher: string | null;
+  volume: string | null;
+  issue: string | null;
+  pageRange: string | null;
+  pageCount: number | null;
+  language: string | null;
+  citationCount: number | null;
+  doi: string | null;
+  isbn13: string | null;
+  isbn10: string | null;
+  abstract: string | null;
+  publisherDescription: string | null;
+  landingUrl: string | null;
+  fullTextUrl: string | null;
+  accessLevel: "metadata" | "abstract";
+  fullTextIndicated: boolean;
+  provenance: { basis: string; retrievedAtUtc: string; accessDescription: string };
+  relevance: number | null;
+};
+export type AcademicDoiCheck = { submittedDoi: string; isRegistered: boolean; failureCode: string | null };
+export type AcademicSourceSearchResponse = {
+  workspaceId: string;
+  page: number;
+  pageSize: number;
+  totalMatched: number;
+  hasMore: boolean;
+  partial: boolean;
+  partialNotice: string | null;
+  sources: AcademicSearchSource[];
+  doiChecks: AcademicDoiCheck[];
+};
+export type AcademicSourceSearchParams = {
+  term: string;
+  page: number;
+  pageSize: number;
+  yearFrom?: number | null;
+  yearTo?: number | null;
+  openAccessOnly?: boolean;
+  dois?: string[];
+  isbns?: string[];
+};
 export type AssetStatus = "Active" | "Archived";
 export type AssetType = "image" | "document" | "presentation" | "video" | "audio" | "music" | "research" | "social" | "file" | "other";
 export type Asset = {
@@ -1563,4 +1613,21 @@ export const api = {
   resolveMovieComment: (projectId: string, commentId: string) => request<MovieCollaboration>(`/api/movie-studio/projects/${projectId}/collaboration/comments/${commentId}/resolve`, { method: "POST" }, true),
   requestMovieReview: (projectId: string, input: { targetType: string; targetId: string; reviewerUserId: string; isFinal: boolean; requestNote?: string | null }) => request<MovieCollaboration>(`/api/movie-studio/projects/${projectId}/collaboration/reviews`, { method: "POST", body: JSON.stringify(input) }, true),
   decideMovieReview: (projectId: string, reviewId: string, input: { status: string; decisionNote?: string | null }) => request<MovieCollaboration>(`/api/movie-studio/projects/${projectId}/collaboration/reviews/${reviewId}/decision`, { method: "POST", body: JSON.stringify(input) }, true),
+  // Issue #1267 slice 1: a read-only, workspace-scoped scholarly search. It is a GET with no
+  // CSRF token and no job creation, so it cannot spend credits or change any state; the abort
+  // signal lets a new page or a closed panel cancel the in-flight search. Note what a call is: one
+  // search, every time. The server keeps no cursor and caches no pool, so asking for page 2 is a
+  // second lookup rather than a slice of the answer to page 1, and the two answers can differ.
+  searchAcademicSources: (workspaceId: string, params: AcademicSourceSearchParams, signal?: AbortSignal) => {
+    const query = new URLSearchParams();
+    query.set("q", params.term.trim());
+    query.set("page", String(params.page));
+    query.set("pageSize", String(params.pageSize));
+    if (params.yearFrom) query.set("yearFrom", String(params.yearFrom));
+    if (params.yearTo) query.set("yearTo", String(params.yearTo));
+    if (params.openAccessOnly) query.set("openAccessOnly", "true");
+    for (const doi of params.dois ?? []) query.append("doi", doi);
+    for (const isbn of params.isbns ?? []) query.append("isbn", isbn);
+    return request<AcademicSourceSearchResponse>(`/api/workspaces/${encodeURIComponent(workspaceId)}/academic-sources/search?${query.toString()}`, { signal });
+  },
 };
