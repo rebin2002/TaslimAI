@@ -6,6 +6,7 @@ using System.Text.Json.Nodes;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 using Taslim.Api.Ai;
+using Taslim.Api.Activity;
 using Taslim.Api.Assets;
 using Taslim.Api.Authorization;
 using Taslim.Api.Contracts;
@@ -173,9 +174,42 @@ public interface IGenerationJobService
     Task<bool> AbortPendingMovieProductionAsync(Guid userId, Guid jobId, CancellationToken cancellationToken = default);
     Task<GenerationJob?> RetryAsync(Guid userId, Guid jobId, CancellationToken cancellationToken = default, string? idempotencyKey = null, string? requestId = null);
     Task<GenerationJob?> GetAsync(Guid userId, Guid jobId, CancellationToken cancellationToken = default);
+    /// <summary>
+    /// <see cref="GetAsync"/> plus the live downloadability of exactly the renditions this job's
+    /// published <c>ResultJson</c> snapshot advertises, so the studio read path can answer each
+    /// advertised format from the current stored-file state instead of from the immutable
+    /// publication-time record (issue #1049).
+    ///
+    /// The production service resolves the live facts. The default keeps the historical payload
+    /// byte-for-byte intact for implementations that carry no availability data of their own: it
+    /// performs the same authorized read and pairs it with <c>null</c>, which the contract mapper
+    /// renders as the contract exactly as it is served today.
+    /// </summary>
+    Task<GenerationJobPublishedReadModel?> GetPublishedAsync(Guid userId, Guid jobId, CancellationToken cancellationToken = default) =>
+        ToReadModelWithoutAvailabilityAsync(GetAsync(userId, jobId, cancellationToken));
+
+    private static async Task<GenerationJobPublishedReadModel?> ToReadModelWithoutAvailabilityAsync(Task<GenerationJob?> read)
+    {
+        var job = await read;
+        return job is null ? null : new GenerationJobPublishedReadModel(job, null);
+    }
     Task<GenerationJobListDto?> ListAsync(Guid userId, GenerationJobFilter filter, CancellationToken cancellationToken = default);
     Task<GenerationJobCancelResult> CancelAsync(Guid userId, Guid jobId, CancellationToken cancellationToken = default);
 }
+
+/// <summary>
+/// An authorized generation-job read paired with the live availability of the renditions its
+/// published snapshot advertises.
+///
+/// The dictionary maps representation identity to "the download route would serve this rendition
+/// right now", the same fact <c>AssetService.GetDownloadAsync</c> enforces with
+/// <c>representation.StoredFile is { Status: StoredFileStatus.Ready }</c>. It is <c>null</c> when the
+/// snapshot advertises no renditions at all, which keeps the served contract byte-for-byte what it
+/// was before this seam existed, and is populated - failing closed per identity - as soon as the
+/// snapshot promises at least one download. The job's <c>ResultJson</c> is never rewritten here.
+/// </summary>
+public sealed record GenerationJobPublishedReadModel(GenerationJob Job, IReadOnlyDictionary<Guid, bool>? RepresentationAvailability);
+
 
 internal static class GenerationJobPublicationContract
 {
@@ -326,6 +360,7 @@ public sealed class GenerationJobService(
     IGenerationCostGuardrailService costGuardrails,
     IHttpContextAccessor httpContextAccessor,
     IOptions<ImageGenerationOptions> imageOptions,
+    IOptions<DocumentGenerationOptions> documentOptions,
     MovieCollaborationAccess? movieCollaboration = null) : IGenerationJobService
 {
     public async Task<GenerationJob> CreateAsync(Guid userId, CreateGenerationJobRequest request, CancellationToken cancellationToken = default, string? idempotencyKey = null, string? requestId = null, Guid? retryOfJobId = null)
@@ -453,6 +488,11 @@ public sealed class GenerationJobService(
             throw new GenerationJobValidationException("RETRY_IDEMPOTENCY_REQUIRED", "A retry idempotency key is required.");
         if (string.Equals(source.JobType, GenerationJobTypes.ImageGenerate, StringComparison.OrdinalIgnoreCase) && !imageOptions.Value.Enabled)
             throw new GenerationJobValidationException(GenerationJobErrorCodes.ImageStudioUnavailable, "Image generation is not available right now.");
+        // Same fail-closed boundary as the Image gate above. Every retry entry
+        // point inherits it, so a caller that bypasses the Document Studio route
+        // still cannot resume provider spend while the studio is disabled.
+        if (string.Equals(source.JobType, GenerationJobTypes.DocumentGenerate, StringComparison.OrdinalIgnoreCase) && !documentOptions.Value.Enabled)
+            throw new GenerationJobValidationException(DocumentStudioAvailability.UnavailableCode, DocumentStudioAvailability.UnavailableMessage);
 
         var retryInputJson = source.InputJson;
         MovieDialogueTake? pendingDialogueTake = null;
@@ -700,21 +740,129 @@ public sealed class GenerationJobService(
         return job;
     }
 
+    public async Task<GenerationJobPublishedReadModel?> GetPublishedAsync(Guid userId, Guid jobId, CancellationToken cancellationToken = default)
+    {
+        // Authorization stays exactly where it was: the availability half below only ever runs on a
+        // job this caller has already been allowed to read.
+        var job = await GetAsync(userId, jobId, cancellationToken);
+        if (job is null) return null;
+        return new GenerationJobPublishedReadModel(job, await ReadPublishedRepresentationAvailabilityAsync(userId, job, cancellationToken));
+    }
+
+    /// <summary>
+    /// Answers every rendition the published <c>ResultJson</c> snapshot advertises with the answer the
+    /// download route would give <em>this</em> viewer right now, in ONE projected query regardless of
+    /// how many renditions the snapshot names (issue #1049: the snapshot is baked at completion and is
+    /// never rewritten, so after a retention prune it still promises a download the route refuses with
+    /// <c>409 ASSET_FILE_UNAVAILABLE</c>).
+    ///
+    /// The answer comes from <see cref="AssetService.CanDownloadRepresentation"/>, the same predicate
+    /// <c>AssetService.GetDownloadAsync</c> enforces and <c>AssetContractMapper.ToDto</c> reports, so
+    /// the studio half of the contract cannot advertise a rendition the route refuses. File status is
+    /// only one of its three branches: a Ready file the viewer may not read (conversation-scoped or
+    /// non-shared) and a Ready document rendition whose stored metadata disagrees with the file are
+    /// both refusals, and the studio views have to withdraw for them exactly as the library lane does
+    /// (#1041 / #1092 invariant, applied to the studio path it did not cover).
+    ///
+    /// The set is bounded by construction: the identities come from this authorized job's snapshot and
+    /// nothing else is asked for, only the columns the shared predicate reads are projected (no bytes,
+    /// storage keys, hashes or neighbouring rows), and each identity is additionally pinned to the
+    /// authorized job's own workspace so a stale or foreign identity inside a snapshot fails closed
+    /// instead of reporting another workspace's file state.
+    ///
+    /// Returns <c>null</c> when the snapshot advertises no rendition at all, which leaves the served
+    /// contract byte-for-byte unchanged; a job that promises downloads gets a complete, fail-closed
+    /// answer for each of them.
+    /// </summary>
+    private async Task<IReadOnlyDictionary<Guid, bool>?> ReadPublishedRepresentationAvailabilityAsync(Guid userId, GenerationJob job, CancellationToken cancellationToken)
+    {
+        var advertised = GenerationJobContractMapper.AdvertisedRepresentationIds(job.ResultJson);
+        if (advertised.Count == 0) return null;
+        var advertisedIds = advertised.ToList();
+        var workspaceId = job.WorkspaceId;
+        var rows = await db.AssetRepresentations.AsNoTracking()
+            .Where(representation => advertisedIds.Contains(representation.Id)
+                && representation.Asset.WorkspaceId == workspaceId)
+            .Select(representation => new
+            {
+                representation.Id,
+                representation.AssetId,
+                representation.StoredFileId,
+                representation.RepresentationType,
+                representation.FileName,
+                RepresentationContentType = representation.ContentType,
+                representation.SizeBytes,
+                AssetWorkspaceId = representation.Asset.WorkspaceId,
+                AssetType = representation.Asset.AssetType,
+                // StoredFile is a required relationship (inner join), so these are always present in
+                // a returned row; Project is optional, hence the explicit null branch that EF can
+                // translate to a CASE instead of dereferencing a missing join partner.
+                FileId = representation.StoredFile.Id,
+                FileStatus = representation.StoredFile.Status,
+                FileWorkspaceId = representation.StoredFile.WorkspaceId,
+                FileUserId = representation.StoredFile.UserId,
+                FileProjectId = representation.StoredFile.ProjectId,
+                FileConversationId = representation.StoredFile.ConversationId,
+                FileProjectWorkspaceId = representation.StoredFile.Project == null
+                    ? (Guid?)null
+                    : representation.StoredFile.Project.WorkspaceId,
+                FileContentType = representation.StoredFile.ContentType,
+                FileExtension = representation.StoredFile.Extension,
+                FileSizeBytes = representation.StoredFile.SizeBytes,
+            })
+            .ToListAsync(cancellationToken);
+
+        // Seeded unavailable, then confirmed from the loaded state: an advertised rendition whose row
+        // is gone entirely, and one whose stored file row is gone, is a rendition the route cannot
+        // serve either, so both stay false.
+        var availability = new Dictionary<Guid, bool>(advertisedIds.Count);
+        foreach (var id in advertisedIds) availability[id] = false;
+        foreach (var row in rows)
+        {
+            // Rebuilt from the projection rather than loaded as tracked graph entities: the predicate
+            // reads exactly these members, and only its own answer leaves this method.
+            var asset = new Asset { Id = row.AssetId, WorkspaceId = row.AssetWorkspaceId, AssetType = row.AssetType };
+            var representation = new AssetRepresentation
+            {
+                Id = row.Id,
+                AssetId = row.AssetId,
+                StoredFileId = row.StoredFileId,
+                RepresentationType = row.RepresentationType,
+                FileName = row.FileName,
+                ContentType = row.RepresentationContentType,
+                SizeBytes = row.SizeBytes,
+            };
+            var file = new StoredFile
+            {
+                Id = row.FileId,
+                WorkspaceId = row.FileWorkspaceId,
+                UserId = row.FileUserId,
+                ProjectId = row.FileProjectId,
+                ConversationId = row.FileConversationId,
+                Project = row.FileProjectWorkspaceId is null
+                    ? null
+                    : new Project { Id = row.FileProjectId ?? Guid.Empty, WorkspaceId = row.FileProjectWorkspaceId.Value },
+                Status = row.FileStatus,
+                ContentType = row.FileContentType,
+                Extension = row.FileExtension,
+                SizeBytes = row.FileSizeBytes,
+            };
+            availability[row.Id] = AssetService.CanDownloadRepresentation(asset, representation, file, userId);
+        }
+        return availability;
+    }
+
     public async Task<GenerationJobListDto?> ListAsync(Guid userId, GenerationJobFilter filter, CancellationToken cancellationToken = default)
     {
         if (!await access.IsMemberAsync(userId, filter.WorkspaceId, cancellationToken)) return null;
         var page = ApiPagination.NormalizePage(filter.Page);
         var pageSize = ApiPagination.NormalizePageSize(filter.PageSize);
-        // Mirrors IsPrivateExecutionRecord: research records stay with their creator because the
-        // published report asset is creator-private (#936), and an unscoped presentation export
-        // publishes an asset that AssetVisibility already keeps private to its creator, so in both
-        // cases the result JSON references assets other workspace members cannot read. Expressed
-        // as a translatable predicate so paging and the total count stay consistent with the
-        // hidden records.
-        var query = db.GenerationJobs.AsNoTracking().Where(job => job.WorkspaceId == filter.WorkspaceId &&
-            (job.CreatedByUserId == userId
-                || (job.JobType != GenerationJobTypes.ResearchGenerate
-                    && (job.JobType != GenerationJobTypes.PresentationGenerate || job.ProjectId != null))));
+        // Keep list visibility on the same SQL-translatable policy as the Activity Center and
+        // project overview, including provider-specific deterministic JobType folding.
+        var query = CreatorPrivacyFence.VisibleToMember(
+            db.GenerationJobs.AsNoTracking().Where(job => job.WorkspaceId == filter.WorkspaceId),
+            userId,
+            db.Database.ProviderName);
         if (filter.Status.HasValue) query = query.Where(job => job.Status == filter.Status.Value);
         if (filter.ProjectId.HasValue) query = query.Where(job => job.ProjectId == filter.ProjectId.Value);
         if (!string.IsNullOrWhiteSpace(filter.JobType)) query = query.Where(job => job.JobType == filter.JobType);
@@ -770,20 +918,21 @@ public sealed class GenerationJobService(
     }
 
     // Execution records that describe creator-private output must not disclose the output's
-    // identifiers. Research records embed report text derived from private uploads, and since
-    // #936 the research report asset is creator-private for the same reason, so the record and
-    // the asset hide from co-members together. A presentation job without a project publishes
-    // an asset that AssetVisibility keeps private to its creator, so the asset id,
-    // representation ids and exported file name carried in the presentation result JSON are
-    // private to that creator as well. Project-scoped presentation and other deliverable jobs
-    // keep the intentional workspace sharing surface for both the record and the asset.
+    // identifiers. Research records embed report text derived from private uploads; unscoped
+    // Presentation exports and Social posts also carry creator-private result data. Project-scoped
+    // Presentation and Social jobs keep the intentional workspace-sharing surface.
     private static bool IsPrivateExecutionRecord(GenerationJob job, Guid userId) =>
         job.CreatedByUserId != userId
         && (string.Equals(job.JobType, GenerationJobTypes.ResearchGenerate, StringComparison.OrdinalIgnoreCase)
-            || IsUnscopedPresentationExportRecord(job));
+            || IsUnscopedPresentationExportRecord(job)
+            || IsUnscopedSocialRecord(job));
 
     private static bool IsUnscopedPresentationExportRecord(GenerationJob job) =>
         string.Equals(job.JobType, GenerationJobTypes.PresentationGenerate, StringComparison.OrdinalIgnoreCase)
+        && job.ProjectId is null;
+
+    private static bool IsUnscopedSocialRecord(GenerationJob job) =>
+        string.Equals(job.JobType, GenerationJobTypes.SocialGenerate, StringComparison.OrdinalIgnoreCase)
         && job.ProjectId is null;
 
     private async Task CancelUsageAsync(GenerationJob job, string code, CancellationToken cancellationToken)
@@ -1661,6 +1810,7 @@ public sealed class GenerationJobWorker(
             failureUsage ??= (exception as PresentationGenerationStageException)?.Usage;
             failureUsage ??= (exception as ResearchGenerationStageException)?.Usage;
             failureUsage ??= (exception as SocialGenerationStageException)?.Usage;
+            failureUsage ??= ResolveMovieDialogueFailureUsage(exception);
 var qualityFailure = exception as GenerationQualityControlException ?? exception.InnerException as GenerationQualityControlException;
             if (qualityFailure is not null)
             {
@@ -2084,6 +2234,9 @@ var qualityFailure = exception as GenerationQualityControlException ?? exception
             : string.Equals(job.JobType, GenerationJobTypes.VoiceGenerate, StringComparison.OrdinalIgnoreCase)
                 ? GenerationJobErrorCodes.VoiceCancelled
             : GenerationJobErrorCodes.Cancelled;
+
+    internal static AiUsageMetadata? ResolveMovieDialogueFailureUsage(Exception exception) =>
+        (exception as MovieDialogueVoiceOutputInvalidException)?.Usage;
 
     private static string MapFailureCode(Exception exception, string jobType)
     {
