@@ -47,6 +47,7 @@ public class AcademicProjectsApiTests : IClassFixture<TaslimApiFactory>
             ("POST", $"/api/workspaces/{workspace}/academic-projects"),
             ("GET", $"/api/academic-projects/{project}"),
             ("POST", $"/api/academic-projects/{project}/run"),
+            ("POST", $"/api/academic-projects/{project}/recover-abandoned"),
             ("POST", $"/api/academic-projects/{project}/approvals/plan"),
             ("POST", $"/api/academic-projects/{project}/budget"),
             ("GET", $"/api/academic-projects/{project}/evidence-matrix"),

@@ -68,6 +68,7 @@ the global limiter only (asserted by `AcademicProjectsApiTests`).
 | `POST /api/workspaces/{workspaceId}/academic-projects` | Persist research-plan **intake** only — validated by `AcademicWorkflowRequest.Validate`, stored as revision 0 with an `intake` checkpoint. Never auto-runs. `Idempotency-Key` header (preferred) or body `requestKey`; replays return the existing project with HTTP 200 and write nothing. |
 | `GET  /api/academic-projects/{projectId}` | Snapshot summary: stage states, pending approval, approval history, budget usage, artifact counts, `connectedStages` / `missingStages`, `evidenceCurrent`. |
 | `POST /api/academic-projects/{projectId}/run` | Resumable step: advances the workflow as far as it can through committed checkpoints until a gate or the end. If the next actionable stage has no registered handler, answers **501 `ACADEMIC_STAGE_NOT_CONNECTED`** with `missingStage`, `connectedStages` and `resumableAtRevision`, and the stored state does not move. |
+| `POST /api/academic-projects/{projectId}/recover-abandoned` | **Administrator-only** recovery, still workspace-fenced. Requires the current revision/attempt plus `operatorConfirmedWorkerStopped: true` and a non-empty `verificationReason` (max 500 chars). The operator must verify the worker/request has stopped and cannot resume external work; a timeout or old `StartedAtUtc` is never sufficient. The action records the operator, timestamp, attempt and reason in the private workflow snapshot, retains the original reservation, and does not invoke a handler. A later ordinary `run` is a separate action. |
 | `POST /api/academic-projects/{projectId}/approvals/{kind}` | Approval decisions (`Approved`, `RequestRevision`, `Rejected`); replays are no-ops. Returns `APPLIED` / `ALREADY_APPLIED`, or 409 `NO_PENDING_APPROVAL`. RequestRevision clears the gated stage's artifact and everything downstream, carries reviewer notes into the re-run fingerprint, and leaves earlier artifacts (e.g. the discovered library when re-screening) intact. |
 | `POST /api/academic-projects/{projectId}/budget` | Raise ceilings (never lower). Unpauses a `PausedBudget` project only when the ceilings actually change; an equal-after-clamping request answers `BUDGET_UNCHANGED` without a checkpoint. |
 | `GET  /api/academic-projects/{projectId}/evidence-matrix` | Reads the Phase B `AcademicMatrixCell`/`Finding` rows scoped to `(workspaceId, projectId)`. |
@@ -103,6 +104,16 @@ ceilings and spend, which the intake budget the workspace itself supplied.
   committed checkpoint with no re-execution of completed stages and no double
   billing (billable attempts are reserved-then-metered per `attemptKey`; duplicates
   resolve to `DuplicateCheckpoint`).
+- **Abandoned attempts are not member-recoverable.** Only an authenticated administrator
+  who is also a member of the owning workspace can submit recovery. Before confirming,
+  the operator must use platform/runtime evidence to establish that the executing worker
+  and request are stopped and cannot later perform side effects; a client disconnect,
+  elapsed duration or stale-looking timestamp is not proof. The API fails closed when
+  the attestation or reason is absent, records the attestation in the private snapshot,
+  and leaves the reserved usage charged. There is deliberately no automatic recovery
+  timeout. Future side-effectful handlers must retain this verified-stop procedure and
+  independent provider-side idempotency; completion fencing alone does not stop an
+  already-running handler from repeating an external effect.
 - **Approval and budget actions** are themselves checkpointed (`approval|…`,
   `budget-raise|…` keys), so replayed decisions and replayed raises are no-ops by
   construction, not by convention.
@@ -207,7 +218,8 @@ missing and are reported exactly by the API.
 - `apps/api.Tests/AcademicWorkflowStoreTests.cs` — persistence contract: intake
   idempotency, CAS conflicts, checkpoint-key replay without rewrite, byte-identical
   snapshot round-trip, both directions of the workspace fence, forward-only
-  watermark, ledger ordering and scoping.
+  watermark, ledger ordering and scoping; verified recovery attestation is persisted,
+  the reservation remains charged, and a synthetic late return cannot overwrite a retry.
 - `apps/api.Tests/AcademicProjectsApiTests.cs` — the production composition wires only
   `AcademicPlanStageHandler`; coverage includes auth/fences, saved Plan and approval,
   the missing-Discover 501 without terminal failure, zero usage, replay semantics,
@@ -215,9 +227,10 @@ missing and are reported exactly by the API.
 - `apps/api.Tests/AcademicProjectsConnectedFlowTests.cs` — same API with all seven
   Phase C scripted handlers registered through the production seam: full gated
   drain to `Completed` with exact per-stage billing, ledger monotonicity, approval
-  replay, RequestRevision lineage (earlier artifacts survive), budget pause →
-  raise → resume without double charge, projection staleness self-heal and rebuild
-  idempotency, access-boundary rows.
+  replay, RequestRevision lineage (earlier artifacts survive), budget pause → raise →
+  resume without double charge, projection staleness self-heal and rebuild
+  idempotency, access-boundary rows, member denial for live-worker recovery, and
+  administrator-only verified abandoned recovery followed by a normal resume.
 - Local full API verification (2026-11-25): `dotnet test apps/api.Tests/Taslim.Api.Tests.csproj
   --logger 'console;verbosity=minimal'` passed 3,532, skipped 20, failed 0 (8m04s) on .NET 8.
   No disposable PostgreSQL/API stack was configured locally; the 20 environment-conditional

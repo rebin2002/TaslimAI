@@ -14,7 +14,9 @@ using Taslim.Api.AcademicEvidence.Persistence;
 using Taslim.Api.AcademicIntegration;
 using Taslim.Api.AcademicIntegration.Persistence;
 using Taslim.Api.AcademicWorkflow;
+using Taslim.Api.Authorization;
 using Taslim.Api.Contracts;
+using Taslim.Api.Domain;
 using Taslim.Api.Persistence;
 using Taslim.Api.Tests;
 using Xunit;
@@ -83,7 +85,7 @@ public sealed class AcademicProjectsConnectedFlowTests : IClassFixture<AcademicC
     }
 
     [Fact]
-    public async Task Run_reports_live_owner_and_explicit_recovery_fences_the_blocked_request()
+    public async Task Member_recovery_is_denied_while_a_live_attempt_completes_normally()
     {
         var (client, workspaceId) = await RegisterAsync();
         var projectId = await CreateAsync(client, workspaceId, "api-live-attempt-recovery", "Live attempt recovery probe");
@@ -115,18 +117,17 @@ public sealed class AcademicProjectsConnectedFlowTests : IClassFixture<AcademicC
                 (await duplicateRun.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("error").GetProperty("code").GetString());
             Assert.Equal(baselineCalls + 1, handler.Calls.Count);
 
-            var recovered = await PostJsonAsync(client, $"/api/academic-projects/{projectId}/recover-abandoned", new
+            var recovery = await PostJsonAsync(client, $"/api/academic-projects/{projectId}/recover-abandoned", new
             {
                 attemptId,
                 expectedRevision = revision,
+                operatorConfirmedWorkerStopped = true,
+                verificationReason = "A member must not recover a worker that is still executing.",
             });
-            Assert.Equal(HttpStatusCode.OK, recovered.StatusCode);
-            var recoveredBody = await recovered.Content.ReadFromJsonAsync<JsonElement>();
-            Assert.Equal("STAGE_ATTEMPT_RECOVERED", recoveredBody.GetProperty("code").GetString());
-            Assert.Equal(JsonValueKind.Null, recoveredBody.GetProperty("activeAttemptId").ValueKind);
-            Assert.Equal("Failed", recoveredBody.GetProperty("stages").EnumerateArray()
-                .Single(stage => stage.GetProperty("stage").GetString() == "Plan")
-                .GetProperty("state").GetString());
+            Assert.Equal(HttpStatusCode.Forbidden, recovery.StatusCode);
+            var unchanged = await DetailAsync(client, projectId);
+            Assert.Equal(attemptId, unchanged.GetProperty("activeAttemptId").GetGuid());
+            Assert.Equal(revision, unchanged.GetProperty("project").GetProperty("revision").GetInt64());
         }
         finally
         {
@@ -136,10 +137,102 @@ public sealed class AcademicProjectsConnectedFlowTests : IClassFixture<AcademicC
         }
 
         Assert.NotNull(firstResponse);
-        Assert.Equal(HttpStatusCode.Conflict, firstResponse!.StatusCode);
-        var staleBody = await firstResponse.Content.ReadFromJsonAsync<JsonElement>();
-        Assert.Equal("CHECKPOINT_CONFLICT", staleBody.GetProperty("error").GetProperty("code").GetString());
+        Assert.Equal(HttpStatusCode.OK, firstResponse!.StatusCode);
+        var completed = await firstResponse.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal("AwaitingApproval", State(completed));
+        Assert.Equal("Plan", PendingKind(completed));
         Assert.Equal(baselineCalls + 1, handler.Calls.Count);
+    }
+
+    [Fact]
+    public async Task Administrator_can_recover_a_verified_abandoned_attempt_and_resume_normally()
+    {
+        var (client, workspaceId, operatorId) = await RegisterAdminAsync();
+        var projectId = await CreateAsync(client, workspaceId, "verified-abandoned-attempt", "Verified abandoned attempt probe");
+        var attemptId = Guid.NewGuid();
+        const string reason = "Synthetic test operator verified the stage worker was stopped.";
+        long runningRevision;
+
+        using (var scope = _factory.Services.CreateScope())
+        {
+            var store = scope.ServiceProvider.GetRequiredService<IAcademicWorkflowStateStore>();
+            var intake = (await store.LoadAsync(projectId, CancellationToken.None))!;
+            var running = intake.Clone();
+            running.Revision = intake.Revision + 1;
+            running.UpdatedAtUtc = DateTime.UtcNow;
+            running.Stage(AcademicStage.Plan).State = AcademicStageState.Running;
+            running.Stage(AcademicStage.Plan).AttemptCount = 1;
+            running.Stage(AcademicStage.Plan).StartedAtUtc = running.UpdatedAtUtc;
+            running.ActiveAttempt = new AcademicLiveAttempt
+            {
+                AttemptId = attemptId,
+                OwnerId = Guid.NewGuid(),
+                Stage = AcademicStage.Plan,
+                Attempt = 1,
+                StartedAtUtc = running.UpdatedAtUtc,
+            };
+            running.Budget.Add(new AcademicBudgetEntry
+            {
+                AttemptKey = $"synthetic-abandoned|{attemptId:N}",
+                Stage = AcademicStage.Plan,
+                Attempt = 1,
+                ReservedUsd = 0.25m,
+                ReservedProviderCalls = 1,
+            });
+            var committed = await store.TryCommitAsync(
+                running,
+                intake.Revision,
+                $"{projectId:N}|{running.Revision}|synthetic-abandoned-attempt",
+                CancellationToken.None);
+            Assert.Equal(AcademicCommitStatus.Committed, committed.Status);
+            runningRevision = running.Revision;
+        }
+
+        var unverified = await PostJsonAsync(client, $"/api/academic-projects/{projectId}/recover-abandoned", new
+        {
+            attemptId,
+            expectedRevision = runningRevision,
+            operatorConfirmedWorkerStopped = false,
+            verificationReason = "",
+        });
+        Assert.Equal(HttpStatusCode.BadRequest, unverified.StatusCode);
+
+        var recovered = await PostJsonAsync(client, $"/api/academic-projects/{projectId}/recover-abandoned", new
+        {
+            attemptId,
+            expectedRevision = runningRevision,
+            operatorConfirmedWorkerStopped = true,
+            verificationReason = reason,
+        });
+        Assert.Equal(HttpStatusCode.OK, recovered.StatusCode);
+        var recoveredJson = await recovered.Content.ReadAsStringAsync();
+        var recoveredBody = JsonDocument.Parse(recoveredJson).RootElement;
+        Assert.Equal("STAGE_ATTEMPT_RECOVERED", recoveredBody.GetProperty("code").GetString());
+        Assert.Equal(JsonValueKind.Null, recoveredBody.GetProperty("activeAttemptId").ValueKind);
+        Assert.Equal("Failed", recoveredBody.GetProperty("stages").EnumerateArray()
+            .Single(stage => stage.GetProperty("stage").GetString() == "Plan")
+            .GetProperty("state").GetString());
+        Assert.Equal(0.25m, recoveredBody.GetProperty("usage").GetProperty("spentUsd").GetDecimal());
+        Assert.DoesNotContain(reason, recoveredJson, StringComparison.Ordinal);
+
+        using (var scope = _factory.Services.CreateScope())
+        {
+            var store = scope.ServiceProvider.GetRequiredService<IAcademicWorkflowStateStore>();
+            var persisted = (await store.LoadAsync(projectId, CancellationToken.None))!;
+            Assert.Equal(attemptId, persisted.LastAttemptRecovery!.AttemptId);
+            Assert.Equal(operatorId, persisted.LastAttemptRecovery.VerifiedByUserId);
+            Assert.Equal(reason, persisted.LastAttemptRecovery.Reason);
+            Assert.Equal(0.25m, persisted.Budget.Single().ChargedUsd);
+            Assert.Equal(1, persisted.Budget.Single().ChargedProviderCalls);
+        }
+
+        var beforeResume = _factory.StageHandlers[AcademicStage.Plan].Calls.Count;
+        var resumed = await RunAsync(client, projectId);
+        Assert.Equal("AwaitingApproval", State(resumed));
+        Assert.Equal(beforeResume + 1, _factory.StageHandlers[AcademicStage.Plan].Calls.Count);
+        Assert.Equal(2, resumed.GetProperty("stages").EnumerateArray()
+            .Single(stage => stage.GetProperty("stage").GetString() == "Plan")
+            .GetProperty("attemptCount").GetInt32());
     }
 
     [Fact]
@@ -605,6 +698,40 @@ public sealed class AcademicProjectsConnectedFlowTests : IClassFixture<AcademicC
         var auth = await response.Content.ReadFromJsonAsync<AuthResponse>();
         Assert.NotNull(auth);
         return (client, auth.PersonalWorkspace.Id);
+    }
+
+    private async Task<(HttpClient Client, Guid WorkspaceId, Guid UserId)> RegisterAdminAsync()
+    {
+        var client = _factory.CreateClient();
+        var email = $"academic-operator-{Guid.NewGuid():N}@example.com";
+        var csrf = await client.GetFromJsonAsync<JsonElement>("/api/auth/csrf");
+        using var request = new HttpRequestMessage(HttpMethod.Post, "/api/auth/register")
+        {
+            Content = new StringContent(
+                JsonSerializer.Serialize(new
+                {
+                    displayName = "Academic Recovery Operator",
+                    email,
+                    password = "StrongPassword!123",
+                    preferredLanguage = "en",
+                }),
+                Encoding.UTF8, "application/json"),
+        };
+        request.Headers.Add("X-CSRF-TOKEN", csrf.GetProperty("token").GetString()!);
+        var response = await client.SendAsync(request);
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var auth = await response.Content.ReadFromJsonAsync<AuthResponse>();
+        Assert.NotNull(auth);
+
+        using var scope = _factory.Services.CreateScope();
+        var roleManager = scope.ServiceProvider.GetRequiredService<RoleManager<IdentityRole<Guid>>>();
+        var userManager = scope.ServiceProvider.GetRequiredService<UserManager<ApplicationUser>>();
+        if (!await roleManager.RoleExistsAsync(AdminPolicies.Role))
+            Assert.True((await roleManager.CreateAsync(new IdentityRole<Guid>(AdminPolicies.Role))).Succeeded);
+        var user = await userManager.FindByEmailAsync(email);
+        Assert.NotNull(user);
+        Assert.True((await userManager.AddToRoleAsync(user!, AdminPolicies.Role)).Succeeded);
+        return (client, auth.PersonalWorkspace.Id, auth.User.Id);
     }
 
 

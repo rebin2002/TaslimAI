@@ -317,13 +317,15 @@ public sealed class AcademicProjectsService(
         Guid projectId,
         long expectedRevision,
         Guid? attemptId,
+        Guid verifiedByUserId,
+        string verificationReason,
         CancellationToken cancellationToken)
     {
         var snapshot = await LoadFencedAsync(workspaceId, projectId, cancellationToken);
         if (snapshot is null) return AcademicProjectServiceResult.NotFound();
 
         var recovered = await engine.RecoverAbandonedAttemptAsync(
-            projectId, expectedRevision, attemptId, cancellationToken);
+            projectId, expectedRevision, attemptId, verifiedByUserId, verificationReason, cancellationToken);
         if (recovered.Snapshot is null)
             return AcademicProjectServiceResult.NotFound(recovered.Code ?? "PROJECT_NOT_FOUND");
 

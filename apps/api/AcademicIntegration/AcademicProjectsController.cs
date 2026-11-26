@@ -58,7 +58,9 @@ public sealed record AcademicApprovalRequest(
 
 public sealed record AcademicAttemptRecoveryRequest(
     Guid? AttemptId,
-    long? ExpectedRevision);
+    long? ExpectedRevision,
+    bool? OperatorConfirmedWorkerStopped,
+    string? VerificationReason);
 
 public sealed record AcademicStageDto(
     string Stage,
@@ -213,12 +215,13 @@ public sealed record AcademicCheckpointDto(
 /// CSRF like the rest of the API, and every mutation carries the same existing
 /// abuse-boundary policies the comparable lanes use: intake and checkpoint decisions sit
 /// behind the generation policy, a resume (which spends stage work when lanes connect)
-/// behind the expensive-AI policy, and budget changes plus explicit abandoned-attempt
-/// recovery behind account security. Recovery is revision/attempt fenced and never calls
-/// a stage handler. Reads stay on the global limiter only. None of these routes reaches a
-/// scholarly catalog or an export renderer: <c>run</c> can prepare and checkpoint the
-/// deterministic Plan stage; until downstream lanes register stage handlers, it reports
-/// the exact missing stage instead of pretending, and reads return committed checkpoints.
+/// behind the expensive-AI policy, and budget changes plus abandoned-attempt recovery behind
+/// account security. Recovery additionally requires the administrator policy and an explicit
+/// attestation with a reason; it is never enabled by elapsed time. Recovery is revision/attempt
+/// fenced and never calls a stage handler. Reads stay on the global limiter only. None of these
+/// routes reaches a scholarly catalog or an export renderer: <c>run</c> can prepare and
+/// checkpoint the deterministic Plan stage; until downstream lanes register stage handlers,
+/// it reports the exact missing stage instead of pretending, and reads return committed checkpoints.
 /// </summary>
 [ApiController]
 [Authorize]
@@ -314,6 +317,7 @@ public sealed class AcademicProjectsController(
         };
     }
 
+    [Authorize(Policy = AdminPolicies.Usage)]
     [HttpPost("api/academic-projects/{projectId:guid}/recover-abandoned")]
     [ValidateAntiForgeryToken]
     [EnableRateLimiting(RateLimiting.AccountSecurity)]
@@ -326,12 +330,19 @@ public sealed class AcademicProjectsController(
         if (failure is not null) return failure;
         if (request.ExpectedRevision is null or <= 0)
             return ApiResults.Validation(this, "A positive ExpectedRevision is required for abandoned-attempt recovery.");
+        if (request.OperatorConfirmedWorkerStopped is not true
+            || string.IsNullOrWhiteSpace(request.VerificationReason)
+            || request.VerificationReason.Length > 500)
+            return ApiResults.Validation(this,
+                "Administrator recovery requires confirmation that the worker has stopped and a reason of at most 500 characters.");
 
         var outcome = await service.RecoverAbandonedAsync(
             snapshot!.WorkspaceId,
             projectId,
             request.ExpectedRevision.Value,
             request.AttemptId,
+            GetUserId(),
+            request.VerificationReason.Trim(),
             cancellationToken);
         return outcome.Status switch
         {

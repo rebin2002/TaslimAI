@@ -152,8 +152,15 @@ public sealed partial class AcademicWorkflowOrchestrator
         Guid projectId,
         long expectedRevision,
         Guid? expectedAttemptId,
+        Guid verifiedByUserId,
+        string verificationReason,
         CancellationToken cancellationToken)
     {
+        if (verifiedByUserId == Guid.Empty)
+            throw new ArgumentException("A verified operator identity is required for recovery.", nameof(verifiedByUserId));
+        if (string.IsNullOrWhiteSpace(verificationReason) || verificationReason.Length > 500)
+            throw new ArgumentException("A recovery verification reason of 1 to 500 characters is required.", nameof(verificationReason));
+
         var loaded = await store.LoadAsync(projectId, cancellationToken);
         if (loaded is null)
             return AcademicWorkflowRunResult.From(AcademicWorkflowRunStatus.NotFound, null, code: "PROJECT_NOT_FOUND");
@@ -195,6 +202,13 @@ public sealed partial class AcademicWorkflowOrchestrator
         record.LastErrorCode = "STAGE_ATTEMPT_ABANDONED";
         record.LastErrorDetail = "The previous worker was explicitly marked abandoned; its reserved usage remains charged.";
         recovered.ActiveAttempt = null;
+        recovered.LastAttemptRecovery = new AcademicAttemptRecoveryAudit
+        {
+            AttemptId = active?.AttemptId,
+            VerifiedByUserId = verifiedByUserId,
+            VerifiedAtUtc = clock.GetUtcNow().UtcDateTime,
+            Reason = verificationReason.Trim(),
+        };
 
         var attemptLabel = active?.AttemptId.ToString("N") ?? "legacy-unowned";
         var commit = await CommitAsync(

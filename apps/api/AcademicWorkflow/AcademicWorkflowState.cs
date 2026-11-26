@@ -31,6 +31,12 @@ public sealed class AcademicWorkflowSnapshot
     /// </summary>
     public AcademicLiveAttempt? ActiveAttempt { get; set; }
 
+    /// <summary>
+    /// Internal audit of the most recent privileged abandoned-attempt recovery. This stays
+    /// in the workspace-scoped snapshot and is deliberately not part of the member DTO.
+    /// </summary>
+    public AcademicAttemptRecoveryAudit? LastAttemptRecovery { get; set; }
+
     /// <summary>Committed checkpoint revision; starts at 0 and only ever increases.</summary>
     public long Revision { get; set; }
 
@@ -87,6 +93,14 @@ public sealed record AcademicLiveAttempt
     public required AcademicStage Stage { get; init; }
     public required int Attempt { get; init; }
     public required DateTime StartedAtUtc { get; init; }
+}
+
+public sealed record AcademicAttemptRecoveryAudit
+{
+    public Guid? AttemptId { get; init; }
+    public required Guid VerifiedByUserId { get; init; }
+    public required DateTime VerifiedAtUtc { get; init; }
+    public required string Reason { get; init; }
 }
 
 public sealed record AcademicStageRecord

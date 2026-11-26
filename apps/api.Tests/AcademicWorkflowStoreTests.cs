@@ -435,12 +435,15 @@ public sealed class AcademicWorkflowStoreTests
     }
 
     [Fact]
-    public async Task Explicit_recovery_preserves_charge_and_fences_a_late_completion_after_retry()
+    public async Task Verified_recovery_preserves_charge_and_fences_a_synthetic_late_completion_after_retry()
     {
         using var fixture = new Fixture();
         var snapshot = Snapshot(WorkspaceA, "sqlite-abandoned-attempt-recovery");
         Assert.True(await fixture.Store.TryCreateAsync(snapshot, default));
 
+        // Deliberately keep only a synthetic handler live across the state transition to
+        // exercise stale-write fencing. This does not authorize production recovery while
+        // an external handler is live; the API requires a privileged verified-stop action.
         var serializedStore = new SerializedStore(fixture.Store);
         var blockedHandler = new BlockingPlanHandler();
         var abandonedWorker = new AcademicWorkflowOrchestrator(serializedStore, [blockedHandler]);
@@ -450,12 +453,20 @@ public sealed class AcademicWorkflowStoreTests
         var inFlight = await fixture.Store.LoadAsync(snapshot.ProjectId, default);
         var attemptId = Assert.IsType<AcademicLiveAttempt>(inFlight!.ActiveAttempt).AttemptId;
         var recovered = await abandonedWorker.RecoverAbandonedAttemptAsync(
-            snapshot.ProjectId, inFlight.Revision, attemptId, CancellationToken.None);
+            snapshot.ProjectId,
+            inFlight.Revision,
+            attemptId,
+            Guid.Parse("99999999-9999-9999-9999-999999999999"),
+            "Synthetic test-only operator verification for the late-return fencing scenario.",
+            CancellationToken.None);
 
         Assert.Equal(AcademicWorkflowRunStatus.StageFailure, recovered.Status);
         Assert.Equal("STAGE_ATTEMPT_RECOVERED", recovered.Code);
         Assert.Equal(AcademicStageState.Failed, recovered.Snapshot!.Stage(AcademicStage.Plan).State);
         Assert.Null(recovered.Snapshot.ActiveAttempt);
+        Assert.Equal(attemptId, recovered.Snapshot.LastAttemptRecovery!.AttemptId);
+        Assert.Equal("Synthetic test-only operator verification for the late-return fencing scenario.",
+            recovered.Snapshot.LastAttemptRecovery.Reason);
         var abandonedReservation = Assert.Single(recovered.Snapshot.Budget);
         Assert.Null(abandonedReservation.Committed);
         Assert.Equal(abandonedReservation.ReservedUsd, abandonedReservation.ChargedUsd);
