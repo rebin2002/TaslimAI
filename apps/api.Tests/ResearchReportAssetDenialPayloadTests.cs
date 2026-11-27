@@ -48,19 +48,19 @@ namespace Taslim.Api.Tests;
 ///   B. URL-BEARING RESPONSE HEADERS. A 404 denial must not carry a header whose
 ///      NAME is URL-bearing (<c>Location</c>, <c>Content-Location</c>, <c>Link</c>,
 ///      <c>Refresh</c>, <c>Content-Disposition</c>, any <c>*-Redirect</c> or any name
-///      containing url/uri/link/location/redirect/href) and no header VALUE may echo
-///      a live asset identifier. Name-based, so opaque base64 cookies are not false
-///      positives while a relative link in <c>Link</c> is caught.
+///      containing url/uri/link/location/redirect/href), nor URL references, live asset
+///      identifiers or content metadata values/field names in any header VALUE. Opaque
+///      cookie values remain allowed unless they contain one of those actual leaks.
 ///   C. URL REFERENCES OF ANY RESOLUTION MODE IN THE PAYLOAD. Absolute
 ///      (<c>https://host/p</c>), scheme-/protocol-relative (<c>//host/p</c>) and
 ///      root-relative (<c>/api/assets/{id}/download</c>) references are each matched
 ///      explicitly in the body, so the "no signed/download URL of any form" claim is
 ///      no longer carried by a single <c>"://"</c> substring test.
 ///   D. LIVE MUTATION CONTROLS. The assertion core is a pure function over a
-///      captured response, so the injected leaks the review asked for - a
-///      <c>Location</c>/<c>Link</c> header and a relative asset URL in the body - are
-///      replayed against it in-process and must be rejected for the documented arm,
-///      while the pristine envelope must be accepted. Each arm therefore has a
+///      captured response, so injected URL-bearing headers, relative asset URLs in the
+///      body, and URL/content-metadata values in otherwise unclassified header values
+///      are replayed against it in-process and must be rejected for the documented arm,
+///      while the pristine envelope must still be accepted. Each arm therefore has a
 ///      demonstrated red state without touching production code.
 ///
 /// The <c>Task.Delay(150)</c> the review flagged was removed: <c>GenerationJobsApiFactory</c>
@@ -243,6 +243,12 @@ public sealed class ResearchReportAssetDenialPayloadTests : IClassFixture<Resear
                 DenialResponse.Pristine().AsDocumentLeak().WithHeader("Content-Disposition", "attachment; filename=\"" + probe.PdfFileName + "\""), "[header:url-bearing]"),
             ("Ad-hoc URL-bearing header name",
                 DenialResponse.Pristine().WithHeader("X-Asset-Download-Url", assetPath), "[header:url-bearing]"),
+            ("Unclassified header's second value carries an absolute URL",
+                DenialResponse.Pristine().WithHeader("X-Debug", "opaque-safe", "https://cdn.private.invalid/signed?key=abc"), "[header:value-url]"),
+            ("Unclassified header value carries a content-metadata value",
+                DenialResponse.Pristine().WithHeader("X-Asset-Name", probe.Name), "[header:value-metadata]"),
+            ("Unclassified header value carries a content-metadata field name",
+                DenialResponse.Pristine().WithHeader("X-Asset-Metadata", "{\"mimeType\":\"application/pdf\"}"), "[header:value-metadata-field]"),
             ("Header value echoing the live asset id",
                 DenialResponse.Pristine().WithHeader("X-Asset-Id", probe.Id.ToString("D")), "[header:value-leak]"),
             ("Payload with a root-relative asset URL",
@@ -372,11 +378,33 @@ public sealed class ResearchReportAssetDenialPayloadTests : IClassFixture<Resear
         {
             foreach (var value in values)
             {
+                if (AbsoluteUrlPattern.IsMatch(value) || SchemeRelativeUrlPattern.IsMatch(value)
+                    || RootRelativeUrlPattern.IsMatch(value))
+                {
+                    violations.Add($"[header:value-url] {subject} on {channel} denial header '{name}' contains a URL reference '{Truncate(value)}'");
+                }
+
                 foreach (var identifier in probe.LiveIdentifiers)
                 {
                     if (value.Contains(identifier, StringComparison.OrdinalIgnoreCase))
                     {
                         violations.Add($"[header:value-leak] {subject} on {channel} denial header '{name}' echoes live asset value '{identifier}'");
+                    }
+                }
+
+                foreach (var metadata in probe.ContentMetadataValues.Concat(new[] { ReportTitle }).Concat(ForbiddenDocumentMediaMarkers))
+                {
+                    if (value.Contains(metadata, StringComparison.OrdinalIgnoreCase))
+                    {
+                        violations.Add($"[header:value-metadata] {subject} on {channel} denial header '{name}' echoes content-metadata value '{metadata}'");
+                    }
+                }
+
+                foreach (var field in ForbiddenMetadataFields)
+                {
+                    if (value.Contains(field, StringComparison.OrdinalIgnoreCase))
+                    {
+                        violations.Add($"[header:value-metadata-field] {subject} on {channel} denial header '{name}' carries content-metadata field name {field}");
                     }
                 }
             }
@@ -550,12 +578,12 @@ public sealed class ResearchReportAssetDenialPayloadTests : IClassFixture<Resear
         IReadOnlyDictionary<string, IReadOnlyList<string>> Headers,
         string Body)
     {
-        public DenialResponse WithHeader(string name, string value) =>
+        public DenialResponse WithHeader(string name, params string[] values) =>
             this with
             {
                 Headers = new Dictionary<string, IReadOnlyList<string>>(Headers, StringComparer.OrdinalIgnoreCase)
                 {
-                    [name] = new[] { value },
+                    [name] = values,
                 },
             };
 
