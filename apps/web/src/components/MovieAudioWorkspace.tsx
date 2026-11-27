@@ -18,6 +18,7 @@ import {
   movieAudioText,
   type MovieAudioKey,
 } from "@/lib/movieAudioI18n";
+import { formatSoundTrackWindow, sortSoundTracksByAuthoredWindow } from "@/lib/movieAudioWindow";
 
 /**
  * The sound stage. Everything rendered here is a persisted record: the project
@@ -51,12 +52,10 @@ export function MovieAudioWorkspace({ project }: { project: MovieProject }) {
     setLibrary(libraryResult);
     setSoundtrack(soundtrackResult);
     setCaptionTracks(captionResult ?? []);
-    setTracks(
-      trackGroups
-        .filter((group): group is { targetId: string; targetType: string; tracks: MovieSoundTrack[] } => group !== null)
-        .flatMap((group) => group.tracks)
-        .sort((left, right) => left.startMilliseconds - right.startMilliseconds),
-    );
+    const merged = trackGroups
+      .filter((group): group is { targetId: string; targetType: string; tracks: MovieSoundTrack[] } => group !== null)
+      .flatMap((group) => group.tracks);
+    setTracks(sortSoundTracksByAuthoredWindow(merged));
     setLoading(false);
   }, [project.id, shots]);
 
@@ -170,7 +169,7 @@ export function MovieAudioWorkspace({ project }: { project: MovieProject }) {
                   <div>
                     <dt>{text("window")}</dt>
                     <dd>
-                      {formatMovieAudioNumber(locale, track.startMilliseconds)}–{formatMovieAudioNumber(locale, track.endMilliseconds)} ms
+                      {formatSoundTrackWindow(locale, track)}
                     </dd>
                   </div>
                   <div>
