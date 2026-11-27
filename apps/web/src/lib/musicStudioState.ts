@@ -34,7 +34,7 @@ export function musicStudioFailureCopy(
     return { title: t("music.deliveryFailedTitle"), text: t("music.deliveryFailedText"), allowRetry: false };
   }
   if (job?.errorCode === "MUSIC_SUBMISSION_RETRY_BLOCKED") {
-    return { title: t("music.unconfirmedTitle"), text: t("music.retryUnconfirmedText"), allowRetry: false };
+    return { title: t("music.unconfirmedTitle"), text: t("music.unconfirmedText"), allowRetry: false };
   }
   if (job?.status === "Cancelled") {
     if (job.errorCode === "MUSIC_CANCELLED_UNCONFIRMED_SUBMISSION") return { title: t("music.cancelledUnconfirmedTitle"), text: t("music.cancelledUnconfirmedText"), allowRetry: false };

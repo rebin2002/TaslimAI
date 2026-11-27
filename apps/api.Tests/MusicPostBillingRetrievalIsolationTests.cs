@@ -188,6 +188,13 @@ public sealed class MusicProviderOutageRetryPreservationTests : IClassFixture<Mu
 
         Assert.Equal(GenerationJobStatus.Failed.ToString(), failed.Status);
         Assert.Equal(GenerationJobErrorCodes.MusicProviderUnavailable, failed.ErrorCode);
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            var attempt = await db.GenerationProviderAttempts.AsNoTracking().SingleAsync(item => item.GenerationJobId == submitted.Id);
+            Assert.Null(attempt.ProviderExecutionId);
+            Assert.Contains("musicDispatchProtocol", attempt.SafeMetadataJson, StringComparison.Ordinal);
+        }
         // Pre-existing copy is intentionally left untouched for the retryable class.
         Assert.Equal("Music generation is temporarily unavailable. Please try again later.", failed.ErrorMessage);
 
@@ -324,6 +331,13 @@ internal sealed class OutageMusicProvider : IMusicGenerationProvider
 
     public Task<MusicProviderResult> GenerateAsync(MusicGenerationInput request, CancellationToken cancellationToken = default)
         => throw new MusicProviderUnavailableException();
+
+    // Model an actual pre-dispatch outage, before the adapter could hand a paid request to transport.
+    public Task<MusicProviderResult> GenerateAsync(
+        MusicGenerationInput request, CancellationToken cancellationToken,
+        Func<string, Task>? onSubmissionAccepted, Func<Task>? onDispatchSubmitting = null)
+        => GenerateAsync(request, cancellationToken);
+
 }
 
 /// <summary>
@@ -672,6 +686,7 @@ internal sealed class PostureMusicProvider : IMusicGenerationProvider
     public volatile bool DeclareRejected;
     public volatile bool DelayUntilCancelled;
     public volatile bool AcceptThenCancel;
+    public volatile bool CancelWithDispatchMarkerOnly;
     public volatile bool AmbiguousCreateFault;
     public volatile bool AcceptThenRejectWithoutNoCharge;
 
@@ -690,20 +705,21 @@ internal sealed class PostureMusicProvider : IMusicGenerationProvider
             throw new MusicProviderUnavailableException();
         }
         if (onDispatchSubmitting is not null) await onDispatchSubmitting();
-        Interlocked.Increment(ref submissions);
         if (AcceptThenCancel)
         {
-            if (onSubmissionAccepted is not null) await onSubmissionAccepted("posture-accepted-operation");
+            if (!CancelWithDispatchMarkerOnly && onSubmissionAccepted is not null) await onSubmissionAccepted("posture-accepted-operation");
+            Interlocked.Increment(ref submissions);
             try
             {
                 await Task.Delay(Timeout.Infinite, cancellationToken);
             }
-            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested && !CancelWithDispatchMarkerOnly)
             {
                 throw new MusicProviderCancellationWithAcceptedSubmissionException("posture-accepted-operation", outputConfirmedComplete: false);
             }
             throw new MusicProviderUnavailableException();
         }
+        Interlocked.Increment(ref submissions);
         if (AcceptThenRejectWithoutNoCharge)
         {
             if (onSubmissionAccepted is not null) await onSubmissionAccepted("posture-rejected-after-acceptance");
@@ -761,7 +777,7 @@ public sealed class MusicRetryPostureIsolationTests : IClassFixture<MusicPosture
             Assert.Equal(HttpStatusCode.Accepted, created.StatusCode);
             var submitted = (await created.Content.ReadFromJsonAsync<CreateMusicGenerationResponse>(PostureJson))!.Job;
             var failed = await WaitForTerminal(client, submitted.Id);
-            Assert.Equal(GenerationJobErrorCodes.MusicProviderTimeout, failed.ErrorCode);
+            Assert.Equal(GenerationJobErrorCodes.MusicProviderSubmissionUnconfirmed, failed.ErrorCode);
             Assert.Equal(submissionsBefore + 1, provider.Submissions);
 
             using (var scope = factory.Services.CreateScope())
@@ -790,6 +806,8 @@ public sealed class MusicRetryPostureIsolationTests : IClassFixture<MusicPosture
                 var attempt = await db.GenerationProviderAttempts.SingleAsync(item => item.GenerationJobId == submitted.Id);
                 attempt.ProviderExecutionId = null;
                 attempt.SafeMetadataJson = null;
+                var historicalJob = await db.GenerationJobs.SingleAsync(item => item.Id == submitted.Id);
+                historicalJob.ErrorCode = GenerationJobErrorCodes.MusicProviderTimeout;
                 await db.SaveChangesAsync();
             }
             var legacyRetry = await SendWithCsrf(client, HttpMethod.Post, $"/api/generation/jobs/{submitted.Id}/retry", null, $"music-ambiguous-legacy-{Guid.NewGuid():N}");
@@ -915,8 +933,10 @@ public sealed class MusicRetryPostureIsolationTests : IClassFixture<MusicPosture
             provider.DelayUntilCancelled = false;
         }
     }
-    [Fact]
-    public async Task Member_cancelling_an_accepted_music_job_is_refused_on_retry_and_never_posts_a_second_generation()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Cancellation_after_dispatch_remains_uncertain_and_never_posts_a_second_generation(bool markerOnly)
     {
         // The end-to-end regression the billing-fairness policy needs for F-36: the provider accepted the
         // paid generation, the member cancelled it, and no provider-side cancellation was ever issued -
@@ -927,6 +947,7 @@ public sealed class MusicRetryPostureIsolationTests : IClassFixture<MusicPosture
         // the ground truth for "was a second track paid for"; the fixture provider is shared across the
         // class, so it is asserted as a delta.
         var provider = Provider();
+        provider.CancelWithDispatchMarkerOnly = markerOnly;
         provider.AcceptThenCancel = true;
         var submissionsBeforeCreate = provider.Submissions;
         var client = factory.CreateClient();
@@ -992,6 +1013,7 @@ public sealed class MusicRetryPostureIsolationTests : IClassFixture<MusicPosture
         finally
         {
             provider.AcceptThenCancel = false;
+            provider.CancelWithDispatchMarkerOnly = false;
             // Never strand the shared fixture on an in-flight job: if the test failed before its own
             // cancellation ran, cancel and drain it so the neighbouring posture tests still get a worker.
             if (jobId is Guid orphan)

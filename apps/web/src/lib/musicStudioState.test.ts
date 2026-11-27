@@ -38,7 +38,7 @@ describe("music studio state", () => {
   it("keeps ordinary failures retryable and separates known delivery failures from uncertain outcomes", () => {
     const copy = (code: string | null, status: GenerationJob["status"] = "Failed") => musicStudioFailureCopy(job({ status, errorCode: code }), (key) => key);
     expect(copy("MUSIC_PROVIDER_SUBMISSION_UNCONFIRMED")).toEqual({ title: "music.unconfirmedTitle", text: "music.unconfirmedText", allowRetry: false });
-    expect(copy("MUSIC_SUBMISSION_RETRY_BLOCKED")).toEqual({ title: "music.unconfirmedTitle", text: "music.retryUnconfirmedText", allowRetry: false });
+    expect(copy("MUSIC_SUBMISSION_RETRY_BLOCKED")).toEqual({ title: "music.unconfirmedTitle", text: "music.unconfirmedText", allowRetry: false });
     expect(copy("MUSIC_SUBMISSION_RETRY_BLOCKED", "Cancelled").allowRetry).toBe(false);
     for (const code of ["MUSIC_OUTPUT_RETRIEVAL_FAILED", "MUSIC_RETRIEVAL_RETRY_BLOCKED"]) {
       expect(copy(code)).toEqual({ title: "music.deliveryFailedTitle", text: "music.deliveryFailedText", allowRetry: false });

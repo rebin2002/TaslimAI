@@ -334,18 +334,53 @@ public sealed class MubertMusicGenerationProviderTests
     }
 
     [Fact]
-    public async Task Timeout_before_the_create_is_answered_stays_a_retryable_provider_timeout()
+    public async Task A_status_response_body_fault_after_acceptance_preserves_the_original_operation()
     {
-        // The genuinely unsubmitted stage: the track-creation POST itself never returns a body, so no
-        // generation id exists and nothing can have been charged. The retryable timeout class is correct
-        // here, and it is the only music timeout that stays retryable.
+        var handler = new MubertHandler((_, number) => number == 1
+            ? Json(HttpStatusCode.OK, "{\"data\":{\"id\":\"original-track\"}}")
+            : new HttpResponseMessage(HttpStatusCode.OK) { Content = new StreamContent(new IoFaultingStream()) });
+        var provider = CreateProvider(handler);
+        string? acceptedId = null;
+
+        await Assert.ThrowsAsync<MusicProviderSubmissionUnconfirmedException>(() => provider.GenerateAsync(
+            Input(), CancellationToken.None, id => { acceptedId = id; return Task.CompletedTask; }));
+
+        Assert.Equal("original-track", acceptedId);
+        Assert.Collection(handler.Requests, post => Assert.Equal(HttpMethod.Post, post.Method),
+            get => { Assert.Equal(HttpMethod.Get, get.Method); Assert.EndsWith("/tracks/original-track", get.RequestUri!.AbsolutePath); });
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task A_lost_or_incomplete_create_response_is_unconfirmed(bool lostResponse)
+    {
+        var handler = new MubertHandler((_, _) =>
+            lostResponse ? throw new HttpRequestException("synthetic lost create response")
+                : Json(HttpStatusCode.OK, "{}"));
+        var provider = CreateProvider(handler);
+        var dispatches = 0;
+        var acceptances = 0;
+
+        await Assert.ThrowsAsync<MusicProviderSubmissionUnconfirmedException>(() => provider.GenerateAsync(
+            Input(), CancellationToken.None, _ => { acceptances++; return Task.CompletedTask; },
+            () => { dispatches++; return Task.CompletedTask; }));
+
+        Assert.Equal(1, dispatches);
+        Assert.Equal(0, acceptances);
+        Assert.Equal(HttpMethod.Post, Assert.Single(handler.Requests).Method);
+    }
+
+    [Fact]
+    public async Task Timeout_while_reading_the_create_response_is_unconfirmed_and_never_reposts()
+    {
         var handler = new MubertHandler((_, _) => new HttpResponseMessage(HttpStatusCode.OK)
         {
             Content = new StreamContent(new BlockingStream()),
         });
         var provider = CreateProvider(handler, providerTimeoutSeconds: 1);
 
-        await Assert.ThrowsAsync<MusicProviderTimeoutException>(() => provider.GenerateAsync(Input()));
+        await Assert.ThrowsAsync<MusicProviderSubmissionUnconfirmedException>(() => provider.GenerateAsync(Input()));
         Assert.Single(handler.Requests, request => request.Method == HttpMethod.Post);
     }
 

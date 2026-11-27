@@ -72,6 +72,7 @@ public sealed class MubertMusicGenerationProvider(
         // leave the track id in the log so the pending generation can be reconciled by hand. Both
         // automatic and customer retries stay blocked until a provider outcome explicitly proves no
         // charge; Mubert does not currently make that billing promise for a failed track.
+        var dispatchStarted = false;
         var providerSubmissionAccepted = false;
         string? providerTrackId = null;
 
@@ -83,6 +84,7 @@ public sealed class MubertMusicGenerationProvider(
             // write it aborts before the transport is called, so a later retry cannot duplicate a
             // request that never left this process.
             if (onDispatchSubmitting is not null) await onDispatchSubmitting();
+            dispatchStarted = true;
 
             var createdBody = await SendJsonWithRetryAsync(
                 HttpMethod.Post,
@@ -97,9 +99,10 @@ public sealed class MubertMusicGenerationProvider(
                     mode = NormalizeMode(settings.MubertMode),
                 },
                 timeout.Token);
-            var created = ReadEnvelope<MubertTrackResource>(createdBody)?.Data
-                ?? throw new MusicProviderFailureException();
-            if (string.IsNullOrWhiteSpace(created.Id)) throw new MusicProviderFailureException();
+            MubertTrackResource? created;
+            try { created = ReadEnvelope<MubertTrackResource>(createdBody)?.Data; }
+            catch (MusicProviderFailureException) { throw new MusicProviderSubmissionUnconfirmedException(); }
+            if (string.IsNullOrWhiteSpace(created?.Id)) throw new MusicProviderSubmissionUnconfirmedException();
             providerSubmissionAccepted = true;
             providerTrackId = created.Id;
 
@@ -251,14 +254,12 @@ public sealed class MubertMusicGenerationProvider(
                 throw new MusicOutputRetrievalFailedException();
             }
 
-            if (providerSubmissionAccepted)
+            if (dispatchStarted)
             {
-                // Accepted, unconfirmed: the paid generation may exist, so the retryable timeout code
-                // would be a duplicate-submission instruction. Terminal, with the id kept for
-                // reconciliation; nothing provider-sensitive is carried in the message.
+                // The create has left the dispatch gate. A lost response cannot prove the job was rejected.
                 logger.LogWarning(
                     exception,
-                    "Mubert music provider timed out before an accepted track's completion could be confirmed; the generation was not re-submitted. ProviderKey={ProviderKey}; ModelKey={ModelKey}; ProviderOperationId={ProviderOperationId}",
+                    "Mubert music provider timed out before the submitted track's outcome could be confirmed; the generation was not re-submitted. ProviderKey={ProviderKey}; ModelKey={ModelKey}; ProviderOperationId={ProviderOperationId}",
                     Key,
                     settings.Model,
                     providerTrackId);
@@ -267,6 +268,11 @@ public sealed class MubertMusicGenerationProvider(
 
             logger.LogWarning("Mubert music provider timed out. ProviderKey={ProviderKey}; ModelKey={ModelKey}", Key, settings.Model);
             throw new MusicProviderTimeoutException();
+        }
+        catch (Exception exception) when (dispatchStarted && !billableOutputReceived && exception is (HttpRequestException or IOException))
+        {
+            // Response headers alone do not tell us whether the create or an accepted job finished.
+            throw new MusicProviderSubmissionUnconfirmedException();
         }
         catch (UriFormatException exception)
         {
@@ -309,6 +315,10 @@ public sealed class MubertMusicGenerationProvider(
                 logger.LogWarning(exception, "Mubert request failed transiently; retrying. Attempt={Attempt}", attempt + 1);
                 await RetryDelayAsync(attempt, cancellationToken);
                 continue;
+            }
+            catch (HttpRequestException) when (method == HttpMethod.Post)
+            {
+                throw new MusicProviderSubmissionUnconfirmedException();
             }
             catch (HttpRequestException exception)
             {

@@ -132,18 +132,37 @@ public sealed class StableAudioMusicGenerationProviderTests
         Assert.Single(handler.Requests, request => request.Method == HttpMethod.Post);
     }
 
-    [Fact]
-    public async Task Timeout_before_the_create_is_answered_stays_a_retryable_provider_timeout()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task A_lost_or_incomplete_create_response_is_unconfirmed(bool lostResponse)
     {
-        // The genuinely unsubmitted stage: the create POST never returns a body, so no generation id
-        // exists and nothing can have been charged. This is the one case that keeps the retryable class.
+        var handler = new StableAudioHandler((_, _) =>
+            lostResponse ? throw new HttpRequestException("synthetic lost create response")
+                : Json(HttpStatusCode.Accepted, "{}"));
+        var provider = CreateProvider(handler);
+        var dispatches = 0;
+        var acceptances = 0;
+
+        await Assert.ThrowsAsync<MusicProviderSubmissionUnconfirmedException>(() => provider.GenerateAsync(
+            Input(), CancellationToken.None, _ => { acceptances++; return Task.CompletedTask; },
+            () => { dispatches++; return Task.CompletedTask; }));
+
+        Assert.Equal(1, dispatches);
+        Assert.Equal(0, acceptances);
+        Assert.Equal(HttpMethod.Post, Assert.Single(handler.Requests).Method);
+    }
+
+    [Fact]
+    public async Task Timeout_while_reading_the_create_response_is_unconfirmed_and_never_reposts()
+    {
         var handler = new StableAudioHandler((_, _) => new HttpResponseMessage(HttpStatusCode.Accepted)
         {
             Content = new StreamContent(new HangingStream()),
         });
         var provider = CreateProvider(handler, providerTimeoutSeconds: 1);
 
-        await Assert.ThrowsAsync<MusicProviderTimeoutException>(() => provider.GenerateAsync(Input()));
+        await Assert.ThrowsAsync<MusicProviderSubmissionUnconfirmedException>(() => provider.GenerateAsync(Input()));
         Assert.Single(handler.Requests, request => request.Method == HttpMethod.Post);
     }
 

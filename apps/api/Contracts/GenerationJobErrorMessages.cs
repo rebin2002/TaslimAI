@@ -94,7 +94,7 @@ public static class GenerationJobErrorMessages
             // an outcome that was never observed and neither invites another submission - the accepted
             // attempt may still be running and billing, so RetryAsync refuses the retry (see
             // GenerationJobExecution.RetryAsync) and the copy points at reconciliation instead.
-            GenerationJobErrorCodes.MusicCancelledUnconfirmedSubmission => "The music generation was cancelled after the provider had already accepted it, so the first attempt may still finish and may still be charged. It was not started again, and it will not be retried until that attempt has been reconciled. Please contact support if the track does not appear.",
+            GenerationJobErrorCodes.MusicCancelledUnconfirmedSubmission => "The music job was cancelled. The provider may have already accepted the original request, so the first attempt may still finish and may still be charged. It was not started again, and it will not be retried until that attempt has been reconciled. Please contact support if the track does not appear.",
             // Here the finished track IS established - polling saw it complete - and only the delivery
             // was lost to the cancellation, so the copy may say so without claiming a second generation.
             GenerationJobErrorCodes.MusicCancelledUndeliveredOutput => "Your music was generated, but the cancellation stopped it before the finished track could be delivered. It was not generated a second time. Please contact support to recover it.",

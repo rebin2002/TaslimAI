@@ -63,6 +63,7 @@ public sealed class StableAudioMusicGenerationProvider(
         // customer copy asserts the music was generated. Both automatic and customer retries stay
         // blocked until reconciliation establishes a provider-declared no-charge outcome; the
         // generation id remains in the log so the pending result can be reconciled by hand.
+        var dispatchStarted = false;
         var providerSubmissionAccepted = false;
         string? providerGenerationId = null;
 
@@ -79,6 +80,7 @@ public sealed class StableAudioMusicGenerationProvider(
             // write it aborts before the transport is called, so a later retry cannot duplicate a
             // request that never left this process.
             if (onDispatchSubmitting is not null) await onDispatchSubmitting();
+            dispatchStarted = true;
 
             var stopwatch = Stopwatch.StartNew();
             var createdBody = await SendCreateAsync(
@@ -271,13 +273,12 @@ public sealed class StableAudioMusicGenerationProvider(
                 throw new MusicOutputRetrievalFailedException();
             }
 
-            if (providerSubmissionAccepted)
+            if (dispatchStarted)
             {
-                // Accepted, unconfirmed: charging state unknown, so the retryable timeout code would
-                // instruct a second paid submission. Terminal instead, with the id logged.
+                // The create has left the dispatch gate. A lost response cannot prove the job was rejected.
                 logger.LogWarning(
                     exception,
-                    "Stable Audio music provider timed out before an accepted generation's completion could be confirmed; the generation was not re-submitted. ProviderKey={ProviderKey}; ProviderOperationId={ProviderOperationId}",
+                    "Stable Audio music provider timed out before the submitted generation's outcome could be confirmed; the generation was not re-submitted. ProviderKey={ProviderKey}; ProviderOperationId={ProviderOperationId}",
                     Key,
                     providerGenerationId);
                 throw new MusicProviderSubmissionUnconfirmedException();
@@ -285,6 +286,11 @@ public sealed class StableAudioMusicGenerationProvider(
 
             logger.LogWarning("Stable Audio music provider timed out. ProviderKey={ProviderKey}", Key);
             throw new MusicProviderTimeoutException();
+        }
+        catch (Exception exception) when (dispatchStarted && !billableResultReceived && exception is (HttpRequestException or IOException))
+        {
+            // Response headers alone do not tell us whether the create or an accepted job finished.
+            throw new MusicProviderSubmissionUnconfirmedException();
         }
         catch (UriFormatException exception)
         {
@@ -306,8 +312,8 @@ public sealed class StableAudioMusicGenerationProvider(
             }
             catch (HttpRequestException exception)
             {
-                logger.LogWarning(exception, "Stable Audio create request failed.");
-                throw new MusicProviderUnavailableException();
+                logger.LogWarning(exception, "Stable Audio create response was lost.");
+                throw new MusicProviderSubmissionUnconfirmedException();
             }
 
             using (response)
@@ -458,7 +464,7 @@ public sealed class StableAudioMusicGenerationProvider(
             if (!string.IsNullOrWhiteSpace(response?.Id)) return response.Id;
         }
         catch (JsonException) { }
-        throw new MusicProviderFailureException();
+        throw new MusicProviderSubmissionUnconfirmedException();
     }
 
     private static string ClassifyFailure(HttpStatusCode status, bool preSubmissionCreateResponse) =>

@@ -526,18 +526,12 @@ public sealed class GenerationJobService(
                 GenerationJobErrorCodes.MusicSubmissionRetryBlocked,
                 "This retry was blocked because the first attempt may already have reached the provider and its outcome has not been reconciled yet. Starting another would risk a duplicate paid generation.");
         }
-        if (string.Equals(source.JobType, GenerationJobTypes.MusicGenerate, StringComparison.OrdinalIgnoreCase))
+        if (string.Equals(source.JobType, GenerationJobTypes.MusicGenerate, StringComparison.OrdinalIgnoreCase)
+            && await GenerationJobWorker.HasUnresolvedMusicAttemptAsync(db, source.Id, null, cancellationToken))
         {
-            var attempts = await db.GenerationProviderAttempts.AsNoTracking()
-                .Where(item => item.GenerationJobId == source.Id)
-                .Select(item => new { item.ProviderExecutionId, item.SafeMetadataJson })
-                .ToListAsync(cancellationToken);
-            if (attempts.Any(item => !GenerationJobWorker.IsSafeMusicRetryEvidence(item.ProviderExecutionId, item.SafeMetadataJson)))
-            {
-                throw new GenerationJobValidationException(
-                    GenerationJobErrorCodes.MusicSubmissionRetryBlocked,
-                    "This retry was blocked because the persisted provider-attempt evidence does not prove that the previous music request was unsubmitted or explicitly not charged.");
-            }
+            throw new GenerationJobValidationException(
+                GenerationJobErrorCodes.MusicSubmissionRetryBlocked,
+                "This retry was blocked because the persisted provider-attempt evidence does not prove that the previous music request was unsubmitted or explicitly not charged.");
         }
         if (string.Equals(source.JobType, GenerationJobTypes.ImageGenerate, StringComparison.OrdinalIgnoreCase) && !imageOptions.Value.Enabled)
             throw new GenerationJobValidationException(GenerationJobErrorCodes.ImageStudioUnavailable, "Image generation is not available right now.");
@@ -1951,20 +1945,20 @@ await RecoverExpiredClaimsAsync(db, usage, movieExecutions, notifications, scope
                 await dialogueExecutions.MarkCancelledAsync(claimedJob.Id, CancellationToken.None);
             if (providerAttempt is not null)
                 await budget.CompleteAttemptAsync(providerAttempt, null, false, GenerationProviderAttemptStatus.Cancelled, GenerationJobErrorCodes.Cancelled, CancellationToken.None);
-            // F-36: WHICH cancellation was it? A music cancellation raised after the provider accepted
-            // the paid submission carries a distinct terminal code, because nothing cancels the accepted
-            // operation at the provider: the attempt may still finish and may still bill, so the retry
-            // endpoint must refuse it instead of treating it like an ordinary cancellation. Every other
-            // cancellation - including a music cancellation before acceptance - keeps its existing
-            // per-type code and stays retryable, which MusicRetryPostureIsolationTests pins both ways.
-            // The provider-attempt telemetry above deliberately keeps the generic Cancelled status: it
-            // records how the attempt ended for operators, not the customer-facing outcome.
-            var (cancelCode, cancelMessage) = cancellationException switch
+            var cancelCode = cancellationException switch
             {
-                MusicProviderCancellationWithAcceptedSubmissionException { OutputConfirmedComplete: true } => (GenerationJobErrorCodes.MusicCancelledUndeliveredOutput, "The music generation was cancelled before the finished track could be delivered."),
-                MusicProviderCancellationWithAcceptedSubmissionException { OutputConfirmedComplete: false } => (GenerationJobErrorCodes.MusicCancelledUnconfirmedSubmission, "The music generation was cancelled after the provider accepted it, so its outcome has not been reconciled."),
-                _ => (CancellationCode(claimedJob), "The job was cancelled."),
+                MusicProviderCancellationWithAcceptedSubmissionException { OutputConfirmedComplete: true } => GenerationJobErrorCodes.MusicCancelledUndeliveredOutput,
+                MusicProviderCancellationWithAcceptedSubmissionException => GenerationJobErrorCodes.MusicCancelledUnconfirmedSubmission,
+                _ => CancellationCode(claimedJob),
             };
+            // A lost create response can leave only the dispatch marker. A plain cancellation from
+            // the transport must agree with recovery and retry admission on this same evidence.
+            if (cancelCode == GenerationJobErrorCodes.MusicCancelled
+                && await HasUnresolvedMusicAttemptAsync(db, claimedJob.Id, claimedJob.ConcurrencyToken, CancellationToken.None))
+                cancelCode = GenerationJobErrorCodes.MusicCancelledUnconfirmedSubmission;
+            var cancelMessage = cancelCode == CancellationCode(claimedJob)
+                ? "The job was cancelled."
+                : GenerationJobErrorMessages.For(cancelCode);
             // Host shutdown cancels stoppingToken before this handler exits. Durable
             // cancellation must still commit so the job does not remain Running until
             // lease recovery on the next process.
@@ -1978,6 +1972,9 @@ await RecoverExpiredClaimsAsync(db, usage, movieExecutions, notifications, scope
             if (!publicationCommitted)
                 foreach (var publication in publications) await publisher.DiscardAsync(publication, CancellationToken.None);
             var failureCode = MapFailureCode(exception, claimedJob.JobType);
+            if (failureCode is (GenerationJobErrorCodes.MusicProviderTimeout or GenerationJobErrorCodes.MusicProviderUnavailable or GenerationJobErrorCodes.MusicGenerationFailed)
+                && await HasUnresolvedMusicAttemptAsync(db, claimedJob.Id, claimedJob.ConcurrencyToken, CancellationToken.None))
+                failureCode = GenerationJobErrorCodes.MusicProviderSubmissionUnconfirmed;
             var failureClassification = GenerationFailureClassifier.Classify(failureCode);
             if (GenerationJobTypes.MovieTypes.Contains(claimedJob.JobType))
             {
@@ -2458,6 +2455,17 @@ var qualityFailure = exception as GenerationQualityControlException ?? exception
         if (operationRows.Count == 0 && markerRows.Count == 0)
             return (false, null, null, unmarkedRows.Any(item => !HasMusicDispatchProtocol(item.SafeMetadataJson)));
         return (true, null, null, true);
+    }
+
+    internal static async Task<bool> HasUnresolvedMusicAttemptAsync(
+        TaslimDbContext db, Guid jobId, Guid? claimToken, CancellationToken cancellationToken)
+    {
+        var attempts = db.GenerationProviderAttempts.AsNoTracking().Where(item => item.GenerationJobId == jobId);
+        if (claimToken.HasValue)
+            attempts = attempts.Where(item => item.JobConcurrencyToken == claimToken.Value);
+        var evidence = await attempts.Select(item => new { item.ProviderExecutionId, item.SafeMetadataJson })
+            .ToListAsync(cancellationToken);
+        return evidence.Any(item => !IsSafeMusicRetryEvidence(item.ProviderExecutionId, item.SafeMetadataJson));
     }
 
     internal static bool IsSafeMusicRetryEvidence(string? providerExecutionId, string? safeMetadataJson)
