@@ -1,3 +1,4 @@
+using System.Buffers.Binary;
 using System.IO.Compression;
 using System.Text;
 using System.Text.Json;
@@ -73,6 +74,8 @@ public static class GeneratedMediaSecurity
     {
         if (content.Length <= 0) throw new FileUploadValidationException("Generated file is empty.");
         ValidateHeader(descriptor, content);
+        if (descriptor.ContentType.StartsWith("image/", StringComparison.OrdinalIgnoreCase))
+            ValidateImageCompleteness(descriptor, content);
 
         switch (descriptor.Extension)
         {
@@ -159,6 +162,238 @@ public static class GeneratedMediaSecurity
 
     private static bool IsMpegFrame(ReadOnlySpan<byte> content) =>
         content.Length >= 2 && content[0] == 0xFF && (content[1] & 0xE0) == 0xE0;
+
+    private static void ValidateImageCompleteness(GeneratedMediaDescriptor descriptor, ReadOnlySpan<byte> content)
+    {
+        var complete = descriptor.Extension switch
+        {
+            ".png" => IsCompletePng(content),
+            ".jpg" or ".jpeg" => IsCompleteJpeg(content),
+            ".webp" => IsCompleteWebp(content),
+            // A registered image container with no completeness rule must not silently skip the
+            // gate: an unbounded default would accept any truncated output the moment a new image
+            // extension is added to the registry above, so an unknown container fails closed.
+            _ => false,
+        };
+
+        if (!complete)
+            throw new FileUploadValidationException("Generated image is truncated or structurally incomplete.");
+    }
+
+    private static bool IsCompletePng(ReadOnlySpan<byte> content)
+    {
+        // Presence checks alone are not completeness: a file holding only an IHDR and a trailing
+        // IEND passes a signature/terminator test while carrying no pixel data at all, and that is
+        // exactly what a truncated provider response can look like once the IDAT chain is lost. So
+        // the chunk stream is walked: IHDR must be first with its declared header length, at least
+        // one IDAT chunk must carry a non-empty payload, IEND must be reached as a zero-length
+        // chunk, and every declared length must fit inside the buffer. Bytes trailing IEND are
+        // tolerated only as zero fill, mirroring IsCompleteJpeg's rule for data after EOI.
+        if (content.Length < 40
+            || !content[..8].SequenceEqual(new byte[] { 0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A }))
+        {
+            return false;
+        }
+
+        var index = 8L;
+        var sawImageData = false;
+        while (index + 12 <= content.Length)
+        {
+            var start = (int)index;
+            var length = BinaryPrimitives.ReadUInt32BigEndian(content[start..(start + 4)]);
+            if (length > int.MaxValue - 12) return false;
+            var end = index + 12 + length;
+            if (end > content.Length) return false;
+
+            var type = content[(start + 4)..(start + 8)];
+            if (index == 8)
+            {
+                // IHDR is mandatory, must open the chunk stream, and has a fixed 13-byte payload;
+                // without it the offsets below would describe an arbitrary byte sequence.
+                if (!type.SequenceEqual("IHDR"u8) || length != 13) return false;
+            }
+            else if (type.SequenceEqual("IHDR"u8))
+            {
+                // PNG permits exactly one IHDR, at the start of the chunk stream.
+                return false;
+            }
+            else if (type.SequenceEqual("IDAT"u8))
+            {
+                sawImageData = sawImageData || length > 0;
+            }
+            else if (type.SequenceEqual("IEND"u8))
+            {
+                // IEND declares an empty payload and ends the image. Anything other than zero fill
+                // behind it means the terminator was not really the terminator.
+                return length == 0 && sawImageData && IsPngFill(content[(int)end..]);
+            }
+
+            index = end;
+        }
+
+        return false;
+    }
+
+    private static bool IsPngFill(ReadOnlySpan<byte> tail)
+    {
+        foreach (var value in tail)
+            if (value != 0x00) return false;
+        return true;
+    }
+
+    private static bool IsCompleteJpeg(ReadOnlySpan<byte> content)
+    {
+        if (content.Length < 4 || content[0] != 0xFF || content[1] != 0xD8)
+            return false;
+
+        // Walk the marker segments instead of searching for an FFD9 pair anywhere. A byte search
+        // is satisfied by an FFD9 sequence that lives inside a segment body (an EXIF thumbnail or
+        // a comment payload), so a file truncated after the metadata block but before the end of
+        // the scan data still looked complete. Here each segment is skipped by its declared
+        // length, entropy-coded data is stepped over with its 0xFF00 byte stuffing honoured, and
+        // the file is complete only when the walk reaches EOI with nothing but fill bytes behind
+        // it. A well-formed walk is not by itself evidence of a picture: reaching EOI immediately
+        // after SOI, or after nothing but metadata segments (APPn/COM/DNL), is a container with no
+        // image either, so EOI is only accepted once the walk has also seen a frame definition
+        // (an SOFn marker) and a scan start (SOS). Restart markers are handled inside the scan, so
+        // a multi-scan or progressive JPEG is not rejected.
+        var index = 2;
+        var inScanData = false;
+        var sawFrameDefinition = false;
+        var sawScanStart = false;
+        var sawScanData = false;
+        while (index + 1 < content.Length)
+        {
+            if (inScanData)
+            {
+                // Inside entropy-coded data every 0xFF is stuffed with a following 0x00, so the
+                // first 0xFF whose successor is non-zero starts the next marker.
+                if (content[index] == 0xFF && content[index + 1] != 0x00)
+                    inScanData = false;
+                else
+                {
+                    sawScanData = true;
+                    index++;
+                }
+                continue;
+            }
+
+            if (content[index] != 0xFF) return false;
+            while (index < content.Length && content[index] == 0xFF) index++;
+            if (index >= content.Length) return false;
+
+            var marker = content[index++];
+            if (marker == 0xD9) return sawFrameDefinition && sawScanStart && sawScanData && IsJpegFill(content[index..]);
+            if (marker is 0x01) continue;
+            if (marker >= 0xD0 && marker <= 0xD7)
+            {
+                inScanData = true;
+                continue;
+            }
+
+            // 0xC0-0xCF are the frame markers, except 0xC4 (DHT), 0xC8 (reserved) and 0xCC (DAC).
+            if (marker is >= 0xC0 and <= 0xCF and not 0xC4 and not 0xC8 and not 0xCC)
+                sawFrameDefinition = true;
+
+            if (!TryReadSegmentLength(content, ref index)) return false;
+            if (marker == 0xDA)
+            {
+                inScanData = true;
+                sawScanStart = true;
+            }
+        }
+
+        return false;
+    }
+
+    private static bool TryReadSegmentLength(ReadOnlySpan<byte> content, ref int index)
+    {
+        if (index + 2 > content.Length) return false;
+        var segmentLength = BinaryPrimitives.ReadUInt16BigEndian(content[index..(index + 2)]);
+        if (segmentLength < 2 || index + segmentLength > content.Length) return false;
+        index += segmentLength;
+        return true;
+    }
+
+    private static bool IsJpegFill(ReadOnlySpan<byte> tail)
+    {
+        // FFD9 is the last real marker; JPEG permits 0xFF fill bytes and 0x00 padding after it.
+        foreach (var value in tail)
+            if (value is not (0xFF or 0x00)) return false;
+        return true;
+    }
+
+    private static bool IsCompleteWebp(ReadOnlySpan<byte> content)
+    {
+        if (content.Length < 20 || !content[..4].SequenceEqual("RIFF"u8) || !content[8..12].SequenceEqual("WEBP"u8))
+            return false;
+
+        var riffEnd = 8L + BinaryPrimitives.ReadUInt32LittleEndian(content[4..8]);
+        if (riffEnd > content.Length || riffEnd < 20) return false;
+
+        var index = 12L;
+        var extendedHeaderOnly = false;
+        var sawImageData = false;
+        while (index < riffEnd)
+        {
+            if (riffEnd - index < 8) return false;
+            var chunkStart = (int)index;
+            var chunkLength = BinaryPrimitives.ReadUInt32LittleEndian(content[(chunkStart + 4)..(chunkStart + 8)]);
+            var chunkEnd = index + 8 + chunkLength;
+            var alignedEnd = chunkEnd + (chunkLength & 1);
+            if (chunkEnd > riffEnd || alignedEnd > riffEnd) return false;
+            if ((chunkLength & 1) != 0 && content[(int)chunkEnd] != 0) return false;
+
+            var chunkType = content[chunkStart..(chunkStart + 4)];
+            if ((chunkType.SequenceEqual("VP8 "u8) || chunkType.SequenceEqual("VP8L"u8)) && chunkLength > 0)
+                sawImageData = true;
+            // A VP8X chunk is only the extended-format header: it describes the canvas and sets
+            // flags, and the actual samples live in the VP8/VP8L chunk that follows it or inside
+            // ANMF frames. Remember image data but keep validating every declared chunk and pad byte.
+            if (chunkType.SequenceEqual("VP8X"u8) && chunkLength >= 10)
+                extendedHeaderOnly = true;
+            else if (extendedHeaderOnly && chunkType.SequenceEqual("ANMF"u8))
+            {
+                if (!HasAnimatedWebpFrame(content, chunkStart + 8, (int)chunkEnd)) return false;
+                sawImageData = true;
+            }
+
+            index = alignedEnd;
+        }
+
+        return index == riffEnd && sawImageData;
+    }
+
+    private static bool HasAnimatedWebpFrame(ReadOnlySpan<byte> content, int payloadStart, int payloadEnd)
+    {
+        // An ANMF payload opens with the 16-byte frame header - canvas x, canvas y, tile width,
+        // tile height and duration as three-byte little-endian fields plus the disposal/blending
+        // and loop flag byte - and continues with whole sub-chunks in the same
+        // FourCC + 32-bit length + payload + even-alignment pad layout as the outer container. The
+        // frame image lives in one of those sub-chunks, and a compliant encoder may put an ALPH
+        // chunk (or any other chunk) ahead of it, so every sub-chunk and pad is walked before success.
+        const int FrameHeaderSize = 16;
+        if (payloadEnd > content.Length || payloadStart + FrameHeaderSize > payloadEnd) return false;
+
+        var index = payloadStart + FrameHeaderSize;
+        var sawImageData = false;
+        while (index < payloadEnd)
+        {
+            if (payloadEnd - index < 8) return false;
+            var nestedType = content[index..(index + 4)];
+            var nestedLength = BinaryPrimitives.ReadUInt32LittleEndian(content[(index + 4)..(index + 8)]);
+            if (nestedLength > int.MaxValue - 8) return false;
+            var nestedEnd = (long)index + 8 + nestedLength;
+            var alignedEnd = nestedEnd + (nestedLength & 1);
+            if (nestedEnd > payloadEnd || alignedEnd > payloadEnd) return false;
+            if ((nestedLength & 1) != 0 && content[(int)nestedEnd] != 0) return false;
+            if ((nestedType.SequenceEqual("VP8 "u8) || nestedType.SequenceEqual("VP8L"u8)) && nestedLength > 0)
+                sawImageData = true;
+            index = (int)alignedEnd;
+        }
+
+        return index == payloadEnd && sawImageData;
+    }
 
     private static bool IsFtyp(ReadOnlySpan<byte> content) =>
         content.Length >= 12 && content[4..8].SequenceEqual("ftyp"u8);
