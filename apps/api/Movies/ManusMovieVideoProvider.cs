@@ -197,8 +197,16 @@ public sealed class ManusMovieVideoProvider(
                 throw new MovieVideoProviderOutputException();
             }
 
-            var stream = await response.Content.ReadAsStreamAsync(token);
-            return new ResponseOwnedStream(stream, response, sizeBytes);
+            try
+            {
+                var stream = await response.Content.ReadAsStreamAsync(token);
+                return new ResponseOwnedStream(stream, response, sizeBytes);
+            }
+            catch
+            {
+                response.Dispose();
+                throw;
+            }
         }
 
         return new MovieVideoProviderOutput(
@@ -659,10 +667,34 @@ public sealed class ManusMovieVideoProvider(
 
         protected override void Dispose(bool disposing)
         {
-            if (disposing) { inner.Dispose(); response.Dispose(); }
-            base.Dispose(disposing);
+            if (!disposing)
+            {
+                base.Dispose(false);
+                return;
+            }
+
+            try
+            {
+                inner.Dispose();
+            }
+            finally
+            {
+                try { response.Dispose(); }
+                finally { base.Dispose(true); }
+            }
         }
-        public override async ValueTask DisposeAsync() { await inner.DisposeAsync(); response.Dispose(); GC.SuppressFinalize(this); }
+        public override async ValueTask DisposeAsync()
+        {
+            try
+            {
+                await inner.DisposeAsync();
+            }
+            finally
+            {
+                try { response.Dispose(); }
+                finally { GC.SuppressFinalize(this); }
+            }
+        }
         public override bool CanRead => inner.CanRead;
         public override bool CanSeek => inner.CanSeek;
         public override bool CanWrite => false;

@@ -284,6 +284,9 @@ public sealed class GenerationQualityControlIntegrationTests : IClassFixture<Gen
         Assert.False(await db.StoredFiles.AsNoTracking().AnyAsync(item => item.GenerationJobOutputs.Any(output => output.GenerationJobId == created.Id)));
         var usage = await db.UsageTransactions.AsNoTracking().SingleAsync(item => item.GenerationJobId == created.Id);
         Assert.Equal(UsageTransactionStatus.Failed, usage.Status);
+        Assert.Equal(0m, usage.ChargedAmount);
+        Assert.Equal(0m, usage.ReversedAmount);
+        Assert.False(usage.IsBillable);
         Assert.Contains(GenerationQualityReasonCodes.RepresentationCorrupt, usage.SafeMetadataJson, StringComparison.Ordinal);
         Assert.Contains("FailedPermanent", usage.SafeMetadataJson, StringComparison.Ordinal);
     }

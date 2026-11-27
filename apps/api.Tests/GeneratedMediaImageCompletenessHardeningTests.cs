@@ -1,3 +1,4 @@
+using System.Buffers.Binary;
 using Taslim.Api.Files;
 using Xunit;
 
@@ -81,6 +82,18 @@ public sealed class GeneratedMediaImageCompletenessHardeningTests
     }
 
     [Fact]
+    public void Jpeg_with_frame_and_scan_markers_but_no_scan_bytes_is_rejected()
+    {
+        var emptyScan = Concat(
+            new byte[] { 0xFF, 0xD8 },
+            FrameDefinition(),
+            StartOfScan(),
+            new byte[] { 0xFF, 0xD9 });
+
+        Assert.Throws<FileUploadValidationException>(() => Validate(emptyScan, ".jpeg", "image/jpeg"));
+    }
+
+    [Fact]
     public void Jpeg_allows_only_fill_and_padding_bytes_after_the_terminal_marker()
     {
         var withFill = Concat(
@@ -149,6 +162,56 @@ public sealed class GeneratedMediaImageCompletenessHardeningTests
     }
 
     [Fact]
+    public void Webp_rejects_an_odd_image_chunk_without_its_alignment_byte()
+    {
+        var content = Webp(chunkPayloadLength: 1, declaredChunkLength: 1, declaredRiffLength: 4 + 8 + 1, payload: new byte[] { 0x20 });
+
+        Assert.Throws<FileUploadValidationException>(() => Validate(content, ".webp", "image/webp"));
+    }
+
+    [Fact]
+    public void Webp_rejects_a_nonzero_odd_chunk_alignment_byte()
+    {
+        var content = Webp(chunkPayloadLength: 2, declaredChunkLength: 1, declaredRiffLength: 4 + 8 + 2, payload: new byte[] { 0x20, 0x7F });
+
+        Assert.Throws<FileUploadValidationException>(() => Validate(content, ".webp", "image/webp"));
+    }
+
+    [Fact]
+    public void Webp_rejects_an_incomplete_chunk_after_image_data()
+    {
+        var image = Webp(chunkPayloadLength: 12, declaredChunkLength: 12, declaredRiffLength: 4 + 8 + 12);
+        var content = Concat(image, "META"u8.ToArray());
+        BinaryPrimitives.WriteUInt32LittleEndian(content.AsSpan(4, 4), (uint)(content.Length - 8));
+
+        Assert.Throws<FileUploadValidationException>(() => Validate(content, ".webp", "image/webp"));
+    }
+
+    [Fact]
+    public void Animated_webp_rejects_a_frame_image_chunk_without_its_alignment_byte()
+    {
+        var extendedHeader = WebpChunk("VP8X", new byte[10]);
+        var unpaddedFrameImage = Concat("VP8 "u8.ToArray(), BitConverter.GetBytes(1), new byte[] { 0x20 });
+        var frame = WebpChunk("ANMF", Concat(new byte[16], unpaddedFrameImage));
+        var content = WebpContainer(extendedHeader, frame);
+
+        Assert.Throws<FileUploadValidationException>(() => Validate(content, ".webp", "image/webp"));
+    }
+
+    [Fact]
+    public void Animated_webp_rejects_a_malformed_later_frame_after_a_complete_frame()
+    {
+        var extendedHeader = WebpChunk("VP8X", new byte[10]);
+        var completeImage = WebpChunk("VP8 ", Enumerable.Repeat((byte)0x20, 12).ToArray());
+        var completeFrame = WebpChunk("ANMF", Concat(new byte[16], completeImage));
+        var unpaddedFrameImage = Concat("VP8 "u8.ToArray(), BitConverter.GetBytes(1), new byte[] { 0x20 });
+        var malformedFrame = WebpChunk("ANMF", Concat(new byte[16], unpaddedFrameImage));
+        var content = WebpContainer(extendedHeader, completeFrame, malformedFrame);
+
+        Assert.Throws<FileUploadValidationException>(() => Validate(content, ".webp", "image/webp"));
+    }
+
+    [Fact]
     public void Webp_accepts_a_consistently_declared_lossy_chunk()
     {
         var payload = Enumerable.Repeat((byte)0x20, 12).ToArray();
@@ -192,6 +255,19 @@ public sealed class GeneratedMediaImageCompletenessHardeningTests
             payload);
         var body = Concat(System.Text.Encoding.ASCII.GetBytes("WEBP"), chunk);
         return Concat(System.Text.Encoding.ASCII.GetBytes("RIFF"), BitConverter.GetBytes(declaredRiffLength), body);
+    }
+
+    private static byte[] WebpChunk(string fourCc, byte[] payload)
+    {
+        var chunk = Concat(System.Text.Encoding.ASCII.GetBytes(fourCc), BitConverter.GetBytes(payload.Length), payload);
+        return payload.Length % 2 == 0 ? chunk : Concat(chunk, new byte[] { 0 });
+    }
+
+    private static byte[] WebpContainer(params byte[][] chunks)
+    {
+        var body = new List<byte>("WEBP"u8.ToArray());
+        foreach (var chunk in chunks) body.AddRange(chunk);
+        return Concat("RIFF"u8.ToArray(), BitConverter.GetBytes(body.Count), body.ToArray());
     }
 
     private static byte[] Concat(params byte[][] parts) => parts.SelectMany(part => part).ToArray();

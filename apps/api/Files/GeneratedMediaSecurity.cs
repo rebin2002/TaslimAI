@@ -208,9 +208,14 @@ public static class GeneratedMediaSecurity
             var type = content[(start + 4)..(start + 8)];
             if (index == 8)
             {
-                // IHDR is mandatory and must open the chunk stream; without it the offsets below
-                // would describe an arbitrary byte sequence rather than an image.
-                if (!type.SequenceEqual("IHDR"u8) || length < 13) return false;
+                // IHDR is mandatory, must open the chunk stream, and has a fixed 13-byte payload;
+                // without it the offsets below would describe an arbitrary byte sequence.
+                if (!type.SequenceEqual("IHDR"u8) || length != 13) return false;
+            }
+            else if (type.SequenceEqual("IHDR"u8))
+            {
+                // PNG permits exactly one IHDR, at the start of the chunk stream.
+                return false;
             }
             else if (type.SequenceEqual("IDAT"u8))
             {
@@ -256,6 +261,7 @@ public static class GeneratedMediaSecurity
         var inScanData = false;
         var sawFrameDefinition = false;
         var sawScanStart = false;
+        var sawScanData = false;
         while (index + 1 < content.Length)
         {
             if (inScanData)
@@ -265,7 +271,10 @@ public static class GeneratedMediaSecurity
                 if (content[index] == 0xFF && content[index + 1] != 0x00)
                     inScanData = false;
                 else
+                {
+                    sawScanData = true;
                     index++;
+                }
                 continue;
             }
 
@@ -274,7 +283,7 @@ public static class GeneratedMediaSecurity
             if (index >= content.Length) return false;
 
             var marker = content[index++];
-            if (marker == 0xD9) return sawFrameDefinition && sawScanStart && IsJpegFill(content[index..]);
+            if (marker == 0xD9) return sawFrameDefinition && sawScanStart && sawScanData && IsJpegFill(content[index..]);
             if (marker is 0x01) continue;
             if (marker >= 0xD0 && marker <= 0xD7)
             {
@@ -324,32 +333,35 @@ public static class GeneratedMediaSecurity
 
         var index = 12L;
         var extendedHeaderOnly = false;
-        while (index + 8 <= riffEnd)
+        var sawImageData = false;
+        while (index < riffEnd)
         {
+            if (riffEnd - index < 8) return false;
             var chunkStart = (int)index;
             var chunkLength = BinaryPrimitives.ReadUInt32LittleEndian(content[(chunkStart + 4)..(chunkStart + 8)]);
             var chunkEnd = index + 8 + chunkLength;
-            if (chunkEnd > riffEnd) return false;
+            var alignedEnd = chunkEnd + (chunkLength & 1);
+            if (chunkEnd > riffEnd || alignedEnd > riffEnd) return false;
+            if ((chunkLength & 1) != 0 && content[(int)chunkEnd] != 0) return false;
 
             var chunkType = content[chunkStart..(chunkStart + 4)];
             if ((chunkType.SequenceEqual("VP8 "u8) || chunkType.SequenceEqual("VP8L"u8)) && chunkLength > 0)
-                return true;
+                sawImageData = true;
             // A VP8X chunk is only the extended-format header: it describes the canvas and sets
             // flags, and the actual samples live in the VP8/VP8L chunk that follows it or inside
-            // ANMF frames. Declaring it complete accepted a header-only container with no image
-            // payload, so it is remembered and the walk continues until real image data shows up.
+            // ANMF frames. Remember image data but keep validating every declared chunk and pad byte.
             if (chunkType.SequenceEqual("VP8X"u8) && chunkLength >= 10)
                 extendedHeaderOnly = true;
-            else if (extendedHeaderOnly && chunkType.SequenceEqual("ANMF"u8) &&
-                     HasAnimatedWebpFrame(content, chunkStart + 8, (int)chunkEnd))
+            else if (extendedHeaderOnly && chunkType.SequenceEqual("ANMF"u8))
             {
-                return true;
+                if (!HasAnimatedWebpFrame(content, chunkStart + 8, (int)chunkEnd)) return false;
+                sawImageData = true;
             }
 
-            index = chunkEnd + (chunkLength & 1);
+            index = alignedEnd;
         }
 
-        return false;
+        return index == riffEnd && sawImageData;
     }
 
     private static bool HasAnimatedWebpFrame(ReadOnlySpan<byte> content, int payloadStart, int payloadEnd)
@@ -359,26 +371,28 @@ public static class GeneratedMediaSecurity
         // and loop flag byte - and continues with whole sub-chunks in the same
         // FourCC + 32-bit length + payload + even-alignment pad layout as the outer container. The
         // frame image lives in one of those sub-chunks, and a compliant encoder may put an ALPH
-        // chunk (or any other chunk) ahead of it, so the sub-chunks are iterated rather than
-        // assumed to start at a fixed offset. The frame counts when any sub-chunk is a non-empty
-        // VP8 or VP8L chunk whose declared body fits inside the ANMF range.
+        // chunk (or any other chunk) ahead of it, so every sub-chunk and pad is walked before success.
         const int FrameHeaderSize = 16;
         if (payloadEnd > content.Length || payloadStart + FrameHeaderSize > payloadEnd) return false;
 
         var index = payloadStart + FrameHeaderSize;
-        while (index + 8 <= payloadEnd)
+        var sawImageData = false;
+        while (index < payloadEnd)
         {
+            if (payloadEnd - index < 8) return false;
             var nestedType = content[index..(index + 4)];
             var nestedLength = BinaryPrimitives.ReadUInt32LittleEndian(content[(index + 4)..(index + 8)]);
             if (nestedLength > int.MaxValue - 8) return false;
             var nestedEnd = (long)index + 8 + nestedLength;
-            if (nestedEnd > payloadEnd) return false;
+            var alignedEnd = nestedEnd + (nestedLength & 1);
+            if (nestedEnd > payloadEnd || alignedEnd > payloadEnd) return false;
+            if ((nestedLength & 1) != 0 && content[(int)nestedEnd] != 0) return false;
             if ((nestedType.SequenceEqual("VP8 "u8) || nestedType.SequenceEqual("VP8L"u8)) && nestedLength > 0)
-                return true;
-            index = (int)nestedEnd + (int)(nestedLength & 1);
+                sawImageData = true;
+            index = (int)alignedEnd;
         }
 
-        return false;
+        return index == payloadEnd && sawImageData;
     }
 
     private static bool IsFtyp(ReadOnlySpan<byte> content) =>

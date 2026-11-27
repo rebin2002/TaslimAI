@@ -338,6 +338,69 @@ public sealed class ManusMovieVideoProviderTests
         Assert.Throws<MovieVideoProviderOutputException>(() => stream.Seek(9, SeekOrigin.Begin));
     }
 
+    [Fact]
+    public async Task Retrieval_disposes_response_when_opening_the_response_stream_fails()
+    {
+        var content = new StreamOpenFailureContent();
+        var handler = new RecordingHandler(request =>
+        {
+            if (request.Method == HttpMethod.Get && request.RequestUri!.Host == "cdn.example.test")
+                return new HttpResponseMessage(HttpStatusCode.OK) { Content = content };
+            throw new InvalidOperationException($"Unexpected request: {request.Method} {request.RequestUri}");
+        });
+        var provider = CreateProvider(handler, EnabledOptions());
+        var status = new MovieVideoProviderStatus(
+            MovieVideoProviderJobStatus.Succeeded,
+            100,
+            MetadataJson: JsonSerializer.Serialize(new
+            {
+                providerTaskId = TaskId,
+                outputUrl = "https://cdn.example.test/clip.mp4",
+                contentType = "video/mp4",
+                fileName = "clip.mp4",
+                sizeBytes = 4,
+                durationSeconds = 5,
+            }));
+
+        var output = await provider.RetrieveAsync(TaskId, status, CancellationToken.None);
+        await Assert.ThrowsAsync<IOException>(() => output.OpenReadAsync(CancellationToken.None));
+
+        Assert.True(content.WasDisposed);
+        Assert.Single(handler.Requests);
+    }
+
+    [Fact]
+    public async Task Retrieval_disposes_response_even_when_inner_stream_async_disposal_fails()
+    {
+        var content = new TrackingStreamContent(new AsyncDisposeFailureStream(Encoding.UTF8.GetBytes("clip")));
+        var handler = new RecordingHandler(request =>
+        {
+            if (request.Method == HttpMethod.Get && request.RequestUri!.Host == "cdn.example.test")
+                return new HttpResponseMessage(HttpStatusCode.OK) { Content = content };
+            throw new InvalidOperationException($"Unexpected request: {request.Method} {request.RequestUri}");
+        });
+        var provider = CreateProvider(handler, EnabledOptions());
+        var status = new MovieVideoProviderStatus(
+            MovieVideoProviderJobStatus.Succeeded,
+            100,
+            MetadataJson: JsonSerializer.Serialize(new
+            {
+                providerTaskId = TaskId,
+                outputUrl = "https://cdn.example.test/clip.mp4",
+                contentType = "video/mp4",
+                fileName = "clip.mp4",
+                sizeBytes = 4,
+                durationSeconds = 5,
+            }));
+
+        var output = await provider.RetrieveAsync(TaskId, status, CancellationToken.None);
+        var stream = await output.OpenReadAsync(CancellationToken.None);
+        await Assert.ThrowsAsync<IOException>(() => stream.DisposeAsync().AsTask());
+
+        Assert.True(content.WasDisposed);
+        Assert.Single(handler.Requests);
+    }
+
     private static ManusMovieVideoProvider CreateProvider(HttpMessageHandler handler, MovieVideoOptions options) =>
         new(
             new HttpClient(handler) { BaseAddress = new Uri("https://api.manus.ai/") },
@@ -407,6 +470,73 @@ public sealed class ManusMovieVideoProviderTests
         content.Headers.ContentType = new MediaTypeHeaderValue(contentType);
         content.Headers.ContentLength = bytes.Length;
         return new HttpResponseMessage(HttpStatusCode.OK) { Content = content };
+    }
+
+    private sealed class StreamOpenFailureContent : HttpContent
+    {
+        public bool WasDisposed { get; private set; }
+
+        public StreamOpenFailureContent() => Headers.ContentType = new MediaTypeHeaderValue("video/mp4");
+
+        protected override Task<Stream> CreateContentReadStreamAsync() =>
+            Task.FromException<Stream>(new IOException("synthetic stream-open failure"));
+
+        protected override Task<Stream> CreateContentReadStreamAsync(CancellationToken cancellationToken) =>
+            Task.FromException<Stream>(new IOException("synthetic stream-open failure"));
+
+        protected override Task SerializeToStreamAsync(Stream stream, TransportContext? context) =>
+            Task.FromException(new IOException("synthetic stream-open failure"));
+
+        protected override bool TryComputeLength(out long length)
+        {
+            length = 0;
+            return false;
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing) WasDisposed = true;
+            base.Dispose(disposing);
+        }
+    }
+
+    private sealed class TrackingStreamContent : HttpContent
+    {
+        private readonly Stream stream;
+        public bool WasDisposed { get; private set; }
+
+        public TrackingStreamContent(Stream stream)
+        {
+            this.stream = stream;
+            Headers.ContentType = new MediaTypeHeaderValue("video/mp4");
+        }
+
+        protected override Task<Stream> CreateContentReadStreamAsync() => Task.FromResult(stream);
+
+        protected override Task<Stream> CreateContentReadStreamAsync(CancellationToken cancellationToken) => Task.FromResult(stream);
+
+        protected override Task SerializeToStreamAsync(Stream destination, TransportContext? context) => stream.CopyToAsync(destination);
+
+        protected override bool TryComputeLength(out long length)
+        {
+            length = 0;
+            return false;
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing) WasDisposed = true;
+            base.Dispose(disposing);
+        }
+    }
+
+    private sealed class AsyncDisposeFailureStream(byte[] bytes) : MemoryStream(bytes)
+    {
+        public override ValueTask DisposeAsync()
+        {
+            base.Dispose();
+            return ValueTask.FromException(new IOException("synthetic stream-disposal failure"));
+        }
     }
 
     private sealed class ChunkedVideoContent : HttpContent

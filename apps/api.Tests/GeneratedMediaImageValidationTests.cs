@@ -44,6 +44,28 @@ public sealed class GeneratedMediaImageValidationTests
         GeneratedMediaSecurity.ValidateContent(descriptor, CompletePng(320, 180), new Taslim.Api.Files.FileOptions());
     }
 
+    [Theory]
+    [InlineData(12)]
+    [InlineData(14)]
+    public void Png_requires_exactly_13_bytes_in_the_ihdr_payload(int ihdrLength)
+    {
+        var descriptor = GeneratedMediaSecurity.ValidateDescriptor("wrong-ihdr-length.png", "image/png");
+
+        Assert.Throws<FileUploadValidationException>(() =>
+            GeneratedMediaSecurity.ValidateContent(descriptor, PngWithIhdrLength(ihdrLength), new Taslim.Api.Files.FileOptions()));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void Png_rejects_a_second_ihdr_before_or_after_image_data(bool duplicateAfterImageData)
+    {
+        var descriptor = GeneratedMediaSecurity.ValidateDescriptor("duplicate-ihdr.png", "image/png");
+
+        Assert.Throws<FileUploadValidationException>(() =>
+            GeneratedMediaSecurity.ValidateContent(descriptor, PngWithDuplicateIhdr(duplicateAfterImageData), new Taslim.Api.Files.FileOptions()));
+    }
+
     [Fact]
     public void Structurally_complete_png_with_invalid_dimensions_reaches_quality_control()
     {
@@ -166,6 +188,39 @@ public sealed class GeneratedMediaImageValidationTests
         bytes[41] = 0x78;
         "IEND"u8.CopyTo(bytes.AsSpan(50, 4));
         return bytes;
+    }
+
+    private static byte[] PngWithIhdrLength(int ihdrLength) => BuildPng(ihdrLength, duplicateIhdr: false, duplicateAfterImageData: false);
+
+    private static byte[] PngWithDuplicateIhdr(bool duplicateAfterImageData) => BuildPng(13, duplicateIhdr: true, duplicateAfterImageData);
+
+    private static byte[] BuildPng(int ihdrLength, bool duplicateIhdr, bool duplicateAfterImageData)
+    {
+        // Keep chunk boundaries internally consistent so these exercise parser conformance, not a
+        // coincidental short-buffer failure. CRC fields are outside this completeness gate's scope.
+        var header = new byte[ihdrLength];
+        BinaryPrimitives.WriteUInt32BigEndian(header.AsSpan(0, 4), 320);
+        BinaryPrimitives.WriteUInt32BigEndian(header.AsSpan(4, 4), 180);
+        var chunks = new List<byte[]> { PngChunk("IHDR", header) };
+        if (duplicateIhdr && !duplicateAfterImageData)
+            chunks.Add(PngChunk("IHDR", new byte[13]));
+        chunks.Add(PngChunk("IDAT", [0x78]));
+        if (duplicateIhdr && duplicateAfterImageData)
+            chunks.Add(PngChunk("IHDR", new byte[13]));
+        chunks.Add(PngChunk("IEND", []));
+
+        var content = new List<byte>(PngSignature());
+        foreach (var chunk in chunks) content.AddRange(chunk);
+        return [.. content];
+    }
+
+    private static byte[] PngChunk(string type, byte[] payload)
+    {
+        var chunk = new byte[12 + payload.Length];
+        BinaryPrimitives.WriteUInt32BigEndian(chunk.AsSpan(0, 4), (uint)payload.Length);
+        System.Text.Encoding.ASCII.GetBytes(type).CopyTo(chunk, 4);
+        payload.AsSpan().CopyTo(chunk.AsSpan(8));
+        return chunk;
     }
 
     private static byte[] PngWithoutImageData()
