@@ -1,11 +1,17 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { locales, translate } from "@/lib/i18n";
-import { nextMovieMode } from "./MovieStudioView";
+import { movieModeDurationLimit, nextMovieMode } from "./MovieStudioView";
 
 const source = readFileSync(new URL("./MovieStudioView.tsx", import.meta.url), "utf8");
 
 describe("Movie Studio mode switch accessibility", () => {
+  it("keeps Quick clips bounded while allowing Full projects up to 120 minutes", () => {
+    expect(movieModeDurationLimit("Quick")).toBe(3_600);
+    expect(movieModeDurationLimit("Full")).toBe(7_200);
+    expect(source).toContain("max={movieModeDurationLimit(mode)}");
+  });
+
   it("cycles modes with standard tab-list keys", () => {
     expect(nextMovieMode("Quick", "ArrowRight")).toBe("Full");
     expect(nextMovieMode("Full", "ArrowRight")).toBe("Quick");

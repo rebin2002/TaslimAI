@@ -86,6 +86,10 @@ describe("export deep link through the login gate", () => {
     expect(gate).toBeGreaterThan(-1);
     expect(awaitQuery).toBeLessThan(gate);
     expect(source).toContain('import { internalReturnPath, requireAuthenticatedPage } from "@/lib/serverAuth";');
+    expect(source).toContain('import { isAcademicResearchVisible } from "@/lib/academicResearchVisibility";');
+    expect(source).toContain('import { notFound } from "next/navigation";');
+    const visibilityGate = source.indexOf("if (!isAcademicResearchVisible()) notFound();");
+    expect(visibilityGate).toBeGreaterThan(gate);
   });
 
   it("still validates the identifier before handing it to the panel", () => {
