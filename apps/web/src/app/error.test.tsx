@@ -20,6 +20,17 @@ describe("application error recovery boundaries", () => {
     expect(html).not.toContain("digest-1");
   });
 
+  it("gives the root fatal-error alert a programmatic title and description", () => {
+    const html = renderToStaticMarkup(
+      <GlobalError error={new Error("private root detail")} reset={vi.fn()} />,
+    );
+
+    expect(html).toContain('aria-labelledby="global-error-title"');
+    expect(html).toContain('aria-describedby="global-error-description"');
+    expect(html).toContain('id="global-error-title"');
+    expect(html).toContain('id="global-error-description"');
+  });
+
   it("keeps the provider-independent root fallback redacted", () => {
     const html = renderToStaticMarkup(
       <GlobalError error={Object.assign(new Error("private database detail"), { digest: "digest-2" })} reset={vi.fn()} />,
