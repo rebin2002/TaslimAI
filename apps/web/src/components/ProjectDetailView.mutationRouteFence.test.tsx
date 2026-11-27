@@ -328,6 +328,21 @@ describe("project detail mutation route fence", () => {
     expect(headingText()).toBe("Alpha Fence Project");
     expect(buttonByText("projects.restore")).toBeTruthy();
   });
+  it("ignores an archive response for the wrong project while the route still names the clicked project", async () => {
+    await mountView();
+    await settleOverview(0, overviewA);
+    await clickButton("projects.archive");
+    expect(archiveRequests.map((entry) => entry.projectId)).toEqual([projectA.id]);
+
+    // The click and route are still for A, but exercise a malformed/cross-boundary
+    // response carrying B. It must not rewrite A's displayed record or affordances.
+    await settleArchive(0, projectB);
+
+    expect(headingText()).toBe("Alpha Fence Project");
+    expect(buttonByText("projects.archive")).toBeTruthy();
+    expect(buttonByText("projects.restore")).toBeFalsy();
+    expect(container.textContent ?? "").not.toContain("Beta Fence Project");
+  });
   it("still applies a same-project restore success to the displayed record", async () => {
     await mountView();
     await settleOverview(0, overviewAArchived);

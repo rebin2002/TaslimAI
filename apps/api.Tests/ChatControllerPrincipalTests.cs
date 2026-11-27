@@ -149,11 +149,16 @@ public sealed class ChatControllerPrincipalTests
         public UnreachableUsageLedger Usage { get; }
         public UnreachableStorage Storage { get; }
         public CountingChatCompletionService Completion { get; }
+        // Batch-C (#891/#908) admission reads router readiness only, after the principal and
+        // membership guards. A ready stub keeps this file's unreachable-by-design contract:
+        // reaching Select here means a guard stopped guarding.
+        public IAiModelRouter Router { get; } = new ReadyButUnreachableRouter();
 
         public ChatController Controller(string? identifier) => new(
             Db,
             Access,
             Completion,
+            Router,
             new AiContextBuilder(Options.Create(new AiOptions())),
             Usage,
             Options.Create(new JsonOptions()),
@@ -265,5 +270,17 @@ public sealed class ChatControllerPrincipalTests
         public Task<Stream?> OpenReadAsync(string storageKey, CancellationToken cancellationToken = default) => Blocked<Stream?>();
         public Task DeleteAsync(string storageKey, CancellationToken cancellationToken = default) => Blocked();
         public Task<bool> ExistsAsync(string storageKey, CancellationToken cancellationToken = default) => Blocked<bool>();
+    }
+
+    /// <summary>
+    /// Advertises chat generation as ready so the Batch-C admission gate never changes the
+    /// outcome this file tests; provider selection stays unreachable-by-design.
+    /// </summary>
+    private sealed class ReadyButUnreachableRouter : IAiModelRouter
+    {
+        public AiProviderSelection Select(AiChatRequest request)
+            => throw new NotSupportedException("Provider selection must not be reached before the principal is accepted.");
+
+        public bool IsChatGenerationAvailable(bool hasImageAttachments) => true;
     }
 }

@@ -155,7 +155,8 @@ internal sealed class ReadbackCancellationFactory : WebApplicationFactory<Progra
 {
     private readonly ReadbackCancellationStyle style;
     private readonly int storageOperationTimeoutSeconds;
-    private readonly SqliteConnection connection = new("DataSource=:memory:");
+    // Keep the shared in-memory database alive while each request or polling scope opens its own connection.
+    private readonly SqliteConnection connection = new($"Data Source=readback-{Guid.NewGuid():N};Mode=Memory;Cache=Shared;Pooling=False");
 
     internal ReadbackCancellationFactory(ReadbackCancellationStyle style, int storageOperationTimeoutSeconds)
     {
@@ -180,6 +181,9 @@ internal sealed class ReadbackCancellationFactory : WebApplicationFactory<Progra
         {
             // Synthetic, structurally shaped values only. Nothing here is a real endpoint,
             // account, bucket, credential, or key.
+            // The recording chat service accepts the image read back by this fixture.
+            ["Ai:Models:mock:ProviderKey"] = "mock",
+            ["Ai:Models:mock:SupportsVision"] = "true",
             ["Files:StorageProvider"] = "S3Compatible",
             ["Files:S3Endpoint"] = "https://synthetic-account.r2.invalid",
             ["Files:S3Region"] = "auto",
@@ -191,8 +195,7 @@ internal sealed class ReadbackCancellationFactory : WebApplicationFactory<Progra
         builder.ConfigureServices(services =>
         {
             services.RemoveAll<DbContextOptions<TaslimDbContext>>();
-            services.AddSingleton(connection);
-            services.AddDbContext<TaslimDbContext>(options => options.UseSqlite(connection));
+            services.AddDbContext<TaslimDbContext>(options => options.UseSqlite(connection.ConnectionString));
 
             Storage = new ReadbackCancellationStorageService(style);
             services.RemoveAll<IFileStorageService>();

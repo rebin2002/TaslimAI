@@ -26,6 +26,7 @@ describe("HomeComposer", () => {
     expect(html).toContain("textarea");
     expect(html).toContain("Launch plan");
     expect(html).toContain("+ Attach");
+    expect(html).toContain("Up to 5 files, 25 MB each");
     expect(html).toContain("Create");
     expect(html).not.toContain("Open Taslim Chat");
   });
