@@ -3,6 +3,7 @@ namespace Taslim.Api.Ai;
 public sealed class AiOptions
 {
     public string DefaultChatTier { get; set; } = "Smart";
+    public int MaxChatOutputTokens { get; set; } = 2_048;
     public int ContextBudgetTokens { get; set; } = 12_000;
     public int ContextOutputReserveTokens { get; set; } = 2_048;
     public int ProjectContextBudgetTokens { get; set; } = 1_200;
@@ -78,8 +79,10 @@ public sealed class AiModelCatalog(IConfiguration configuration)
 
     public AiModelDefinition? Find(string modelKey) => models.FirstOrDefault(model => string.Equals(model.ModelKey, modelKey, StringComparison.OrdinalIgnoreCase));
 
-    public AiModelDefinition? GetForTier(string tier, string providerKey, bool requiresStructuredOutput = false) => models.FirstOrDefault(model =>
-        model.Enabled && string.Equals(model.ProviderKey, providerKey, StringComparison.OrdinalIgnoreCase) && string.Equals(model.CapabilityTier, tier, StringComparison.OrdinalIgnoreCase) && (!requiresStructuredOutput || model.SupportsStructuredOutput));
+    public AiModelDefinition? GetForTier(string tier, string providerKey, bool requiresStructuredOutput = false, bool requiresStreaming = false) => models.FirstOrDefault(model =>
+        model.Enabled && string.Equals(model.ProviderKey, providerKey, StringComparison.OrdinalIgnoreCase) && string.Equals(model.CapabilityTier, tier, StringComparison.OrdinalIgnoreCase)
+        && (!requiresStructuredOutput || model.SupportsStructuredOutput)
+        && (!requiresStreaming || model.SupportsStreaming));
 
     private static IReadOnlyList<AiModelDefinition> Load(IConfiguration configuration)
     {

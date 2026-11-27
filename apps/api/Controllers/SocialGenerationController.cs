@@ -3,6 +3,7 @@ using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.Extensions.Options;
+using Taslim.Api.Authorization;
 using Taslim.Api.Contracts;
 using Taslim.Api.Domain;
 using Taslim.Api.Generation;
@@ -18,7 +19,8 @@ namespace Taslim.Api.Controllers;
 public sealed class SocialGenerationController(
     IGenerationJobService jobs,
     IOptions<SocialGenerationOptions> options,
-    IUsageCostControl costControl) : ControllerBase
+    IUsageCostControl costControl,
+    WorkspaceAccessService access) : ControllerBase
 {
     [HttpPost("jobs")]
     [ValidateAntiForgeryToken]
@@ -32,6 +34,7 @@ public sealed class SocialGenerationController(
             if (string.IsNullOrWhiteSpace(idempotencyKey)) return ApiResults.Error(this, StatusCodes.Status400BadRequest, "IDEMPOTENCY_KEY_REQUIRED", "A unique Idempotency-Key header is required for social generation.");
             var input = SocialGenerationContractMapper.ToInput(request);
             SocialGenerationRequestValidator.Validate(input, options.Value);
+            if (!await access.IsMemberAsync(GetUserId(), input.WorkspaceId, cancellationToken)) return Forbid();
             var preflight = await costControl.CheckPreflightAsync(input.WorkspaceId, UsageFeature.Social, SocialGenerationCostEstimator.Estimate(options.Value), cancellationToken);
             if (!preflight.Allowed) return ApiResults.Error(this, StatusCodes.Status429TooManyRequests, preflight.RejectionCode ?? "COST_GUARDRAIL_REJECTED", preflight.RejectionMessage ?? "This operation exceeds a configured safety limit.");
             var job = await jobs.CreateAsync(GetUserId(), new CreateGenerationJobRequest
@@ -39,7 +42,7 @@ public sealed class SocialGenerationController(
                 WorkspaceId = input.WorkspaceId,
                 ProjectId = input.ProjectId,
                 JobType = GenerationJobTypes.SocialGenerate,
-                Title = input.Prompt.Length > 160 ? input.Prompt[..160] : input.Prompt,
+                Title = TruncateTitle(input.Prompt),
                 InputJson = SocialGenerationContractMapper.SerializeInput(input),
                 EstimatedProviderCostUsd = preflight.EstimatedProviderCostUsd,
             }, cancellationToken, idempotencyKey);
@@ -52,6 +55,19 @@ public sealed class SocialGenerationController(
     }
 
     private Guid GetUserId() => Guid.Parse(User.FindFirst(ClaimTypes.NameIdentifier)?.Value ?? throw new InvalidOperationException("Authenticated user identifier is missing."));
+
+    // Job titles derive from the user prompt. Cutting at the 160-character
+    // boundary must never split a surrogate pair, which would persist a
+    // dangling high surrogate and emit invalid JSON string content — the same
+    // rule the document contract enforces for provider payloads.
+    private static string TruncateTitle(string prompt)
+    {
+        if (prompt.Length <= 160) return prompt;
+        var length = 160;
+        if (char.IsHighSurrogate(prompt[length - 1]) && length < prompt.Length && char.IsLowSurrogate(prompt[length]))
+            length -= 1;
+        return prompt[..length];
+    }
 }
 
 public sealed record CreateSocialGenerationResponse(GenerationJobDto Job);
