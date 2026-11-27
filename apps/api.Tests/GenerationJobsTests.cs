@@ -553,6 +553,48 @@ public sealed class GenerationJobQueuedCancellationTests : IClassFixture<Generat
         Assert.False(await scope.ServiceProvider.GetRequiredService<TaslimDbContext>().Assets.AsNoTracking().AnyAsync(item => item.SourceGenerationJobId == created.Id));
     }
 
+    [Fact]
+    public async Task Member_cannot_cancel_another_creators_queued_private_social_job()
+    {
+        using var creator = factory.CreateClient();
+        using var member = factory.CreateClient();
+        using var creatorRegistration = await Register(creator);
+        using var memberRegistration = await Register(member);
+        creatorRegistration.EnsureSuccessStatusCode();
+        memberRegistration.EnsureSuccessStatusCode();
+        var owner = (await creatorRegistration.Content.ReadFromJsonAsync<AuthResponse>())!;
+        var peer = (await memberRegistration.Content.ReadFromJsonAsync<AuthResponse>())!;
+        var jobId = Guid.NewGuid();
+        const string privateResult = "private-queued-social-result";
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            db.WorkspaceMembers.Add(new WorkspaceMember
+            {
+                Id = Guid.NewGuid(), WorkspaceId = owner.PersonalWorkspace.Id,
+                UserId = peer.User.Id, Role = WorkspaceRole.Member, JoinedAt = DateTime.UtcNow,
+            });
+            db.GenerationJobs.Add(new GenerationJob
+            {
+                Id = jobId, WorkspaceId = owner.PersonalWorkspace.Id, CreatedByUserId = owner.User.Id,
+                JobType = GenerationJobTypes.SocialGenerate, Status = GenerationJobStatus.Queued,
+                CreatedAt = DateTime.UtcNow, QueuedAt = DateTime.UtcNow, InputJson = "{}",
+                ResultJson = JsonSerializer.Serialize(new { posts = new[] { new { body = privateResult } } }),
+            });
+            await db.SaveChangesAsync();
+        }
+
+        using var response = await SendWithCsrf(member, HttpMethod.Post, $"/api/generation/jobs/{jobId}/cancel", null);
+        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+        Assert.DoesNotContain(privateResult, await response.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+
+        using var verification = factory.Services.CreateScope();
+        var stored = await verification.ServiceProvider.GetRequiredService<TaslimDbContext>()
+            .GenerationJobs.AsNoTracking().SingleAsync(job => job.Id == jobId);
+        Assert.Equal(GenerationJobStatus.Queued, stored.Status);
+        Assert.False(stored.CancellationRequested);
+    }
+
     private static async Task<HttpResponseMessage> Register(HttpClient client)
     {
         return await SendWithCsrf(client, HttpMethod.Post, "/api/auth/register", new { displayName = "Queued Cancel", email = $"jobs-queued-{Guid.NewGuid():N}@example.com", password = "StrongPassword!123", preferredLanguage = "en" });
