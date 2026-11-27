@@ -61,6 +61,38 @@ public sealed class BillingAccountService(TaslimDbContext db, IBillingProvisioni
         var purchasedRemaining = balanceByEntitlement.Where(item => item.EntitlementId.HasValue && purchasedIds.Contains(item.EntitlementId.Value)).Sum(item => item.Amount);
         var adjustmentBalance = balanceByEntitlement.Where(item => item.EntitlementId.HasValue && adjustmentIds.Contains(item.EntitlementId.Value)).Sum(item => item.Amount);
         var unallocatedMovements = balanceByEntitlement.Where(item => !item.EntitlementId.HasValue).Sum(item => item.Amount);
+        // Issue #330 reconciliation: a negative unallocated aggregate (a debit
+        // admitted against the pooled balance without a single covering lot, or
+        // a row written before lot attribution existed) must not leave the
+        // category projections overstating what that aggregate allows. Charge
+        // it against the active spendable lots in a deterministic display
+        // order (earliest expiry, then identifier). This only moves amounts
+        // between the category rows and the unallocated row: the total is
+        // arithmetically unchanged, the spendable pool used by admission is
+        // untouched, no ledger row is rewritten, and no lot-priority policy is
+        // encoded, because the projection reconciles for any allocation order.
+        var includedDisplay = includedRemaining;
+        var purchasedDisplay = purchasedRemaining;
+        var unallocatedDisplay = unallocatedMovements;
+        if (unallocatedMovements < 0)
+        {
+            var lotExpiry = entitlements.ToDictionary(item => item.Id, item => item.ExpiresAt);
+            var outstandingSpend = -unallocatedMovements;
+            foreach (var lot in balanceByEntitlement
+                .Where(item => item.EntitlementId.HasValue && item.Amount > 0 &&
+                    (includedIds.Contains(item.EntitlementId.Value) || purchasedIds.Contains(item.EntitlementId.Value)))
+                .Select(item => new { EntitlementId = item.EntitlementId!.Value, item.Amount })
+                .OrderBy(item => lotExpiry[item.EntitlementId] ?? DateTime.MaxValue)
+                .ThenBy(item => item.EntitlementId))
+            {
+                if (outstandingSpend == 0) break;
+                var consumed = Math.Min(lot.Amount, outstandingSpend);
+                if (includedIds.Contains(lot.EntitlementId)) includedDisplay -= consumed;
+                else purchasedDisplay -= consumed;
+                outstandingSpend -= consumed;
+            }
+            unallocatedDisplay = -outstandingSpend;
+        }
         var plans = await db.Plans.AsNoTracking()
             .Where(item => item.IsActive)
             .OrderBy(item => item.SortOrder)
@@ -81,7 +113,7 @@ public sealed class BillingAccountService(TaslimDbContext db, IBillingProvisioni
             new(subscription.Plan.Code, subscription.Plan.Name, subscription.Plan.MonthlyPriceUsd, subscription.Plan.MonthlyCreditAllowance, subscription.Plan.Currency),
             new(subscription.Status.ToString(), subscription.CurrentPeriodStart, subscription.CurrentPeriodEnd, subscription.NextRenewalAt, subscription.CancelAtPeriodEnd),
             new(period.Id, period.Status.ToString(), period.StartsAt, period.EndsAt, period.IncludedCredits),
-            new(period.IncludedCredits, Math.Max(0, includedRemaining), Math.Max(0, purchasedRemaining), adjustmentBalance, Math.Max(0, includedRemaining + purchasedRemaining + adjustmentBalance + unallocatedMovements)),
+            new(period.IncludedCredits, Math.Max(0, includedDisplay), Math.Max(0, purchasedDisplay), adjustmentBalance, Math.Max(0, includedDisplay + purchasedDisplay + adjustmentBalance + unallocatedDisplay)),
             entries.Select(item => new CreditLedgerEntryDto(item.Id, item.Type.ToString(), item.Amount, item.Reason, item.CreatedAt)).ToArray(),
             plans,
             paymentStatus,
