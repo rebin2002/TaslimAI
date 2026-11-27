@@ -52,7 +52,7 @@ public sealed class SocialJobAttachmentPrivacyReadbackTests : IClassFixture<Soci
         using var creator = factory.CreateClient();
         var creatorAuth = await Register(creator, "Attachment Privacy Creator");
 
-        // One marker, reachable through every seam at once: it is the attachment's file name
+        // One marker connects the job and attachment queries: it is the attachment's file name
         // (the `file` search group matches OriginalFileName), part of the job prompt (the
         // `generation` search group matches InputJson), and the attachment's body text.
         var marker = $"zq-attach-{Guid.NewGuid():N}";
@@ -64,11 +64,13 @@ public sealed class SocialJobAttachmentPrivacyReadbackTests : IClassFixture<Soci
 
         // The no-project job produced its creator-private output asset from that attachment.
         Guid outputAssetId;
+        string outputAssetName;
         using (var scope = factory.Services.CreateScope())
         {
             var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
             var asset = await db.Assets.AsNoTracking().SingleAsync(item => item.SourceGenerationJobId == job.Id);
             outputAssetId = asset.Id;
+            outputAssetName = asset.Name;
         }
 
         using var member = factory.CreateClient();
@@ -91,8 +93,10 @@ public sealed class SocialJobAttachmentPrivacyReadbackTests : IClassFixture<Soci
 
         using var memberAsset = await member.GetAsync($"/api/assets/{outputAssetId}");
         Assert.Equal(HttpStatusCode.NotFound, memberAsset.StatusCode);
+        Assert.DoesNotContain(outputAssetName, await memberAsset.Content.ReadAsStringAsync(), StringComparison.Ordinal);
         using var memberDownload = await member.GetAsync($"/api/assets/{outputAssetId}/download");
         Assert.Equal(HttpStatusCode.NotFound, memberDownload.StatusCode);
+        Assert.DoesNotContain(outputAssetName, await memberDownload.Content.ReadAsStringAsync(), StringComparison.Ordinal);
 
         // --- list ----------------------------------------------------------------------
         var memberFiles = await member.GetFromJsonAsync<List<StoredFileDto>>($"/api/workspaces/{creatorAuth.PersonalWorkspace.Id}/files?pageSize=100");
@@ -137,6 +141,9 @@ public sealed class SocialJobAttachmentPrivacyReadbackTests : IClassFixture<Soci
 
         using var creatorAsset = await creator.GetAsync($"/api/assets/{outputAssetId}");
         Assert.Equal(HttpStatusCode.OK, creatorAsset.StatusCode);
+        using var creatorDownload = await creator.GetAsync($"/api/assets/{outputAssetId}/download");
+        Assert.Equal(HttpStatusCode.OK, creatorDownload.StatusCode);
+        Assert.Equal("application/json", creatorDownload.Content.Headers.ContentType?.MediaType);
 
         var creatorFiles = await creator.GetFromJsonAsync<List<StoredFileDto>>($"/api/workspaces/{creatorAuth.PersonalWorkspace.Id}/files?pageSize=100");
         Assert.NotNull(creatorFiles);
@@ -147,6 +154,17 @@ public sealed class SocialJobAttachmentPrivacyReadbackTests : IClassFixture<Soci
         var creatorHits = creatorSearch!.Groups.SelectMany(group => group.Items).ToArray();
         Assert.Contains(creatorHits, item => item.Id == attachment.Id && string.Equals(item.Type, GlobalSearchResultTypes.File, StringComparison.Ordinal));
         Assert.Contains(creatorHits, item => item.Id == job.Id && string.Equals(item.Type, GlobalSearchResultTypes.Generation, StringComparison.Ordinal));
+
+        // Asset search indexes its published name and description, not the input marker.
+        var assetSearchPath = $"/api/search?q={Uri.EscapeDataString(outputAssetName)}";
+        var ownerAssetSearch = await creator.GetFromJsonAsync<GlobalSearchResponseDto>(assetSearchPath);
+        var peerAssetSearch = await member.GetFromJsonAsync<GlobalSearchResponseDto>(assetSearchPath);
+        Assert.NotNull(ownerAssetSearch);
+        Assert.NotNull(peerAssetSearch);
+        Assert.Contains(ownerAssetSearch.Groups.SelectMany(group => group.Items),
+            item => item.Type == GlobalSearchResultTypes.Asset && item.Id == outputAssetId);
+        Assert.DoesNotContain(peerAssetSearch.Groups.SelectMany(group => group.Items),
+            item => item.Id == outputAssetId || item.AssetId == outputAssetId);
     }
 
     [Fact]
