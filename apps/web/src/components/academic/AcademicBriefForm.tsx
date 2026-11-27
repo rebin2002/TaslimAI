@@ -21,6 +21,7 @@ import {
   disciplines,
   methodologyOptions,
   findDiscipline,
+  parseKeywords,
   type AcademicBrief,
   type AcademicLevel,
   type DisciplineId,
@@ -58,7 +59,7 @@ export function AcademicBriefForm({ brief, issues, onChange, onRequirementsChang
 
   // A restored or cleared brief must win over stale typed text; comparing parsed
   // arrays keeps the student's own separators while they type.
-  const parsedText = keywordText.split(/[,;\n]/).map((entry) => entry.trim()).filter(Boolean).slice(0, briefLimits.maxKeywords);
+  const parsedText = parseKeywords(keywordText);
   const inSync = parsedText.length === brief.keywords.length && parsedText.every((entry, index) => entry === brief.keywords[index]);
   useEffect(() => {
     if (inSync) return;
@@ -239,7 +240,7 @@ export function AcademicBriefForm({ brief, issues, onChange, onRequirementsChang
           aria-invalid={fieldHasError(issuesFor("keywords")) || undefined}
           onChange={(event) => {
             setKeywordText(event.target.value);
-            onChange({ keywords: event.target.value.split(/[,;\n]/).map((entry) => entry.trim()).filter(Boolean).slice(0, briefLimits.maxKeywords) });
+            onChange({ keywords: parseKeywords(event.target.value) });
           }}
         />
       </AcademicField>

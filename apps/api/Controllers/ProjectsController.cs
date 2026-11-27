@@ -1,9 +1,11 @@
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
+using Taslim.Api.Activity;
 using Taslim.Api.Authorization;
 using Taslim.Api.Contracts;
 using Taslim.Api.Domain;
+using Taslim.Api.Files;
 using Taslim.Api.Infrastructure;
 using Taslim.Api.Persistence;
 using Taslim.Api.Projects;
@@ -88,14 +90,27 @@ public sealed class ProjectsController(TaslimDbContext db, WorkspaceAccessServic
         if (workspace is null) return ApiResults.Error(this, 404, "WORKSPACE_NOT_FOUND", "Workspace not found.");
 
         var files = db.StoredFiles.AsNoTracking()
-            .Where(file => file.ProjectId == projectId && file.WorkspaceId == project.WorkspaceId && file.Status != StoredFileStatus.Deleted)
-            .Where(file => file.ConversationId == null || file.UserId == userId);
+            .Where(file => file.WorkspaceId == project.WorkspaceId && file.Status != StoredFileStatus.Deleted)
+            .Where(StoredFileVisibility.InProjectView(projectId, userId))
+            .Where(StoredFileVisibility.ForWorkspaceMember(userId))
+            .Where(StoredFileVisibility.IsNotResearchReportOwnedByAnotherMember(userId));
         var assets = db.Assets.AsNoTracking()
-            .Where(asset => asset.ProjectId == projectId && asset.WorkspaceId == project.WorkspaceId && asset.Status == AssetStatus.Active);
+            .Where(asset => asset.ProjectId == projectId && asset.WorkspaceId == project.WorkspaceId && asset.Status == AssetStatus.Active)
+            // Match AssetVisibility (#936): generated Research reports are private to
+            // their ResearchGenerate job creator, but Research-typed assets without that
+            // provenance remain shared and countable by project members (#1042).
+            .Where(asset => asset.AssetType != AssetTypes.Research
+                || asset.SourceGenerationJobId == null
+                || asset.SourceGenerationJob!.JobType != GenerationJobTypes.ResearchGenerate
+                || asset.CreatedByUserId == userId);
         var conversations = db.Conversations.AsNoTracking()
             .Where(conversation => conversation.ProjectId == projectId && conversation.WorkspaceId == project.WorkspaceId && conversation.UserId == userId);
-        var activity = db.GenerationJobs.AsNoTracking()
-            .Where(job => job.ProjectId == projectId && job.WorkspaceId == project.WorkspaceId);
+        // Counts and recent rows share the same creator-private policy as the Activity Center.
+        var activity = CreatorPrivacyFence.VisibleToMember(
+            db.GenerationJobs.AsNoTracking()
+                .Where(job => job.ProjectId == projectId && job.WorkspaceId == project.WorkspaceId),
+            userId,
+            db.Database.ProviderName);
 
         var counts = new ProjectOverviewCountsDto(
             await files.CountAsync(cancellationToken),

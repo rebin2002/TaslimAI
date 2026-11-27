@@ -14,11 +14,11 @@ Install-time identity rules are deliberately strict, because a pack ID is also a
 - Direction must be exactly `ltr` or `rtl`.
 - A pack cannot fall back to itself, and a partial pack must request human review.
 - Re-installing a known ID throws unless the caller passes `replaceVersion` naming the installed version. Without that, one late `install()` could silently retarget the `en` root that every partial pack resolves through.
-- `missingFallbacks()` reports packs whose fallback target is not installed, which is otherwise invisible: every miss in that pack would silently degrade to a raw key.
+- `missingFallbacks()` reports packs whose fallback target is not installed, so the configuration can be corrected.
 
 ## Fallback and safety
 
-Resolution walks the pack's own fallback chain and stops at the first pack that owns the key. Lookups are own-property checks, so an inherited `Object.prototype` member can never be read as a translation. If the chain cannot resolve a key, the key is returned as an explicit last-resort diagnostic; the UI never receives an empty string or a fabricated translation.
+Resolution walks the pack's own fallback chain and stops at the first pack that owns the key. Lookups are own-property checks, so an inherited `Object.prototype` member can never be read as a translation. If a fallback target is missing or a cycle is reached, the registry makes one final lookup in the installed English catalog. Keys absent from all applicable catalogs are returned as an explicit last-resort diagnostic.
 
 Interpolation has the same boundary: `{name}` placeholders substitute only own properties of the supplied variables. A placeholder naming an inherited member (`{toString}`, `{constructor}`) is left literal instead of being coerced into visible text.
 
