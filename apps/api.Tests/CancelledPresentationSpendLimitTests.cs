@@ -53,6 +53,12 @@ public sealed class CancelledPresentationSpendLimitTests
         // Two aliases land today although their jobs have a different canonical window/status.
         var oldJob = AddJob(db, user, workspace, today.AddMonths(-2), GenerationJobTypes.PresentationGenerate, UsageTransactionStatus.Cancelled);
         AddAttempt(db, oldJob, 1, null, 17m);
+        // Feature participates in the unique ledger key, so this identical request ID is legal.
+        db.UsageTransactions.Add(new UsageTransaction
+        {
+            Id = Guid.NewGuid(), WorkspaceId = workspace, UserId = user, GenerationJobId = oldJob.Id, CreatedAt = today,
+            RequestId = $"generation:{oldJob.Id:N}", Feature = UsageFeature.Generation, Status = UsageTransactionStatus.Cancelled,
+        });
         foreach (var source in new[] { oldJob, completedJob })
             db.UsageTransactions.Add(new UsageTransaction
             {
@@ -190,7 +196,13 @@ public sealed class CancelledPresentationSpendLimitTests
         db.UsageTransactions.Add(new UsageTransaction
         {
             Id = Guid.NewGuid(), GenerationJobId = id, WorkspaceId = workspace, UserId = user, CreatedAt = at,
-            RequestId = $"generation:{id:N}", Feature = UsageFeature.Generation, Provider = "synthetic", Model = "model",
+            RequestId = $"generation:{id:N}", Feature = type switch
+            {
+                GenerationJobTypes.PresentationGenerate => UsageFeature.Presentation,
+                GenerationJobTypes.DocumentGenerate => UsageFeature.Document,
+                _ => UsageFeature.Generation,
+            },
+            Provider = "synthetic", Model = "model",
             Status = status, ProviderCostKnown = status == UsageTransactionStatus.Completed, ProviderCostUsd = ledgerCost,
         });
         return job;

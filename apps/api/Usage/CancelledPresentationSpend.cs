@@ -18,10 +18,11 @@ internal static class CancelledPresentationSpend
     internal static IQueryable<decimal> ForCancelledReservations(
         TaslimDbContext db, IQueryable<UsageTransaction> reservations)
     {
-        var cancelled = reservations.Where(row => row.Status == UsageTransactionStatus.Cancelled
+        var cancelled = reservations.Where(row => row.Feature == UsageFeature.Presentation
+            && row.Status == UsageTransactionStatus.Cancelled
             && row.GenerationJobId.HasValue
             && row.RequestId == "generation:" + row.GenerationJobId.Value.ToString().Replace("-", "").ToLower());
-        // Only the generation reservation owns the billing window. Historical aliases may have different dates.
+        // The ledger key includes both feature and request ID. An alias in another feature may have a different date.
         return ReportedUsd(db.GenerationProviderAttempts.AsNoTracking().Where(attempt =>
             cancelled.Any(row => row.GenerationJobId == attempt.GenerationJobId
                 && row.WorkspaceId == attempt.GenerationJob.WorkspaceId && row.UserId == attempt.GenerationJob.CreatedByUserId)));
