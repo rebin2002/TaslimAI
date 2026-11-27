@@ -151,6 +151,7 @@ public sealed class GenerationBudgetService(
     {
         var estimates = attempts.Where(attempt => attempt.EstimatedProviderCostKnown
                 && !(attempt.GenerationJob.JobType == GenerationJobTypes.PresentationGenerate
+                    && attempt.GenerationJob.Status == GenerationJobStatus.Cancelled
                     && attempt.Status == GenerationProviderAttemptStatus.Cancelled))
             .Select(attempt => attempt.EstimatedProviderCostUsd ?? 0m);
         // Replace the cancelled attempt's reservation estimate with its reported actual at most once.

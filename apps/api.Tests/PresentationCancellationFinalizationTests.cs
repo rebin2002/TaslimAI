@@ -38,7 +38,7 @@ public sealed class PresentationCancellationFinalizationTests
     // surfaces after the provider boundary rather than inside it.
     private const string DraftInvalidAfterProviderJson = "{\"title\":\"Launch plan\",\"subtitle\":\"Quarterly review\",\"language\":\"not-a-supported-language\",\"theme\":\"professional-navy\",\"presentationType\":\"business\",\"slides\":[{\"order\":1,\"type\":\"title\",\"title\":\"Launch plan\",\"subtitle\":\"Quarterly review\",\"blocks\":[],\"notes\":null,\"visualSuggestion\":null,\"sourceRefs\":[]}]}";
 
-    private static readonly AiUsageMetadata LateCompletionUsage = new("presentation-test", "presentation-test-model", 100, null, 200, 0.002m, 0.002m, 8, "completed", true);
+    private static readonly AiUsageMetadata LateCompletionUsage = new("presentation-test", "presentation-test-model", 100, null, 200, 0.002m, 0.002m, 8, "completed", true, Currency: "USD");
 
     // ---- race directions: a recorded cancellation must win ----
 
@@ -163,6 +163,7 @@ public sealed class PresentationCancellationFinalizationTests
     [InlineData(null, "USD", null)]
     [InlineData("0", "USD", "0")]
     [InlineData("0.002", "EUR", null)]
+    [InlineData("0.002", "", null)]
     [InlineData("-0.002", "USD", null)]
     public async Task Cancelled_stage_records_only_an_explicit_nonnegative_USD_actual(string? reported, string currency, string? expected)
     {

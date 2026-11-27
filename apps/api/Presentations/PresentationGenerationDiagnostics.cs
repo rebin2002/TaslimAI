@@ -32,13 +32,15 @@ internal sealed class PresentationCancellationException(CancellationToken cancel
     {
         if (!cancellationToken.IsCancellationRequested) return;
 
-        // Only a reported USD actual belongs on the provider attempt. An estimate,
-        // missing cost or a value in another currency must remain unknown here.
-        decimal? cost = usage?.ActualCost is decimal actual && actual >= 0m
-            && (string.IsNullOrEmpty(usage.Currency) || string.Equals(usage.Currency, UsageCurrencies.Usd, StringComparison.OrdinalIgnoreCase))
-            ? actual
+        throw new PresentationCancellationException(cancellationToken, ReportedUsd(usage));
+    }
+
+    internal static decimal? ReportedUsd(AiUsageMetadata? usage)
+    {
+        var (amount, currency) = usage?.ProviderReport ?? (usage?.ActualCost, usage?.Currency);
+        return amount >= 0m && string.Equals(currency, UsageCurrencies.Usd, StringComparison.OrdinalIgnoreCase)
+            ? amount
             : null;
-        throw new PresentationCancellationException(cancellationToken, cost);
     }
 }
 

@@ -165,6 +165,14 @@ public sealed class PresentationPublicationCancellationRaceTests : IClassFixture
 
         // The spend reservation settles as a cancellation, never as a completed charge.
         var usage = await ReadUsageAsync(jobId);
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            var attempt = await db.GenerationProviderAttempts.AsNoTracking().SingleAsync(row => row.GenerationJobId == jobId);
+            Assert.Equal(GenerationProviderAttemptStatus.Cancelled, attempt.Status);
+            Assert.True(attempt.ActualProviderCostKnown);
+            Assert.Equal(0.002m, attempt.ActualProviderCostUsd);
+        }
         Assert.Equal(UsageTransactionStatus.Cancelled, usage.Status);
         Assert.Equal(0m, usage.ChargedAmount);
         Assert.Equal(0m, usage.ProviderCostUsd);
@@ -237,6 +245,118 @@ public sealed class PresentationPublicationCancellationRaceTests : IClassFixture
 
     // The bounded loops below only observe a state the gates already decided; they fail
     // fast with a diagnostic instead of silently waiting on an outcome that cannot arrive.
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(false, true)]
+    [InlineData(true, false)]
+    public async Task Observed_cancellation_after_render_settles_only_the_owner_of_the_claim(bool replaceClaim, bool cancelInPublisher)
+    {
+        var gate = new RenderedDeckGate(replaceClaim, cancelInPublisher);
+        using var standalone = new PresentationPublicationCancellationApiFactory();
+        using var isolated = standalone.WithWebHostBuilder(builder => builder.ConfigureServices(services =>
+        {
+            if (cancelInPublisher)
+            {
+                services.RemoveAll<IGeneratedAssetPublisher>();
+                services.AddSingleton<IGeneratedAssetPublisher>(new CancelledDeckPublisher(gate));
+            }
+            services.RemoveAll<IGenerationJobHandler>();
+            services.AddScoped<PresentationGenerationJobHandler>();
+            services.AddScoped<IGenerationJobHandler>(provider =>
+                new ObserveRenderedDeck(provider.GetRequiredService<PresentationGenerationJobHandler>(), gate));
+        }));
+        using var client = isolated.CreateClient();
+        var workspaceId = await RegisterAsync(client);
+        var jobId = await CreatePresentationJobAsync(client, workspaceId);
+        await gate.Rendered.Task.WaitAsync(TimeSpan.FromSeconds(30));
+        var newClaim = Guid.NewGuid();
+        using var scope = isolated.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        if (replaceClaim)
+        {
+            // A recovery worker has taken ownership before the old worker receives its token.
+            Assert.Equal(1, await db.GenerationJobs.Where(job => job.Id == jobId && job.Status == GenerationJobStatus.Running)
+                .ExecuteUpdateAsync(set => set.SetProperty(job => job.ConcurrencyToken, newClaim)));
+        }
+        else
+        {
+            using var cancel = await CancelAsync(client, jobId);
+            Assert.Equal(HttpStatusCode.Accepted, cancel.StatusCode);
+        }
+
+        // Disposal occurs after the worker's finalization path, so observations are deterministic.
+        await gate.ScopeDisposed.Task.WaitAsync(TimeSpan.FromSeconds(30));
+        var job = await db.GenerationJobs.AsNoTracking().SingleAsync(row => row.Id == jobId);
+        var attempt = await db.GenerationProviderAttempts.AsNoTracking().SingleAsync(row => row.GenerationJobId == jobId);
+        var reservation = await db.UsageTransactions.AsNoTracking().SingleAsync(row => row.GenerationJobId == jobId);
+        Assert.Equal(0m, reservation.ChargedAmount);
+        Assert.False(reservation.IsBillable);
+        Assert.Equal(0, await db.GenerationJobOutputs.CountAsync(row => row.GenerationJobId == jobId));
+        if (replaceClaim)
+        {
+            Assert.Equal(newClaim, job.ConcurrencyToken);
+            Assert.Equal(GenerationJobStatus.Running, job.Status);
+            Assert.Equal(UsageTransactionStatus.Pending, reservation.Status);
+            Assert.Equal(GenerationProviderAttemptStatus.Started, attempt.Status);
+            Assert.False(attempt.ActualProviderCostKnown);
+        }
+        else
+        {
+            Assert.Equal(GenerationJobStatus.Cancelled, job.Status);
+            Assert.Equal(UsageTransactionStatus.Cancelled, reservation.Status);
+            Assert.Equal(GenerationProviderAttemptStatus.Cancelled, attempt.Status);
+            Assert.True(attempt.ActualProviderCostKnown);
+            Assert.Equal(0.002m, attempt.ActualProviderCostUsd);
+        }
+    }
+
+    private sealed class RenderedDeckGate(bool failAfterClaimLoss, bool cancelInPublisher)
+    {
+        public bool FailAfterClaimLoss { get; } = failAfterClaimLoss;
+        public bool CancelInPublisher { get; } = cancelInPublisher;
+        public CancellationToken WorkerToken { get; set; }
+        public TaskCompletionSource Rendered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource ScopeDisposed { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    }
+
+    private sealed class ObserveRenderedDeck(PresentationGenerationJobHandler inner, RenderedDeckGate gate) : IGenerationJobHandler, IDisposable
+    {
+        public bool CanHandle(string jobType) => inner.CanHandle(jobType);
+
+        public async Task<GenerationHandlerResult> ExecuteAsync(GenerationJob job, IProgress<int> progress, CancellationToken token)
+        {
+            var result = await inner.ExecuteAsync(job, progress, token);
+            Assert.NotNull(Assert.Single(result.Outputs).FileArtifact);
+            gate.WorkerToken = token;
+            if (gate.CancelInPublisher) return result;
+            await WaitForMonitorAsync(gate);
+            if (gate.FailAfterClaimLoss)
+                PresentationCancellationException.ThrowIfCancelled(token, result.Usage);
+            return result;
+        }
+
+        public void Dispose() => gate.ScopeDisposed.TrySetResult();
+    }
+
+    private static async Task WaitForMonitorAsync(RenderedDeckGate gate)
+    {
+        var observed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var registration = gate.WorkerToken.Register(() => observed.TrySetResult());
+        gate.Rendered.TrySetResult();
+        await observed.Task.WaitAsync(TimeSpan.FromSeconds(30));
+    }
+
+    private sealed class CancelledDeckPublisher(RenderedDeckGate gate) : IGeneratedAssetPublisher
+    {
+        public async Task<PreparedGenerationOutput> PrepareAsync(GenerationJob job, GenerationHandlerOutput output, CancellationToken cancellationToken)
+        {
+            await WaitForMonitorAsync(gate);
+            throw new OperationCanceledException(gate.WorkerToken);
+        }
+
+        public Task DiscardAsync(PreparedGenerationOutput publication, CancellationToken cancellationToken) => Task.CompletedTask;
+    }
+
     private async Task WaitForPublicationEnteredAsync(Guid jobId)
     {
         for (var attempt = 0; attempt < 600; attempt++)
@@ -478,7 +598,7 @@ public sealed class FinishedDeckPresentationProvider : IPresentationGenerationPr
                 },
             ],
         };
-        var usage = new Taslim.Api.Ai.AiUsageMetadata("presentation-publication-race", "presentation-publication-race-model", 100, null, 200, 0.002m, 0.002m, 8, "completed", true);
+        var usage = new Taslim.Api.Ai.AiUsageMetadata("presentation-publication-race", "presentation-publication-race-model", 100, null, 200, 0.002m, 0.002m, 8, "completed", true, Currency: "USD");
         return Task.FromResult(new PresentationProviderResult(draft, usage));
     }
 }

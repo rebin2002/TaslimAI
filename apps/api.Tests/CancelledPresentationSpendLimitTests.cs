@@ -50,6 +50,15 @@ public sealed class CancelledPresentationSpendLimitTests
         // the same job does not add that expense again.
         var completedJob = AddJob(db, user, workspace, today, GenerationJobTypes.PresentationGenerate, UsageTransactionStatus.Completed, 0.04m);
         AddAttempt(db, completedJob, 1, null, 0.04m);
+        // Two aliases land today although their jobs have a different canonical window/status.
+        var oldJob = AddJob(db, user, workspace, today.AddMonths(-2), GenerationJobTypes.PresentationGenerate, UsageTransactionStatus.Cancelled);
+        AddAttempt(db, oldJob, 1, null, 17m);
+        foreach (var source in new[] { oldJob, completedJob })
+            db.UsageTransactions.Add(new UsageTransaction
+            {
+                Id = Guid.NewGuid(), WorkspaceId = workspace, UserId = user, GenerationJobId = source.Id, CreatedAt = today,
+                RequestId = $"historical:{source.Id:N}", Status = UsageTransactionStatus.Cancelled,
+            });
         await db.SaveChangesAsync();
 
         const decimal daily = 0.36000001m;
@@ -108,11 +117,15 @@ public sealed class CancelledPresentationSpendLimitTests
         var over = estimate with { AmountUsd = 0.01m };
         Assert.False((await preflight.EvaluateAsync(user, workspace, null, over, confirmationAccepted: true)).Allowed);
 
-        // The worker has its own attempt-based admission. Check each limit independently there.
+        // A recovered job's older cancelled attempt keeps its original estimate for the worker's
+        // attempt-based limit. Its foreign finalization cannot replace that estimate with an actual.
+        var recovered = AddJob(db, user, workspace, past, GenerationJobTypes.PresentationGenerate, UsageTransactionStatus.Completed);
+        AddAttempt(db, recovered, 1, 0.25m, 9m);
+        await db.SaveChangesAsync();
         foreach (var (options, rejection) in new[]
         {
-            (new GenerationBudgetOptions { Enabled = true, WorkspaceInternalSafetyCeilingUsd = 0.50m }, "WORKSPACE_INTERNAL_SAFETY_CEILING_EXCEEDED"),
-            (new GenerationBudgetOptions { Enabled = true, UserEstimatedCostCeilingUsd = 0.60m }, "USER_COST_CAP_EXCEEDED"),
+            (new GenerationBudgetOptions { Enabled = true, WorkspaceInternalSafetyCeilingUsd = 0.75m }, "WORKSPACE_INTERNAL_SAFETY_CEILING_EXCEEDED"),
+            (new GenerationBudgetOptions { Enabled = true, UserEstimatedCostCeilingUsd = 0.85m }, "USER_COST_CAP_EXCEEDED"),
         })
         {
             var budget = new GenerationBudgetService(db, Options.Create(options), NullLogger<GenerationBudgetService>.Instance);

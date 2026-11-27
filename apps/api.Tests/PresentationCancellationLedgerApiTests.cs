@@ -99,7 +99,7 @@ public sealed class LateCompletionPresentationChatService : IChatCompletionServi
         await WaitUntilCancelledAsync(cancellationToken);
         return new AiGenerationResult(
             ValidDraftJson,
-            new AiUsageMetadata("presentation-cancel-ledger", "presentation-cancel-ledger", 100, null, 200, 0.002m, 0.002m, 8, "completed", true));
+            new AiUsageMetadata("presentation-cancel-ledger", "presentation-cancel-ledger", 100, null, 200, 0.002m, 0.002m, 8, "completed", true, Currency: "USD"));
     }
 
     public async IAsyncEnumerable<AiStreamEvent> StreamAsync(AiChatRequest request, [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken = default)
