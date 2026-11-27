@@ -2,7 +2,7 @@ name: Taslim CI
 
 on:
   push:
-    branches: [main, "parallel/**", "feature/taslim-autopilot-next-wave"]
+    branches: [main, "parallel/**", "feature/taslim-autopilot-next-wave", "feat/academic-workflow-plan-slice-20261125"]
   pull_request:
 
 permissions:
@@ -21,7 +21,8 @@ concurrency:
   # lanes in container-health-smoke.yml and release-evidence.yml (queue: max
   # is only valid while cancel-in-progress is false and must never combine
   # with cancel-in-progress: true). PR/branch lanes keep supersession.
-  group: ${{ github.workflow }}-${{ github.ref == 'refs/heads/main' && github.run_id || github.head_ref || github.ref }}
+  # Forks can reuse branch names. Keep each PR in its own supersession group.
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || 0 }}-${{ github.ref == 'refs/heads/main' && github.run_id || github.head_ref || github.ref }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 env:
@@ -104,10 +105,64 @@ jobs:
             echo "Production NuGet vulnerability detected." >&2
             exit 1
           fi
+      # FFmpeg runner prerequisite for the Movie hosted media-qualification
+      # gate (apps/api.Tests/MovieFinalAssemblyHostedFfmpegGateTests.cs). That
+      # gate fails closed when /usr/bin/ffmpeg is missing, which is exactly how
+      # exact-head CI run 42294809646 at head 19c117a057ebb7ca79162c00f48f1be6a55f292d
+      # reported 1,072 passed / 1 failed without ever reaching the real media
+      # fixture. Provision the binaries from the runner package archive before
+      # `dotnet test` and verify the paths the gate asserts on. The test stays
+      # fail-closed and is deliberately not weakened, skipped or removed.
+      - name: Provision FFmpeg for hosted media qualification
+        shell: bash
+        run: |
+          sudo apt-get update -qq
+          # fontconfig and one core family keep the libass caption burn-in inside
+          # the same real-media fixture deterministic on a bare runner image.
+          sudo apt-get install -y -qq --no-install-recommends ffmpeg fontconfig fonts-dejavu-core
+      - name: Verify the hosted Movie media toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -x /usr/bin/ffmpeg
+          test -x /usr/bin/ffprobe
+          ffmpeg -hide_banner -version | sed -n '1p'
+          ffprobe -hide_banner -version | sed -n '1p'
+          filters="$(ffmpeg -hide_banner -filters 2>/dev/null)"
+          grep -qw subtitles <<<"$filters"
+          media_dir="$(mktemp -d)"
+          trap 'rm -rf "$media_dir"' EXIT
+          ffmpeg -hide_banner -loglevel error -nostdin \
+            -f lavfi -i "color=c=red:s=320x180:r=10" \
+            -f lavfi -i "sine=frequency=880:sample_rate=48000" \
+            -t 0.2 -c:v mpeg4 -c:a aac "$media_dir/mixed.mp4"
+          streams="$(ffprobe -v error -show_entries stream=codec_type -of csv=p=0 "$media_dir/mixed.mp4")"
+          grep -Fxq audio <<<"$streams"
+          grep -Fxq video <<<"$streams"
       - run: dotnet test apps/api.Tests/Taslim.Api.Tests.csproj
         env:
           ConnectionStrings__Postgres: Host=localhost;Port=5432;Database=taslim_tests;Username=taslim;Password=change-me
           Database__ApplyMigrations: "false"
+
+      - name: Verify exactly one executed Movie assembly qualification test
+        shell: bash
+        run: |
+          set -euo pipefail
+          result_dir="$(mktemp -d)"
+          trap 'rm -rf "$result_dir"' EXIT
+          dotnet test apps/api.Tests/Taslim.Api.Tests.csproj --no-build \
+            --filter 'FullyQualifiedName=Taslim.Api.Tests.MovieFinalAssemblyHostedFfmpegGateTests.Hosted_ci_executes_real_mixed_audio_video_assembly_and_probes_output' \
+            --logger 'trx;LogFileName=qualification.trx' --results-directory "$result_dir"
+          python3 - "$result_dir/qualification.trx" <<'PYTHON'
+          import sys
+          from xml.etree import ElementTree
+
+          root = ElementTree.parse(sys.argv[1]).getroot()
+          results = root.findall("./{*}Results/{*}UnitTestResult")
+          expected = "Taslim.Api.Tests.MovieFinalAssemblyHostedFfmpegGateTests.Hosted_ci_executes_real_mixed_audio_video_assembly_and_probes_output"
+          if len(results) != 1 or results[0].get("testName") != expected or results[0].get("outcome") != "Passed":
+              sys.exit("Expected exactly one executed and passing Movie assembly qualification test.")
+          PYTHON
 
   e2e:
     name: Browser E2E
@@ -158,6 +213,7 @@ jobs:
           ConnectionStrings__Postgres: Host=localhost;Port=5432;Database=taslim_e2e;Username=taslim;Password=change-me
           Database__ApplyMigrations: "true"
           AllowedOrigins__0: http://localhost:3000
+          AcademicWorkflow__PlanEnabled: "true"
           Ai__OpenAI__Enabled: "false"
           Files__StorageProvider: Local
           Files__LocalRootPath: ${{ github.workspace }}/.e2e-files
@@ -169,6 +225,7 @@ jobs:
         env:
           E2E_API_URL: http://localhost:5000
           NEXT_PUBLIC_API_URL: http://localhost:5000
+          NEXT_PUBLIC_ACADEMIC_RESEARCH_ENABLED: "true"
           E2E_TEST_PASSWORD: E2eStrongPassword!123
           CI: "true"
         run: npm run test:e2e --workspace @taslim/web
@@ -184,11 +241,15 @@ jobs:
 
   autopilot-gate:
     name: Autopilot next-wave gate
-    # This gate is specific to main/next-wave integration. Keep ordinary CI
-    # required for other PRs, but do not make the next-wave policy reject
-    # legitimate chained PRs whose base is another dependency branch.
-    if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/feature/taslim-autopilot-next-wave' || (github.event_name == 'pull_request' && (github.base_ref == 'main' || github.base_ref == 'feature/taslim-autopilot-next-wave')) }}
+    # This gate is specific to main/next-wave integration, with this explicitly
+    # opted-in issue branch added so all seven checks can bind to its pushed head.
+    # Do not make the next-wave policy reject chained PRs on other dependency bases.
+    if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/feature/taslim-autopilot-next-wave' || github.ref == 'refs/heads/feat/academic-workflow-plan-slice-20261125' || (github.event_name == 'pull_request' && (github.base_ref == 'main' || github.base_ref == 'feature/taslim-autopilot-next-wave')) }}
     runs-on: ubuntu-latest
+    env:
+      # Permit only this explicitly opted-in push branch as the expected ref;
+      # all other contexts keep the gate's dedicated next-wave default.
+      NEXT_WAVE_EXPECTED_BRANCH: ${{ github.ref == 'refs/heads/feat/academic-workflow-plan-slice-20261125' && 'feat/academic-workflow-plan-slice-20261125' || 'feature/taslim-autopilot-next-wave' }}
     services:
       postgres:
         image: postgres:15@sha256:e27d24a29acce1b554771ba68c43afa55446069d228310451bb8c96c1531d2cb # postgres:15 linux/amd64

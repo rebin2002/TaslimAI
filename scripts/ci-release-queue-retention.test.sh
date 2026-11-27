@@ -227,6 +227,8 @@ posture_violations() {
   else
     grep -q 'github\.workflow' <<<"$group_line" \
       || violations+="concurrency.group must key on github.workflow (cross-workflow isolation)"$'\n'
+    grep -Fq '${{ github.event.pull_request.number || 0 }}' <<<"$group_line" \
+      || violations+="concurrency.group must isolate pull requests with the same branch name in different forks"$'\n'
     grep -q 'github\.head_ref' <<<"$group_line" \
       || violations+="concurrency.group must keep the PR lane (github.head_ref) for safe supersession"$'\n'
     grep -q 'github\.ref' <<<"$group_line" \
@@ -343,7 +345,7 @@ trap 'rm -rf "$temp_dir"' EXIT
 cat > "$temp_dir/old-shared-lane.yml" <<'FIXTURE'
 name: Old af78ba05 posture
 concurrency:
-  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || 0 }}-${{ github.head_ref || github.ref }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 FIXTURE
 
@@ -351,7 +353,7 @@ FIXTURE
 cat > "$temp_dir/max-true.yml" <<'FIXTURE'
 name: Invalid queue combination
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref == 'refs/heads/main' && github.run_id || github.head_ref || github.ref }}
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || 0 }}-${{ github.ref == 'refs/heads/main' && github.run_id || github.head_ref || github.ref }}
   queue: max
   cancel-in-progress: true
 FIXTURE
@@ -361,7 +363,7 @@ FIXTURE
 cat > "$temp_dir/max-expression-cancel.yml" <<'FIXTURE'
 name: Invalid queue combination expression
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref == 'refs/heads/main' && github.run_id || github.head_ref || github.ref }}
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || 0 }}-${{ github.ref == 'refs/heads/main' && github.run_id || github.head_ref || github.ref }}
   queue: max
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 FIXTURE
@@ -370,7 +372,7 @@ FIXTURE
 cat > "$temp_dir/compliant-production.yml" <<'FIXTURE'
 name: Compliant production posture
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref == 'refs/heads/main' && github.run_id || github.head_ref || github.ref }}
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || 0 }}-${{ github.ref == 'refs/heads/main' && github.run_id || github.head_ref || github.ref }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 FIXTURE
 cat >> "$temp_dir/compliant-production.yml" <<'FIXTURE'
@@ -386,7 +388,7 @@ FIXTURE
 cat > "$temp_dir/no-release-lane.yml" <<'FIXTURE'
 name: Missing release lane
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref == 'refs/heads/main' && github.run_id || github.head_ref || github.ref }}
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || 0 }}-${{ github.ref == 'refs/heads/main' && github.run_id || github.head_ref || github.ref }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 FIXTURE
 
@@ -396,7 +398,7 @@ FIXTURE
 cat > "$temp_dir/compliant-max-shared.yml" <<'FIXTURE'
 name: Compliant max-queue shared posture
 concurrency:
-  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || 0 }}-${{ github.head_ref || github.ref }}
   queue: max
   cancel-in-progress: false
 FIXTURE
@@ -405,7 +407,7 @@ FIXTURE
 cat > "$temp_dir/main-cancel.yml" <<'FIXTURE'
 name: Main superseding cancel
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref == 'refs/heads/main' && github.run_id || github.head_ref || github.ref }}
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || 0 }}-${{ github.ref == 'refs/heads/main' && github.run_id || github.head_ref || github.ref }}
   cancel-in-progress: ${{ github.ref == 'refs/heads/main' }}
 FIXTURE
 
@@ -443,6 +445,9 @@ invalid_result="$(simulate_three_main_pushes shared max cancel)"
   && ok "simulator refuses queue max + cancel true as invalid ($invalid_result)" \
   || err "simulator accepted the forbidden queue max + cancel true combination ($invalid_result)"
 
+# Removing only the PR number preserves all other controls but collapses same-name fork branches.
+sed 's/\${{ github.event.pull_request.number || 0 }}-//' "$temp_dir/no-release-lane.yml" > "$temp_dir/fork-collision.yml"
+expect_rejected 'same-name fork PRs' "$temp_dir/fork-collision.yml" 'ci'
 expect_accepted 'compliant split ci'    "$temp_dir/no-release-lane.yml" 'ci'
 expect_accepted 'compliant production'  "$temp_dir/compliant-production.yml" 'production'
 expect_accepted 'compliant max shared'  "$temp_dir/compliant-max-shared.yml" 'ci'

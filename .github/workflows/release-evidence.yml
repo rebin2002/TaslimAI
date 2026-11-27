@@ -2,7 +2,7 @@ name: Taslim Release Evidence
 
 on:
   push:
-    branches: [main, "parallel/**"]
+    branches: [main, "parallel/**", "feat/academic-workflow-plan-slice-20261125"]
   pull_request:
 
 permissions:
@@ -20,7 +20,8 @@ concurrency:
   # manifest lives on the job-level release lane below (queue: max +
   # cancel-in-progress: false; queue: max must never combine with
   # cancel-in-progress: true).
-  group: ${{ github.workflow }}-${{ github.ref == 'refs/heads/main' && github.run_id || github.head_ref || github.ref }}
+  # Forks can reuse branch names. Keep each PR in its own supersession group.
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || 0 }}-${{ github.ref == 'refs/heads/main' && github.run_id || github.head_ref || github.ref }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 env:
@@ -29,6 +30,8 @@ env:
 
 jobs:
   release-evidence:
+    env:
+      GOVERNANCE_PYTHON: /usr/bin/python3
     name: Release evidence and safety contract
     runs-on: ubuntu-latest
     # Retention + serialization lane for integrated main commits: queue: max
@@ -44,15 +47,30 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
+          persist-credentials: false
       - name: Test release evidence behavior
         run: bash scripts/release-evidence.test.sh
+      - name: Ensure the workflow YAML parser is available
+        run: |
+          if ! "$GOVERNANCE_PYTHON" -c 'import yaml'; then
+            sudo apt-get update -qq
+            sudo apt-get install -y python3-yaml
+          fi
+      - name: Test release governance evidence behavior
+        run: bash scripts/release-governance-evidence.test.sh
       - name: Generate release evidence manifest
         env:
           RELEASE_EVIDENCE_PATH: ${{ runner.temp }}/taslim-release-evidence.json
         run: bash scripts/release-evidence.sh
+      - name: Generate release governance evidence
+        env:
+          GOVERNANCE_EVIDENCE_PATH: ${{ runner.temp }}/taslim-release-governance-evidence.json
+        run: bash scripts/release-governance-evidence.sh
       - if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: taslim-release-evidence-${{ github.run_id }}
-          path: ${{ runner.temp }}/taslim-release-evidence.json
+          path: |
+            ${{ runner.temp }}/taslim-release-evidence.json
+            ${{ runner.temp }}/taslim-release-governance-evidence.json
           if-no-files-found: ignore
