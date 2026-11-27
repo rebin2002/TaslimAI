@@ -74,7 +74,11 @@ class TestNode {
     if (!event.propagationStopped && node.parentNode) this.notify(event, node.parentNode);
   }
   contains(node: TestNode | null): boolean { return node === this || this.childNodes.some((child) => child.contains(node)); }
-  focus() { this.ownerDocument.activeElement = this; }
+  focus() {
+    if (this.ownerDocument.activeElement === this) return;
+    this.ownerDocument.activeElement = this;
+    this.dispatchEvent({ type: "focusin", bubbles: true });
+  }
   blur() { if (this.ownerDocument.activeElement === this) this.ownerDocument.activeElement = this.ownerDocument.body; }
 }
 type TestEvent = {
@@ -124,6 +128,7 @@ vi.mock("../lib/apiBase", () => ({
 }));
 
 import { AssetDetail, type AssetDetailLabels } from "./AssetDetail";
+import { closeDialog, openDialog } from "../lib/useDialogAccessibility";
 
 function historyAsset(): Asset {
   return {
@@ -289,6 +294,36 @@ describe("Image Studio history detail dialog keyboard contract", () => {
     expect(findByClass(container, "asset-detail-panel")).toHaveLength(0);
     // Without the restore the reader's position in the recent-generation list
     // is lost: activeElement would fall to the body with no announcement.
+    expect(document.activeElement).toBe(trigger);
+  });
+
+  it("contains programmatic focus, yields to an upper dialog, and restores the history opener", async () => {
+    await mount();
+    const trigger = findButtonByText("Bottle hero shot");
+    const behind = findButtonByText("Generate");
+    trigger.focus();
+    await click(trigger);
+    const panel = dialogPanel();
+    behind.focus();
+    expect(document.activeElement).toBe(panel);
+
+    const front = document.createElement("button");
+    document.body.appendChild(front);
+    const otherDialog = { token: Symbol("upper dialog"), element: front as unknown as HTMLElement };
+    openDialog(otherDialog);
+    try {
+      front.focus();
+      expect(document.activeElement).toBe(front);
+      expect(await pressKey(panel, "Escape")).toBe(false);
+      expect(closeCalls).toBe(0);
+    } finally {
+      closeDialog(otherDialog);
+      document.body.removeChild(front);
+    }
+    behind.focus();
+    expect(document.activeElement).toBe(panel);
+    await pressKey(document.activeElement, "Escape");
+    expect(closeCalls).toBe(1);
     expect(document.activeElement).toBe(trigger);
   });
 

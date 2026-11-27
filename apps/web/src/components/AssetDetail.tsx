@@ -1,6 +1,7 @@
 import { localeTag } from "@/lib/i18n";
 /* eslint-disable @next/next/no-img-element -- detail previews use authenticated API URLs with session cookies. */
-import { useEffect, useRef, type KeyboardEvent } from "react";
+import { useLayoutEffect, useRef, type KeyboardEvent } from "react";
+import { closeDialog, isTopDialog, openDialog, type DialogHandle } from "../lib/useDialogAccessibility";
 import { CalendarDays, Download, ExternalLink, FileText, FolderKanban, HardDrive, Headphones, Info, Layers3, Pencil, ShieldCheck, X } from "lucide-react";
 import type { Asset } from "../lib/api";
 import { assetFileUrl, assetRepresentationUrl } from "../lib/apiBase";
@@ -52,6 +53,7 @@ export function AssetDetail({ asset, locale, labels, onClose, onEdit }: {
   onEdit: (asset: Asset) => void;
 }) {
   const panelRef = useRef<HTMLElement>(null);
+  const handleRef = useRef<DialogHandle | null>(null);
 
   // A generated image opened from the Image Studio history strip (or the asset library) is a
   // modal surface, but on its own the markup was not a dialog for a keyboard user: activation
@@ -59,22 +61,34 @@ export function AssetDetail({ asset, locale, labels, onClose, onEdit }: {
   // did nothing; and the first Tab walked out of the modal into the page behind it. Closing
   // unmounted the panel while focus still pointed inside it, dropping the reader to the top of
   // the document with no announcement of where it had gone.
-  useEffect(() => {
+  useLayoutEffect(() => {
     const panel = panelRef.current;
     if (!panel) return;
     const active = document.activeElement;
     const opener = active && active !== document.body ? (active as HTMLElement) : null;
+    const handle: DialogHandle = { token: Symbol("asset-detail"), element: panel };
+    handleRef.current = handle;
+    openDialog(handle);
+    const containFocus = () => {
+      if (isTopDialog(handle) && !panel.contains(document.activeElement)) panel.focus();
+    };
+    document.addEventListener("focusin", containFocus, true);
     // `tabIndex={-1}` lets the panel take focus without joining the tab order, and the focused
     // panel is named by aria-labelledby, so opening announces role "dialog" with the asset name.
-    panel.focus();
+    if (isTopDialog(handle)) panel.focus();
     return () => {
+      document.removeEventListener("focusin", containFocus, true);
+      const wasTop = isTopDialog(handle);
+      closeDialog(handle);
+      handleRef.current = null;
       // Every close path unmounts the panel (Escape, the close control, backdrop, edit handoff),
       // so restoring here puts the reader back on the history item it activated.
-      if (opener && document.contains(opener)) opener.focus();
+      if (wasTop && opener && document.contains(opener)) opener.focus();
     };
   }, []);
 
   function handleKeyDown(event: KeyboardEvent<HTMLElement>) {
+    if (!handleRef.current || !isTopDialog(handleRef.current)) return;
     if (event.key === "Escape") {
       // The dialog owns Escape while it is mounted; preventDefault keeps a parent handler from
       // also acting on the dismissal.
