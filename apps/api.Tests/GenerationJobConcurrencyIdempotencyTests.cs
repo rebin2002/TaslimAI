@@ -699,10 +699,20 @@ public sealed class GenerationJobFinalizationSourceContractTests
     // that must carry each. Counting occurrences turns silent removal of the
     // claim-token guard from any single finalization into a deterministic failure.
     private const string CompletionFence =
-        "item.Id == current.Id && item.Status == GenerationJobStatus.Running && item.ConcurrencyToken == claimedJob.ConcurrencyToken && !item.CancellationRequested";
+        "item.Id == current.Id && item.Status == GenerationJobStatus.Running && item.ConcurrencyToken == claimedJob.ConcurrencyToken && !item.CancellationRequested && item.ClaimExpiresAt.HasValue && item.ClaimExpiresAt > completedAt";
     private const string RecoveryFence = "&& item.ConcurrencyToken == expired.ConcurrencyToken";
     private const string WorkerTokenFence = "job.Id == jobId && job.Status == GenerationJobStatus.Running && job.ConcurrencyToken == concurrencyToken";
     private const string TerminalFence = "item.Id == job.Id && item.Status == GenerationJobStatus.Running && item.ConcurrencyToken == concurrencyToken";
+    private const string RunningCancellationFence = "item.Id == job.Id && item.Status == GenerationJobStatus.Running && item.ConcurrencyToken == concurrencyToken && item.ClaimExpiresAt.HasValue && item.ClaimExpiresAt > now";
+    private const string RunningFailureFence = "item.Id == job.Id && item.Status == GenerationJobStatus.Running && item.ConcurrencyToken == concurrencyToken && !item.CancellationRequested && item.ClaimExpiresAt.HasValue && item.ClaimExpiresAt > now";
+    private const string RecoveryCancellationFence = "item.Id == job.Id && item.Status == GenerationJobStatus.Running && item.ConcurrencyToken == expired.ConcurrencyToken && item.CancellationRequested && item.ClaimExpiresAt.HasValue && item.ClaimExpiresAt < now";
+    private const string RecoveryRedispatchFence = "item.Id == job.Id && item.Status == GenerationJobStatus.Running && item.ConcurrencyToken == expired.ConcurrencyToken && !item.CancellationRequested && item.ClaimExpiresAt.HasValue && item.ClaimExpiresAt < now";
+    private const string RecoveryFailureFence = "item.Id == job.Id && item.Status == GenerationJobStatus.Running && item.ConcurrencyToken == expired.ConcurrencyToken && !item.CancellationRequested && item.ClaimExpiresAt.HasValue && item.ClaimExpiresAt < now";
+    private const string RecoveryRedispatchUpdate = ".Where(item => " + RecoveryRedispatchFence + ") .ExecuteUpdateAsync(setters => setters .SetProperty(item => item.Status, GenerationJobStatus.Queued)";
+    private const string RecoveryFailureUpdate = ".Where(item => " + RecoveryFailureFence + ") .ExecuteUpdateAsync(setters => setters .SetProperty(item => item.Status, GenerationJobStatus.Failed)";
+    private const string MusicAttemptTokenFence = "item.Id == attemptId && item.JobConcurrencyToken == jobConcurrencyToken";
+    private const string MusicParentClaimFence =
+        "db.GenerationJobs.Any(job => job.Id == item.GenerationJobId && job.Status == GenerationJobStatus.Running && job.ConcurrencyToken == jobConcurrencyToken && !job.CancellationRequested && job.ClaimExpiresAt.HasValue && job.ClaimExpiresAt > now)";
 
     [Fact]
     public void Every_terminal_finalization_of_a_running_job_is_fenced_by_the_claim_token()
@@ -714,9 +724,36 @@ public sealed class GenerationJobFinalizationSourceContractTests
         // execution duplicate generation side effects; this contract pins all of them.
         var source = ReadSharedLifecycleSource();
 
-        Assert.Equal(1, CountOccurrences(source, CompletionFence));
+        var normalizedSource = NormalizeWhitespace(source);
+        Assert.Equal(1, CountOccurrences(normalizedSource, CompletionFence));
         Assert.Equal(2, CountOccurrences(source, WorkerTokenFence));
         Assert.Equal(2, CountOccurrences(source, TerminalFence));
+
+        // The two provider-attempt updates added for Music dispatch and acceptance
+        // include a nested parent-job predicate. Pin the complete live claim in both
+        // methods; a token on the attempt row alone cannot fence a superseded parent.
+        var dispatch = NormalizeWhitespace(ExtractMethod(source, "private async Task StampDispatchingSubmissionAsync("));
+        Assert.Contains(MusicAttemptTokenFence, dispatch);
+        Assert.Equal(1, CountOccurrences(dispatch, MusicParentClaimFence));
+        Assert.Contains("(item.ProviderExecutionId == null || item.ProviderExecutionId == \"\")", dispatch);
+        Assert.Contains(".SetProperty(item => item.ProviderExecutionId, MusicDispatchMarker)", dispatch);
+
+        var acceptance = NormalizeWhitespace(ExtractMethod(source, "private async Task StampAcceptedSubmissionAsync("));
+        Assert.Contains(MusicAttemptTokenFence, acceptance);
+        Assert.Equal(1, CountOccurrences(acceptance, MusicParentClaimFence));
+        Assert.Contains("item.ProviderExecutionId == MusicDispatchMarker", acceptance);
+        Assert.Contains(".SetProperty(item => item.ProviderExecutionId, operationId)", acceptance);
+
+        // Pin each of the five Running -> terminal writes to its complete applicable
+        // token and lease guard. Cancellation finalization is intentionally distinct:
+        // the recovery path requires CancellationRequested, while an active worker
+        // cancellation is fenced by the live claim and lease.
+        var cancelRunning = NormalizeWhitespace(ExtractMethod(source, "private static async Task CancelRunningAsync("));
+        Assert.Contains(RunningCancellationFence, cancelRunning);
+        Assert.Contains(".SetProperty(item => item.Status, GenerationJobStatus.Cancelled)", cancelRunning);
+        var failRunning = NormalizeWhitespace(ExtractMethod(source, "private static async Task FailAsync("));
+        Assert.Contains(RunningFailureFence, failRunning);
+        Assert.Contains(".SetProperty(item => item.Status, GenerationJobStatus.Failed)", failRunning);
 
         // The lease-recovery finalizations filter across wrapped lines; assert every
         // Running-status guard inside RecoverExpiredClaimsAsync is paired with the
@@ -724,20 +761,29 @@ public sealed class GenerationJobFinalizationSourceContractTests
         var recovery = ExtractMethod(source, "private async Task RecoverExpiredClaimsAsync(");
         Assert.Equal(4, CountOccurrences(recovery, "Status == GenerationJobStatus.Running"));
         Assert.Equal(3, CountOccurrences(recovery, RecoveryFence));
+        var normalizedRecovery = NormalizeWhitespace(recovery);
+        Assert.Equal(1, CountOccurrences(normalizedRecovery, RecoveryCancellationFence));
+        Assert.Equal(2, CountOccurrences(normalizedRecovery, RecoveryRedispatchFence));
+        Assert.Equal(1, CountOccurrences(normalizedRecovery, RecoveryRedispatchUpdate));
+        Assert.Equal(1, CountOccurrences(normalizedRecovery, RecoveryFailureUpdate));
+        Assert.Contains("job.Status == GenerationJobStatus.Running && job.ClaimExpiresAt.HasValue && job.ClaimExpiresAt < now", normalizedRecovery);
+        Assert.Contains("job.Status != GenerationJobStatus.Running || job.ConcurrencyToken != expired.ConcurrencyToken || job.ClaimExpiresAt is null || job.ClaimExpiresAt >= now", normalizedRecovery);
 
-        // Single-line Running guards that are not token-fenced must not finalize a
-        // job. On current main exactly two exist and both are reads: the user-facing
-        // cancellation request filter and the expired-claim discovery scan feeding the
-        // recovery loop above. A new unfenced finalization fails this assertion.
-        var unfencedLines = source.Split('\n')
+        // Seven source lines contain Running without ConcurrencyToken on that same
+        // line: the cancellation-request filter, expired-claim discovery, three
+        // multiline recovery predicates, and the two provider-attempt parent checks
+        // pinned above. The latter two are legitimate new sites, not unfenced writes.
+        var runningPredicatesWithoutInlineToken = source.Split('\n')
             .Select(line => line.Trim())
             .Where(line => line.Contains("Status == GenerationJobStatus.Running", StringComparison.Ordinal)
                 && !line.Contains("ConcurrencyToken", StringComparison.Ordinal))
             .ToArray();
-        Assert.Equal(5, unfencedLines.Length);
-        Assert.DoesNotContain(unfencedLines, line => line.Contains("ExecuteUpdateAsync", StringComparison.Ordinal));
-        Assert.Contains(unfencedLines, line => line.Contains("item.Id == jobId", StringComparison.Ordinal));
-        Assert.Contains(unfencedLines, line => line.Contains("ClaimExpiresAt.HasValue", StringComparison.Ordinal));
+        Assert.Equal(7, runningPredicatesWithoutInlineToken.Length);
+        Assert.Equal(4, runningPredicatesWithoutInlineToken.Count(line => line.Contains("item.Status == GenerationJobStatus.Running", StringComparison.Ordinal)));
+        Assert.Equal(3, runningPredicatesWithoutInlineToken.Count(line => line.Contains("job.Status == GenerationJobStatus.Running", StringComparison.Ordinal)));
+        Assert.DoesNotContain(runningPredicatesWithoutInlineToken, line => line.Contains("ExecuteUpdateAsync", StringComparison.Ordinal));
+        Assert.Contains(runningPredicatesWithoutInlineToken, line => line.Contains("item.Id == jobId", StringComparison.Ordinal));
+        Assert.Contains(runningPredicatesWithoutInlineToken, line => line.Contains("ClaimExpiresAt.HasValue", StringComparison.Ordinal));
     }
 
     private static string ExtractMethod(string source, string signature)
@@ -769,6 +815,9 @@ public sealed class GenerationJobFinalizationSourceContractTests
             count++;
         return count;
     }
+
+    private static string NormalizeWhitespace(string source) =>
+        string.Join(' ', source.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
 
     private static string ReadSharedLifecycleSource()
     {
