@@ -67,16 +67,16 @@ public sealed class GenerationCostGuardrailService(
         var workspaceExposure = await ExposureForAsync(
             settings.WorkspaceInternalSafetyCeilingUsd,
             row => row.WorkspaceId == workspaceId,
-            cancellationToken);
+            includeCancelledPresentationSpend: true, cancellationToken);
         var userExposure = await ExposureForAsync(
             userLimit,
             row => row.UserId == userId,
-            cancellationToken);
+            includeCancelledPresentationSpend: true, cancellationToken);
         var projectExposure = projectId.HasValue
             ? await ExposureForAsync(
                 settings.ProjectEstimatedCostCeilingUsd,
                 row => row.WorkspaceId == workspaceId && row.ProjectId == projectId,
-                cancellationToken)
+                includeCancelledPresentationSpend: false, cancellationToken)
             : Exposure.Empty;
 
         var workspaceCap = CreateCap("workspace", settings.WorkspaceInternalSafetyCeilingUsd, workspaceExposure, normalizedEstimate);
@@ -102,24 +102,12 @@ public sealed class GenerationCostGuardrailService(
                 "This generation may use a high amount of provider resources. Review the estimate before continuing."));
         }
 
-        if (!settings.Enabled)
-        {
-            return new GenerationCostPreflightResult(
-                normalizedEstimate,
-                true,
-                false,
-                confirmationAccepted,
-                workspaceCap,
-                userCap,
-                projectCap,
-                warnings);
-        }
-
-        if (settings.RejectUnknownEstimates && workspaceCap is { UsageKnown: false })
+        var rejectUnknownExposure = settings.Enabled && settings.RejectUnknownEstimates;
+        if (rejectUnknownExposure && workspaceCap is { UsageKnown: false })
             return Reject(normalizedEstimate, confirmationAccepted, workspaceCap, userCap, projectCap, warnings, "WORKSPACE_COST_UNKNOWN", "This workspace has provider exposure that cannot be estimated safely.");
-        if (settings.RejectUnknownEstimates && userCap is { UsageKnown: false })
+        if (rejectUnknownExposure && userCap is { UsageKnown: false })
             return Reject(normalizedEstimate, confirmationAccepted, workspaceCap, userCap, projectCap, warnings, "USER_COST_UNKNOWN", "This user has provider exposure that cannot be estimated safely.");
-        if (settings.RejectUnknownEstimates && projectCap is { UsageKnown: false })
+        if (rejectUnknownExposure && projectCap is { UsageKnown: false })
             return Reject(normalizedEstimate, confirmationAccepted, workspaceCap, userCap, projectCap, warnings, "PROJECT_COST_UNKNOWN", "This project has provider exposure that cannot be estimated safely.");
 
         var snapshot = new GenerationBudgetSnapshot(
@@ -132,8 +120,9 @@ public sealed class GenerationCostGuardrailService(
         if (!decision.Allowed)
             return Reject(normalizedEstimate, confirmationAccepted, workspaceCap, userCap, projectCap, warnings, decision.RejectionCode!, decision.RejectionMessage!);
 
-        var confirmationRequired = (warnings.Any(item => item.Code == "EXPENSIVE_GENERATION") && settings.RequireConfirmationForExpensiveGeneration)
-            || (warnings.Any(item => item.Code == "COST_ESTIMATE_UNKNOWN") && settings.RequireConfirmationForUnknownEstimates);
+        var confirmationRequired = settings.Enabled && (
+            (warnings.Any(item => item.Code == "EXPENSIVE_GENERATION") && settings.RequireConfirmationForExpensiveGeneration)
+            || (warnings.Any(item => item.Code == "COST_ESTIMATE_UNKNOWN") && settings.RequireConfirmationForUnknownEstimates));
         return new GenerationCostPreflightResult(
             normalizedEstimate,
             true,
@@ -189,11 +178,13 @@ public sealed class GenerationCostGuardrailService(
     private async Task<Exposure> ExposureForAsync(
         decimal? limit,
         System.Linq.Expressions.Expression<Func<UsageTransaction, bool>> predicate,
+        bool includeCancelledPresentationSpend,
         CancellationToken cancellationToken)
     {
         if (!limit.HasValue) return Exposure.Empty;
 
-        var amounts = db.UsageTransactions.AsNoTracking().Where(predicate).Select(row => new
+        var reservations = db.UsageTransactions.AsNoTracking().Where(predicate);
+        var amounts = reservations.Select(row => new
         {
             Cost = row.Status == UsageTransactionStatus.Pending
                 ? row.EstimatedProviderCostUsd ?? 0m
@@ -203,6 +194,10 @@ public sealed class GenerationCostGuardrailService(
                 ? !row.EstimatedProviderCostUsd.HasValue
                 : (row.Status == UsageTransactionStatus.Completed || row.Status == UsageTransactionStatus.Failed || row.Status == UsageTransactionStatus.Refunded) && !row.ProviderCostKnown,
         });
+
+        if (includeCancelledPresentationSpend)
+            amounts = amounts.Concat(CancelledPresentationSpend.ForCancelledReservations(db, reservations)
+                .Select(cost => new { Cost = cost, Unknown = false }));
 
         if (db.Database.IsNpgsql())
         {

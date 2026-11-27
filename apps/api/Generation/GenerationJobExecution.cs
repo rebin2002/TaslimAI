@@ -1547,6 +1547,16 @@ public sealed class GenerationJobWorker(
         var publicationCommitted = false;
         AiUsageMetadata? providerUsage = null;
         GenerationProviderAttempt? providerAttempt = null;
+        var presentation = claimedJob.JobType == GenerationJobTypes.PresentationGenerate;
+        Task CancelExecutionAsync(CancellationToken token, OperationCanceledException? error = null)
+        {
+            var attempt = presentation ? providerAttempt : null;
+            var reportedUsd = presentation
+                ? (error as PresentationCancellationException)?.ReportedCostUsd ?? PresentationCancellationException.ReportedUsd(providerUsage)
+                : null;
+            return CancelRunningAsync(db, usage, claimedJob, claimedJob.ConcurrencyToken, presentation ? CancellationToken.None : token, budget, attempt, reportedUsd);
+        }
+
         var executionStarted = Stopwatch.GetTimestamp();
         logger.LogInformation(
             "Generation job execution started. JobId={JobId}; WorkspaceId={WorkspaceId}; JobType={JobType}; RequestId={RequestId}; RetryCount={RetryCount}",
@@ -1593,16 +1603,16 @@ public sealed class GenerationJobWorker(
             providerAttempt = await budget.BeginAttemptAsync(claimedJob, claimedJob.Provider ?? "selected", claimedJob.ProviderModel, estimate, stoppingToken);
             var progress = new SerializedProgress(value => UpdateProgressSafelyAsync(claimedJob.Id, claimedJob.ConcurrencyToken, value, stoppingToken));
             var result = await handler.ExecuteAsync(claimedJob, progress, cancellation.Token);
+            providerUsage = result.Usage;
             await progress.DrainAsync();
             if ((GenerationJobTypes.MovieTypes.Contains(claimedJob.JobType) || GenerationJobTypes.MovieDialogueVoiceTypes.Contains(claimedJob.JobType))
                 && !result.Outputs.Any(output => output.Asset is not null
                     && (output.StoredFileId.HasValue || output.FileArtifact is not null || output.StreamArtifact is not null)))
                 throw new MovieVideoProviderOutputException();
-            providerUsage = result.Usage;
             var current = await db.GenerationJobs.FirstOrDefaultAsync(item => item.Id == claimedJob.Id, stoppingToken);
             if (current is null || current.Status != GenerationJobStatus.Running || current.ConcurrencyToken != claimedJob.ConcurrencyToken || current.CancellationRequested || cancellation.IsCancellationRequested)
             {
-                await CancelRunningAsync(db, usage, claimedJob, claimedJob.ConcurrencyToken, stoppingToken);
+                await CancelExecutionAsync(stoppingToken);
                 return;
             }
             foreach (var output in result.Outputs)
@@ -1716,7 +1726,7 @@ public sealed class GenerationJobWorker(
             if (completed == 0)
             {
                 foreach (var publication in publications) await publisher.DiscardAsync(publication, stoppingToken);
-                await CancelRunningAsync(db, usage, claimedJob, claimedJob.ConcurrencyToken, stoppingToken);
+                await CancelExecutionAsync(stoppingToken);
                 return;
             }
             publicationCommitted = true;
@@ -1780,9 +1790,9 @@ public sealed class GenerationJobWorker(
             }
             if (GenerationJobTypes.MovieDialogueVoiceTypes.Contains(claimedJob.JobType))
                 await dialogueExecutions.MarkCancelledAsync(claimedJob.Id, CancellationToken.None);
-            await CancelRunningAsync(db, usage, claimedJob, claimedJob.ConcurrencyToken, stoppingToken);
+            await CancelExecutionAsync(stoppingToken);
         }
-        catch (OperationCanceledException) when (cancellation.IsCancellationRequested)
+        catch (OperationCanceledException exception) when (cancellation.IsCancellationRequested)
         {
             if (!publicationCommitted)
                 foreach (var publication in publications) await publisher.DiscardAsync(publication, CancellationToken.None);
@@ -1795,12 +1805,13 @@ public sealed class GenerationJobWorker(
             }
             if (GenerationJobTypes.MovieDialogueVoiceTypes.Contains(claimedJob.JobType))
                 await dialogueExecutions.MarkCancelledAsync(claimedJob.Id, CancellationToken.None);
-            if (providerAttempt is not null)
-                await budget.CompleteAttemptAsync(providerAttempt, null, false, GenerationProviderAttemptStatus.Cancelled, GenerationJobErrorCodes.Cancelled, CancellationToken.None);
-            // Host shutdown cancels stoppingToken before this handler exits. Durable
-            // cancellation must still commit so the job does not remain Running until
-            // lease recovery on the next process.
-            await CancelRunningAsync(db, usage, claimedJob, claimedJob.ConcurrencyToken, CancellationToken.None);
+            if (!presentation && providerAttempt is not null)
+                await budget.CompleteAttemptAsync(providerAttempt, null, false, GenerationProviderAttemptStatus.Cancelled,
+                    GenerationJobErrorCodes.Cancelled, CancellationToken.None);
+
+            // The monitor also cancels a worker that lost its claim. Presentation spend,
+            // the job update and the zero-charge ledger settle only for the winning owner.
+            await CancelExecutionAsync(CancellationToken.None, exception);
             logger.LogInformation(
                 "Generation job execution cancelled. JobId={JobId}; JobType={JobType}; RequestId={RequestId}; ElapsedMs={ElapsedMs}; UsageFinalized={UsageFinalized}",
                 claimedJob.Id, claimedJob.JobType, claimedJob.RequestId, (long)Stopwatch.GetElapsedTime(executionStarted).TotalMilliseconds, true);
@@ -2171,11 +2182,16 @@ var qualityFailure = exception as GenerationQualityControlException ?? exception
         }
     }
 
-    private static async Task CancelRunningAsync(TaslimDbContext db, IGenerationJobUsageService usage, GenerationJob job, Guid concurrencyToken, CancellationToken cancellationToken)
+    private static async Task CancelRunningAsync(TaslimDbContext db, IGenerationJobUsageService usage,
+        GenerationJob job, Guid concurrencyToken, CancellationToken cancellationToken, IGenerationBudgetService budget,
+        GenerationProviderAttempt? attempt, decimal? reportedCostUsd)
     {
         var now = DateTime.UtcNow;
         await using var finalization = await db.Database.BeginTransactionAsync(cancellationToken);
-        var cancelled = await db.GenerationJobs.Where(item => item.Id == job.Id && item.Status == GenerationJobStatus.Running && item.ConcurrencyToken == concurrencyToken)
+        var presentation = job.JobType == GenerationJobTypes.PresentationGenerate;
+        var cancelled = await db.GenerationJobs
+            .Where(item => item.Id == job.Id && item.Status == GenerationJobStatus.Running && item.ConcurrencyToken == concurrencyToken)
+            .Where(item => !presentation || item.ClaimExpiresAt > now)
             .ExecuteUpdateAsync(setters => setters
                 .SetProperty(item => item.Status, GenerationJobStatus.Cancelled)
                 .SetProperty(item => item.ErrorCode, CancellationCode(job))
@@ -2199,6 +2215,9 @@ var qualityFailure = exception as GenerationQualityControlException ?? exception
                 .ExecuteUpdateAsync(setters => setters.SetProperty(track => track.Status, MovieSoundStatuses.Cancelled).SetProperty(track => track.UpdatedAt, now), cancellationToken);
         var transaction = await usage.BeginAsync(job, cancellationToken: cancellationToken);
         await usage.CancelAsync(transaction, CancellationCode(job), cancellationToken);
+        if (attempt is not null)
+            await budget.CompleteAttemptAsync(attempt, reportedCostUsd, reportedCostUsd.HasValue,
+                GenerationProviderAttemptStatus.Cancelled, GenerationJobErrorCodes.Cancelled, cancellationToken);
         await finalization.CommitAsync(cancellationToken);
     }
 

@@ -87,7 +87,7 @@ public sealed class DirectorScenePlanCreativeException(string code, string messa
 public sealed class MovieDirectorScenePlanningOptions
 {
     public int MaxScenes { get; set; } = 24;
-    public int MaxDurationSeconds { get; set; } = 3_600;
+    public int MaxDurationSeconds { get; set; } = MovieDurationBudgetPolicy.MaxMovieDurationSeconds;
     public int MaxRepairAttempts { get; set; }
 }
 
@@ -102,6 +102,7 @@ public static class DirectorScenePlanValidationReasonCodes
     public const string StoryUngrounded = "SCENE_PLAN_STORY_UNGROUNDED";
     public const string CharacterMismatch = "SCENE_PLAN_CHARACTER_MISMATCH";
     public const string InvalidSource = "SCENE_PLAN_INVALID_SOURCE";
+    public const string DuplicateTarget = "SCENE_PLAN_DUPLICATE_TARGET";
     public const string Placeholder = "SCENE_PLAN_PLACEHOLDER";
     public const string LanguageMismatch = "SCENE_PLAN_LANGUAGE_MISMATCH";
     public const string BaseRevisionMismatch = "SCENE_PLAN_BASE_REVISION_MISMATCH";
@@ -146,7 +147,11 @@ public sealed class MovieDirectorScenePlanValidator(
         AddIf(findings, !SupportedLanguage(context.Language, payload.Language), DirectorScenePlanValidationReasonCodes.LanguageMismatch, "language");
         AddIf(findings, string.IsNullOrWhiteSpace(payload.AspectRatio) || payload.AspectRatio.Length > 20 || !string.Equals(payload.AspectRatio, context.AspectRatio, StringComparison.OrdinalIgnoreCase), DirectorScenePlanValidationReasonCodes.SchemaInvalid, "aspectRatio");
 
-        var targetDuration = Math.Clamp(context.DurationSeconds, 1, Math.Max(1, settings.MaxDurationSeconds));
+        var maxDuration = Math.Max(1, settings.MaxDurationSeconds);
+        var targetDuration = Math.Clamp(context.DurationSeconds, 1, maxDuration);
+        // Reject unsupported source durations rather than accepting a truncated scene plan.
+        AddIf(findings, context.DurationSeconds < 1 || context.DurationSeconds > maxDuration,
+            DirectorScenePlanValidationReasonCodes.RuntimeMismatch, "targetDurationSeconds");
         AddIf(findings, payload.TargetDurationSeconds != targetDuration, DirectorScenePlanValidationReasonCodes.RuntimeMismatch, "targetDurationSeconds");
         AddIf(findings, payload.Scenes is null || payload.Scenes.Count == 0, DirectorScenePlanValidationReasonCodes.RequiredFieldMissing, "scenes");
         if (payload.Scenes is null || payload.Scenes.Count == 0) return Rejected(findings);
@@ -156,7 +161,8 @@ public sealed class MovieDirectorScenePlanValidator(
         AddIf(findings, payload.TotalEstimatedDurationSeconds != payload.Scenes.Sum(item => item.EstimatedDurationSeconds), DirectorScenePlanValidationReasonCodes.RuntimeMismatch, "totalEstimatedDurationSeconds");
         AddIf(findings, payload.TotalEstimatedDurationSeconds > targetDuration || payload.TotalEstimatedDurationSeconds < Math.Max(1, (int)Math.Ceiling(targetDuration * 0.8m)), DirectorScenePlanValidationReasonCodes.RuntimeMismatch, "totalEstimatedDurationSeconds");
 
-        var screenplayScenes = AllScreenplayScenes(context);
+        var screenplayTargets = AllScreenplayScenes(context).ToDictionary(item => item.Id, item => item.MovieSceneId);
+        var targetedMovieScenes = new HashSet<Guid>();
         var movieSceneIds = context.RelevantMovieScenes.Select(item => item.Id).ToHashSet();
         var knownCharacters = KnownCharacters(context);
         var sequenceNumbers = new HashSet<int>();
@@ -188,7 +194,14 @@ public sealed class MovieDirectorScenePlanValidator(
             ValidateText(findings, scene.EmotionalObjective, 2_000, "emotionalObjective");
             ValidateText(findings, scene.TransitionRelationship, 1_000, "transitionRelationship");
             ValidateText(findings, scene.ProductionIntent, 4_000, "productionIntent");
-            AddIf(findings, scene.EstimatedDurationSeconds < 1 || scene.EstimatedDurationSeconds > targetDuration, DirectorScenePlanValidationReasonCodes.RuntimeMismatch, "estimatedDurationSeconds");
+            // Fail closed at admission on the per-scene ceiling. A scene longer than the largest unit the
+            // render path can actually produce is never honoured: MovieProductionPreflight and the
+            // generation orchestrators bill each shot from Math.Clamp(..., 1, 3_600) and provider clips are
+            // capped at ProviderCapabilityPricing.MaxDurationSeconds (default 3_600), so an admitted
+            // over-length scene would be silently shortened and underbilled rather than rejected.
+            // Bounded by targetDuration, so every plan legal under the configured ceiling behaves unchanged.
+            var renderableSceneCeilingSeconds = Math.Min(targetDuration, MovieDurationBudgetPolicy.MaxShotDurationSeconds);
+            AddIf(findings, scene.EstimatedDurationSeconds < 1 || scene.EstimatedDurationSeconds > renderableSceneCeilingSeconds, DirectorScenePlanValidationReasonCodes.RuntimeMismatch, "estimatedDurationSeconds");
             AddIf(findings, scene.ParticipatingCharacters is null, DirectorScenePlanValidationReasonCodes.SchemaInvalid, "participatingCharacters");
             AddIf(findings, scene.ContinuityRequirements is null, DirectorScenePlanValidationReasonCodes.SchemaInvalid, "continuityRequirements");
             AddIf(findings, scene.ParticipatingCharacters is not null && scene.ParticipatingCharacters.Count > 16, DirectorScenePlanValidationReasonCodes.SchemaInvalid, "participatingCharacters");
@@ -200,10 +213,19 @@ public sealed class MovieDirectorScenePlanValidator(
                     AddIf(findings, string.IsNullOrWhiteSpace(character) || character.Length > 160 || (knownCharacters.Count > 0 && !knownCharacters.Contains(Normalize(character))), DirectorScenePlanValidationReasonCodes.CharacterMismatch, "participatingCharacters");
                 }
             }
+            // Apply updates an explicit production scene first, otherwise a linked production scene.
+            // Unlinked screenplay material can ground several proposals that each create a new scene.
+            Guid? targetMovieSceneId = null;
             if (scene.SourceScreenplaySceneId is Guid screenplayId)
-                AddIf(findings, screenplayScenes.All(item => item.Id != screenplayId), DirectorScenePlanValidationReasonCodes.InvalidSource, "sourceScreenplaySceneId");
+                AddIf(findings, !screenplayTargets.TryGetValue(screenplayId, out targetMovieSceneId), DirectorScenePlanValidationReasonCodes.InvalidSource, "sourceScreenplaySceneId");
             if (scene.ExistingMovieSceneId is Guid movieSceneId)
-                AddIf(findings, !movieSceneIds.Contains(movieSceneId), DirectorScenePlanValidationReasonCodes.InvalidSource, "existingMovieSceneId");
+            {
+                var exists = movieSceneIds.Contains(movieSceneId);
+                AddIf(findings, !exists, DirectorScenePlanValidationReasonCodes.InvalidSource, "existingMovieSceneId");
+                if (exists) targetMovieSceneId = movieSceneId;
+            }
+            AddIf(findings, targetMovieSceneId is Guid targetId && !targetedMovieScenes.Add(targetId),
+                DirectorScenePlanValidationReasonCodes.DuplicateTarget, "target");
 
             combinedText.AddRange([
                 scene.Title, scene.NarrativePurpose, scene.StoryBeat, scene.LocationEnvironment,
