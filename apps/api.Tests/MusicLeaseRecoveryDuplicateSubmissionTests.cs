@@ -708,6 +708,96 @@ public sealed class MusicAcceptedCancellationLeaseRecoveryTests : IClassFixture<
     }
 
     [Fact]
+    public async Task Parent_claim_token_change_before_dispatch_fence_prevents_the_paid_post()
+    {
+        var provider = Provider();
+        var submissionsBefore = provider.SubmittedGenerations;
+        provider.Reset(AcceptedCancellationMode.ReportThenHang);
+        using var lost = await StartClaimThatWillBeLostAsync(
+            provider,
+            "parent-claim-dispatch",
+            waitAccepted: false,
+            beforeMarkerStamp: jobId => SupersedeParentClaimAsync(jobId, changeToken: true));
+
+        for (var attempt = 0; attempt < 400 && provider.DispatchSinkCalls == 0; attempt++) await Task.Delay(25);
+
+        Assert.True(provider.DispatchSinkCalls > 0, "the stale worker never reached the dispatch evidence fence");
+        Assert.Equal(1, provider.DispatchSinkFaults);
+        Assert.Equal(submissionsBefore, provider.SubmittedGenerations);
+        var (markers, marker, _) = await AttemptEvidenceAsync(lost.JobId);
+        Assert.Equal(0, markers);
+        Assert.Null(marker);
+        await lost.StopAsync();
+    }
+
+    [Theory]
+    [InlineData("not-running")]
+    [InlineData("cancelled")]
+    [InlineData("expired")]
+    public async Task Parent_state_change_before_acceptance_keeps_only_the_dispatch_marker(string mutation)
+    {
+        var provider = Provider();
+        var submissionsBefore = provider.SubmittedGenerations;
+        provider.Reset(AcceptedCancellationMode.ReportThenHang);
+        using var lost = await StartClaimThatWillBeLostAsync(
+            provider,
+            "parent-claim-acceptance",
+            waitAccepted: false,
+            beforeAcceptedStamp: jobId => InvalidateParentClaimAsync(jobId, mutation));
+
+        for (var attempt = 0; attempt < 400 && provider.AcceptanceSinkFaults == 0; attempt++) await Task.Delay(25);
+
+        Assert.Equal(1, provider.AcceptanceSinkFaults);
+        Assert.Equal(0, provider.ReportedAcceptances);
+        Assert.Equal(submissionsBefore + 1, provider.SubmittedGenerations);
+        var (markers, marker, _) = await AttemptEvidenceAsync(lost.JobId);
+        Assert.Equal(1, markers);
+        Assert.Equal("taslim:dispatch-pending", marker);
+
+        if (mutation == "not-running")
+        {
+            using var verify = factory.Services.CreateScope();
+            var job = await verify.ServiceProvider.GetRequiredService<TaslimDbContext>().GenerationJobs
+                .AsNoTracking().SingleAsync(item => item.Id == lost.JobId);
+            Assert.Equal(GenerationJobStatus.Failed, job.Status);
+        }
+        else
+        {
+            var cancelled = await TerminaliseThroughRecoveryAsync(lost.Client, lost.JobId);
+            Assert.Equal(GenerationJobErrorCodes.MusicCancelledUnconfirmedSubmission, cancelled.ErrorCode);
+        }
+        Assert.Equal(submissionsBefore + 1, provider.SubmittedGenerations);
+        await lost.StopAsync();
+    }
+
+    [Fact]
+    public async Task Expired_parent_claim_cannot_write_success_or_publish_a_late_worker_result()
+    {
+        var provider = Provider();
+        provider.Reset(AcceptedCancellationMode.ReportThenFinishOnRelease);
+        using var lost = await StartClaimThatWillBeLostAsync(provider, "parent-claim-success");
+        using (var scope = factory.Services.CreateScope())
+        {
+            await scope.ServiceProvider.GetRequiredService<TaslimDbContext>().GenerationJobs
+                .Where(item => item.Id == lost.JobId)
+                .ExecuteUpdateAsync(setters => setters.SetProperty(item => item.ClaimExpiresAt, DateTime.UtcNow.AddMinutes(-1)));
+        }
+        provider.Release();
+
+        await WaitForProviderAttemptStatusAsync(lost.JobId, GenerationProviderAttemptStatus.Cancelled);
+        using (var verify = factory.Services.CreateScope())
+        {
+            var db = verify.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            var job = await db.GenerationJobs.AsNoTracking().SingleAsync(item => item.Id == lost.JobId);
+            Assert.Equal(GenerationJobStatus.Running, job.Status);
+            Assert.True(job.ClaimExpiresAt < DateTime.UtcNow);
+            Assert.Null(job.ResultJson);
+            Assert.Equal(0, await db.GenerationJobOutputs.AsNoTracking().CountAsync(item => item.GenerationJobId == lost.JobId));
+        }
+        await lost.StopAsync();
+    }
+
+    [Fact]
     public async Task Crash_after_the_marker_and_before_the_provider_answer_closes_the_cancellation_without_asking_the_provider()
     {
         // The window the marker exists for: the create left the process and the answer never arrived.
@@ -966,7 +1056,9 @@ public sealed class MusicAcceptedCancellationLeaseRecoveryTests : IClassFixture<
         AcceptedCancellationMusicProvider provider,
         string label,
         bool supersedeClaim = false,
-        bool waitAccepted = true)
+        bool waitAccepted = true,
+        Func<Guid, Task>? beforeMarkerStamp = null,
+        Func<Guid, Task>? beforeAcceptedStamp = null)
     {
         var client = factory.CreateClient();
         var auth = await Register(client, $"{label}-{Guid.NewGuid():N}@example.com");
@@ -974,6 +1066,8 @@ public sealed class MusicAcceptedCancellationLeaseRecoveryTests : IClassFixture<
         Assert.Equal(HttpStatusCode.Accepted, created.StatusCode);
         var job = (await created.Content.ReadFromJsonAsync<CreateMusicGenerationResponse>(Json))!.Job;
         if (supersedeClaim) provider.BeforeMarkerStampAsync = SupersedeAttemptClaim(job.Id);
+        else if (beforeMarkerStamp is not null) provider.BeforeMarkerStampAsync = () => beforeMarkerStamp(job.Id);
+        if (beforeAcceptedStamp is not null) provider.BeforeAcceptedStampAsync = () => beforeAcceptedStamp(job.Id);
         var acceptances = provider.ReportedAcceptances;
         var process = new CancellationTokenSource();
         var worker = CreateWorker(cancellationPollMilliseconds: 60_000);
@@ -985,6 +1079,43 @@ public sealed class MusicAcceptedCancellationLeaseRecoveryTests : IClassFixture<
         }
 
         return new LostClaim(client, job.Id, worker, process);
+    }
+
+    private async Task SupersedeParentClaimAsync(
+        Guid jobId,
+        bool changeToken = false,
+        bool requestCancellation = false,
+        bool expireLease = false)
+    {
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        var row = await db.GenerationJobs.SingleAsync(item => item.Id == jobId);
+        if (changeToken) row.ConcurrencyToken = Guid.NewGuid();
+        if (requestCancellation) row.CancellationRequested = true;
+        if (expireLease) row.ClaimExpiresAt = DateTime.UtcNow.AddMinutes(-1);
+        await db.SaveChangesAsync();
+    }
+
+    private async Task InvalidateParentClaimAsync(Guid jobId, string mutation)
+    {
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        var row = await db.GenerationJobs.SingleAsync(item => item.Id == jobId);
+        switch (mutation)
+        {
+            case "not-running":
+                row.Status = GenerationJobStatus.Failed;
+                break;
+            case "cancelled":
+                row.CancellationRequested = true;
+                break;
+            case "expired":
+                row.ClaimExpiresAt = DateTime.UtcNow.AddMinutes(-1);
+                break;
+            default:
+                throw new ArgumentOutOfRangeException(nameof(mutation));
+        }
+        await db.SaveChangesAsync();
     }
 
     private Func<Task> SupersedeAttemptClaim(Guid jobId) => async () =>
@@ -1036,6 +1167,22 @@ public sealed class MusicAcceptedCancellationLeaseRecoveryTests : IClassFixture<
         return (stamped.Count,
             stamped.Count == 1 ? stamped[0].ProviderExecutionId : null,
             stamped.Count == 1 ? stamped[0].SafeMetadataJson : null);
+    }
+
+    private async Task WaitForProviderAttemptStatusAsync(Guid jobId, GenerationProviderAttemptStatus expected)
+    {
+        for (var attempt = 0; attempt < 400; attempt++)
+        {
+            using var scope = factory.Services.CreateScope();
+            var status = await scope.ServiceProvider.GetRequiredService<TaslimDbContext>()
+                .GenerationProviderAttempts.AsNoTracking()
+                .Where(item => item.GenerationJobId == jobId)
+                .Select(item => item.Status)
+                .SingleAsync();
+            if (status == expected) return;
+            await Task.Delay(25);
+        }
+        throw new TimeoutException($"Provider attempt for job {jobId} never reached {expected}.");
     }
 
     private static async Task AssertRetryRefusedAsync(HttpClient client, Guid jobId, string expectedCode)
@@ -1191,9 +1338,10 @@ internal sealed class AcceptedCancellationMusicProvider : IMusicGenerationProvid
     public const string AcceptedOperationId = "op-accepted-before-the-crash";
 
     private static readonly byte[] Mp3 = CreateMinimalMp3();
-    private readonly TaskCompletionSource released = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private TaskCompletionSource released = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private int submittedGenerations;
     private int reportedAcceptances;
+    private int acceptanceSinkFaults;
     private int dispatchSinkCalls;
     private int dispatchSinkFaults;
     private int reconciliationCalls;
@@ -1204,6 +1352,7 @@ internal sealed class AcceptedCancellationMusicProvider : IMusicGenerationProvid
     public int SubmittedGenerations => Volatile.Read(ref submittedGenerations);
 
     public int ReportedAcceptances => Volatile.Read(ref reportedAcceptances);
+    public int AcceptanceSinkFaults => Volatile.Read(ref acceptanceSinkFaults);
     public int DispatchSinkCalls => Volatile.Read(ref dispatchSinkCalls);
     public int DispatchSinkFaults => Volatile.Read(ref dispatchSinkFaults);
     public int ReconciliationCalls => Volatile.Read(ref reconciliationCalls);
@@ -1212,6 +1361,7 @@ internal sealed class AcceptedCancellationMusicProvider : IMusicGenerationProvid
     /// Runs immediately before the worker's pre-dispatch stamp, so a test can make that stamp fail for
     /// a reason the production code cannot see coming (a claim that was superseded underneath it).
     public Func<Task>? BeforeMarkerStampAsync { get; set; }
+    public Func<Task>? BeforeAcceptedStampAsync { get; set; }
 
     /// The answer recovery's provider-status lookup gets back, i.e. the test-side stand-in for what the
     /// vendor's own status endpoint says about the durable operation id.
@@ -1224,6 +1374,8 @@ internal sealed class AcceptedCancellationMusicProvider : IMusicGenerationProvid
     {
         Mode = mode;
         BeforeMarkerStampAsync = null;
+        BeforeAcceptedStampAsync = null;
+        released = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         ReconciliationResult = null;
         ThrowOnReconcile = false;
         Interlocked.Exchange(ref dispatchSinkCalls, 0);
@@ -1231,6 +1383,7 @@ internal sealed class AcceptedCancellationMusicProvider : IMusicGenerationProvid
         Interlocked.Exchange(ref reconciliationCalls, 0);
         Interlocked.Exchange(ref reconciledOperationId, null);
         Interlocked.Exchange(ref reportedAcceptances, 0);
+        Interlocked.Exchange(ref acceptanceSinkFaults, 0);
     }
 
     public void Release() => released.TrySetResult();
@@ -1297,7 +1450,19 @@ internal sealed class AcceptedCancellationMusicProvider : IMusicGenerationProvid
         {
             // Mirrors Mubert and Stable Audio: the create call was answered with the provider's own
             // operation id, and the evidence is handed to the sink before any polling happens.
-            if (onSubmissionAccepted is not null) await onSubmissionAccepted(AcceptedOperationId);
+            if (BeforeAcceptedStampAsync is not null) await BeforeAcceptedStampAsync();
+            if (onSubmissionAccepted is not null)
+            {
+                try
+                {
+                    await onSubmissionAccepted(AcceptedOperationId);
+                }
+                catch
+                {
+                    Interlocked.Increment(ref acceptanceSinkFaults);
+                    throw;
+                }
+            }
             Interlocked.Increment(ref reportedAcceptances);
         }
 

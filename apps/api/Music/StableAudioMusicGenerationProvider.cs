@@ -62,9 +62,10 @@ public sealed class StableAudioMusicGenerationProvider(
         // accepted one may still be running and billing. It is equally not the retrieval class, whose
         // customer copy asserts the music was generated. The policy is to stop the machine from
         // submitting again (terminal MUSIC_PROVIDER_SUBMISSION_UNCONFIRMED, whose automatic
-        // re-dispatch is suppressed) and keep the generation id in the log so the pending result can
-        // be reconciled by hand; an informed customer may still choose to retry once deliberately.
+        // re-dispatch is suppressed) and keep the generation id in the log so the pending result can be
+        // reconciled by hand.
         var providerSubmissionAccepted = false;
+        var providerCreateMayHaveReachedProvider = false;
         string? providerGenerationId = null;
 
         try
@@ -83,11 +84,21 @@ public sealed class StableAudioMusicGenerationProvider(
             if (onDispatchSubmitting is not null) await onDispatchSubmitting();
 
             var stopwatch = Stopwatch.StartNew();
+            providerCreateMayHaveReachedProvider = true;
             var createdBody = await SendCreateAsync(
                 new Uri(baseUri, "v2beta/audio/stable-audio/text-to-audio"),
                 BuildForm(request, model, format),
                 timeout.Token);
-            var generationId = ReadGenerationId(createdBody);
+            string generationId;
+            try
+            {
+                generationId = ReadGenerationId(createdBody);
+            }
+            catch (MusicProviderFailureException exception)
+            {
+                logger.LogWarning(exception, "Stable Audio accepted a create request but returned no usable operation id; the dispatch was not repeated.");
+                throw new MusicProviderSubmissionUnconfirmedException();
+            }
             providerSubmissionAccepted = true;
             providerGenerationId = generationId;
 
@@ -140,15 +151,10 @@ public sealed class StableAudioMusicGenerationProvider(
                     if (!result.IsSuccessStatusCode)
                     {
                         var declared = await MapFailureAsync(result);
-                        // A moderation rejection or an invalid-request answer is the provider declaring
-                        // that this submission will not produce a track, so its own terminal class and
-                        // the normal retry behaviour stay correct. Every other non-success answer on the
-                        // polling path - persistent 5xx, 408, 401/403, 402, 429, 404, or the generic
-                        // fault - leaves an ACCEPTED generation's outcome unknown, and its retryable
-                        // code would instruct a second paid submission.
-                        throw IsProviderDeclaredTerminal(declared)
-                            ? declared
-                            : CreateSubmissionUnconfirmed("result status", declared, providerGenerationId, pollAttempts);
+                        // This is a GET error, not the generation's own terminal status. Error-body words
+                        // such as "rejected", "moderation", or "invalid" cannot prove that the already-
+                        // accepted paid generation failed or was not charged.
+                        throw CreateSubmissionUnconfirmed("result status", declared, providerGenerationId, pollAttempts);
                     }
 
                     billableResultReceived = true;
@@ -244,6 +250,16 @@ public sealed class StableAudioMusicGenerationProvider(
                 pollAttempts);
             return new MusicProviderResult(output, normalizedContentType, format, request.DurationSeconds, usage);
         }
+        catch (OperationCanceledException exception) when (cancellationToken.IsCancellationRequested && providerCreateMayHaveReachedProvider && !providerSubmissionAccepted)
+        {
+            logger.LogWarning(exception, "Stable Audio create was cancelled after dispatch began but before an operation id was observed; the submission remains unconfirmed and was not re-submitted.");
+            throw new MusicProviderCancellationWithAcceptedSubmissionException(null, outputConfirmedComplete: false);
+        }
+        catch (OperationCanceledException exception) when (!cancellationToken.IsCancellationRequested && providerCreateMayHaveReachedProvider && !providerSubmissionAccepted)
+        {
+            logger.LogWarning(exception, "Stable Audio create timed out after dispatch began but before an operation id was observed; the submission remains unconfirmed and was not re-submitted.");
+            throw new MusicProviderSubmissionUnconfirmedException();
+        }
         catch (OperationCanceledException exception) when (cancellationToken.IsCancellationRequested && providerSubmissionAccepted)
         {
             // F-36: same posture as Mubert. The create call was answered with a generation id, so
@@ -311,17 +327,33 @@ public sealed class StableAudioMusicGenerationProvider(
             {
                 response = await httpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
             }
-            catch (HttpRequestException exception)
+            catch (Exception exception) when (exception is HttpRequestException or IOException)
             {
-                logger.LogWarning(exception, "Stable Audio create request failed.");
-                throw new MusicProviderUnavailableException();
+                logger.LogWarning(exception, "Stable Audio create transport failed after dispatch; the request may have reached the provider, so its outcome is unconfirmed.");
+                throw new MusicProviderSubmissionUnconfirmedException();
             }
 
             using (response)
             {
                 if (response.StatusCode != HttpStatusCode.Accepted)
+                {
+                    if (response.IsSuccessStatusCode || IsAmbiguousCreateStatus(response.StatusCode))
+                    {
+                        logger.LogWarning("Stable Audio create returned an ambiguous status after dispatch. StatusCode={StatusCode}", (int)response.StatusCode);
+                        throw new MusicProviderSubmissionUnconfirmedException();
+                    }
                     throw await MapFailureAsync(response);
-                return await response.Content.ReadAsStringAsync(cancellationToken);
+                }
+
+                try
+                {
+                    return await response.Content.ReadAsStringAsync(cancellationToken);
+                }
+                catch (Exception exception) when (exception is HttpRequestException or IOException)
+                {
+                    logger.LogWarning(exception, "Stable Audio accepted the create request but its response body was lost; the operation id is unavailable for reconciliation.");
+                    throw new MusicProviderSubmissionUnconfirmedException();
+                }
             }
         }
     }
@@ -532,12 +564,9 @@ public sealed class StableAudioMusicGenerationProvider(
                 return new MusicSubmissionReconciliation(MusicSubmissionOutcome.InProgress, false);
             if (result.IsSuccessStatusCode)
                 return new MusicSubmissionReconciliation(MusicSubmissionOutcome.Completed, false);
-            var declared = await MapFailureAsync(result);
-            return IsProviderDeclaredTerminal(declared)
-                // The only contract-supported release: Stability declaring this generation failed
-                // means its own documentation says the credits were not spent.
-                ? new MusicSubmissionReconciliation(MusicSubmissionOutcome.ProviderDeclaredFailure, true)
-                : MusicSubmissionReconciliation.Unknown;
+            // An HTTP status/body from the lookup is not the generation's own terminal status.
+            // In particular, text in a result error cannot prove that the customer was not charged.
+            return MusicSubmissionReconciliation.Unknown;
         }
         catch (Exception exception) when (exception is not OperationCanceledException)
         {
@@ -545,9 +574,6 @@ public sealed class StableAudioMusicGenerationProvider(
             return MusicSubmissionReconciliation.Unknown;
         }
     }
-
-    private static bool IsProviderDeclaredTerminal(Exception exception) =>
-        exception is MusicProviderRejectedException or MusicProviderInvalidRequestException;
 
     /// <summary>
     /// Builds the exception for a generation Stability accepted but whose outcome was never observed,
@@ -604,6 +630,9 @@ public sealed class StableAudioMusicGenerationProvider(
         statusCode == HttpStatusCode.RequestTimeout
         || statusCode == HttpStatusCode.TooManyRequests
         || (int)statusCode >= 500;
+
+    private static bool IsAmbiguousCreateStatus(HttpStatusCode statusCode) =>
+        statusCode == HttpStatusCode.RequestTimeout || (int)statusCode >= 500;
 
     private static string Clip(string? value, int maxLength)
     {

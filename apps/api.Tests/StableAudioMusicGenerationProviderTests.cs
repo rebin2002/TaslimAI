@@ -45,15 +45,71 @@ public sealed class StableAudioMusicGenerationProviderTests
     [Fact]
     public async Task Maps_rejected_prompt_without_exposing_upstream_body()
     {
-        var handler = new StableAudioHandler((_, requestNumber) => requestNumber == 1
-            ? Json(HttpStatusCode.Accepted, "{\"id\":\"generation-rejected\"}")
-            : Json(HttpStatusCode.UnprocessableEntity, "{\"message\":\"private moderation payload\",\"category\":\"safety\"}"));
+        var handler = new StableAudioHandler((_, _) =>
+            Json(HttpStatusCode.UnprocessableEntity, "{\"message\":\"private moderation payload\",\"category\":\"safety\"}"));
         var provider = CreateProvider(handler);
 
         var exception = await Assert.ThrowsAsync<MusicProviderRejectedException>(() => provider.GenerateAsync(Input()));
 
         Assert.DoesNotContain("private moderation payload", exception.Message, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("secret-api-key", exception.Message, StringComparison.Ordinal);
+        Assert.Single(handler.Requests);
+        Assert.Equal(HttpMethod.Post, handler.Requests[0].Method);
+    }
+
+    [Fact]
+    public async Task Lost_create_transport_response_is_unconfirmed_without_a_second_paid_post()
+    {
+        var handler = new StableAudioHandler((_, requestNumber) => requestNumber == 1
+            ? throw new HttpRequestException("synthetic connection reset after dispatch")
+            : Json(HttpStatusCode.Accepted, "{\"id\":\"must-not-be-created\"}"));
+        var provider = CreateProvider(handler, retryAttempts: 2, retryDelayMilliseconds: 1);
+
+        await Assert.ThrowsAsync<MusicProviderSubmissionUnconfirmedException>(() => provider.GenerateAsync(Input()));
+
+        Assert.Single(handler.Requests);
+        Assert.Single(handler.Requests, request => request.Method == HttpMethod.Post);
+    }
+
+    [Fact]
+    public async Task Ambiguous_server_error_on_create_is_unconfirmed_without_a_second_paid_post()
+    {
+        var handler = new StableAudioHandler((_, requestNumber) => requestNumber == 1
+            ? new HttpResponseMessage(HttpStatusCode.ServiceUnavailable)
+            : Json(HttpStatusCode.Accepted, "{\"id\":\"must-not-be-created\"}"));
+        var provider = CreateProvider(handler, retryAttempts: 2, retryDelayMilliseconds: 1);
+
+        await Assert.ThrowsAsync<MusicProviderSubmissionUnconfirmedException>(() => provider.GenerateAsync(Input()));
+
+        Assert.Single(handler.Requests);
+        Assert.Single(handler.Requests, request => request.Method == HttpMethod.Post);
+    }
+
+    [Fact]
+    public async Task Accepted_create_response_without_a_usable_generation_id_is_unconfirmed()
+    {
+        var handler = new StableAudioHandler((_, _) => Json(HttpStatusCode.Accepted, "{\"status\":\"accepted\"}"));
+        var provider = CreateProvider(handler);
+
+        await Assert.ThrowsAsync<MusicProviderSubmissionUnconfirmedException>(() => provider.GenerateAsync(Input()));
+
+        Assert.Single(handler.Requests);
+        Assert.Single(handler.Requests, request => request.Method == HttpMethod.Post);
+    }
+
+    [Fact]
+    public async Task Rejected_words_in_a_result_lookup_error_do_not_make_the_accepted_generation_retryable()
+    {
+        var handler = new StableAudioHandler((_, requestNumber) => requestNumber == 1
+            ? Json(HttpStatusCode.Accepted, "{\"id\":\"generation-result-error\"}")
+            : Json(HttpStatusCode.UnprocessableEntity, "{\"message\":\"prompt rejected by moderation; invalid request\"}"));
+        var provider = CreateProvider(handler);
+
+        var failure = await Assert.ThrowsAsync<MusicProviderSubmissionUnconfirmedException>(() => provider.GenerateAsync(Input()));
+
+        Assert.IsAssignableFrom<MusicProviderUnavailableException>(failure);
+        Assert.Single(handler.Requests, request => request.Method == HttpMethod.Post);
+        Assert.DoesNotContain("rejected", failure.Message, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
@@ -115,17 +171,17 @@ public sealed class StableAudioMusicGenerationProviderTests
     }
 
     [Fact]
-    public async Task Timeout_before_the_create_is_answered_stays_a_retryable_provider_timeout()
+    public async Task Timeout_after_create_dispatch_begins_is_unconfirmed_not_a_retryable_timeout()
     {
-        // The genuinely unsubmitted stage: the create POST never returns a body, so no generation id
-        // exists and nothing can have been charged. This is the one case that keeps the retryable class.
+        // Once the create POST has been handed to the transport, a timeout cannot prove that Stability
+        // did not accept it. The attempt stays unconfirmed and must not offer a second paid POST.
         var handler = new StableAudioHandler((_, _) => new HttpResponseMessage(HttpStatusCode.Accepted)
         {
             Content = new StreamContent(new HangingStream()),
         });
         var provider = CreateProvider(handler, providerTimeoutSeconds: 1);
 
-        await Assert.ThrowsAsync<MusicProviderTimeoutException>(() => provider.GenerateAsync(Input()));
+        await Assert.ThrowsAsync<MusicProviderSubmissionUnconfirmedException>(() => provider.GenerateAsync(Input()));
         Assert.Single(handler.Requests, request => request.Method == HttpMethod.Post);
     }
 
@@ -408,11 +464,10 @@ public sealed class StableAudioMusicGenerationProviderTests
     }
 
     [Fact]
-    public async Task User_cancellation_before_the_generation_is_answered_stays_an_ordinary_cancellation()
+    public async Task User_cancellation_after_create_dispatch_begins_is_typed_as_unconfirmed()
     {
-        // F-36 required separation: cancellation while the billable POST is still unanswered proves
-        // nothing was accepted, so the ordinary cancellation posture - which RetryAsync still permits -
-        // must survive untouched.
+        // The POST is already inside the transport, so cancellation cannot prove that Stability did not
+        // accept it. Keep the original operation unconfirmed rather than permitting a paid retry.
         var handler = new StableAudioHandler((_, _) => new HttpResponseMessage(HttpStatusCode.Accepted)
         {
             Content = new StreamContent(new HangingStream()),
@@ -423,9 +478,10 @@ public sealed class StableAudioMusicGenerationProviderTests
         await Task.Delay(50);
         cancellation.Cancel();
 
-        var failure = await Record.ExceptionAsync(() => generation);
-        Assert.IsAssignableFrom<OperationCanceledException>(failure);
-        Assert.IsNotType<MusicProviderCancellationWithAcceptedSubmissionException>(failure);
+        var failure = await Assert.ThrowsAsync<MusicProviderCancellationWithAcceptedSubmissionException>(() => generation);
+        Assert.False(failure.OutputConfirmedComplete);
+        Assert.Null(failure.ProviderOperationId);
+        Assert.Single(handler.Requests, request => request.Method == HttpMethod.Post);
     }
 
     [Theory]
@@ -584,16 +640,15 @@ public sealed class StableAudioMusicGenerationProviderTests
     [Theory]
     [InlineData("{\"errors\":[\"prompt rejected by moderation\"],\"moderation\":\"blocked\"}")]
     [InlineData("{\"errors\":[\"invalid prompt parameters\"]}")]
-    public async Task Result_lookup_declaring_a_terminal_failure_carries_the_vendors_no_charge_promise(string body)
+    public async Task Result_lookup_error_text_does_not_prove_terminal_failure_or_no_charge(string body)
     {
-        // The only branch allowed to release a retry: Stability documents "you will not be charged for
-        // failed generations", and a 400/422 is that vendor declaring this generation failed - so the no-charge
-        // bit is set from the contract, not inferred.
+        // A failed lookup response is not the generation's own terminal result. Its status or message may
+        // describe the request rather than the accepted generation, so retry release cannot infer no charge.
         var handler = new StableAudioHandler((_, _) => Json(HttpStatusCode.BadRequest, body));
         var provider = CreateProvider(handler);
         var result = await provider.ReconcileAcceptedSubmissionAsync("result-declined");
-        Assert.Equal(MusicSubmissionOutcome.ProviderDeclaredFailure, result.Outcome);
-        Assert.True(result.ProviderDeclaresNoCharge);
+        Assert.Equal(MusicSubmissionOutcome.Unknown, result.Outcome);
+        Assert.False(result.ProviderDeclaresNoCharge);
     }
 
     [Theory]

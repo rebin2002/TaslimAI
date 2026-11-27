@@ -1778,7 +1778,7 @@ await RecoverExpiredClaimsAsync(db, usage, movieExecutions, notifications, scope
                 {
                     var completedAt = DateTime.UtcNow;
                     completed = await db.GenerationJobs
-                        .Where(item => item.Id == current.Id && item.Status == GenerationJobStatus.Running && item.ConcurrencyToken == claimedJob.ConcurrencyToken && !item.CancellationRequested)
+                        .Where(item => item.Id == current.Id && item.Status == GenerationJobStatus.Running && item.ConcurrencyToken == claimedJob.ConcurrencyToken && !item.CancellationRequested && item.ClaimExpiresAt.HasValue && item.ClaimExpiresAt > completedAt)
                         .ExecuteUpdateAsync(setters => setters
                             .SetProperty(item => item.Status, GenerationJobStatus.Succeeded)
                             .SetProperty(item => item.ProgressPercent, 100)
@@ -2113,9 +2113,9 @@ var qualityFailure = exception as GenerationQualityControlException ?? exception
                 var now = DateTime.UtcNow;
                 var current = await db.GenerationJobs.AsNoTracking()
                     .Where(job => job.Id == jobId)
-                    .Select(job => new { job.Status, job.ConcurrencyToken, job.CancellationRequested, job.RequestId })
+                    .Select(job => new { job.Status, job.ConcurrencyToken, job.CancellationRequested, job.ClaimExpiresAt, job.RequestId })
                     .FirstOrDefaultAsync(stoppingToken);
-                if (current is null || current.Status != GenerationJobStatus.Running || current.ConcurrencyToken != concurrencyToken || current.CancellationRequested)
+                if (current is null || current.Status != GenerationJobStatus.Running || current.ConcurrencyToken != concurrencyToken || current.CancellationRequested || !current.ClaimExpiresAt.HasValue || current.ClaimExpiresAt <= now)
                 {
                     logger.LogWarning(
                         "Generation job lease or cancellation state changed during execution. JobId={JobId}; RequestId={RequestId}; Status={Status}; CancellationRequested={CancellationRequested}",
@@ -2134,7 +2134,7 @@ var qualityFailure = exception as GenerationQualityControlException ?? exception
                 {
                     var claimExpiresAt = now.AddMinutes(Math.Max(2, settings.ClaimLeaseMinutes));
                     var renewed = await db.GenerationJobs
-                        .Where(job => job.Id == jobId && job.Status == GenerationJobStatus.Running && job.ConcurrencyToken == concurrencyToken)
+                        .Where(job => job.Id == jobId && job.Status == GenerationJobStatus.Running && job.ConcurrencyToken == concurrencyToken && !job.CancellationRequested && job.ClaimExpiresAt.HasValue && job.ClaimExpiresAt > now)
                         .ExecuteUpdateAsync(setters => setters.SetProperty(job => job.ClaimExpiresAt, claimExpiresAt), stoppingToken);
                     if (renewed == 0)
                     {
@@ -2328,7 +2328,7 @@ var qualityFailure = exception as GenerationQualityControlException ?? exception
         // terminalCode is only supplied by the caller that KNOWS more than "the member cancelled" -
         // today that is the accepted-but-unresolved music cancellation (F-36). Everything else keeps the
         // existing per-type cancellation code and its retryability.
-        var cancelled = await db.GenerationJobs.Where(item => item.Id == job.Id && item.Status == GenerationJobStatus.Running && item.ConcurrencyToken == concurrencyToken)
+        var cancelled = await db.GenerationJobs.Where(item => item.Id == job.Id && item.Status == GenerationJobStatus.Running && item.ConcurrencyToken == concurrencyToken && item.ClaimExpiresAt.HasValue && item.ClaimExpiresAt > now)
             .ExecuteUpdateAsync(setters => setters
                 .SetProperty(item => item.Status, GenerationJobStatus.Cancelled)
                 .SetProperty(item => item.ErrorCode, terminalCode ?? CancellationCode(job))
@@ -2361,7 +2361,7 @@ var qualityFailure = exception as GenerationQualityControlException ?? exception
     {
         var now = DateTime.UtcNow;
         await using var finalization = await db.Database.BeginTransactionAsync(cancellationToken);
-        var failed = await db.GenerationJobs.Where(item => item.Id == job.Id && item.Status == GenerationJobStatus.Running && item.ConcurrencyToken == concurrencyToken)
+        var failed = await db.GenerationJobs.Where(item => item.Id == job.Id && item.Status == GenerationJobStatus.Running && item.ConcurrencyToken == concurrencyToken && !item.CancellationRequested && item.ClaimExpiresAt.HasValue && item.ClaimExpiresAt > now)
             .ExecuteUpdateAsync(setters => setters
                 .SetProperty(item => item.Status, GenerationJobStatus.Failed)
                 .SetProperty(item => item.ErrorCode, code)
@@ -2528,12 +2528,19 @@ var qualityFailure = exception as GenerationQualityControlException ?? exception
         Guid jobConcurrencyToken,
         CancellationToken cancellationToken)
     {
+        var now = DateTime.UtcNow;
         int stamped;
         try
         {
             stamped = await db.GenerationProviderAttempts
                 .Where(item => item.Id == attemptId
                     && item.JobConcurrencyToken == jobConcurrencyToken
+                    && db.GenerationJobs.Any(job => job.Id == item.GenerationJobId
+                        && job.Status == GenerationJobStatus.Running
+                        && job.ConcurrencyToken == jobConcurrencyToken
+                        && !job.CancellationRequested
+                        && job.ClaimExpiresAt.HasValue
+                        && job.ClaimExpiresAt > now)
                     && (item.ProviderExecutionId == null || item.ProviderExecutionId == ""))
                 .ExecuteUpdateAsync(setters => setters
                     .SetProperty(item => item.ProviderExecutionId, MusicDispatchMarker),
@@ -2593,23 +2600,34 @@ var qualityFailure = exception as GenerationQualityControlException ?? exception
             operationId = operationId[..ProviderExecutionIdLimit];
         }
 
+        var now = DateTime.UtcNow;
+        int stamped;
         try
         {
-            var stamped = await db.GenerationProviderAttempts
-                .Where(item => item.Id == attemptId && item.JobConcurrencyToken == jobConcurrencyToken)
+            stamped = await db.GenerationProviderAttempts
+                .Where(item => item.Id == attemptId
+                    && item.JobConcurrencyToken == jobConcurrencyToken
+                    && item.ProviderExecutionId == MusicDispatchMarker
+                    && db.GenerationJobs.Any(job => job.Id == item.GenerationJobId
+                        && job.Status == GenerationJobStatus.Running
+                        && job.ConcurrencyToken == jobConcurrencyToken
+                        && !job.CancellationRequested
+                        && job.ClaimExpiresAt.HasValue
+                        && job.ClaimExpiresAt > now))
                 .ExecuteUpdateAsync(setters => setters
                     .SetProperty(item => item.ProviderExecutionId, operationId),
                     cancellationToken);
-            if (stamped == 0)
-            {
-                logger.LogWarning("Music accepted-submission evidence found no current attempt row; treating the submission as unconfirmed. AttemptId={AttemptId}; JobConcurrencyToken={JobConcurrencyToken}", attemptId, jobConcurrencyToken);
-                throw new MusicProviderSubmissionUnconfirmedException();
-            }
         }
-        catch (DbUpdateException exception)
+        catch (Exception exception) when (exception is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
         {
             db.ChangeTracker.Clear();
             logger.LogWarning(exception, "Music accepted-submission evidence could not be persisted; treating the submission as unconfirmed. AttemptId={AttemptId}", attemptId);
+            throw new MusicProviderSubmissionUnconfirmedException();
+        }
+
+        if (stamped == 0)
+        {
+            logger.LogWarning("Music accepted-submission evidence found no live parent claim; treating the submission as unconfirmed. AttemptId={AttemptId}; JobConcurrencyToken={JobConcurrencyToken}", attemptId, jobConcurrencyToken);
             throw new MusicProviderSubmissionUnconfirmedException();
         }
     }

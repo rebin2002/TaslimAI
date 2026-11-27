@@ -53,8 +53,39 @@ public sealed class MubertMusicGenerationProviderTests
             });
         var provider = CreateProvider(handler, retryAttempts: 1, retryDelayMilliseconds: 25);
 
-        await Assert.ThrowsAsync<MusicProviderUnavailableException>(() => provider.GenerateAsync(Input()));
+        await Assert.ThrowsAsync<MusicProviderSubmissionUnconfirmedException>(() => provider.GenerateAsync(Input()));
         Assert.Single(handler.Requests);
+    }
+
+    [Fact]
+    public async Task Lost_create_transport_response_is_unconfirmed_without_a_second_paid_post()
+    {
+        var handler = new MubertHandler((_, requestNumber) =>
+        {
+            if (requestNumber == 1) throw new HttpRequestException("synthetic connection reset after dispatch");
+            return Json(HttpStatusCode.OK, "{\"data\":{\"id\":\"must-not-be-created\"}}");
+        });
+        var provider = CreateProvider(handler, retryAttempts: 2, retryDelayMilliseconds: 1);
+
+        await Assert.ThrowsAsync<MusicProviderSubmissionUnconfirmedException>(() => provider.GenerateAsync(Input()));
+
+        Assert.Single(handler.Requests);
+        Assert.Single(handler.Requests, request => request.Method == HttpMethod.Post);
+    }
+
+    [Theory]
+    [InlineData("not-json")]
+    [InlineData("{\"data\":null}")]
+    [InlineData("{\"data\":{}}")]
+    public async Task Successful_create_response_without_a_usable_track_id_is_unconfirmed(string body)
+    {
+        var handler = new MubertHandler((_, _) => Json(HttpStatusCode.OK, body));
+        var provider = CreateProvider(handler);
+
+        await Assert.ThrowsAsync<MusicProviderSubmissionUnconfirmedException>(() => provider.GenerateAsync(Input()));
+
+        Assert.Single(handler.Requests);
+        Assert.Single(handler.Requests, request => request.Method == HttpMethod.Post);
     }
 
     [Fact]
@@ -287,12 +318,10 @@ public sealed class MubertMusicGenerationProviderTests
     }
 
     [Fact]
-    public async Task User_cancellation_before_the_create_is_answered_stays_an_ordinary_cancellation()
+    public async Task User_cancellation_after_create_dispatch_begins_is_typed_as_unconfirmed()
     {
-        // The required contrast case: while the billable create POST is still unanswered, acceptance is
-        // NOT established, so this stays the deliberate-abort posture the retry path treats as safe. The
-        // typed unconfirmed cancellation must not leak into the pre-submission stage, or a member who
-        // cancels too early would be stranded behind a refusal for a job that never reached anyone.
+        // The request is already inside the transport, so caller cancellation cannot prove that Mubert
+        // did not accept it. Keep the original operation unconfirmed rather than permitting a paid retry.
         var handler = new MubertHandler((_, _) => new HttpResponseMessage(HttpStatusCode.OK)
         {
             Content = new StreamContent(new BlockingStream()),
@@ -303,9 +332,10 @@ public sealed class MubertMusicGenerationProviderTests
         await handler.WaitForRequestAsync(1);
         cancellation.Cancel();
 
-        var failure = await Record.ExceptionAsync(() => generation);
-        Assert.IsAssignableFrom<OperationCanceledException>(failure);
-        Assert.IsNotType<MusicProviderCancellationWithAcceptedSubmissionException>(failure);
+        var failure = await Assert.ThrowsAsync<MusicProviderCancellationWithAcceptedSubmissionException>(() => generation);
+        Assert.False(failure.OutputConfirmedComplete);
+        Assert.Null(failure.ProviderOperationId);
+        Assert.Single(handler.Requests, request => request.Method == HttpMethod.Post);
     }
 
     [Fact]
@@ -334,18 +364,17 @@ public sealed class MubertMusicGenerationProviderTests
     }
 
     [Fact]
-    public async Task Timeout_before_the_create_is_answered_stays_a_retryable_provider_timeout()
+    public async Task Timeout_after_create_dispatch_begins_is_unconfirmed_not_a_retryable_timeout()
     {
-        // The genuinely unsubmitted stage: the track-creation POST itself never returns a body, so no
-        // generation id exists and nothing can have been charged. The retryable timeout class is correct
-        // here, and it is the only music timeout that stays retryable.
+        // Once the create POST has been handed to the transport, a timeout cannot prove that Mubert
+        // did not accept it. The attempt stays unconfirmed and must not offer a second paid POST.
         var handler = new MubertHandler((_, _) => new HttpResponseMessage(HttpStatusCode.OK)
         {
             Content = new StreamContent(new BlockingStream()),
         });
         var provider = CreateProvider(handler, providerTimeoutSeconds: 1);
 
-        await Assert.ThrowsAsync<MusicProviderTimeoutException>(() => provider.GenerateAsync(Input()));
+        await Assert.ThrowsAsync<MusicProviderSubmissionUnconfirmedException>(() => provider.GenerateAsync(Input()));
         Assert.Single(handler.Requests, request => request.Method == HttpMethod.Post);
     }
 

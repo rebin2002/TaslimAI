@@ -3,7 +3,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 import type { Asset } from "@/lib/api";
 import { API_URL } from "@/lib/apiBase";
-import { ReferenceAudioPanel } from "./MusicStudioView";
+import { MusicStudioFailureActions, ReferenceAudioPanel } from "./MusicStudioView";
 
 vi.mock("next/navigation", () => ({
   useSearchParams: () => new URLSearchParams(),
@@ -69,6 +69,29 @@ function storedCandidate(asset: Asset) {
 }
 
 const emptyState = { candidate: null, previewObjectUrl: null, rejectedReasonKey: null };
+
+describe("Music Studio failure actions", () => {
+  const musicSource = readFileSync(new URL("./MusicStudioView.tsx", import.meta.url), "utf8");
+
+  it("rechecks the original job without rendering a new-generation retry after retrieval failure", () => {
+    const html = renderToStaticMarkup(
+      <MusicStudioFailureActions allowRetry={false} allowRecheck working={false} error="" onRetry={() => undefined} onRecheck={() => undefined} t={translate} />,
+    );
+    expect(html).toContain('data-action="recheck-original-job"');
+    expect(html).toContain("movieAudio.refresh");
+    expect(html).not.toContain("music.retry");
+    expect(musicSource).toContain("setCurrent(await api.getGenerationJob(current.id))");
+    expect(musicSource).toContain("onRecheck={() => void recheckOriginalJob()}");
+  });
+
+  it("renders the new-generation retry only when the state classifier allows it", () => {
+    const html = renderToStaticMarkup(
+      <MusicStudioFailureActions allowRetry allowRecheck={false} working={false} error="" onRetry={() => undefined} onRecheck={() => undefined} t={translate} />,
+    );
+    expect(html).toContain("music.retry");
+    expect(html).not.toContain("recheck-original-job");
+  });
+});
 
 describe("Music Studio artifact download", () => {
   const musicSource = readFileSync(new URL("./MusicStudioView.tsx", import.meta.url), "utf8");

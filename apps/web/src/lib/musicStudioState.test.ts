@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { GenerationJob } from "./api";
-import { canCancelMusicJob, isMusicCancellationUnresolved, isMusicJob, isMusicOutcomeUnconfirmed, isMusicProviderUnavailable, musicStudioFailureCopy, parseMusicJobResult, safeMusicJobView } from "./musicStudioState";
+import { canCancelMusicJob, isMusicCancellationUnresolved, isMusicJob, isMusicOutcomeUnconfirmed, isMusicProviderUnavailable, isMusicRetrievalFailure, musicStudioFailureCopy, parseMusicJobResult, safeMusicJobView } from "./musicStudioState";
 import { locales, translations } from "./i18n";
 
 function job(overrides: Partial<GenerationJob> = {}): GenerationJob {
@@ -35,13 +35,13 @@ describe("music studio state", () => {
     expect(isMusicOutcomeUnconfirmed(job({ status: "Succeeded" }))).toBe(false);
   });
 
-  it("gives every music failure its own copy and only the unconfirmed one loses the retry action", () => {
+  it("gives each music failure explicit retry and recheck choices", () => {
     const copy = (code: string | null, status: GenerationJob["status"] = "Failed") => musicStudioFailureCopy(job({ status, errorCode: code }), (key) => key);
-    expect(copy("MUSIC_PROVIDER_SUBMISSION_UNCONFIRMED")).toEqual({ title: "music.unconfirmedTitle", text: "music.unconfirmedText", allowRetry: false });
+    expect(copy("MUSIC_PROVIDER_SUBMISSION_UNCONFIRMED")).toEqual({ title: "music.unconfirmedTitle", text: "music.unconfirmedText", allowRetry: false, allowRecheck: true });
     expect(copy("MUSIC_SUBMISSION_RETRY_BLOCKED").allowRetry).toBe(false);
-    expect(copy("MUSIC_PROVIDER_UNAVAILABLE")).toEqual({ title: "music.providerUnavailableTitle", text: "music.providerUnavailableText", allowRetry: true });
-    expect(copy("MUSIC_GENERATION_FAILED")).toEqual({ title: "music.failureTitle", text: "music.failureText", allowRetry: true });
-    expect(copy(null, "Cancelled")).toEqual({ title: "music.cancelledTitle", text: "music.cancelledText", allowRetry: true });
+    expect(copy("MUSIC_PROVIDER_UNAVAILABLE")).toEqual({ title: "music.providerUnavailableTitle", text: "music.providerUnavailableText", allowRetry: true, allowRecheck: false });
+    expect(copy("MUSIC_GENERATION_FAILED")).toEqual({ title: "music.failureTitle", text: "music.failureText", allowRetry: true, allowRecheck: false });
+    expect(copy(null, "Cancelled")).toEqual({ title: "music.cancelledTitle", text: "music.cancelledText", allowRetry: true, allowRecheck: false });
     // The unconfirmed text is the one that must not assert an outcome either way.
     for (const locale of locales) {
       const text = translations[locale]["music.unconfirmedText"];
@@ -53,17 +53,18 @@ describe("music studio state", () => {
       }
     }
   });
+
   it("refuses the retry affordance for a cancellation of an accepted submission, and keeps it for a plain one", () => {
     // F-36: the panel is the only place a member can start a second paid generation after cancelling,
     // so the affordance must follow the server's refusal instead of the job status.
     expect(musicStudioFailureCopy(job({ status: "Cancelled", errorCode: "MUSIC_CANCELLED_UNCONFIRMED_SUBMISSION" }), (key) => key))
-      .toEqual({ title: "music.cancelledUnconfirmedTitle", text: "music.cancelledUnconfirmedText", allowRetry: false });
+      .toEqual({ title: "music.cancelledUnconfirmedTitle", text: "music.cancelledUnconfirmedText", allowRetry: false, allowRecheck: true });
     expect(musicStudioFailureCopy(job({ status: "Cancelled", errorCode: "MUSIC_CANCELLED_UNDELIVERED_OUTPUT" }), (key) => key))
-      .toEqual({ title: "music.cancelledUndeliveredTitle", text: "music.cancelledUndeliveredText", allowRetry: false });
+      .toEqual({ title: "music.cancelledUndeliveredTitle", text: "music.cancelledUndeliveredText", allowRetry: false, allowRecheck: true });
     // A cancellation before the provider accepted anything is genuinely safe to redo and keeps its copy
     // and its action, as does a cancelled job whose code was never set.
     expect(musicStudioFailureCopy(job({ status: "Cancelled", errorCode: "MUSIC_CANCELLED" }), (key) => key))
-      .toEqual({ title: "music.cancelledTitle", text: "music.cancelledText", allowRetry: true });
+      .toEqual({ title: "music.cancelledTitle", text: "music.cancelledText", allowRetry: true, allowRecheck: false });
     expect(musicStudioFailureCopy(job({ status: "Cancelled", errorCode: null }), (key) => key).allowRetry).toBe(true);
     expect(isMusicCancellationUnresolved(job({ status: "Cancelled", errorCode: "MUSIC_CANCELLED" }))).toBe(false);
     expect(isMusicCancellationUnresolved(job({ status: "Cancelled", errorCode: "MUSIC_CANCELLED_UNCONFIRMED_SUBMISSION" }))).toBe(true);
@@ -71,7 +72,7 @@ describe("music studio state", () => {
     // The failure family predicate is unchanged, so an accepted-but-unconfirmed FAILED job keeps its own
     // copy instead of being relabelled as a cancellation.
     expect(musicStudioFailureCopy(job({ status: "Failed", errorCode: "MUSIC_PROVIDER_SUBMISSION_UNCONFIRMED" }), (key) => key))
-      .toEqual({ title: "music.unconfirmedTitle", text: "music.unconfirmedText", allowRetry: false });
+      .toEqual({ title: "music.unconfirmedTitle", text: "music.unconfirmedText", allowRetry: false, allowRecheck: true });
     for (const locale of locales) {
       const unconfirmed = translations[locale]["music.cancelledUnconfirmedText"];
       const undelivered = translations[locale]["music.cancelledUndeliveredText"];
@@ -91,6 +92,20 @@ describe("music studio state", () => {
       }
       expect(undelivered).not.toEqual(translations[locale]["music.cancelledText"]);
     }
+  });
+
+  it("classifies retrieval failure as same-job recovery, never a new-generation retry", () => {
+    const failed = job({
+      status: "Failed",
+      errorCode: "MUSIC_OUTPUT_RETRIEVAL_FAILED",
+      errorMessage: "Your music was generated, but the finished track could not be delivered.",
+    });
+    const copy = musicStudioFailureCopy(failed, (key) => key);
+    expect(isMusicRetrievalFailure(failed)).toBe(true);
+    expect(copy).toEqual({ title: "music.failureTitle", text: failed.errorMessage, allowRetry: false, allowRecheck: true });
+    expect(copy.text).not.toMatch(/try again|please retry/i);
+    expect(musicStudioFailureCopy(job({ status: "Cancelled", errorCode: "MUSIC_CANCELLED_UNDELIVERED_OUTPUT" }), (key) => key).allowRecheck).toBe(true);
+    expect(isMusicRetrievalFailure(job({ status: "Failed", errorCode: "MUSIC_PROVIDER_UNAVAILABLE" }))).toBe(false);
   });
 
   it("rejects a succeeded result whose asset identity is empty or whitespace-only", () => {

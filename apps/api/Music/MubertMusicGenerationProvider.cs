@@ -70,9 +70,9 @@ public sealed class MubertMusicGenerationProvider(
         // by our own request id, the policy is to stop the machine from submitting again (the terminal
         // MUSIC_PROVIDER_SUBMISSION_UNCONFIRMED code, whose automatic re-dispatch is suppressed) and to
         // leave the track id in the log so the pending generation can be reconciled by hand. A customer
-        // who is told the outcome is unknown may still choose to retry once deliberately, which is the
-        // shipped policy for that code.
+        // who is told the outcome is unknown must wait for the original operation to be reconciled.
         var providerSubmissionAccepted = false;
+        var providerCreateMayHaveReachedProvider = false;
         string? providerTrackId = null;
 
         try
@@ -85,6 +85,7 @@ public sealed class MubertMusicGenerationProvider(
             // still fails closed.
             if (onDispatchSubmitting is not null) await onDispatchSubmitting();
 
+            providerCreateMayHaveReachedProvider = true;
             var createdBody = await SendJsonWithRetryAsync(
                 HttpMethod.Post,
                 new Uri(baseUri, "tracks"),
@@ -98,9 +99,18 @@ public sealed class MubertMusicGenerationProvider(
                     mode = NormalizeMode(settings.MubertMode),
                 },
                 timeout.Token);
-            var created = ReadEnvelope<MubertTrackResource>(createdBody)?.Data
-                ?? throw new MusicProviderFailureException();
-            if (string.IsNullOrWhiteSpace(created.Id)) throw new MusicProviderFailureException();
+            MubertTrackResource? created;
+            try
+            {
+                created = ReadEnvelope<MubertTrackResource>(createdBody)?.Data;
+            }
+            catch (MusicProviderFailureException exception)
+            {
+                logger.LogWarning(exception, "Mubert create may have been accepted but its response could not be reconciled.");
+                throw new MusicProviderSubmissionUnconfirmedException();
+            }
+            if (created is null || string.IsNullOrWhiteSpace(created.Id))
+                throw new MusicProviderSubmissionUnconfirmedException();
             providerSubmissionAccepted = true;
             providerTrackId = created.Id;
 
@@ -212,6 +222,16 @@ public sealed class MubertMusicGenerationProvider(
                 pollAttempts);
             return new MusicProviderResult(download.Content, contentType, format, request.DurationSeconds, usage);
         }
+        catch (OperationCanceledException exception) when (cancellationToken.IsCancellationRequested && providerCreateMayHaveReachedProvider && !providerSubmissionAccepted)
+        {
+            logger.LogWarning(exception, "Mubert create was cancelled after dispatch began but before a track id was observed; the submission remains unconfirmed and was not re-submitted.");
+            throw new MusicProviderCancellationWithAcceptedSubmissionException(null, outputConfirmedComplete: false);
+        }
+        catch (OperationCanceledException exception) when (!cancellationToken.IsCancellationRequested && providerCreateMayHaveReachedProvider && !providerSubmissionAccepted)
+        {
+            logger.LogWarning(exception, "Mubert create timed out after dispatch began but before a track id was observed; the submission remains unconfirmed and was not re-submitted.");
+            throw new MusicProviderSubmissionUnconfirmedException();
+        }
         catch (OperationCanceledException exception) when (cancellationToken.IsCancellationRequested && providerSubmissionAccepted)
         {
             // F-36: the caller cancelled, and the filter proves the create POST was already answered
@@ -314,13 +334,36 @@ public sealed class MubertMusicGenerationProvider(
             catch (HttpRequestException exception)
             {
                 logger.LogWarning(exception, "Mubert request failed after bounded retries.");
+                if (method == HttpMethod.Post)
+                    throw new MusicProviderSubmissionUnconfirmedException();
+                throw new MusicProviderUnavailableException();
+            }
+            catch (IOException exception)
+            {
+                logger.LogWarning(exception, "Mubert request transport failed after dispatch.");
+                if (method == HttpMethod.Post)
+                    throw new MusicProviderSubmissionUnconfirmedException();
                 throw new MusicProviderUnavailableException();
             }
 
             using (response)
             {
-                var body = await response.Content.ReadAsStringAsync(cancellationToken);
+                string body;
+                try
+                {
+                    body = await response.Content.ReadAsStringAsync(cancellationToken);
+                }
+                catch (Exception exception) when (method == HttpMethod.Post && exception is HttpRequestException or IOException)
+                {
+                    logger.LogWarning(exception, "Mubert create response was lost after dispatch; the track may exist but its operation id is unavailable.");
+                    throw new MusicProviderSubmissionUnconfirmedException();
+                }
                 if (response.IsSuccessStatusCode) return body;
+                if (method == HttpMethod.Post && IsAmbiguousCreateStatus(response.StatusCode))
+                {
+                    logger.LogWarning("Mubert create returned an ambiguous status after dispatch. StatusCode={StatusCode}", (int)response.StatusCode);
+                    throw new MusicProviderSubmissionUnconfirmedException();
+                }
                 if (IsTransient(response.StatusCode) && attempt < maxRetries)
                 {
                     logger.LogWarning("Mubert request returned transient HTTP status; retrying. StatusCode={StatusCode}; Attempt={Attempt}", (int)response.StatusCode, attempt + 1);
@@ -523,6 +566,9 @@ public sealed class MubertMusicGenerationProvider(
         statusCode == HttpStatusCode.RequestTimeout
         || statusCode == HttpStatusCode.TooManyRequests
         || (int)statusCode >= 500;
+
+    private static bool IsAmbiguousCreateStatus(HttpStatusCode statusCode) =>
+        statusCode == HttpStatusCode.RequestTimeout || (int)statusCode >= 500;
 
     /// <summary>
     /// Classifies a failed artifact GET that happens after the track was created, completed and
