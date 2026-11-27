@@ -63,7 +63,7 @@ public sealed class MovieCharacterProductionSheetContractTests
             continuity: null!, worldContinuity: null!, productionContinuity: null!, productionReferences: null!,
             productionPreflight: null!, timeline: null!, transitionEdits: null!, takeSelects: null!, shotExecution: null!,
             authorization: null!, shotImportance: null!, cinematographyPlanning: null!, productionSheets: productionSheets,
-            geographySheets: null!, propBible: null!, referenceReadiness: null!, insertPlanner: null!)
+            geographySheets: null!, propBible: null!, referenceReadiness: null!, insertPlanner: null!, insertDecisions: null!)
         {
             ControllerContext = new ControllerContext
             {

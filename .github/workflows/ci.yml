@@ -251,3 +251,10 @@ jobs:
           ConnectionStrings__Postgres: Host=localhost;Port=5432;Database=taslim_fresh;Username=taslim;Password=change-me
           Database__ApplyMigrations: "false"
         run: bash scripts/autopilot-next-wave-gate.sh
+      - name: Rehearse the Movie decision migration from the PR base
+        if: github.event_name == 'pull_request'
+        env:
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          POSTGRES_SERVICE_ID: ${{ job.services.postgres.id }}
+        run: bash scripts/movie-decision-migration-upgrade.sh
