@@ -37,7 +37,7 @@ namespace Taslim.Api.Tests;
 /// provider, model, credential, usage reservation, charging, live storage, migration,
 /// PostgreSQL, secret, deployment or queue transport is constructed or reached.
 /// </summary>
-public sealed class MovieFinalAssemblyQueueRedrive696Tests
+public sealed partial class MovieFinalAssemblyQueueRedrive696Tests
 {
     private const int ExpectedRedriveBudget = 3;
 
@@ -336,7 +336,7 @@ public sealed class MovieFinalAssemblyQueueRedrive696Tests
         Captions = new MovieAssemblyCaptionsRequest { Mode = MovieAssemblyCaptionModes.None },
     };
 
-    private static MovieFinalAssemblyService CreateService(TaslimDbContext db, RedriveSeam queue) =>
+    private static MovieFinalAssemblyService CreateService(TaslimDbContext db, IGenerationJobService queue) =>
         new(db,
             new MovieCollaborationAccess(db, new WorkspaceAccessService(db)),
             queue,

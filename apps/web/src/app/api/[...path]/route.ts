@@ -1,8 +1,10 @@
+import { MAX_USER_UPLOAD_FILE_BYTES, MAX_USER_UPLOAD_REQUEST_BODY_BYTES } from "../../../lib/fileUploadLimits";
+
 const configuredApiUrl = process.env.NEXT_PUBLIC_API_URL;
 if (process.env.NODE_ENV === "production" && (!configuredApiUrl || !configuredApiUrl.startsWith("https://")))
   throw new Error("NEXT_PUBLIC_API_URL must be an HTTPS URL in production.");
 const apiOrigin = (configuredApiUrl ?? "http://localhost:5000").replace(/\/$/, "");
-const MAX_PROXY_BODY_BYTES = 25 * 1024 * 1024;
+const MAX_PROXY_BODY_BYTES = MAX_USER_UPLOAD_FILE_BYTES;
 const UPSTREAM_TIMEOUT_MS = 30_000;
 // Every extra percent-encoding round is another spelling of the same relative
 // segment (%2e%2e, %252e%252e, ...), so decoding is iterated a bounded number of
@@ -26,6 +28,14 @@ function stripUntrustedForwardingHeaders(headers: Headers): void {
 type RouteContext = { params: Promise<{ path: string[] }> };
 
 const bodyMethods = new Set(["POST", "PUT", "PATCH", "DELETE"]);
+
+function hasWorkspaceFileUploadAllowance(request: Request, path: string[]): boolean {
+  return request.method === "POST"
+    && path.length === 3
+    && path[0] === "workspaces"
+    && path[2] === "files"
+    && (request.headers.get("content-type") ?? "").toLowerCase().startsWith("multipart/form-data");
+}
 
 // encodeURIComponent() leaves "." and ".." untouched, so a relative segment
 // supplied to the catch-all survives into the target string and the URL parser
@@ -79,9 +89,9 @@ function getSetCookieHeaders(headers: Headers): string[] {
   return combined ? splitCombinedSetCookieHeader(combined) : [];
 }
 
-async function readBoundedBody(request: Request): Promise<ArrayBuffer | Response> {
+async function readBoundedBody(request: Request, maxBodyBytes: number): Promise<ArrayBuffer | Response> {
   const declaredLength = request.headers.get("content-length");
-  if (declaredLength && Number.isFinite(Number(declaredLength)) && Number(declaredLength) > MAX_PROXY_BODY_BYTES)
+  if (declaredLength && Number.isFinite(Number(declaredLength)) && Number(declaredLength) > maxBodyBytes)
     return Response.json({ error: { code: "REQUEST_TOO_LARGE", message: "The request body is too large." } }, { status: 413 });
   if (!request.body) return new ArrayBuffer(0);
 
@@ -93,7 +103,7 @@ async function readBoundedBody(request: Request): Promise<ArrayBuffer | Response
       const { done, value } = await reader.read();
       if (done) break;
       total += value.byteLength;
-      if (total > MAX_PROXY_BODY_BYTES)
+      if (total > maxBodyBytes)
         return Response.json({ error: { code: "REQUEST_TOO_LARGE", message: "The request body is too large." } }, { status: 413 });
       chunks.push(value);
     }
@@ -144,7 +154,10 @@ async function forward(request: Request, context: RouteContext): Promise<Respons
     cache: "no-store",
   };
   if (bodyMethods.has(request.method)) {
-    const body = await readBoundedBody(request);
+    const maxBodyBytes = hasWorkspaceFileUploadAllowance(request, path)
+      ? MAX_USER_UPLOAD_REQUEST_BODY_BYTES
+      : MAX_PROXY_BODY_BYTES;
+    const body = await readBoundedBody(request, maxBodyBytes);
     if (body instanceof Response) return body;
     init.body = body;
   }

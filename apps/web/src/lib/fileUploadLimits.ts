@@ -1,0 +1,9 @@
+export const MAX_USER_UPLOAD_FILE_BYTES = 25 * 1024 * 1024;
+export const USER_UPLOAD_MULTIPART_OVERHEAD_BYTES = 1 * 1024 * 1024;
+export const MAX_USER_UPLOAD_REQUEST_BODY_BYTES = MAX_USER_UPLOAD_FILE_BYTES + USER_UPLOAD_MULTIPART_OVERHEAD_BYTES;
+export const MAX_USER_UPLOAD_SIZE_MB = MAX_USER_UPLOAD_FILE_BYTES / (1024 * 1024);
+export const USER_UPLOAD_SIZE_ERROR_MESSAGE = `Files must be ${MAX_USER_UPLOAD_SIZE_MB} MB or smaller.`;
+
+export function getUserUploadSizeError(fileSizeBytes: number): string | null {
+  return fileSizeBytes > MAX_USER_UPLOAD_FILE_BYTES ? USER_UPLOAD_SIZE_ERROR_MESSAGE : null;
+}
