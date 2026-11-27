@@ -168,6 +168,8 @@ BOUNDED CONTEXT JSON:
         };
         if (fields.Any(string.IsNullOrWhiteSpace))
             throw new DirectorSynopsisGenerationException("The synopsis proposal omitted a required narrative section.");
+        if (draft.Complications is null || draft.CanonAnchors is null || draft.ProposedElements is null)
+            throw new DirectorSynopsisGenerationException("The synopsis proposal omitted required structured arrays.");
         if (draft.BeatCount is < 1 || draft.BeatCount > rules.MaximumBeats)
             throw new DirectorSynopsisGenerationException($"The synopsis proposal exceeds the {rules.Scope} runtime beat limit.");
         if (draft.Complications.Count is < 1 || draft.Complications.Count > rules.MaximumComplications)

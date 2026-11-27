@@ -3,12 +3,15 @@ using System.Net.Http.Json;
 using System.Reflection;
 using System.Text;
 using System.Text.Json;
+using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.Hosting;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Taslim.Api.AcademicIntegration;
 using Taslim.Api.AcademicIntegration.Persistence;
+using Taslim.Api.AcademicWorkflow;
 using Taslim.Api.Infrastructure;
 using Taslim.Api.Contracts;
 using Taslim.Api.Persistence;
@@ -16,19 +19,28 @@ using Xunit;
 
 namespace Taslim.Api.Tests.AcademicIntegration;
 
+/// <summary>Opt in only this test host to the deterministic Plan handler.</summary>
+public sealed class AcademicPlanApiFactory : TaslimApiFactory
+{
+    protected override IHost CreateHost(IHostBuilder builder)
+    {
+        builder.ConfigureHostConfiguration(config => config.AddInMemoryCollection(
+            new Dictionary<string, string?> { [AcademicWorkflowOptions.PlanEnabledKey] = "true" }));
+        return base.CreateHost(builder);
+    }
+}
+
 /// <summary>
-/// The integration surface exactly as deployed on this branch: authenticated,
-/// workspace-scoped, with no provider stage handlers registered yet. These tests pin
-/// the honest staging contract — intake persists and replays idempotently, every read
-/// is fenced to the owning workspace, and running a project answers 501 naming the
-/// missing stage instead of pretending the workflow is live. Nothing here fabricates a
-/// green path: routes that would claim results stay non-success until their lanes land.
+/// The integration surface with the API Plan switch enabled: authenticated and
+/// workspace-scoped, with one deterministic local Plan handler. These tests pin the
+/// honest staging contract — intake persists and replays idempotently, Plan is saved and
+/// gated for approval, and the next missing stage remains an explicit resumable 501.
 /// </summary>
-public class AcademicProjectsApiTests : IClassFixture<TaslimApiFactory>
+public class AcademicProjectsApiTests : IClassFixture<AcademicPlanApiFactory>
 {
     private readonly TaslimApiFactory _factory;
 
-    public AcademicProjectsApiTests(TaslimApiFactory factory)
+    public AcademicProjectsApiTests(AcademicPlanApiFactory factory)
     {
         _factory = factory;
         using var scope = factory.Services.CreateScope();
@@ -47,6 +59,7 @@ public class AcademicProjectsApiTests : IClassFixture<TaslimApiFactory>
             ("POST", $"/api/workspaces/{workspace}/academic-projects"),
             ("GET", $"/api/academic-projects/{project}"),
             ("POST", $"/api/academic-projects/{project}/run"),
+            ("POST", $"/api/academic-projects/{project}/recover-abandoned"),
             ("POST", $"/api/academic-projects/{project}/approvals/plan"),
             ("POST", $"/api/academic-projects/{project}/budget"),
             ("GET", $"/api/academic-projects/{project}/evidence-matrix"),
@@ -80,8 +93,9 @@ public class AcademicProjectsApiTests : IClassFixture<TaslimApiFactory>
         Assert.Equal("Running", project.GetProperty("state").GetString());
         Assert.Equal(0, project.GetProperty("revision").GetInt64());
         Assert.Equal("Doctoral", project.GetProperty("level").GetString());
-        Assert.Equal(7, dto.GetProperty("missingStages").GetArrayLength());
-        Assert.Equal(0, dto.GetProperty("connectedStages").GetArrayLength());
+        Assert.Equal(6, dto.GetProperty("missingStages").GetArrayLength());
+        Assert.Equal(1, dto.GetProperty("connectedStages").GetArrayLength());
+        Assert.Equal("Plan", dto.GetProperty("connectedStages")[0].GetString());
         Assert.Equal(0, dto.GetProperty("planVersion").GetInt32());
         Assert.Equal(0, dto.GetProperty("sourceCount").GetInt32());
         // Nothing is projectable yet, so the derived tables are vacuously current; the
@@ -102,6 +116,17 @@ public class AcademicProjectsApiTests : IClassFixture<TaslimApiFactory>
             .ToListAsync();
         Assert.Single(checkpoints);
         Assert.Equal(0, checkpoints.Single().Revision);
+    }
+
+    [Fact]
+    public void Enabled_composition_registers_only_the_deterministic_plan_handler()
+    {
+        using var scope = _factory.Services.CreateScope();
+        var handlers = scope.ServiceProvider.GetServices<IAcademicStageHandler>().ToArray();
+
+        var handler = Assert.Single(handlers);
+        Assert.IsType<AcademicPlanStageHandler>(handler);
+        Assert.Equal(AcademicStage.Plan, handler.Stage);
     }
 
     [Fact]
@@ -167,6 +192,74 @@ public class AcademicProjectsApiTests : IClassFixture<TaslimApiFactory>
             budget = new { maxTotalUsd = 5m, maxStageUsd = 9m },
         });
         Assert.Equal(HttpStatusCode.BadRequest, stageOverTotal.StatusCode);
+
+        var tooManyKeywords = await PostCreateAsync(client, workspaceId, new
+        {
+            requestKey = $"too-many-keywords-{Guid.NewGuid():N}",
+            researchQuestion = "A valid academic research question",
+            discipline = "Public Health",
+            keywords = Enumerable.Range(1, 13).Select(index => $"keyword-{index}").ToArray(),
+        });
+        Assert.Equal(HttpStatusCode.BadRequest, tooManyKeywords.StatusCode);
+        Assert.Contains("ACADEMIC_REQUEST_INVALID", await tooManyKeywords.Content.ReadAsStringAsync());
+
+        var withoutPlanGate = await PostCreateAsync(client, workspaceId, new
+        {
+            requestKey = "missing-plan-gate",
+            researchQuestion = "A valid academic research question",
+            discipline = "Public Health",
+            requiredApprovals = new[] { "SourceLibrary" },
+        });
+        Assert.Equal(HttpStatusCode.BadRequest, withoutPlanGate.StatusCode);
+        Assert.Contains("Plan approval checkpoint is required", await withoutPlanGate.Content.ReadAsStringAsync());
+    }
+
+    [Theory]
+    [InlineData(null, 0)]
+    [InlineData("false", 0)]
+    [InlineData("invalid", 0)]
+    [InlineData("true", 1)]
+    public void Academic_composition_registers_plan_only_on_explicit_opt_in(string? configured, int expected)
+    {
+        var services = new ServiceCollection();
+        var configuration = new ConfigurationBuilder().AddInMemoryCollection(
+            new Dictionary<string, string?> { [AcademicWorkflowOptions.PlanEnabledKey] = configured }).Build();
+
+        services.AddAcademicProjects(configuration);
+        services.AddAcademicProjects(configuration);
+
+        Assert.Equal(expected, services.Count(descriptor => descriptor.ServiceType == typeof(IAcademicStageHandler)));
+    }
+
+    [Fact]
+    public async Task Default_api_preserves_intake_and_blocks_plan_execution_without_advancing()
+    {
+        using var defaultHost = new TaslimApiFactory();
+        using var scope = defaultHost.Services.CreateScope();
+        scope.ServiceProvider.GetRequiredService<TaslimDbContext>().Database.EnsureCreated();
+        using var defaultClient = defaultHost.CreateClient();
+        var (client, workspace) = await RegisterAsync(defaultClient);
+        var created = await PostCreateAsync(client, workspace, new
+        {
+            requestKey = "academic-off-test",
+            researchQuestion = "How are sources catalogued?",
+            discipline = "History",
+        });
+        Assert.Equal(HttpStatusCode.Created, created.StatusCode);
+        var intake = await created.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Empty(intake.GetProperty("connectedStages").EnumerateArray());
+        var project = intake.GetProperty("project");
+        var path = $"/api/academic-projects/{project.GetProperty("projectId").GetGuid()}";
+
+        var run = await PostJsonAsync(client, $"{path}/run", new { });
+        Assert.Equal(HttpStatusCode.NotImplemented, run.StatusCode);
+        var error = (await run.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("error");
+        Assert.Equal("ACADEMIC_STAGE_NOT_CONNECTED", error.GetProperty("code").GetString());
+        Assert.Equal("Plan", error.GetProperty("missingStage").GetString());
+        var detail = await client.GetFromJsonAsync<JsonElement>(path);
+        Assert.Equal(project.GetProperty("revision").GetInt64(), detail.GetProperty("project").GetProperty("revision").GetInt64());
+        Assert.Equal(0, detail.GetProperty("planVersion").GetInt32());
+        Assert.Equal(0, detail.GetProperty("usage").GetProperty("callsUsed").GetInt32());
     }
 
     [Fact]
@@ -190,21 +283,37 @@ public class AcademicProjectsApiTests : IClassFixture<TaslimApiFactory>
         Assert.Equal(HttpStatusCode.OK, list.StatusCode);
         Assert.Empty(JsonDocument.Parse(await list.Content.ReadAsStringAsync()).RootElement.EnumerateArray());
 
-        // Direct id access: not a member of the owning workspace. 404 vs 403 both deny;
-        // the fence must never answer with data.
-        foreach (var path in new[]
+        // Every project route must make a foreign project indistinguishable from an
+        // unknown project id, without weakening workspace authorization elsewhere.
+        foreach (var suffix in new[]
         {
-            $"/api/academic-projects/{projectId}",
-            $"/api/academic-projects/{projectId}/evidence-matrix",
-            $"/api/academic-projects/{projectId}/verification",
-            $"/api/academic-projects/{projectId}/checkpoints",
+            "",
+            "/evidence-matrix",
+            "/verification",
+            "/checkpoints",
+            "/run",
+            "/approvals/plan",
+            "/budget",
         })
         {
-            var denied = await otherClient.GetAsync(path);
-            Assert.True(
-                denied.StatusCode is HttpStatusCode.Forbidden or HttpStatusCode.NotFound,
-                $"{path} answered {denied.StatusCode} with body {await denied.Content.ReadAsStringAsync()}");
-            Assert.DoesNotContain("isolation probe", await SafeBody(denied));
+            async Task<HttpResponseMessage> SendProbeAsync(Guid id)
+            {
+                var path = $"/api/academic-projects/{id}{suffix}";
+                return suffix is "/run" or "/approvals/plan" or "/budget"
+                    ? await PostJsonAsync(otherClient, path, new { })
+                    : await otherClient.GetAsync(path);
+            }
+
+            using var foreign = await SendProbeAsync(projectId);
+            using var unknown = await SendProbeAsync(Guid.NewGuid());
+            Assert.Equal(HttpStatusCode.NotFound, foreign.StatusCode);
+            Assert.Equal(HttpStatusCode.NotFound, unknown.StatusCode);
+            var foreignBody = await foreign.Content.ReadAsStringAsync();
+            var unknownBody = await unknown.Content.ReadAsStringAsync();
+            Assert.Equal(unknownBody, foreignBody);
+            var error = JsonDocument.Parse(foreignBody).RootElement.GetProperty("error");
+            Assert.Equal("PROJECT_NOT_FOUND", error.GetProperty("code").GetString());
+            Assert.Equal("Project not found.", error.GetProperty("message").GetString());
         }
 
         // And they cannot create into someone else's workspace.
@@ -217,34 +326,224 @@ public class AcademicProjectsApiTests : IClassFixture<TaslimApiFactory>
         Assert.Equal(HttpStatusCode.Forbidden, foreignCreate.StatusCode);
     }
 
+    [Theory]
+    [InlineData(40, 40, true)]
+    [InlineData(41, null, false)]
+    [InlineData(null, 40, true)]
+    [InlineData(null, 41, false)]
+    [InlineData(10, 11, false)]
+    public async Task Source_targets_must_fit_the_projects_discovery_limit(int? total, int? peerReviewed, bool accepted)
+    {
+        var (client, workspaceId) = await RegisterAsync();
+        var response = await PostCreateAsync(client, workspaceId, new
+        {
+            requestKey = $"targets-{Guid.NewGuid():N}",
+            researchQuestion = "Which sources discuss the research question?",
+            discipline = "History",
+            maxDiscoverySources = 40,
+            minimumSources = total,
+            minimumPeerReviewed = peerReviewed,
+        });
+
+        Assert.Equal(accepted ? HttpStatusCode.Created : HttpStatusCode.BadRequest, response.StatusCode);
+        if (!accepted)
+        {
+            Assert.Contains("ACADEMIC_REQUEST_INVALID", await response.Content.ReadAsStringAsync());
+            var projects = await client.GetFromJsonAsync<JsonElement[]>($"/api/workspaces/{workspaceId}/academic-projects");
+            Assert.Empty(projects!);
+        }
+    }
+
     [Fact]
-    public async Task Run_reports_the_exact_missing_stage_and_leaves_state_untouched()
+    public async Task Plan_lists_reject_overflow_and_preserve_every_accepted_entry_after_reload()
+    {
+        var (client, workspaceId) = await RegisterAsync();
+        var questions = Enumerable.Range(1, 4).Select(i => $"Research sub-question {i}?").ToArray();
+        var longHeading = new string('h', 200);
+        var headings = Enumerable.Range(1, 23).Select(i => $"Chapter {i}").Append(longHeading).ToArray();
+        var request = new
+        {
+            requestKey = $"plan-lists-{Guid.NewGuid():N}",
+            researchQuestion = "How are records used in historical research?",
+            discipline = "History",
+            subQuestions = questions,
+            targetChapterHeadings = headings,
+        };
+
+        foreach (var invalid in new[]
+        {
+            request with { subQuestions = [.. questions, "Which additional sources are needed?"] },
+            request with { targetChapterHeadings = [.. headings, "One chapter too many"] },
+        })
+        {
+            var rejected = await PostCreateAsync(client, workspaceId, invalid);
+            Assert.Equal(HttpStatusCode.BadRequest, rejected.StatusCode);
+            Assert.Contains("ACADEMIC_REQUEST_INVALID", await rejected.Content.ReadAsStringAsync());
+        }
+        var projects = await client.GetFromJsonAsync<JsonElement[]>($"/api/workspaces/{workspaceId}/academic-projects");
+        Assert.Empty(projects!);
+
+        var accepted = await PostCreateAsync(client, workspaceId, request);
+        Assert.Equal(HttpStatusCode.Created, accepted.StatusCode);
+        var projectId = (await accepted.Content.ReadFromJsonAsync<JsonElement>())
+            .GetProperty("project").GetProperty("projectId").GetGuid();
+        var path = $"/api/academic-projects/{projectId}";
+        var run = await PostJsonAsync(client, $"{path}/run", new { });
+        Assert.Equal(HttpStatusCode.OK, run.StatusCode);
+        var reloaded = await client.GetFromJsonAsync<JsonElement>(path);
+        var plan = reloaded.GetProperty("plan");
+        Assert.Equal(questions, plan.GetProperty("subQuestions").Deserialize<string[]>());
+        Assert.Equal(headings, plan.GetProperty("chapterOutline").Deserialize<string[]>());
+    }
+
+    [Fact]
+    public async Task Run_saves_and_gates_the_plan_then_reports_missing_discovery_as_resumable()
     {
         var (client, workspaceId) = await RegisterAsync();
         var create = await PostCreateAsync(client, workspaceId, new
         {
             requestKey = $"not-connected-{Guid.NewGuid():N}",
-            researchQuestion = "Stage gate probe",
-            discipline = "Economics",
+            researchQuestion = "How has pharmaceutical market access regulation evolved in the Kurdistan Region of Iraq since 2012?",
+            discipline = "Pharmacy and Health Policy",
+            level = "Masters",
+            method = "SystematicReview",
+            methodologies = new[] { "SystematicReview", "Qualitative" },
+            citationStyle = "Vancouver",
+            workingTitle = "Pharmaceutical market access in the Kurdistan Region",
+            geographicScope = "Kurdistan Region of Iraq",
+            populationOrContext = "Regulated medicines and patients",
+            timePeriod = "2012-2025",
+            subQuestions = new[] { "Which institutions regulate medicine entry?" },
+            keywords = new[] { "pharmaceutical market access", "medicine regulation" },
+            minimumSources = 60,
+            minimumPeerReviewed = 40,
+            allowedSourceTypes = new[] { "journal_article", "book" },
+            requireFullText = true,
+            programmeRequirements = "Use Vancouver style and keep an auditable screening log.",
         });
         var projectId = (await create.Content.ReadFromJsonAsync<JsonElement>())
             .GetProperty("project").GetProperty("projectId").GetGuid();
 
         var run = await PostJsonAsync(client, $"/api/academic-projects/{projectId}/run", new { });
-        Assert.Equal(HttpStatusCode.NotImplemented, run.StatusCode);
-        var error = (await run.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("error");
-        Assert.Equal("ACADEMIC_STAGE_NOT_CONNECTED", error.GetProperty("code").GetString());
-        Assert.Equal("Plan", error.GetProperty("missingStage").GetString());
-        Assert.Equal(0, error.GetProperty("connectedStages").GetArrayLength());
-        Assert.Equal(0, error.GetProperty("resumableAtRevision").GetInt64());
+        Assert.Equal(HttpStatusCode.OK, run.StatusCode);
+        var prepared = await run.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal("AwaitingApproval", prepared.GetProperty("project").GetProperty("state").GetString());
+        Assert.Equal("Plan", prepared.GetProperty("pendingApproval").GetProperty("kind").GetString());
+        Assert.Equal(1, prepared.GetProperty("planVersion").GetInt32());
+        Assert.Equal(1, prepared.GetProperty("connectedStages").GetArrayLength());
+        Assert.Equal(6, prepared.GetProperty("missingStages").GetArrayLength());
 
-        // Nothing moved: still revision 0, still one intake checkpoint, nothing charged.
+        var prematureResume = await PostJsonAsync(client, $"/api/academic-projects/{projectId}/run", new { });
+        Assert.Equal(HttpStatusCode.OK, prematureResume.StatusCode);
+        var heldForReview = await prematureResume.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal("AwaitingApproval", heldForReview.GetProperty("project").GetProperty("state").GetString());
+        Assert.Equal("Plan", heldForReview.GetProperty("pendingApproval").GetProperty("kind").GetString());
+        Assert.Equal(
+            prepared.GetProperty("project").GetProperty("revision").GetInt64(),
+            heldForReview.GetProperty("project").GetProperty("revision").GetInt64());
+
+        var plan = prepared.GetProperty("plan");
+        Assert.Equal("How has pharmaceutical market access regulation evolved in the Kurdistan Region of Iraq since 2012?", plan.GetProperty("researchQuestion").GetString());
+        Assert.Equal("Masters", plan.GetProperty("level").GetString());
+        Assert.Equal("Vancouver", plan.GetProperty("citationStyle").GetString());
+        Assert.Equal(2, plan.GetProperty("methodologies").GetArrayLength());
+        Assert.Equal("Qualitative", plan.GetProperty("methodologies")[1].GetString());
+        Assert.Equal("Kurdistan Region of Iraq", plan.GetProperty("geographicScope").GetString());
+        Assert.Equal("2012-2025", plan.GetProperty("timePeriod").GetString());
+        Assert.True(plan.GetProperty("requireFullText").GetBoolean());
+        Assert.Equal(60, plan.GetProperty("minimumSources").GetInt32());
+        Assert.Equal(40, plan.GetProperty("minimumPeerReviewed").GetInt32());
+        Assert.Equal("pharmaceutical market access", plan.GetProperty("keywords")[0].GetString());
+        Assert.Equal("medicine regulation", plan.GetProperty("keywords")[1].GetString());
+        Assert.Contains(plan.GetProperty("inclusionCriteria").EnumerateArray(), item =>
+            item.GetString()!.Contains("scholarly books", StringComparison.OrdinalIgnoreCase));
+        Assert.Contains(plan.GetProperty("inclusionCriteria").EnumerateArray(), item =>
+            item.GetString()!.Contains("journal articles", StringComparison.OrdinalIgnoreCase));
+        Assert.Equal(3, plan.GetProperty("searchStrategy").GetArrayLength());
+        Assert.Equal("ScholarlyRecords", plan.GetProperty("searchStrategy")[0].GetProperty("collection").GetString());
+        Assert.Equal("JournalAndIdentifierRecords", plan.GetProperty("searchStrategy")[1].GetProperty("collection").GetString());
+        Assert.Equal("BookRecords", plan.GetProperty("searchStrategy")[2].GetProperty("collection").GetString());
+        Assert.Contains(plan.GetProperty("allowedSourceTypes").EnumerateArray(), item => item.GetString() == "book");
+        Assert.Contains(plan.GetProperty("allowedSourceTypes").EnumerateArray(), item => item.GetString() == "journal_article");
+        Assert.DoesNotContain("OpenAlex", plan.GetRawText(), StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("Crossref", plan.GetRawText(), StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(0, prepared.GetProperty("usage").GetProperty("spentUsd").GetDecimal());
+        Assert.Equal(0, prepared.GetProperty("usage").GetProperty("callsUsed").GetInt32());
+
+        var pendingApproval = heldForReview.GetProperty("pendingApproval");
+        var approve = await PostJsonAsync(client, $"/api/academic-projects/{projectId}/approvals/plan", new
+        {
+            decision = "Approved",
+            approvalKey = pendingApproval.GetProperty("approvalKey").GetString(),
+            checkpointRevision = pendingApproval.GetProperty("checkpointRevision").GetInt64(),
+        });
+        Assert.Equal(HttpStatusCode.OK, approve.StatusCode);
+        var approved = await approve.Content.ReadFromJsonAsync<JsonElement>();
+        var approvedRevision = approved.GetProperty("project").GetProperty("revision").GetInt64();
+        var checkpointsBeforeMissingStage = await client.GetFromJsonAsync<JsonElement[]>($"/api/academic-projects/{projectId}/checkpoints");
+        var missingRun = await PostJsonAsync(client, $"/api/academic-projects/{projectId}/run", new { });
+        Assert.Equal(HttpStatusCode.NotImplemented, missingRun.StatusCode);
+        var error = (await missingRun.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("error");
+        Assert.Equal("ACADEMIC_STAGE_NOT_CONNECTED", error.GetProperty("code").GetString());
+        Assert.Equal("Discover", error.GetProperty("missingStage").GetString());
+        Assert.Equal(1, error.GetProperty("connectedStages").GetArrayLength());
+        Assert.Equal("Plan", error.GetProperty("connectedStages")[0].GetString());
+
+        // After the review checkpoint, the missing stage is reported without advancing
+        // revision or turning the still-resumable project into a terminal failure.
         var detail = await client.GetFromJsonAsync<JsonElement>($"/api/academic-projects/{projectId}");
-        Assert.Equal(0, detail.GetProperty("project").GetProperty("revision").GetInt64());
+        Assert.Equal("Running", detail.GetProperty("project").GetProperty("state").GetString());
+        Assert.Equal(approvedRevision, detail.GetProperty("project").GetProperty("revision").GetInt64());
+        Assert.Equal(1, detail.GetProperty("planVersion").GetInt32());
         Assert.Equal(0, detail.GetProperty("usage").GetProperty("spentUsd").GetDecimal());
         var checkpoints = await client.GetFromJsonAsync<JsonElement[]>($"/api/academic-projects/{projectId}/checkpoints");
         Assert.NotNull(checkpoints);
-        Assert.Single(checkpoints);
+        Assert.Equal(checkpointsBeforeMissingStage!.Length, checkpoints.Length);
+    }
+
+    [Fact]
+    public async Task Undefined_numeric_approval_decision_is_rejected_without_moving_the_pending_checkpoint()
+    {
+        var (client, workspaceId) = await RegisterAsync();
+        var create = await PostCreateAsync(client, workspaceId, new
+        {
+            requestKey = $"invalid-decision-{Guid.NewGuid():N}",
+            researchQuestion = "Approval decision validation probe",
+            discipline = "Sociology",
+        });
+        var projectId = (await create.Content.ReadFromJsonAsync<JsonElement>())
+            .GetProperty("project").GetProperty("projectId").GetGuid();
+
+        var run = await PostJsonAsync(client, $"/api/academic-projects/{projectId}/run", new { });
+        Assert.Equal(HttpStatusCode.OK, run.StatusCode);
+        var pending = await run.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal("AwaitingApproval", pending.GetProperty("project").GetProperty("state").GetString());
+        var revision = pending.GetProperty("project").GetProperty("revision").GetInt64();
+        var checkpointRevision = pending.GetProperty("pendingApproval").GetProperty("checkpointRevision").GetInt64();
+        var approvalKey = pending.GetProperty("pendingApproval").GetProperty("approvalKey").GetString();
+
+        var invalid = await PostJsonAsync(
+            client,
+            $"/api/academic-projects/{projectId}/approvals/plan",
+            new { decision = "2147483647", notes = "must not be recorded", approvalKey, checkpointRevision });
+        Assert.Equal(HttpStatusCode.BadRequest, invalid.StatusCode);
+
+        var unchanged = await client.GetFromJsonAsync<JsonElement>($"/api/academic-projects/{projectId}");
+        Assert.Equal("AwaitingApproval", unchanged.GetProperty("project").GetProperty("state").GetString());
+        Assert.Equal(revision, unchanged.GetProperty("project").GetProperty("revision").GetInt64());
+        Assert.Equal("Plan", unchanged.GetProperty("pendingApproval").GetProperty("kind").GetString());
+        Assert.Equal(checkpointRevision, unchanged.GetProperty("pendingApproval").GetProperty("checkpointRevision").GetInt64());
+        Assert.Empty(unchanged.GetProperty("approvals").EnumerateArray());
+
+        var valid = await PostJsonAsync(
+            client,
+            $"/api/academic-projects/{projectId}/approvals/plan",
+            new { decision = "Approved", approvalKey, checkpointRevision });
+        Assert.Equal(HttpStatusCode.OK, valid.StatusCode);
+        var approved = await valid.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal("APPLIED", approved.GetProperty("code").GetString());
+        Assert.Equal("Running", approved.GetProperty("project").GetProperty("state").GetString());
+        Assert.Single(approved.GetProperty("approvals").EnumerateArray());
     }
 
     [Fact]
@@ -260,8 +559,16 @@ public class AcademicProjectsApiTests : IClassFixture<TaslimApiFactory>
         var projectId = (await create.Content.ReadFromJsonAsync<JsonElement>())
             .GetProperty("project").GetProperty("projectId").GetGuid();
 
-        var approve = await PostJsonAsync(client, $"/api/academic-projects/{projectId}/approvals/plan",
-            new { decision = "Approved", notes = "looks good" });
+        var approve = await PostJsonAsync(
+            client,
+            $"/api/academic-projects/{projectId}/approvals/plan",
+            new
+            {
+                decision = "Approved",
+                notes = "looks good",
+                approvalKey = "missing-checkpoint",
+                checkpointRevision = 1L,
+            });
         Assert.Equal(HttpStatusCode.Conflict, approve.StatusCode);
         Assert.Contains("NO_PENDING_APPROVAL", await approve.Content.ReadAsStringAsync());
     }
@@ -382,9 +689,9 @@ public class AcademicProjectsApiTests : IClassFixture<TaslimApiFactory>
 
     // --- helpers -------------------------------------------------------------------------------
 
-    private async Task<(HttpClient Client, Guid WorkspaceId)> RegisterAsync()
+    private async Task<(HttpClient Client, Guid WorkspaceId)> RegisterAsync(HttpClient? client = null)
     {
-        var client = _factory.CreateClient();
+        client ??= _factory.CreateClient();
         var csrf = await client.GetFromJsonAsync<JsonElement>("/api/auth/csrf");
         var token = csrf.GetProperty("token").GetString()!;
         using var request = new HttpRequestMessage(HttpMethod.Post, "/api/auth/register")
