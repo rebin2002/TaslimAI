@@ -8,6 +8,15 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  # Batch CI/release runs so one commit stream cannot start two simultaneous
+  # production builds or release manifests. Each workflow keeps its own lane
+  # (independent gates never cancel one another) keyed by the source branch or
+  # pull request; supersede only on non-main lanes, while every integrated main
+  # commit keeps a serialized, non-cancelled run.
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
 env:
   NODE_VERSION: "22"
   DOTNET_VERSION: "8.0.x"
@@ -22,6 +31,16 @@ jobs:
         run: |
           bash -n scripts/api-health-smoke.sh scripts/api-health-smoke.test.sh
           bash scripts/api-health-smoke.test.sh
+      - name: Validate production container smoke helpers
+        run: |
+          bash -n scripts/container-health-smoke.sh scripts/container-health-smoke.test.sh
+          bash scripts/container-health-smoke.test.sh
+          bash -n scripts/web-container-smoke.sh scripts/web-container-smoke.test.sh
+          bash scripts/web-container-smoke.test.sh
+      - name: Enforce deploy-safe CI/release concurrency policy
+        run: |
+          bash -n scripts/ci-release-policy.test.sh
+          bash scripts/ci-release-policy.test.sh
 
   frontend:
     name: Frontend checks

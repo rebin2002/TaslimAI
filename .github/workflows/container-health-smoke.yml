@@ -8,6 +8,16 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  # Batch production-image smoke runs so one commit stream cannot start two
+  # simultaneous Docker builds of the Railway Web/API release images. Each
+  # workflow keeps its own lane (independent gates never cancel one another)
+  # keyed by the source branch or pull request; supersede only on non-main
+  # lanes, while every integrated main commit keeps a serialized,
+  # non-cancelled run.
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
 jobs:
   container-health:
     name: Build production images and smoke-test API
