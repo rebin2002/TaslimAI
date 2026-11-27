@@ -24,11 +24,48 @@ public int MaxImageDimension { get; set; } = 16_384;
 public sealed class ImagePricingOptions
 {
     // GPT Image 2.5 Sunburst rates, USD per 1M tokens, documented 2026-09-08.
-    public decimal? TextInputUsdPerMillion { get; set; }
-    public decimal? CachedTextInputUsdPerMillion { get; set; }
-    public decimal? ImageInputUsdPerMillion { get; set; }
-    public decimal? CachedImageInputUsdPerMillion { get; set; }
-    public decimal? ImageOutputUsdPerMillion { get; set; }
+    private decimal? textInputUsdPerMillion;
+    private decimal? cachedTextInputUsdPerMillion;
+    private decimal? imageInputUsdPerMillion;
+    private decimal? cachedImageInputUsdPerMillion;
+    private decimal? imageOutputUsdPerMillion;
+
+    public decimal? TextInputUsdPerMillion
+    {
+        get => textInputUsdPerMillion;
+        set => textInputUsdPerMillion = EnsureNonNegative(value, nameof(TextInputUsdPerMillion));
+    }
+
+    public decimal? CachedTextInputUsdPerMillion
+    {
+        get => cachedTextInputUsdPerMillion;
+        set => cachedTextInputUsdPerMillion = EnsureNonNegative(value, nameof(CachedTextInputUsdPerMillion));
+    }
+
+    public decimal? ImageInputUsdPerMillion
+    {
+        get => imageInputUsdPerMillion;
+        set => imageInputUsdPerMillion = EnsureNonNegative(value, nameof(ImageInputUsdPerMillion));
+    }
+
+    public decimal? CachedImageInputUsdPerMillion
+    {
+        get => cachedImageInputUsdPerMillion;
+        set => cachedImageInputUsdPerMillion = EnsureNonNegative(value, nameof(CachedImageInputUsdPerMillion));
+    }
+
+    public decimal? ImageOutputUsdPerMillion
+    {
+        get => imageOutputUsdPerMillion;
+        set => imageOutputUsdPerMillion = EnsureNonNegative(value, nameof(ImageOutputUsdPerMillion));
+    }
+
+    private static decimal? EnsureNonNegative(decimal? value, string parameterName)
+    {
+        if (value < 0m)
+            throw new ArgumentOutOfRangeException(parameterName, value, "Image pricing rates cannot be negative.");
+        return value;
+    }
 
     public UsagePricingSnapshot? ToSnapshot(ImageGenerationOptions options) =>
         TextInputUsdPerMillion.HasValue && CachedTextInputUsdPerMillion.HasValue && ImageInputUsdPerMillion.HasValue && CachedImageInputUsdPerMillion.HasValue && ImageOutputUsdPerMillion.HasValue && options.PricingEffectiveDateUtc.HasValue && !string.IsNullOrWhiteSpace(options.PricingVersion) && !string.IsNullOrWhiteSpace(options.PricingSource)

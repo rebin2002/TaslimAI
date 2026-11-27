@@ -59,6 +59,7 @@ import { MovieExportsWorkspace } from "@/components/MovieExportsWorkspace";
 import { MovieTeamWorkspace } from "@/components/MovieTeamWorkspace";
 import { useLocale } from "@/components/LocaleProvider";
 import { buildMovieEditModel, clampMovieEditPlayhead, moveMovieEditSelection } from "@/lib/movieEditState";
+import { formatMovieTimecode } from "@/lib/movieSalvage";
 
 export const fullMovieModules = [
   { slug: "overview", icon: Gauge },
@@ -1255,9 +1256,7 @@ function MovieTakeCard({ take, shot, busyKey, onAction }: { take: MovieTake; sho
 }
 
 function formatEditTime(seconds: number) {
-  const minutes = Math.floor(seconds / 60);
-  const remainder = Math.floor(seconds % 60);
-  return `${String(minutes).padStart(2, "0")}:${String(remainder).padStart(2, "0")}`;
+  return formatMovieTimecode(Math.max(0, Math.floor(seconds * 1000)), { showMilliseconds: false });
 }
 
 function EditModule({ project, onRefresh }: { project: MovieProject; onRefresh: () => Promise<void> }) {

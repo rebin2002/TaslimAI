@@ -14,13 +14,13 @@ const accountSource = readFileSync(new URL("./AccountView.tsx", import.meta.url)
 
 describe("profile avatar thumbnails share one derivation", () => {
   it("draws the header thumbnail through the shared helper and the live session user", () => {
-    expect(headerSource).toContain("profileAvatarInitial(user, locale)");
+    expect(headerSource).toContain("profileAvatarInitial(user, languagePackTag(languagePackId))");
     expect(headerSource).toContain("const { user } = useAuth();");
     expect(headerSource).not.toMatch(/displayName\.slice\(0, *1\)/);
   });
 
   it("draws the account identity mark through the same helper", () => {
-    expect(accountSource).toContain("profileAvatarInitial(user, locale)");
+    expect(accountSource).toContain("profileAvatarInitial(user, languagePackTag(languagePackId))");
     expect(accountSource).not.toMatch(/displayName\.trim\(\)\.slice\(0, *1\)/);
   });
 

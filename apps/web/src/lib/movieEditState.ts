@@ -39,6 +39,10 @@ function readyClip(scene: MovieScene) {
   return scene.clips.find((clip) => Boolean(clip.assetId) && readyClipStatuses.has(clip.status)) ?? null;
 }
 
+function activeClip(scene: MovieScene) {
+  return scene.clips.find((clip) => activeClipStatuses.has(clip.status)) ?? null;
+}
+
 function sceneEditState(scene: MovieScene, clip: SceneClip | null): Pick<MovieEditScene, "readiness" | "blockers"> {
   const blockers: string[] = [];
   if (scene.durationSeconds === null && clip?.durationSeconds == null) blockers.push("Set a scene duration before editing.");
@@ -58,7 +62,7 @@ export function buildMovieEditModel(project: MovieProject): MovieEditModel {
   const scenes = [...project.scenes]
     .sort((left, right) => left.sequence - right.sequence)
     .map((scene) => {
-      const clip = readyClip(scene) ?? scene.clips[0] ?? null;
+      const clip = activeClip(scene) ?? readyClip(scene) ?? scene.clips[0] ?? null;
       const durationSeconds = sceneDuration(scene, clip);
       const startSeconds = cursor;
       cursor += durationSeconds;
