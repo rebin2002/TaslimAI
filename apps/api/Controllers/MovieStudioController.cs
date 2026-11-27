@@ -230,8 +230,8 @@ public sealed class MovieStudioController(IMovieStudioService movies, IMovieProd
             var result = await productionSheets.SaveDraftAsync(GetUserId(), characterId, request, cancellationToken);
             return result is null ? ApiResults.Error(this, 404, "MOVIE_CHARACTER_NOT_FOUND", "Movie character not found.") : Ok(result);
         }
-        catch (MovieCharacterProductionSheetValidationException exception) { return ApiResults.Error(this, 400, exception.Code, exception.Message); }
-        catch (MovieCharacterProductionSheetLockedException exception) { return ApiResults.Error(this, 409, "MOVIE_CHARACTER_PRODUCTION_SHEET_LOCKED", exception.Message); }
+        catch (MovieCharacterProductionSheetValidationException exception) { return ProductionSheetError(exception); }
+        catch (MovieCharacterProductionSheetLockedException exception) { return ProductionSheetError(exception); }
     }
 
     [HttpPost("production-sheets/{sheetId:guid}/approve")]
@@ -243,8 +243,8 @@ public sealed class MovieStudioController(IMovieStudioService movies, IMovieProd
             var result = await productionSheets.ApproveAsync(GetUserId(), sheetId, cancellationToken);
             return result is null ? ApiResults.Error(this, 404, "MOVIE_CHARACTER_PRODUCTION_SHEET_NOT_FOUND", "Character production sheet not found.") : Ok(result);
         }
-        catch (MovieCharacterProductionSheetValidationException exception) { return ApiResults.Error(this, 400, exception.Code, exception.Message); }
-        catch (MovieCharacterProductionSheetLockedException exception) { return ApiResults.Error(this, 409, "MOVIE_CHARACTER_PRODUCTION_SHEET_LOCKED", exception.Message); }
+        catch (MovieCharacterProductionSheetValidationException exception) { return ProductionSheetError(exception); }
+        catch (MovieCharacterProductionSheetLockedException exception) { return ProductionSheetError(exception); }
     }
 
     [HttpPost("production-sheets/{sheetId:guid}/lock")]
@@ -256,15 +256,21 @@ public sealed class MovieStudioController(IMovieStudioService movies, IMovieProd
             var result = await productionSheets.LockAsync(GetUserId(), sheetId, cancellationToken);
             return result is null ? ApiResults.Error(this, 404, "MOVIE_CHARACTER_PRODUCTION_SHEET_NOT_FOUND", "Character production sheet not found.") : Ok(result);
         }
-        catch (MovieCharacterProductionSheetValidationException exception) { return ApiResults.Error(this, 400, exception.Code, exception.Message); }
+        catch (MovieCharacterProductionSheetValidationException exception) { return ProductionSheetError(exception); }
+        catch (MovieCharacterProductionSheetLockedException exception) { return ProductionSheetError(exception); }
     }
 
     [HttpPost("production-sheets/{sheetId:guid}/unlock")]
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> UnlockProductionSheet(Guid sheetId, CancellationToken cancellationToken)
     {
-        var result = await productionSheets.UnlockAsync(GetUserId(), sheetId, cancellationToken);
-        return result is null ? ApiResults.Error(this, 404, "MOVIE_CHARACTER_PRODUCTION_SHEET_NOT_FOUND", "Character production sheet not found.") : Ok(result);
+        try
+        {
+            var result = await productionSheets.UnlockAsync(GetUserId(), sheetId, cancellationToken);
+            return result is null ? ApiResults.Error(this, 404, "MOVIE_CHARACTER_PRODUCTION_SHEET_NOT_FOUND", "Character production sheet not found.") : Ok(result);
+        }
+        catch (MovieCharacterProductionSheetValidationException exception) { return ProductionSheetError(exception); }
+        catch (MovieCharacterProductionSheetLockedException exception) { return ProductionSheetError(exception); }
     }
 
     [HttpGet("projects/{id:guid}/world")]
@@ -1097,6 +1103,7 @@ public sealed class MovieStudioController(IMovieStudioService movies, IMovieProd
             return result is null ? ApiResults.Error(this, 404, "MOVIE_PROJECT_NOT_FOUND", "Movie project not found.") : CreatedAtAction(nameof(GetStoryRevision), new { movieProjectId, revisionId = result.CurrentRevisionId }, result);
         }
         catch (MovieStoryValidationException exception) { return ApiResults.Error(this, 400, "MOVIE_STORY_INVALID", exception.Message); }
+        catch (MovieStoryRevisionConflictException exception) { return ApiResults.Error(this, 409, "MOVIE_STORY_REVISION_CONFLICT", exception.Message); }
         catch (MovieCollaborationForbiddenException) { return Forbid(); }
     }
 
@@ -1147,6 +1154,12 @@ public sealed class MovieStudioController(IMovieStudioService movies, IMovieProd
         catch (MovieStoryWorkflowException exception) { return ApiResults.Error(this, 409, exception.Code, exception.Message); }
         catch (MovieCollaborationForbiddenException) { return Forbid(); }
     }
+
+    private IActionResult ProductionSheetError(MovieCharacterProductionSheetValidationException exception) =>
+        ApiResults.Error(this, exception.Code == "SHEET_STATE_CHANGED" ? 409 : 400, exception.Code, exception.Message);
+
+    private IActionResult ProductionSheetError(MovieCharacterProductionSheetLockedException exception) =>
+        ApiResults.Error(this, 409, "MOVIE_CHARACTER_PRODUCTION_SHEET_LOCKED", exception.Message);
 
     private Guid GetUserId() => Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier) ?? throw new InvalidOperationException("Authenticated user identifier is missing."));
 }
