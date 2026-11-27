@@ -182,8 +182,14 @@ import { academicRoute } from "@/components/academic/academicRoutes";
 ```
 
 plus the matching `research.academicEntry` key in `lib/navigation.ts` / `lib/i18n.ts`, which
-Phase A avoids touching because those files are owner-claimed. Until that lands, the academic
-studio is reachable at `/create/research/academic` and the route is fully functional on its own.
+Phase A avoids touching because those files are owner-claimed. The current implementation uses
+`NEXT_PUBLIC_ACADEMIC_RESEARCH_ENABLED` as a shared public build-time visibility gate instead:
+only the exact value `true` shows the Standard Research link or permits the signed-in
+`/create/research/academic` and `/create/research/academic/export` pages to render. The default is
+OFF; when unset or false, both direct routes return not found after authentication. This switch
+does not replace authentication or enable scholarly discovery, external services or charging.
+CI opts in only for synthetic Browser E2E. Production visibility and cutover remain separately
+reviewed and authorized.
 
 ## Language coverage
 

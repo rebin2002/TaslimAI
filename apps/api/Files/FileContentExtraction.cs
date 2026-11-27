@@ -25,7 +25,7 @@ public interface IFileContentExtractor
 public sealed class FileContentExtractor(IOptions<FileOptions> options) : IFileContentExtractor
 {
     private readonly int maxCharacters = Math.Clamp(options.Value.MaxExtractedTextCharacters, 1_000, 1_000_000);
-    private readonly long maxStagingBytes = Math.Min(options.Value.MaxFileSizeBytes, 25 * 1_048_576);
+    private readonly long maxStagingBytes = Math.Min(options.Value.MaxFileSizeBytes, FileOptions.MaxUserUploadFileSizeBytes);
     private readonly int maxArchiveEntries = Math.Clamp(options.Value.MaxArchiveEntries, 1, 10_000);
     private readonly long maxArchiveUncompressedBytes = Math.Clamp(options.Value.MaxArchiveUncompressedBytes, 1_048_576, 1_073_741_824);
     private readonly long maxArchiveEntryBytes = Math.Clamp(options.Value.MaxArchiveEntryBytes, 64 * 1024, Math.Clamp(options.Value.MaxArchiveUncompressedBytes, 1_048_576, 1_073_741_824));

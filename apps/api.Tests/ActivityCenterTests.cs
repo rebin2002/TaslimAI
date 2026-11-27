@@ -11,11 +11,14 @@ using Xunit;
 
 namespace Taslim.Api.Tests;
 
-public sealed class ActivityCenterTests : IClassFixture<GenerationJobsNoWorkerFactory>
+public sealed class ActivityCenterTests : IClassFixture<DocumentEnabledNoWorkerFactory>
 {
-    private readonly GenerationJobsNoWorkerFactory factory;
+    // This fixture projects an existing document.generate job, so it opts into
+    // Document Studio explicitly: the generic Generation Job route rejects that
+    // job type while the Document kill switch is off.
+    private readonly DocumentEnabledNoWorkerFactory factory;
 
-    public ActivityCenterTests(GenerationJobsNoWorkerFactory factory)
+    public ActivityCenterTests(DocumentEnabledNoWorkerFactory factory)
     {
         this.factory = factory;
         using var scope = factory.Services.CreateScope();
