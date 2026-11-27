@@ -20,7 +20,7 @@ namespace Taslim.Api.Tests;
 ///   * the per-generation ceiling is a completely separate, much smaller number that every
 ///     paid provider adapter enforces on its own clip.
 ///
-/// Verified trace on <c>main</c> (read-only; nothing here edits a production file):
+/// Contract shared across project planning, Full/Quick create admission, and provider execution:
 ///
 ///   1. <see cref="MovieBudgetDirectorService.MaxProjectPlanningDurationSeconds"/> (120 * 60)
 ///      is the approved overall-plan runtime, and
@@ -28,13 +28,8 @@ namespace Taslim.Api.Tests;
 ///      per-shot ceiling. <c>DeriveUnplannedProjectShotGrid</c> already refuses anything above
 ///      7,200 s with <c>project_duration_unsupported</c> and never models a two-hour brief as one
 ///      two-hour clip. That plan ceiling is <b>already merged</b> (#854).
-///   2. The project <b>create request</b> is still capped by
-///      <see cref="MovieStudioValidation.Validate"/> at the legacy one-hour value, so a
-///      7,200-second project cannot be created yet. That seam is owned by open PR #269
-///      (<c>MovieEntities.cs</c> / <c>MovieStudioService.cs</c>) and is deliberately NOT patched
-///      here. Group B below is the red/green compatibility contract: it records the guard as
-///      missing on today's baseline and starts enforcing #685's exact 7,200-second acceptance the
-///      moment #269 lands, failing if that ceiling lands as anything other than 120 minutes.
+///   2. Full project creation accepts the approved 7,200-second ceiling; Quick creation remains
+///      capped at 3,600 seconds because it submits one focused generation.
 ///   3. Provider clip maxima are independent and far shorter than the plan: Runway accepts only
 ///      2-10 seconds and Manus only 1-30 seconds per generation; the provider-neutral
 ///      <see cref="DirectVideoRequestNormalizer"/> refuses any request outside its declared
@@ -47,10 +42,8 @@ namespace Taslim.Api.Tests;
 ///      Group C proves a 7,200-second single paid clip is blocked before any HTTP call, queue
 ///      entry, or spend, on today's baseline and after #269.
 ///
-/// Scope and safety: this file is additive and provider-free. It performs no network I/O (every
-/// adapter is driven by an in-memory stub handler that records requests so "zero calls" is
-/// provable), no provider activation, no credentials, no purchases, no schema or data changes,
-/// and no edits to any path owned by #269 or #348.
+/// Scope and safety: adapter tests use in-memory stub handlers so zero provider calls are provable.
+/// The suite performs no real generation, purchases, schema changes, or production data changes.
 /// </summary>
 public sealed class MovieProjectDurationCeilingCompatibilityTests
 {
@@ -128,9 +121,7 @@ public sealed class MovieProjectDurationCeilingCompatibilityTests
     }
 
     // -----------------------------------------------------------------------------------------
-    // Group B - the project create request (#685's missing guard, owned by PR #269).
-    //           Compatibility contract: green on today's baseline while the guard is missing,
-    //           and self-enforcing once the 120-minute ceiling lands.
+    // Group B - Full project admission is exactly 120 minutes; Quick remains at one hour.
     // -----------------------------------------------------------------------------------------
 
     [Theory]
@@ -146,15 +137,19 @@ public sealed class MovieProjectDurationCeilingCompatibilityTests
     }
 
     [Fact]
-    public void Create_request_ceiling_never_exceeds_the_planning_ceiling_at_any_merge_order()
+    public void Full_create_ceiling_matches_the_approved_planning_ceiling()
     {
-        var ceiling = EffectiveCreateRequestCeilingSeconds();
+        Assert.Equal(ApprovedProjectCeilingSeconds, MovieStudioValidation.MaxProjectDurationSeconds);
+        Assert.Equal(MovieBudgetDirectorService.MaxProjectPlanningDurationSeconds, MovieStudioValidation.MaxProjectDurationSeconds);
+    }
 
-        // Whether #269 has landed or not, the create contract can never be looser than the
-        // planner, so an accepted project is always a project the planner can budget.
-        Assert.True(
-            ceiling <= MovieBudgetDirectorService.MaxProjectPlanningDurationSeconds,
-            $"The create validator accepts {ceiling}s while planning only supports {MovieBudgetDirectorService.MaxProjectPlanningDurationSeconds}s.");
+    [Fact]
+    public void Quick_movie_creation_remains_bounded_to_one_hour()
+    {
+        Assert.Null(MovieStudioValidation.Validate(CreateRequest(PerGenerationCeilingSeconds, MovieProjectModes.Quick)));
+        var overCap = MovieStudioValidation.Validate(CreateRequest(PerGenerationCeilingSeconds + 1, MovieProjectModes.Quick));
+        Assert.NotNull(overCap);
+        Assert.Contains("60", overCap, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -183,49 +178,22 @@ public sealed class MovieProjectDurationCeilingCompatibilityTests
     }
 
     /// <summary>
-    /// The red/green switch for #685.
-    ///
-    /// Today (main, #269 unmerged) the project create request still stops at one hour, so this
-    /// test records that exact missing guard and pins the legacy value. Once PR #269 lifts the
-    /// create cap to the approved 120 minutes, the same test flips to enforcing the acceptance
-    /// criteria verbatim: 7,200 seconds is accepted and 7,201 seconds is refused. It also fails
-    /// if the ceiling ever lands as an unapproved number, so the guard cannot be satisfied by an
-    /// accidental value such as 3,601 or an unbounded 86,400.
+    /// Full project creation must accept the exact approved cap and reject the first second above it.
     /// </summary>
     [Fact]
-    public void Project_level_long_form_acceptance_matches_the_approved_ceiling_once_the_owner_cap_lands()
+    public void Project_level_long_form_acceptance_is_exactly_120_minutes()
     {
-        var ceiling = EffectiveCreateRequestCeilingSeconds();
-
-        Assert.True(
-            ceiling == LegacyProjectCeilingSeconds || ceiling == ApprovedProjectCeilingSeconds,
-            $"Unexpected project duration ceiling {ceiling}s. Only the legacy one-hour cap (#{LegacyProjectCeilingSeconds / 60} min) or the approved #685 120-minute cap is sanctioned; widening the project cap needs its own review.");
-
-        if (ceiling >= ApprovedProjectCeilingSeconds)
-        {
-            // #685 acceptance criteria, enforced from here on.
-            Assert.Null(MovieStudioValidation.Validate(CreateRequest(ApprovedProjectCeilingSeconds)));
-            var overCap = MovieStudioValidation.Validate(CreateRequest(ApprovedProjectCeilingSeconds + 1));
-            Assert.NotNull(overCap);
-            Assert.Contains("120", overCap, StringComparison.Ordinal);
-        }
-        else
-        {
-            // Missing guard, stated rather than hidden: the project metadata limit from #685 is
-            // not implemented on this baseline, so a compliant two-hour brief is still refused.
-            var error = MovieStudioValidation.Validate(CreateRequest(ApprovedProjectCeilingSeconds));
-            Assert.NotNull(error);
-            Assert.True(
-                !error.Contains("120", StringComparison.Ordinal),
-                "The validator advertises a 120-minute project ceiling but does not accept 7,200 seconds.");
-        }
+        Assert.Equal(ApprovedProjectCeilingSeconds, MovieStudioValidation.MaxProjectDurationSeconds);
+        Assert.Null(MovieStudioValidation.Validate(CreateRequest(ApprovedProjectCeilingSeconds)));
+        var overCap = MovieStudioValidation.Validate(CreateRequest(ApprovedProjectCeilingSeconds + 1));
+        Assert.NotNull(overCap);
+        Assert.Contains("120", overCap, StringComparison.Ordinal);
     }
 
     [Fact]
     public void Long_form_project_ceiling_and_plan_ceiling_use_the_same_approved_number()
     {
-        // Cross-seam consistency: the create validator may lag the planner, but the planner must
-        // already cover whatever the create validator accepts, and both must land on 7,200.
+        // Cross-seam consistency: Full create and project planning share the approved 7,200-second cap.
         var ceiling = EffectiveCreateRequestCeilingSeconds();
         Assert.True(ceiling <= MovieBudgetDirectorService.MaxProjectPlanningDurationSeconds);
         Assert.Equal(ApprovedProjectCeilingSeconds, MovieBudgetDirectorService.MaxProjectPlanningDurationSeconds);
@@ -236,7 +204,7 @@ public sealed class MovieProjectDurationCeilingCompatibilityTests
 
     // -----------------------------------------------------------------------------------------
     // Group C - provider clip maxima stay independent: one 7,200-second PAID clip is blocked
-    //           before any HTTP call, queue entry, or spend, on both baselines.
+    //           before any HTTP call, queue entry, or spend.
     // -----------------------------------------------------------------------------------------
 
     [Fact]
@@ -403,10 +371,10 @@ public sealed class MovieProjectDurationCeilingCompatibilityTests
         return LegacyProjectCeilingSeconds;
     }
 
-    private static MovieStudioCreateRequest CreateRequest(int durationSeconds) => new()
+    private static MovieStudioCreateRequest CreateRequest(int durationSeconds, string mode = MovieProjectModes.Full) => new()
     {
         WorkspaceId = Guid.NewGuid(),
-        Mode = MovieProjectModes.Full,
+        Mode = mode,
         Title = "Two Hour Feature",
         Description = "A 120-minute project used to probe the approved #685 duration ceilings.",
         DurationSeconds = durationSeconds,

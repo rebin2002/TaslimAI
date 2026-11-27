@@ -40,6 +40,7 @@ public interface IMovieStudioService
     Task<MovieStoryboardProjectDto?> GetStoryboardAsync(Guid userId, Guid movieProjectId, CancellationToken cancellationToken);
     Task<MovieSceneShotPlanDto?> GetSceneShotPlanAsync(Guid userId, Guid sceneId, CancellationToken cancellationToken);
     Task<MovieShotDto?> GetShotPlanningAsync(Guid userId, Guid shotId, CancellationToken cancellationToken);
+    Task<int?> GetEffectiveShotDurationSecondsAsync(Guid userId, Guid shotId, CancellationToken cancellationToken);
     Task<MovieShotDto?> UpdateShotPlanningAsync(Guid userId, Guid shotId, MovieStudioShotUpdateRequest request, CancellationToken cancellationToken);
     Task<MovieSceneShotPlanDto?> ReorderShotAsync(Guid userId, Guid shotId, MovieShotReorderRequest request, CancellationToken cancellationToken);
     Task<MovieSceneShotPlanDto?> ArchiveShotAsync(Guid userId, Guid shotId, CancellationToken cancellationToken);
@@ -618,6 +619,13 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
         return ToDto(shot, shot.Clips.OrderBy(item => item.CreatedAt).Select(ToDto).ToArray());
     }
 
+    public async Task<int?> GetEffectiveShotDurationSecondsAsync(Guid userId, Guid shotId, CancellationToken cancellationToken)
+    {
+        var shot = await PlanningShotQuery().FirstOrDefaultAsync(item => item.Id == shotId, cancellationToken);
+        if (shot is null || !await collaboration.HasPermissionAsync(userId, shot.Scene.MovieProjectId, MoviePermissions.View, cancellationToken)) return null;
+        return shot.DurationSeconds ?? shot.Scene.DurationSeconds ?? Math.Min(shot.Scene.MovieProject.DurationSeconds, 60);
+    }
+
     public async Task<MovieShotDto?> UpdateShotPlanningAsync(Guid userId, Guid shotId, MovieStudioShotUpdateRequest request, CancellationToken cancellationToken)
     {
         var shot = await PlanningShotQuery().FirstOrDefaultAsync(item => item.Id == shotId, cancellationToken);
@@ -1069,7 +1077,11 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
         if (workflowError is not null) throw new MovieProductionValidationException("PRODUCTION_STAGE_INVALID", workflowError);
 
         var movie = shot.Scene.MovieProject;
-        var durationSeconds = Math.Clamp(shot.DurationSeconds ?? shot.Scene.DurationSeconds ?? Math.Min(movie.DurationSeconds, 60), 1, 3600);
+        var durationSeconds = shot.DurationSeconds ?? shot.Scene.DurationSeconds ?? Math.Min(movie.DurationSeconds, 60);
+        if (!MovieDurationBudgetPolicy.IsSupportedSingleClipDuration(durationSeconds))
+            throw new MovieProductionValidationException(
+                MovieDurationBudgetPolicy.SingleClipDurationUnsupportedCode,
+                MovieDurationBudgetPolicy.SingleClipDurationUnsupportedMessage);
         // The server owns the estimate. Client-supplied cost fields are not trusted for
         // cap enforcement because they could otherwise be lowered to bypass a cap.
         var estimate = await movieCostEstimator.EstimateAsync(
@@ -1103,13 +1115,31 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
     {
         var regeneration = await RegenerationQuery().FirstOrDefaultAsync(item => item.Id == requestId, cancellationToken);
         if (regeneration is null || !await collaboration.HasPermissionAsync(userId, regeneration.MovieShot.Scene.MovieProjectId, MoviePermissions.Generate, cancellationToken)) return null;
-        if (regeneration.Status == MovieRegenerationStatuses.Confirmed) return await GetRegenerationRequestAsync(userId, requestId, cancellationToken);
+        var shot = regeneration.MovieShot;
+        var movie = shot.Scene.MovieProject;
+        var durationSeconds = shot.DurationSeconds ?? shot.Scene.DurationSeconds ?? Math.Min(movie.DurationSeconds, 60);
+        if (!MovieDurationBudgetPolicy.IsSupportedSingleClipDuration(durationSeconds))
+            throw new MovieProductionValidationException(
+                MovieDurationBudgetPolicy.SingleClipDurationUnsupportedCode,
+                MovieDurationBudgetPolicy.SingleClipDurationUnsupportedMessage);
+        if (regeneration.Status == MovieRegenerationStatuses.Confirmed)
+        {
+            if (regeneration.GenerationJob is not null)
+            {
+                MovieGenerationInput? confirmedInput = null;
+                try { confirmedInput = JsonSerializer.Deserialize<MovieGenerationInput>(regeneration.GenerationJob.InputJson); }
+                catch (JsonException) { }
+                if (confirmedInput?.DurationSeconds != durationSeconds)
+                    throw new MovieProductionValidationException(
+                        MovieStudioClipIdempotency.ReusedCode,
+                        "This regeneration request was already priced for a different clip duration.");
+            }
+            return await GetRegenerationRequestAsync(userId, requestId, cancellationToken);
+        }
         if (regeneration.Status != MovieRegenerationStatuses.PendingConfirmation)
             throw new MovieProductionValidationException("REGENERATION_STALE", "This regeneration request is no longer pending confirmation.");
         if (!request.Confirm) throw new MovieProductionValidationException("REGENERATION_CONFIRMATION_REQUIRED", "Explicit confirmation is required before queuing selective regeneration.");
 
-        var shot = regeneration.MovieShot;
-        var movie = shot.Scene.MovieProject;
         var preflight = await costGuardrails.EvaluateAsync(
             userId,
             movie.WorkspaceId,
@@ -1123,7 +1153,6 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
         var workflowError = MovieProductionWorkflow.ValidateVersionCreation(regeneration.RequestedStage, source);
         if (workflowError is not null) throw new MovieProductionValidationException("PRODUCTION_STAGE_INVALID", workflowError);
         var now = DateTime.UtcNow;
-        var durationSeconds = Math.Clamp(shot.DurationSeconds ?? shot.Scene.DurationSeconds ?? Math.Min(movie.DurationSeconds, 60), 1, 3600);
         var estimate = await movieCostEstimator.EstimateAsync(
             new MovieGenerationCostRequest(durationSeconds, "1080p", "1080p", movie.QualityLevel, "native"),
             provider.Key,
@@ -1285,6 +1314,11 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
     {
         var shot = await db.MovieShots.Include(item => item.Scene).ThenInclude(item => item.MovieProject).ThenInclude(item => item.Guide).FirstOrDefaultAsync(item => item.Id == shotId, cancellationToken);
         if (shot is null || !await collaboration.HasPermissionAsync(userId, shot.Scene.MovieProjectId, MoviePermissions.Generate, cancellationToken)) return null;
+        var durationSeconds = MovieStudioClipIdempotency.ResolveDurationSeconds(shot.Scene.MovieProject, shot.Scene, shot);
+        if (!MovieDurationBudgetPolicy.IsSupportedSingleClipDuration(durationSeconds))
+            throw new GenerationJobValidationException(
+                MovieDurationBudgetPolicy.SingleClipDurationUnsupportedCode,
+                MovieDurationBudgetPolicy.SingleClipDurationUnsupportedMessage);
         var readiness = MovieShotReadiness.Evaluate(shot);
         if (!readiness.Ready) throw new MovieStudioValidationException($"Shot is not ready for generation. {readiness.Summary}");
         await referenceReadiness.EnsureCanGenerateAsync(
@@ -1310,6 +1344,10 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
         // different derivation of the same value.
         var description = shot?.Description ?? scene.Summary;
         var durationSeconds = MovieStudioClipIdempotency.ResolveDurationSeconds(movie, scene, shot);
+        if (!MovieDurationBudgetPolicy.IsSupportedSingleClipDuration(durationSeconds))
+            throw new GenerationJobValidationException(
+                MovieDurationBudgetPolicy.SingleClipDurationUnsupportedCode,
+                MovieDurationBudgetPolicy.SingleClipDurationUnsupportedMessage);
         var sceneJson = SceneSnapshot(scene);
         var shotJson = shot is null ? null : ShotSnapshot(shot);
         if (normalizedKey is not null)

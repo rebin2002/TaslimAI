@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { GET, PATCH, POST } from "./route";
+import { MAX_USER_UPLOAD_FILE_BYTES, MAX_USER_UPLOAD_REQUEST_BODY_BYTES } from "../../../lib/fileUploadLimits";
 
 function context(path: string[]) {
   return { params: Promise.resolve({ path }) };
@@ -155,13 +156,35 @@ describe("same-origin API proxy", () => {
     vi.stubGlobal("fetch", fetchMock);
     const response = await POST(new Request("http://localhost:3000/api/files", {
       method: "POST",
-      headers: { "content-length": String(25 * 1024 * 1024 + 1) },
+      headers: { "content-length": String(MAX_USER_UPLOAD_FILE_BYTES + 1) },
       body: "small-body",
     }), context(["files"]));
 
     expect(response.status).toBe(413);
     await expect(response.json()).resolves.toEqual({ error: { code: "REQUEST_TOO_LARGE", message: "The request body is too large." } });
     expect(fetchMock).not.toHaveBeenCalled();
+    vi.unstubAllGlobals();
+  });
+
+  it("forwards a maximum-size ordinary file with multipart framing", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response("{}", { status: 201 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const form = new FormData();
+    const fileBytes = new Uint8Array(MAX_USER_UPLOAD_FILE_BYTES).fill("a".charCodeAt(0));
+    form.append("file", new File([fileBytes], "brief.txt", { type: "text/plain" }));
+    const request = new Request("http://localhost:3000/api/workspaces/workspace-1/files", {
+      method: "POST",
+      body: form,
+    });
+
+    const response = await POST(request, context(["workspaces", "workspace-1", "files"]));
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    const forwardedBody = await new Response(init.body).arrayBuffer();
+
+    expect(response.status).toBe(201);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(forwardedBody.byteLength).toBeGreaterThan(MAX_USER_UPLOAD_FILE_BYTES);
+    expect(forwardedBody.byteLength).toBeLessThanOrEqual(MAX_USER_UPLOAD_REQUEST_BODY_BYTES);
     vi.unstubAllGlobals();
   });
 
