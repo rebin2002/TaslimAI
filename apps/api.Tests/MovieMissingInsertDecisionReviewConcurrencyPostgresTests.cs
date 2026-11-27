@@ -1,4 +1,6 @@
+using System.Data.Common;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Diagnostics;
 using Npgsql;
 using Taslim.Api.Authorization;
 using Taslim.Api.Contracts;
@@ -64,11 +66,113 @@ public sealed class MovieMissingInsertDecisionReviewConcurrencyPostgresTests : I
 
     private TaslimDbContext NewContext() => new(options);
 
-    private static MovieMissingInsertDecisionService CreateService(TaslimDbContext db) =>
-        // ReviewAsync only exercises the decision store and the collaboration check; the planner,
-        // reference-package and timeline dependencies belong to the Apply path (same discipline as
-        // MovieMissingInsertDecisionTests, which constructs the service with null! for these).
-        new(db, new MovieCollaborationAccess(db, new WorkspaceAccessService(db)), null!, null!, null!);
+    private static MovieMissingInsertDecisionService CreateService(TaslimDbContext db, IMovieMissingInsertPlannerService? planner = null) =>
+        new(db, new MovieCollaborationAccess(db, new WorkspaceAccessService(db)), planner!, null!, null!);
+
+    [DisposablePostgresFact]
+    public async Task Concurrent_materialization_of_two_proposals_replays_the_same_persisted_decisions()
+    {
+        Assert.True(ready);
+        Fixture fixture;
+        MovieMissingInsertDecision existing;
+        await using (var setup = NewContext())
+        {
+            fixture = await SeedPendingDecisionAsync(setup);
+            existing = await setup.MovieMissingInsertDecisions.SingleAsync(item => item.Id == fixture.DecisionId);
+        }
+
+        var gaps = new[] { 2_000, 4_000 }.Select(start => new MovieMissingInsertGapDto(
+            Guid.NewGuid(), "Gap", existing.TrackId, start, start + 1_000, 1_000,
+            null, null, null, existing.AnchorShotId, existing.SceneId, "Synthetic gap")).ToArray();
+        var grounding = new MovieMissingInsertProposalGroundingDto(null, null, null, existing.AnchorShotId, "kit-hash", []);
+        var proposals = gaps.Select(gap => new MovieMissingInsertProposalDto(
+            Guid.NewGuid(), gap.Id, MovieMissingInsertApprovalStatuses.PendingApproval, true, false,
+            MovieMissingInsertProposalTypes.Detail, existing.SceneId, null, existing.AnchorShotId, 1_000,
+            "Detail insert", "Fill the bounded gap", null, null, null, null, null, null, null, grounding, fixture.TakeId)).ToArray();
+        var plan = new MovieMissingInsertPlanDto(MovieMissingInsertPlanner.ContractVersion, existing.MovieProjectId,
+            existing.TimelineRevisionId, existing.TimelineRevisionNumber, MovieTimelineRevisionStatuses.Draft, true, false, false,
+            new MovieMissingInsertGroundingDto(null, null, null, null, [], true), gaps, [], proposals, [], DateTime.UtcNow);
+        var request = new MovieMissingInsertMaterializeRequest { TimelineRevisionId = existing.TimelineRevisionId };
+
+        // Both connections have already read the same persisted proposal set when the gate opens.
+        var barrier = new MaterializationReadBarrier();
+        var raceOptions = new DbContextOptionsBuilder<TaslimDbContext>(options).AddInterceptors(barrier).Options;
+        await using var first = new TaslimDbContext(raceOptions);
+        await using var second = new TaslimDbContext(raceOptions);
+        var results = await Task.WhenAll(
+            CreateService(first, new StaticPlan(plan)).MaterializeAsync(fixture.FirstReviewerId, existing.MovieProjectId, request, CancellationToken.None),
+            CreateService(second, new StaticPlan(plan with { Proposals = proposals.Reverse().ToArray() }))
+                .MaterializeAsync(fixture.SecondReviewerId, existing.MovieProjectId, request, CancellationToken.None));
+
+        await using var verify = NewContext();
+        var persisted = await verify.MovieMissingInsertDecisions.AsNoTracking()
+            .Where(item => item.MovieProjectId == existing.MovieProjectId && item.TimelineRevisionId == existing.TimelineRevisionId)
+            .OrderBy(item => item.TimelineInMilliseconds).ToArrayAsync();
+        Assert.Equal(new[] { existing.ProposalId, proposals[0].Id, proposals[1].Id }, persisted.Select(item => item.ProposalId).ToArray());
+        foreach (var result in results)
+        {
+            Assert.NotNull(result);
+            Assert.Equal(persisted.Select(item => item.Id).ToArray(), result!.Select(item => item.Id).ToArray());
+            Assert.Equal(persisted.Select(item => item.CreatedByUserId).ToArray(), result.Select(item => item.CreatedByUserId).ToArray());
+        }
+    }
+
+    private sealed class StaticPlan(MovieMissingInsertPlanDto plan) : IMovieMissingInsertPlannerService
+    {
+        public Task<MovieMissingInsertPlanDto?> GetAsync(Guid userId, Guid movieProjectId, Guid? timelineRevisionId, CancellationToken cancellationToken = default)
+            => Task.FromResult<MovieMissingInsertPlanDto?>(plan);
+    }
+
+    private sealed class MaterializationReadBarrier : DbCommandInterceptor
+    {
+        private readonly TaskCompletionSource released = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private int arrivals;
+
+        public override async ValueTask<DbDataReader> ReaderExecutedAsync(DbCommand command, CommandExecutedEventData eventData,
+            DbDataReader result, CancellationToken cancellationToken = default)
+        {
+            if (command.CommandText.Contains("FROM \"MovieMissingInsertDecisions\"", StringComparison.Ordinal))
+            {
+                if (Interlocked.Increment(ref arrivals) == 2) released.TrySetResult();
+                await released.Task.WaitAsync(TimeSpan.FromSeconds(30), cancellationToken);
+            }
+            return result;
+        }
+    }
+
+    [DisposablePostgresFact]
+    public async Task Review_cannot_substitute_a_different_approved_select_for_the_planned_anchor()
+    {
+        Assert.True(ready);
+        await using var setup = NewContext();
+        var fixture = await SeedPendingDecisionAsync(setup);
+        var decision = await setup.MovieMissingInsertDecisions.SingleAsync(item => item.Id == fixture.DecisionId);
+        var anchorId = Guid.NewGuid();
+        var alternateId = Guid.NewGuid();
+        void AddSelect(Guid id, int number, int start) => setup.MovieTakeSelects.Add(new MovieTakeSelect
+        {
+            Id = id, MovieTakeId = fixture.TakeId, SelectNumber = number,
+            Label = "Approved synthetic range", StartMilliseconds = start, EndMilliseconds = start + 1_000,
+            Status = MovieTakeSelectStatuses.Approved, CreatedByUserId = fixture.FirstReviewerId,
+            CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow,
+        });
+        AddSelect(anchorId, 1, 0);
+        AddSelect(alternateId, 2, 1_000);
+        decision.AnchorSelectId = anchorId;
+        await setup.SaveChangesAsync();
+
+        await using var reviewer = NewContext();
+        var conflict = await Assert.ThrowsAsync<MovieMissingInsertDecisionException>(() => CreateService(reviewer)
+            .ReviewAsync(fixture.FirstReviewerId, decision.Id, new MovieMissingInsertReviewRequest { SelectId = alternateId }, CancellationToken.None));
+        Assert.Equal("MOVIE_INSERT_SELECT_NOT_GROUNDED", conflict.Code);
+        await using var verify = NewContext();
+        var persisted = await verify.MovieMissingInsertDecisions.AsNoTracking().SingleAsync(item => item.Id == decision.Id);
+        Assert.Equal(MovieMissingInsertDecisionStatuses.PendingReview, persisted.Status);
+        Assert.Null(persisted.SelectedSelectId);
+        var approved = await CreateService(verify).ReviewAsync(fixture.FirstReviewerId, decision.Id,
+            new MovieMissingInsertReviewRequest { SelectId = anchorId }, CancellationToken.None);
+        Assert.Equal(anchorId, approved!.SelectedSelectId);
+    }
 
     [DisposablePostgresFact]
     public async Task Stale_second_reviewer_conflicts_and_cannot_overwrite_the_committed_review()

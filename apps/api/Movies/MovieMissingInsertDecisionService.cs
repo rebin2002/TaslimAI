@@ -49,39 +49,47 @@ public sealed class MovieMissingInsertDecisionService(
         if (plan.TimelineRevisionId is not Guid revisionId || plan.TimelineRevisionNumber is not int revisionNumber)
             return [];
 
-        var existing = await db.MovieMissingInsertDecisions
-            .Where(item => item.MovieProjectId == movieProjectId && item.TimelineRevisionId == revisionId)
-            .ToDictionaryAsync(item => item.ProposalId, cancellationToken);
-        foreach (var proposal in plan.Proposals)
+        var revisionDecisions = db.MovieMissingInsertDecisions.AsNoTracking()
+            .Where(item => item.MovieProjectId == movieProjectId && item.TimelineRevisionId == revisionId);
+        var existingIds = (await revisionDecisions.Select(item => item.ProposalId).ToListAsync(cancellationToken)).ToHashSet();
+        await using var transaction = await db.Database.BeginTransactionAsync(cancellationToken);
+
+        // Overlapping plans acquire unique keys in the same order. Only the proposal identity can
+        // be replayed; every other constraint violation rolls back the entire set of inserts.
+        foreach (var proposal in plan.Proposals.OrderBy(item => item.Id))
         {
-            if (existing.ContainsKey(proposal.Id)) continue;
+            if (existingIds.Contains(proposal.Id)) continue;
             var gap = plan.Gaps.SingleOrDefault(item => item.Id == proposal.GapId);
             if (gap is null || proposal.Grounding.AnchorShotId is not Guid anchorShotId) continue;
-            var decision = new MovieMissingInsertDecision
-            {
-                Id = Guid.NewGuid(), MovieProjectId = movieProjectId, ProposalId = proposal.Id, GapId = proposal.GapId,
-                TimelineRevisionId = revisionId, TimelineRevisionNumber = revisionNumber,
-                TrackId = gap.TrackId ?? Guid.Empty, BeforeTimelineItemId = gap.BeforeTimelineItemId, AfterTimelineItemId = gap.AfterTimelineItemId,
-                TimelineInMilliseconds = gap.TimelineInMilliseconds, TimelineOutMilliseconds = gap.TimelineOutMilliseconds,
-                BeforeShotId = gap.BeforeShotId, AfterShotId = gap.AfterShotId, SceneId = gap.SceneId,
-                StorySceneId = proposal.Grounding.StorySceneId, AnchorShotId = anchorShotId,
-                ApprovedStoryRevisionId = proposal.Grounding.ApprovedStoryRevisionId, LockedGuideRevisionId = proposal.Grounding.LockedGuideRevisionId,
-                ProductionKitHash = proposal.Grounding.ProductionKitHash,
-                ProductionKitSchemaVersion = plan.Grounding.ProductionKits.FirstOrDefault(item => item.ShotId == anchorShotId)?.SchemaVersion,
-                AnchorTakeId = proposal.AnchorTakeId, AnchorSelectId = proposal.AnchorSelectId,
-                ContractVersion = plan.ContractVersion, InsertType = proposal.InsertType, DurationMilliseconds = proposal.DurationMilliseconds,
-                Description = LimitRequired(proposal.Description, 2_000, "Proposal description"),
-                Purpose = LimitRequired(proposal.Purpose, 2_000, "Proposal purpose"),
-                ProposalGroundingJson = BoundedJson(new { proposal.Grounding, proposal.AnchorTakeId, proposal.AnchorSelectId }, MaxGroundingJsonLength),
-                ContinuityAnchorJson = BoundedJson(proposal.ContinuityAnchorJson, MaxAnchorJsonLength),
-                ScreenDirectionAnchorJson = BoundedJson(proposal.ScreenDirectionAnchorJson, MaxAnchorJsonLength),
-                Status = MovieMissingInsertDecisionStatuses.PendingReview, CreatedByUserId = userId, CreatedAt = DateTime.UtcNow,
-            };
-            db.MovieMissingInsertDecisions.Add(decision);
-            existing.Add(proposal.Id, decision);
+            var schemaVersion = plan.Grounding.ProductionKits.FirstOrDefault(item => item.ShotId == anchorShotId)?.SchemaVersion;
+            var description = LimitRequired(proposal.Description, 2_000, "Proposal description");
+            var purpose = LimitRequired(proposal.Purpose, 2_000, "Proposal purpose");
+            var grounding = BoundedJson(new { proposal.Grounding, proposal.AnchorTakeId, proposal.AnchorSelectId }, MaxGroundingJsonLength);
+            var continuity = BoundedJson(proposal.ContinuityAnchorJson, MaxAnchorJsonLength);
+            var screenDirection = BoundedJson(proposal.ScreenDirectionAnchorJson, MaxAnchorJsonLength);
+            await db.Database.ExecuteSqlInterpolatedAsync($"""
+                INSERT INTO "MovieMissingInsertDecisions" (
+                    "Id", "MovieProjectId", "ProposalId", "GapId", "TimelineRevisionId", "TimelineRevisionNumber",
+                    "TrackId", "BeforeTimelineItemId", "AfterTimelineItemId", "TimelineInMilliseconds", "TimelineOutMilliseconds",
+                    "BeforeShotId", "AfterShotId", "SceneId", "StorySceneId", "AnchorShotId", "ApprovedStoryRevisionId",
+                    "LockedGuideRevisionId", "ProductionKitHash", "ProductionKitSchemaVersion", "AnchorTakeId", "AnchorSelectId",
+                    "ContractVersion", "InsertType", "DurationMilliseconds", "Description", "Purpose", "ProposalGroundingJson",
+                    "ContinuityAnchorJson", "ScreenDirectionAnchorJson", "Status", "CreatedByUserId", "CreatedAt")
+                VALUES (
+                    {Guid.NewGuid()}, {movieProjectId}, {proposal.Id}, {proposal.GapId}, {revisionId}, {revisionNumber},
+                    {gap.TrackId ?? Guid.Empty}, {gap.BeforeTimelineItemId}, {gap.AfterTimelineItemId}, {gap.TimelineInMilliseconds}, {gap.TimelineOutMilliseconds},
+                    {gap.BeforeShotId}, {gap.AfterShotId}, {gap.SceneId}, {proposal.Grounding.StorySceneId}, {anchorShotId}, {proposal.Grounding.ApprovedStoryRevisionId},
+                    {proposal.Grounding.LockedGuideRevisionId}, {proposal.Grounding.ProductionKitHash}, {schemaVersion}, {proposal.AnchorTakeId}, {proposal.AnchorSelectId},
+                    {plan.ContractVersion}, {proposal.InsertType}, {proposal.DurationMilliseconds}, {description}, {purpose}, {grounding},
+                    {continuity}, {screenDirection}, {MovieMissingInsertDecisionStatuses.PendingReview}, {userId}, {DateTime.UtcNow})
+                ON CONFLICT ("MovieProjectId", "TimelineRevisionId", "ProposalId") DO NOTHING
+                """, cancellationToken);
         }
-        await db.SaveChangesAsync(cancellationToken);
-        return existing.Values.OrderBy(item => item.TimelineInMilliseconds).ThenBy(item => item.Id).Select(ToDto).ToArray();
+
+        var persisted = await revisionDecisions.OrderBy(item => item.TimelineInMilliseconds).ThenBy(item => item.Id)
+            .Select(item => ToDto(item)).ToListAsync(cancellationToken);
+        await transaction.CommitAsync(cancellationToken);
+        return persisted;
     }
 
     public async Task<MovieMissingInsertDecisionDto?> ReviewAsync(Guid userId, Guid decisionId, MovieMissingInsertReviewRequest request, CancellationToken cancellationToken)
@@ -280,6 +288,8 @@ public sealed class MovieMissingInsertDecisionService(
 
     private async Task<SourceSelection> ValidateSourceAsync(MovieMissingInsertDecision decision, Guid takeId, Guid? selectId, CancellationToken cancellationToken)
     {
+        if (decision.AnchorSelectId is Guid anchorSelectId && selectId != anchorSelectId)
+            throw Conflict("MOVIE_INSERT_SELECT_NOT_GROUNDED", "The selected range must match the range grounded by the server planner.");
         var take = await db.MovieTakes
             .Include(item => item.MovieShot).ThenInclude(item => item.Scene)
             .Include(item => item.Asset)
