@@ -65,11 +65,13 @@ public sealed class FilesController(
         if (!await access.IsMemberAsync(userId, workspaceId, cancellationToken)) return Forbid();
         page = ApiPagination.NormalizePage(page);
         pageSize = ApiPagination.NormalizePageSize(pageSize);
-        var files = await db.StoredFiles.AsNoTracking()
-            .Where(file => file.WorkspaceId == workspaceId && file.Status != StoredFileStatus.Deleted && (!projectId.HasValue || file.ProjectId == projectId) && (!conversationId.HasValue || file.ConversationId == conversationId))
-            // Project-scoped files are shared with workspace members. Personal and
-            // conversation-scoped files remain private to their creating user.
-            .Where(file => file.UserId == userId || (file.ProjectId != null && file.ConversationId == null))
+        var fileQuery = db.StoredFiles.AsNoTracking()
+            .Where(file => file.WorkspaceId == workspaceId && file.Status != StoredFileStatus.Deleted && (!conversationId.HasValue || file.ConversationId == conversationId))
+            .Where(StoredFileVisibility.ForWorkspaceMember(userId))
+            .Where(StoredFileVisibility.IsNotResearchReportOwnedByAnotherMember(userId));
+        if (projectId.HasValue)
+            fileQuery = fileQuery.Where(StoredFileVisibility.InProjectView(projectId.Value, userId));
+        var files = await fileQuery
             .OrderByDescending(file => file.CreatedAt)
             .ThenByDescending(file => file.Id)
             .Skip(ApiPagination.GetOffset(page, pageSize))
@@ -125,8 +127,11 @@ public sealed class FilesController(
     private async Task<bool> CanAccessAsync(StoredFile file, Guid userId, CancellationToken cancellationToken)
     {
         if (!await access.IsMemberAsync(userId, file.WorkspaceId, cancellationToken)) return false;
-        if (file.ConversationId is not null || file.ProjectId is null) return file.UserId == userId;
-        return true;
+        return await db.StoredFiles.AsNoTracking()
+            .Where(item => item.Id == file.Id)
+            .Where(StoredFileVisibility.ForWorkspaceMember(userId))
+            .Where(StoredFileVisibility.IsNotResearchReportOwnedByAnotherMember(userId))
+            .AnyAsync(cancellationToken);
     }
 
     private bool TryGetUserId(out Guid userId) =>
