@@ -48,12 +48,15 @@ public sealed class GeneratedAssetPublisher(
         StoredFile? storedFile = null;
         var storedFileId = output.StoredFileId;
         var storageResult = (GeneratedFileStorageResult?)null;
+        var fileProjectId = string.Equals(job.JobType, GenerationJobTypes.ResearchGenerate, StringComparison.OrdinalIgnoreCase)
+            ? null
+            : job.ProjectId;
         if (output.FileArtifact is not null)
         {
             storageResult = await files.StoreGeneratedWithResultAsync(
                 job.WorkspaceId,
                 job.CreatedByUserId,
-                job.ProjectId,
+                fileProjectId,
                 output.FileArtifact.FileName,
                 output.FileArtifact.ContentType,
                 output.FileArtifact.Content,
@@ -68,7 +71,7 @@ public sealed class GeneratedAssetPublisher(
             storageResult = await files.StoreGeneratedStreamWithResultAsync(
                 job.WorkspaceId,
                 job.CreatedByUserId,
-                job.ProjectId,
+                fileProjectId,
                 output.StreamArtifact.FileName,
                 output.StreamArtifact.ContentType,
                 output.StreamArtifact.SizeBytes,

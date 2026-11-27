@@ -1010,6 +1010,9 @@ public sealed record MovieStudioGenerationRequest(
 
 public static class MovieStudioValidation
 {
+    public const int MaxProjectDurationSeconds = MovieDurationBudgetPolicy.MaxMovieDurationSeconds;
+    public const int MaxQuickDurationSeconds = MovieDurationBudgetPolicy.MaxShotDurationSeconds;
+
     public static readonly IReadOnlySet<string> SupportedAspectRatios = new HashSet<string>(StringComparer.Ordinal)
     {
         "16:9", "9:16", "1:1", "4:5", "4:3",
@@ -1038,10 +1041,14 @@ public static class MovieStudioValidation
             : MovieDescriptionMaxLength;
         if (string.IsNullOrWhiteSpace(request.Description) || request.Description.Trim().Length > descriptionMaxLength)
             return $"Describe the movie in 1–{descriptionMaxLength:N0} characters.";
-        if (request.DurationSeconds is < 1 or > 3600) return "Movie duration must be between 1 second and 60 minutes.";
+        if (request.Mode is not (MovieProjectModes.Quick or MovieProjectModes.Full)) return "Choose Quick Movie or Full Movie Project.";
+        var maxDurationSeconds = request.Mode == MovieProjectModes.Full ? MaxProjectDurationSeconds : MaxQuickDurationSeconds;
+        if (request.DurationSeconds < 1 || request.DurationSeconds > maxDurationSeconds)
+            return request.Mode == MovieProjectModes.Full
+                ? $"Movie duration must be between 1 second and {MaxProjectDurationSeconds / 60} minutes."
+                : $"Quick Movie duration must be between 1 second and {MaxQuickDurationSeconds / 60} minutes.";
         if (!SupportedAspectRatios.Contains(request.AspectRatio)) return "Choose a supported aspect ratio.";
         if (!LanguageCodes.Supported.Contains(request.Language)) return "Choose English, Arabic, or Kurdish.";
-        if (request.Mode is not (MovieProjectModes.Quick or MovieProjectModes.Full)) return "Choose Quick Movie or Full Movie Project.";
         if (request.Style is not null && request.Style.Trim().Length > StyleMaxLength) return $"Visual style must be {StyleMaxLength} characters or fewer.";
         if (Exceeds(request.AdditionalInstructions, AdditionalInstructionsMaxLength)) return $"Additional instructions must be {AdditionalInstructionsMaxLength:N0} characters or fewer.";
         if (Exceeds(request.VisualLanguage, CreativeDirectionFieldMaxLength)
