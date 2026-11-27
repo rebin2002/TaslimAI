@@ -2189,8 +2189,9 @@ var qualityFailure = exception as GenerationQualityControlException ?? exception
         var now = DateTime.UtcNow;
         await using var finalization = await db.Database.BeginTransactionAsync(cancellationToken);
         var presentation = job.JobType == GenerationJobTypes.PresentationGenerate;
-        var cancelled = await db.GenerationJobs.Where(item => item.Id == job.Id && item.Status == GenerationJobStatus.Running
-                && item.ConcurrencyToken == concurrencyToken && (!presentation || item.ClaimExpiresAt > now))
+        var cancelled = await db.GenerationJobs
+            .Where(item => item.Id == job.Id && item.Status == GenerationJobStatus.Running && item.ConcurrencyToken == concurrencyToken)
+            .Where(item => !presentation || item.ClaimExpiresAt > now)
             .ExecuteUpdateAsync(setters => setters
                 .SetProperty(item => item.Status, GenerationJobStatus.Cancelled)
                 .SetProperty(item => item.ErrorCode, CancellationCode(job))

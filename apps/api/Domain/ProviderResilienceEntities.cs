@@ -23,6 +23,8 @@ public sealed class ProviderExecutionFinalization
     public Guid JobConcurrencyToken { get; set; }
     public string IdempotencyKey { get; set; } = string.Empty;
     public string State { get; set; } = "claimed";
+    public string? ResultCategory { get; set; }
+    public string? ResultCode { get; set; }
     public DateTime ClaimedAt { get; set; }
     public DateTime? CompletedAt { get; set; }
     public DateTime? ClaimExpiresAt { get; set; }
