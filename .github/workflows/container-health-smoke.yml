@@ -53,4 +53,11 @@ jobs:
         run: bash scripts/container-health-smoke.sh taslim-api:release-smoke 8080 120
 
       - name: Smoke-test web container runtime and security headers
-        run: bash scripts/web-container-smoke.sh taslim-web:release-smoke 3000 120
+        run: |
+          if [[ -f apps/web/src/middleware.ts ]]; then
+            WEB_SMOKE_FENCE_MODE=private-SSR-fence-required \
+              bash scripts/web-container-smoke.sh taslim-web:release-smoke 3000 120
+          else
+            WEB_SMOKE_FENCE_MODE=compatible \
+              bash scripts/web-container-smoke.sh taslim-web:release-smoke 3000 120
+          fi
