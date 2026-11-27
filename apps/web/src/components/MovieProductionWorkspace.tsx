@@ -37,7 +37,7 @@ import {
 } from "@/lib/movieProductionWorkspace";
 import { hasActiveMovieProductionExecution, nextMovieProductionPollDelay } from "@/lib/movieProductionPolling";
 import { productionIntentForTier, type MovieResolutionTier } from "@/lib/movieProductionResolution";
-import { buildMovieRegenerationConfirmation, confirmMovieRegenerationIfAllowed, formatMovieRegenerationCost, movieRegenerationAttemptIsCurrent, retireMovieRegenerationAttempt, type MovieRegenerationAttempt, type MovieRegenerationConfirmationState } from "@/lib/movieRegenerationConfirmation";
+import { buildMovieRegenerationConfirmation, confirmMovieRegenerationIfAllowed, formatMovieRegenerationCost, movieRegenerationAttemptIsCurrent, newMovieRegenerationKeys, retireMovieRegenerationAttempt, type MovieRegenerationAttempt, type MovieRegenerationConfirmationState } from "@/lib/movieRegenerationConfirmation";
 
 const filters: Array<{ id: ProductionWorkspaceFilter; label: string }> = [
   { id: "all", label: "All shots" },
@@ -86,10 +86,6 @@ function confirmationCopy(key: string, t: (key: string) => string) {
   return { title: t("movieBody.production.confirmMotion"), detail: t("movieBody.production.confirmMotionDetail") };
 }
 
-function newIdempotencyKey(prefix: string) {
-  return `${prefix}-${globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`}`;
-}
-
 export function MovieProductionWorkspace({ project, completionPercent, onRefresh, cost = null, adapter = createApiAdapter() }: { project: MovieProject; completionPercent: number; onRefresh: () => Promise<void>; cost?: MovieOverviewCost | null; adapter?: MovieProductionWorkspaceAdapter }) {
   const { locale, t } = useLocale();
   const model = useMemo(() => buildMovieProductionWorkspaceModel(project), [project]);
@@ -131,7 +127,7 @@ export function MovieProductionWorkspace({ project, completionPercent, onRefresh
   function regenerationAttempt(key: string) {
     const existing = regenerationAttemptsRef.current.get(key);
     if (existing) return existing;
-    const attempt: MovieRegenerationAttempt = { key, generation: ++regenerationGenerationRef.current, keys: { create: newIdempotencyKey(`${key}:create`), confirm: newIdempotencyKey(`${key}:confirm`) } };
+    const attempt: MovieRegenerationAttempt = { key, generation: ++regenerationGenerationRef.current, keys: newMovieRegenerationKeys() };
     regenerationAttemptsRef.current.set(key, attempt);
     return attempt;
   }

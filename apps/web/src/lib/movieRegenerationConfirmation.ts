@@ -4,6 +4,11 @@ import { localeTag, type Locale } from "@/lib/i18n";
 export type MovieRegenerationIdempotencyKeys = { create: string; confirm: string };
 export type MovieRegenerationAttempt = { key: string; generation: number; keys: MovieRegenerationIdempotencyKeys };
 
+export function newMovieRegenerationKeys(): MovieRegenerationIdempotencyKeys {
+  const nonce = globalThis.crypto?.randomUUID?.() ?? `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+  return { create: `regen-create-${nonce}`, confirm: `regen-confirm-${nonce}` };
+}
+
 export function movieRegenerationAttemptIsCurrent(current: MovieRegenerationAttempt | undefined, candidate: MovieRegenerationAttempt): boolean {
   return current?.key === candidate.key && current.generation === candidate.generation;
 }

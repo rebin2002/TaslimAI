@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { MovieRegenerationCostPreview, MovieSelectiveRegenerationResponse } from "@/lib/api";
-import { buildMovieRegenerationConfirmation, confirmMovieRegenerationIfAllowed, formatMovieRegenerationCost, movieRegenerationAttemptIsCurrent, retireMovieRegenerationAttempt, type MovieRegenerationAttempt } from "./movieRegenerationConfirmation";
+import { buildMovieRegenerationConfirmation, confirmMovieRegenerationIfAllowed, formatMovieRegenerationCost, movieRegenerationAttemptIsCurrent, newMovieRegenerationKeys, retireMovieRegenerationAttempt, type MovieRegenerationAttempt } from "./movieRegenerationConfirmation";
 
 function response(preview: MovieRegenerationCostPreview): MovieSelectiveRegenerationResponse {
   return { request: { id: "regen-1", costPreview: preview } } as MovieSelectiveRegenerationResponse;
@@ -19,6 +19,15 @@ function preview(overrides: Partial<MovieRegenerationCostPreview> = {}): MovieRe
 }
 
 describe("Movie regeneration confirmation", () => {
+  it("creates distinct phase keys within the Movie API's 80-character limit", () => {
+    const first = newMovieRegenerationKeys();
+    const second = newMovieRegenerationKeys();
+    expect(new Set([first.create, first.confirm, second.create, second.confirm]).size).toBe(4);
+    for (const key of [first.create, first.confirm, second.create, second.confirm]) {
+      expect(key.length).toBeLessThanOrEqual(80);
+    }
+  });
+
   it("does not call the queue endpoint before explicit confirmation", async () => {
     const state = buildMovieRegenerationConfirmation(response(preview()));
     const calls: string[] = [];
