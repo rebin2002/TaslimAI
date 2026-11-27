@@ -1,5 +1,6 @@
+import { translate } from "./i18n";
 import { describe, expect, it } from "vitest";
-import { failUsageLoad, hasUsageLoadError, initialUsageLoadState, retryUsageLoad, usageRequestKey } from "./usageViewState";
+import { failUsageLoad, hasUsageLoadError, initialUsageLoadState, retryUsageLoad, usageRequestKey, usageStatusKey } from "./usageViewState";
 
 describe("usage view load recovery", () => {
   it("makes a transient failure retryable without carrying the error to another request", () => {
@@ -19,5 +20,13 @@ describe("usage view load recovery", () => {
 
     expect(hasUsageLoadError(failed, usageRequestKey("workspace-1", 1))).toBe(false);
     expect(hasUsageLoadError(failed, usageRequestKey("workspace-1", 2))).toBe(true);
+  });
+});
+
+describe("customer usage history", () => {
+  it("shows the approved zero-charge refund label only for a fully refunded row", () => {
+    expect(translate("en", usageStatusKey({ status: "Refunded", chargedAmount: 0 }))).toBe("Refunded · $0 charged");
+    expect(translate("en", usageStatusKey({ status: "Refunded", chargedAmount: 0.00000001 }))).toBe("Refunded");
+    expect(usageStatusKey({ status: "Completed", chargedAmount: 0 })).toBe("usage.completed");
   });
 });

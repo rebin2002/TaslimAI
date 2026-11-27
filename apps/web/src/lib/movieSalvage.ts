@@ -56,14 +56,13 @@ export type SalvageInsertProposal = {
 type Metadata = Record<string, unknown>;
 const usableStatuses = new Set(["Succeeded", "Ready", "Approved", "Selected", "ReviewRequired"]);
 
-function parseMetadata(take: MovieTake, fallbackJson?: string | null): Metadata {
-  const json = fallbackJson ?? null;
+function parseMetadata(json?: string | null): Metadata | null {
   if (!json?.trim()) return {};
   try {
     const value: unknown = JSON.parse(json);
-    return value && typeof value === "object" && !Array.isArray(value) ? value as Metadata : {};
+    return value && typeof value === "object" && !Array.isArray(value) ? value as Metadata : null;
   } catch {
-    return {};
+    return null;
   }
 }
 
@@ -73,8 +72,7 @@ function positiveInteger(value: unknown): number | null {
   return rounded > 0 ? rounded : null;
 }
 
-function durationMilliseconds(take: MovieTake, shotDurationSeconds: number | null, fallbackJson?: string | null): number {
-  const metadata = parseMetadata(take, fallbackJson);
+function durationMilliseconds(metadata: Metadata, shotDurationSeconds: number | null): number {
   return positiveInteger(metadata.durationMilliseconds)
     ?? positiveInteger(metadata.durationMs)
     ?? (typeof metadata.durationSeconds === "number" ? positiveInteger(metadata.durationSeconds * 1000) : null)
@@ -94,8 +92,7 @@ function issueText(value: unknown): Array<{ label: string; detail: string; sever
   });
 }
 
-function qcIssues(take: MovieTake, fallbackJson?: string | null): SalvageQcIssue[] {
-  const metadata = parseMetadata(take, fallbackJson);
+function qcIssues(take: MovieTake, metadata: Metadata): SalvageQcIssue[] {
   const qualityControl = metadata.qualityControl && typeof metadata.qualityControl === "object" ? metadata.qualityControl as Metadata : {};
   const rawIssues = [
     ...issueText(metadata.qcIssues),
@@ -118,26 +115,39 @@ function qcIssues(take: MovieTake, fallbackJson?: string | null): SalvageQcIssue
   return issues;
 }
 
-function usableRange(take: MovieTake, duration: number, fallbackJson?: string | null): { sourceInMilliseconds: number; sourceOutMilliseconds: number } {
-  const metadata = parseMetadata(take, fallbackJson);
-  const ranges = Array.isArray(metadata.usableRanges) ? metadata.usableRanges : [];
-  const firstRange = ranges.find((item) => item && typeof item === "object") as Record<string, unknown> | undefined;
-  const sourceInMilliseconds = positiveInteger(firstRange?.startMilliseconds ?? firstRange?.sourceInMilliseconds ?? metadata.trimInMilliseconds) ?? 0;
-  const requestedOut = positiveInteger(firstRange?.endMilliseconds ?? firstRange?.sourceOutMilliseconds ?? metadata.trimOutMilliseconds);
-  const sourceOutMilliseconds = Math.min(duration, requestedOut ?? duration);
-  return sourceOutMilliseconds > sourceInMilliseconds
-    ? { sourceInMilliseconds, sourceOutMilliseconds }
-    : { sourceInMilliseconds: 0, sourceOutMilliseconds: duration };
+function usableRange(metadata: Metadata, duration: number): Pick<MovieSubclip, "sourceInMilliseconds" | "sourceOutMilliseconds"> | null {
+  let start = metadata.trimInMilliseconds;
+  let end = metadata.trimOutMilliseconds;
+  if ("usableRanges" in metadata) {
+    // A persisted empty list means QC found no usable footage. Never turn an
+    // unreadable first selection into a full-take insertion.
+    const first: unknown = Array.isArray(metadata.usableRanges) ? metadata.usableRanges[0] : null;
+    if (!first || typeof first !== "object" || Array.isArray(first)) return null;
+    const range = first as Metadata;
+    if (!("startMilliseconds" in range || "sourceInMilliseconds" in range ||
+          "endMilliseconds" in range || "sourceOutMilliseconds" in range)) return null;
+    if ("startMilliseconds" in range) start = range.startMilliseconds;
+    else if ("sourceInMilliseconds" in range) start = range.sourceInMilliseconds;
+    if ("endMilliseconds" in range) end = range.endMilliseconds;
+    else if ("sourceOutMilliseconds" in range) end = range.sourceOutMilliseconds;
+  }
+  if (start !== undefined && (typeof start !== "number" || !Number.isFinite(start) || start < 0)) return null;
+  if (end !== undefined && (typeof end !== "number" || !Number.isFinite(end) || end < 0)) return null;
+  const sourceInMilliseconds = start === undefined ? 0 : Math.round(start);
+  const sourceOutMilliseconds = end === undefined ? duration : Math.min(duration, Math.round(end));
+  return sourceOutMilliseconds > sourceInMilliseconds ? { sourceInMilliseconds, sourceOutMilliseconds } : null;
 }
 
 export function buildMovieSubclips(project: MovieProject): MovieSubclip[] {
   return project.scenes.flatMap((scene) => scene.shots.flatMap((shot) => shot.takes
     .filter((take) => Boolean(take.assetId) && usableStatuses.has(take.status))
-    .map((take) => {
-      const clipMetadataJson = shot.clips.find((clip) => clip.id === take.movieClipId)?.metadataJson;
-      const duration = durationMilliseconds(take, shot.durationSeconds, clipMetadataJson);
-      const range = usableRange(take, duration, clipMetadataJson);
-      return {
+    .flatMap((take) => {
+      const metadata = parseMetadata(shot.clips.find((clip) => clip.id === take.movieClipId)?.metadataJson);
+      if (!metadata) return [];
+      const duration = durationMilliseconds(metadata, shot.durationSeconds);
+      const range = usableRange(metadata, duration);
+      if (!range) return [];
+      return [{
         id: `subclip-${take.id}`,
         takeId: take.id,
         shotId: shot.id,
@@ -152,10 +162,10 @@ export function buildMovieSubclips(project: MovieProject): MovieSubclip[] {
         durationMilliseconds: duration,
         sourceInMilliseconds: range.sourceInMilliseconds,
         sourceOutMilliseconds: range.sourceOutMilliseconds,
-        issues: qcIssues(take, clipMetadataJson),
+        issues: qcIssues(take, metadata),
         selected: Boolean(take.selectedAt),
         finalized: Boolean(take.finalizedAt),
-      } satisfies MovieSubclip;
+      } satisfies MovieSubclip];
     })));
 }
 

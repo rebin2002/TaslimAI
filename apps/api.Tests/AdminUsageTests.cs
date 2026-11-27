@@ -63,6 +63,73 @@ public sealed class AdminUsageTests : IClassFixture<TaslimApiFactory>
     }
 
     [Fact]
+    public async Task Over_reversed_usage_preserves_admin_audit_amounts_without_changing_credits()
+    {
+        using var customer = factory.CreateClient();
+        var auth = await Register(customer, "Refunded Usage Customer");
+        var workspaceId = auth.PersonalWorkspace.Id;
+        var transactionId = Guid.NewGuid();
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        db.UsageTransactions.Add(new UsageTransaction
+        {
+            Id = transactionId,
+            WorkspaceId = workspaceId,
+            UserId = auth.User.Id,
+            RequestId = $"audit-{transactionId:N}",
+            Feature = UsageFeature.Image,
+            Status = UsageTransactionStatus.Refunded,
+            ChargedAmount = 1m,
+            ReversedAmount = 2m,
+            CreatedAt = DateTime.UtcNow,
+        });
+        db.CreditLedgerEntries.Add(new CreditLedgerEntry
+        {
+            Id = Guid.NewGuid(),
+            WorkspaceId = workspaceId,
+            Type = CreditLedgerEntryType.Grant,
+            Amount = 17,
+            IdempotencyKey = $"test-grant-{transactionId:N}",
+            Reason = "Synthetic test grant",
+            CreatedAt = DateTime.UtcNow,
+        });
+        await db.SaveChangesAsync();
+        var credits = db.CreditLedgerEntries.AsNoTracking().Where(entry => entry.WorkspaceId == workspaceId)
+            .OrderBy(entry => entry.Id).Select(entry => new { entry.Id, entry.Type, entry.Amount });
+        var originalCredits = await credits.ToArrayAsync();
+
+        var customerRoute = $"/api/workspaces/{workspaceId}/usage";
+        var history = await customer.GetFromJsonAsync<JsonElement>(customerRoute);
+        var row = Assert.Single(history.GetProperty("items").EnumerateArray());
+        Assert.Equal("Refunded", row.GetProperty("status").GetString());
+        Assert.Equal(0m, row.GetProperty("chargedAmount").GetDecimal());
+        Assert.False(row.TryGetProperty("grossChargedAmount", out _));
+        Assert.False(row.TryGetProperty("reversedAmount", out _));
+        var customerSummary = await customer.GetFromJsonAsync<UsageSummaryDto>($"{customerRoute}/summary");
+        Assert.Equal(0m, customerSummary!.CustomerChargedAmount);
+
+        var detailRoute = $"/api/admin/usage/transactions/{transactionId}";
+        Assert.Equal(HttpStatusCode.Forbidden, (await customer.GetAsync(detailRoute)).StatusCode);
+        using var admin = factory.CreateClient();
+        var adminAuth = await Register(admin, "Refund Audit Admin");
+        await AddAdminRole(adminAuth.User.Email!);
+        var detail = await admin.GetFromJsonAsync<AdminUsageTransactionDto>(detailRoute);
+        Assert.NotNull(detail);
+        Assert.Equal(1m, detail.GrossChargedAmount);
+        Assert.Equal(2m, detail.ReversedAmount);
+        Assert.Equal(-1m, detail.ChargedAmount);
+        var report = await admin.GetFromJsonAsync<AdminUsageReportDto>($"/api/admin/usage/report?workspaceId={workspaceId}");
+        Assert.NotNull(report);
+        Assert.Equal(-1m, report.Summary.TotalCustomerChargesUsd);
+        Assert.Equal(detail, Assert.Single(report.Transactions.Items));
+
+        Assert.Equal(originalCredits, await credits.ToArrayAsync());
+        var stored = await db.UsageTransactions.AsNoTracking().SingleAsync(item => item.Id == transactionId);
+        Assert.Equal(1m, stored.ChargedAmount);
+        Assert.Equal(2m, stored.ReversedAmount);
+    }
+
+    [Fact]
     public async Task Normal_usage_response_does_not_expose_provider_cost()
     {
         using var client = factory.CreateClient();

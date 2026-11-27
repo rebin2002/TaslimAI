@@ -88,6 +88,8 @@ public sealed record AdminUsageTransactionDto(
     decimal ProviderCostUsd,
     bool ProviderCostKnown,
     decimal ChargedAmount,
+    decimal GrossChargedAmount,
+    decimal ReversedAmount,
     string Currency,
     string? CostBasis,
     string? PricingVersion,

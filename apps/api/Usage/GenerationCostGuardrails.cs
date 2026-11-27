@@ -102,24 +102,12 @@ public sealed class GenerationCostGuardrailService(
                 "This generation may use a high amount of provider resources. Review the estimate before continuing."));
         }
 
-        if (!settings.Enabled)
-        {
-            return new GenerationCostPreflightResult(
-                normalizedEstimate,
-                true,
-                false,
-                confirmationAccepted,
-                workspaceCap,
-                userCap,
-                projectCap,
-                warnings);
-        }
-
-        if (settings.RejectUnknownEstimates && workspaceCap is { UsageKnown: false })
+        var rejectUnknownExposure = settings.Enabled && settings.RejectUnknownEstimates;
+        if (rejectUnknownExposure && workspaceCap is { UsageKnown: false })
             return Reject(normalizedEstimate, confirmationAccepted, workspaceCap, userCap, projectCap, warnings, "WORKSPACE_COST_UNKNOWN", "This workspace has provider exposure that cannot be estimated safely.");
-        if (settings.RejectUnknownEstimates && userCap is { UsageKnown: false })
+        if (rejectUnknownExposure && userCap is { UsageKnown: false })
             return Reject(normalizedEstimate, confirmationAccepted, workspaceCap, userCap, projectCap, warnings, "USER_COST_UNKNOWN", "This user has provider exposure that cannot be estimated safely.");
-        if (settings.RejectUnknownEstimates && projectCap is { UsageKnown: false })
+        if (rejectUnknownExposure && projectCap is { UsageKnown: false })
             return Reject(normalizedEstimate, confirmationAccepted, workspaceCap, userCap, projectCap, warnings, "PROJECT_COST_UNKNOWN", "This project has provider exposure that cannot be estimated safely.");
 
         var snapshot = new GenerationBudgetSnapshot(
@@ -132,8 +120,9 @@ public sealed class GenerationCostGuardrailService(
         if (!decision.Allowed)
             return Reject(normalizedEstimate, confirmationAccepted, workspaceCap, userCap, projectCap, warnings, decision.RejectionCode!, decision.RejectionMessage!);
 
-        var confirmationRequired = (warnings.Any(item => item.Code == "EXPENSIVE_GENERATION") && settings.RequireConfirmationForExpensiveGeneration)
-            || (warnings.Any(item => item.Code == "COST_ESTIMATE_UNKNOWN") && settings.RequireConfirmationForUnknownEstimates);
+        var confirmationRequired = settings.Enabled && (
+            (warnings.Any(item => item.Code == "EXPENSIVE_GENERATION") && settings.RequireConfirmationForExpensiveGeneration)
+            || (warnings.Any(item => item.Code == "COST_ESTIMATE_UNKNOWN") && settings.RequireConfirmationForUnknownEstimates));
         return new GenerationCostPreflightResult(
             normalizedEstimate,
             true,

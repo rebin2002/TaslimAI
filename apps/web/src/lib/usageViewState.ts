@@ -1,3 +1,5 @@
+import type { UsageTransaction } from "./api";
+
 export type UsageLoadState = {
   errorKey: string | null;
   attempt: number;
@@ -19,4 +21,14 @@ export function retryUsageLoad(state: UsageLoadState): UsageLoadState {
 
 export function hasUsageLoadError(state: UsageLoadState, requestKey: string) {
   return state.errorKey === requestKey;
+}
+
+export function usageStatusKey({ status, chargedAmount }: Pick<UsageTransaction, "status" | "chargedAmount">) {
+  switch (status) {
+    case "Completed": return "usage.completed";
+    case "Failed": return "usage.failed";
+    case "Cancelled": return "usage.cancelled";
+    case "Refunded": return chargedAmount === 0 ? "usage.refundedZeroCharge" : "usage.refunded";
+    default: return "usage.pending";
+  }
 }
