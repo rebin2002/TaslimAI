@@ -72,6 +72,7 @@ describe("healthCareConsentSelection controller (synthetic, #714)", () => {
     expect(revoked.consent).toBe("revoked");
     expect(selectedDocumentIds(revoked)).toEqual([]);
     expect(revoked.selection).toEqual({});
+    expect(revoked.documents).toEqual([]);
     expect(revoked.preview).toEqual({ status: "unavailable", reason: "consent-revoked" });
     expect(isPreviewAvailable(revoked, "synth-doc-01")).toBe(false);
     expect(isDocumentSelected(revoked, "synth-doc-01")).toBe(false);
@@ -205,6 +206,7 @@ describe("healthCareConsentSelection controller (synthetic, #714)", () => {
     expect(seen).toHaveBeenCalledTimes(1);
     // The very first observation after the revoke dispatch is already clean.
     expect(selectedDocumentIds(store.getSnapshot())).toEqual([]);
+    expect(store.getSnapshot().documents).toEqual([]);
     expect(store.getSnapshot().preview).toEqual({ status: "unavailable", reason: "consent-revoked" });
     unsubscribe();
     store.grantConsent(SYNTH_DOCS);

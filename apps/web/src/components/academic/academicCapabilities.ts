@@ -7,22 +7,17 @@
  * control that looks functional but silently does nothing.
  *
  * Contract every consumer relies on:
- * - `available`   the UI ships the behaviour itself, deterministically, in this
- *                 slice (brief capture, identifier validation, citation
- *                 formatting of *verified* records, local review surfaces).
+ * - `available`   the surface ships the behaviour deterministically, including
+ *                 local controls and the authenticated persisted Plan checkpoint.
  * - `planned`     the behaviour needs backend work from a later phase. It may
  *                 only be rendered as a labelled status, never as a button.
  * - `unavailable` the behaviour is explicitly out of scope for academic
  *                 research and must be explained rather than offered.
  *
  * Capability status and workflow-stage runnability are deliberately separate
- * judgements (combined-tree integrity rule, #1267 slice 1 review): a stage of
- * the staged academic workflow may only show as running when the surface that
- * executes it actually exists. Wiring a *capability* (e.g. the standalone,
- * read-only scholarly search) never makes an unconnected *job stage* runnable,
- * because the engine that would run that stage has no registration, no state
- * store and no endpoint until the academic job slice ships. See
- * `AcademicWorkflowStageExecutor` and `academicWorkflowViews`.
+ * judgements: a stage only shows as available when its own execution surface
+ * exists. The Plan API is now connected; a standalone, read-only scholarly
+ * search still does not make the separate Discover workflow stage runnable.
  *
  * Vendor, provider and model names must never reach this file: customer-facing
  * copy describes capabilities by function only (issue #1259, "integrity,
@@ -44,6 +39,7 @@ export type AcademicCapabilityId =
   | "localDraftPersistence"
   | "manualEvidenceNotes"
   | "chapterPlanning"
+  | "persistedPlan"
   | "scholarlyDiscovery"
   | "isbnCatalogLookup"
   | "fullTextRetrieval"
@@ -80,6 +76,7 @@ export const academicCapabilities: Readonly<Record<AcademicCapabilityId, Academi
   localDraftPersistence: { id: "localDraftPersistence", status: "available", phase: "A", detailKey: "capability.available.draft" },
   manualEvidenceNotes: { id: "manualEvidenceNotes", status: "available", phase: "A", detailKey: "capability.available.evidenceManual" },
   chapterPlanning: { id: "chapterPlanning", status: "available", phase: "A", detailKey: "capability.available.chapterPlanning" },
+  persistedPlan: { id: "persistedPlan", status: "available", phase: "C", detailKey: "capability.available.persistedPlan" },
   // #1267 slice 1: the workspace-scoped, read-only search endpoint is live, so discovering
   // bibliographic records and resolving the identifiers inside them is real behaviour, rendered
   // as a working form. Everything that needs the content itself stays planned: an indicated
@@ -124,17 +121,10 @@ export function isCapabilityPlanned(id: AcademicCapabilityId): boolean {
  * which stages run on this slice and which are pending backend work.
  */
 /**
- * What executes a workflow stage.
- * - `"ui"`  the academic surface in this app ships the stage's behaviour
- *           itself (the plan panel *is* the plan stage); its status follows
- *           the capability directly.
- * - `"job"` the stage runs inside the staged academic job — the orchestrator
- *           engine, its durable state and its endpoints. That pipeline is
- *           shipped and registered by the `academicJob` capability slice, so a
- *           `"job"` stage is only runnable while `academicJob` is available,
- *           no matter how real its underlying capability is on its own.
+ * What executes a workflow stage: a local UI surface, the persisted Plan API,
+ * or a downstream job stage that is not connected in this slice.
  */
-export type AcademicWorkflowStageExecutor = "ui" | "job";
+export type AcademicWorkflowStageExecutor = "ui" | "planApi" | "job";
 
 export type AcademicWorkflowStage = {
   id: string;
@@ -145,7 +135,7 @@ export type AcademicWorkflowStage = {
 };
 
 export const academicWorkflowStages: readonly AcademicWorkflowStage[] = [
-  { id: "plan", capability: "briefSetup", executor: "ui", labelKey: "stage.plan.label", descriptionKey: "stage.plan.detail" },
+  { id: "plan", capability: "persistedPlan", executor: "planApi", labelKey: "stage.plan.label", descriptionKey: "stage.plan.detail" },
   // The discovery capability is real today (standalone read-only search in the
   // Sources tab), but this entry describes the discovery *stage* of the staged
   // job. No job runner is wired, so the stage stays non-runnable by executor.
@@ -167,13 +157,13 @@ export type AcademicWorkflowStageView = AcademicWorkflowStage & {
 export function academicWorkflowViews(
   stages: readonly AcademicWorkflowStage[] = academicWorkflowStages,
 ): AcademicWorkflowStageView[] {
-  // Single source of truth for job execution: the staged job ships as a
-  // capability of its own. While it is `planned`, no job-executed stage may
-  // borrow runnability from an available underlying capability.
+  // The downstream staged job ships as a capability of its own. While it is
+  // `planned`, job-executed stages may not borrow runnability from a separate
+  // available capability such as the read-only Sources search.
   const jobEngineAvailable = academicCapabilities.academicJob.status === "available";
   return stages.map((stage) => {
     const capability = capabilityOf(stage.capability);
-    const runnable = capability.status === "available" && (stage.executor === "ui" || jobEngineAvailable);
+    const runnable = capability.status === "available" && (stage.executor === "ui" || stage.executor === "planApi" || jobEngineAvailable);
     if (runnable) return { ...stage, status: "available" as const, phase: capability.phase };
     // An available capability whose job runner does not exist yet is downgraded
     // to a status label, never an executable stage; its phase is the delivery

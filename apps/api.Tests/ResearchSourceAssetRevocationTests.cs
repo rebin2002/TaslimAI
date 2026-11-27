@@ -118,12 +118,13 @@ public sealed class ResearchSourceAssetRevocationTests : IClassFixture<ResearchA
         Assert.Equal(HttpStatusCode.NotFound, (await SendWithCsrf(member, HttpMethod.Post, $"/api/generation/jobs/{created.Job.Id}/retry", null)).StatusCode);
         Assert.Equal(HttpStatusCode.Forbidden, (await SendWithCsrf(member, HttpMethod.Post, $"/api/generation/jobs/{created.Job.Id}/cancel", null)).StatusCode);
 
-        // Revoke is non-destructive: the project report asset and source file rows
-        // survive, so the remaining member can still open the published report.
-        var ownerAsset = await owner.GetAsync($"/api/assets/{assetId}");
-        Assert.Equal(HttpStatusCode.OK, ownerAsset.StatusCode);
-        var ownerDownload = await owner.GetAsync($"/api/assets/{assetId}/download");
-        Assert.Equal(HttpStatusCode.OK, ownerDownload.StatusCode);
+        // Revoke is non-destructive, and that property is now proven directly against the
+        // database below. Over HTTP the remaining non-creator member is failed closed on the
+        // report regardless of the revoke since #936 made Research report assets
+        // creator-private, so this lane keeps its evidence without asserting the visibility
+        // combination #936 removed.
+        AssertDocumentDenied(await owner.GetAsync($"/api/assets/{assetId}"), "non-creator report asset metadata");
+        AssertDocumentDenied(await owner.GetAsync($"/api/assets/{assetId}/download"), "non-creator report asset download");
         using (var scope = factory.Services.CreateScope())
         {
             var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
@@ -136,6 +137,8 @@ public sealed class ResearchSourceAssetRevocationTests : IClassFixture<ResearchA
             Assert.Equal(2, ledger.Count(item => item.SourceType == "web"));
             Assert.Contains(ledger, item => item.StoredFileId == sourceFile.Id);
             Assert.True(await db.StoredFiles.AsNoTracking().AnyAsync(item => item.Id == sourceFile.Id));
+            // The published report asset row itself also survives the membership removal.
+            Assert.True(await db.Assets.AsNoTracking().AnyAsync(item => item.Id == assetId));
         }
 
         // Re-admission restores the revoked researcher's own access.

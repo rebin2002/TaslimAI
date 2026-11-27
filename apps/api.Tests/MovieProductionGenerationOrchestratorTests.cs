@@ -82,6 +82,30 @@ public sealed class MovieProductionGenerationOrchestratorTests
     }
 
     [Fact]
+    public void Single_clip_resolver_preserves_the_renderable_boundary_and_uses_a_short_project_fallback()
+    {
+        Assert.Equal(MovieDurationBudgetPolicy.MaxShotDurationSeconds,
+            MovieProductionGenerationOrchestrator.ResolveSingleClipDuration(
+                MovieDurationBudgetPolicy.MaxShotDurationSeconds, null, MovieDurationBudgetPolicy.MaxMovieDurationSeconds));
+        Assert.Equal(60, MovieProductionGenerationOrchestrator.ResolveSingleClipDuration(
+            null, null, MovieDurationBudgetPolicy.MaxMovieDurationSeconds));
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(3_601)]
+    [InlineData(7_200)]
+    public void Single_clip_resolver_rejects_invalid_or_whole_film_durations_without_truncating(int requestedDurationSeconds)
+    {
+        var exception = Assert.Throws<MovieProductionValidationException>(() =>
+            MovieProductionGenerationOrchestrator.ResolveSingleClipDuration(
+                requestedDurationSeconds, null, MovieDurationBudgetPolicy.MaxMovieDurationSeconds));
+
+        Assert.Equal(MovieDurationBudgetPolicy.SingleClipDurationUnsupportedCode, exception.Code);
+        Assert.Contains($"{MovieDurationBudgetPolicy.MaxShotDurationSeconds}", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Canonical_job_ownership_is_bound_to_the_persisted_clip_target()
     {
         var canonicalClipId = Guid.NewGuid();

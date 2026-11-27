@@ -1,8 +1,10 @@
 import type { Metadata } from "next";
+import { notFound } from "next/navigation";
 import { ProtectedPage } from "@/components/ProtectedPage";
 import { AcademicResearchStudio } from "@/components/academic/AcademicResearchStudio";
 import { academicRoute } from "@/components/academic/academicRoutes";
 import { requireAuthenticatedPage } from "@/lib/serverAuth";
+import { isAcademicResearchVisible } from "@/lib/academicResearchVisibility";
 
 /**
  * Issue #1259 (Academic Research Studio) — Phase A route.
@@ -26,6 +28,7 @@ export const metadata: Metadata = {
 
 export default async function AcademicResearchStudioPage() {
   await requireAuthenticatedPage(academicRoute);
+  if (!isAcademicResearchVisible()) notFound();
   return (
     <ProtectedPage>
       <AcademicResearchStudio />

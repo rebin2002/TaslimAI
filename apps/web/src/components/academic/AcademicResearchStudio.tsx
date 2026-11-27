@@ -14,11 +14,10 @@
  * instead of replacing it.
  *
  * Scope discipline (deliberate, and asserted by the tests):
- * - The only network call in this surface is the one the student starts: the Sources tab's
- *   read-only, workspace-scoped scholarly record search (#1267 slice 1). It runs on submit,
- *   pages on request, is aborted when the panel unmounts or a newer search begins, and never
- *   writes anything server-side. The academic job pipeline, evidence extraction and document
- *   export stay planned phases and appear as statuses; no other tab calls anything.
+ * - Network calls are explicit: the Sources tab's read-only scholarly search and the Plan
+ *   tab's authenticated workspace-scoped create/load/run/approval actions. The Plan action
+ *   runs only the deterministic saved Plan stage; downstream discovery, evidence extraction
+ *   and document export remain visibly unconnected.
  * - No provider, model or cost information anywhere in customer-facing copy.
  * - Drafts persist through the privacy-scoped session draft store, keyed by user
  *   and workspace, and are never read across identities.
@@ -347,6 +346,9 @@ export function AcademicWorkspace({ principal, initialState }: AcademicWorkspace
         t={ta}
         labels={labels}
         onJumpToField={jumpToField}
+        workspaceId={principal.workspaceId}
+        chapterHeadings={state.chapters.map((chapter) => chapter.title)}
+        language={locale}
       />
     );
   };
