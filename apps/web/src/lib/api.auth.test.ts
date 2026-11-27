@@ -35,6 +35,19 @@ describe("api.login", () => {
     vi.unstubAllGlobals();
   });
 
+  it("reads only the server-owned password recovery availability state", async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce(response({ available: false }));
+    vi.stubGlobal("fetch", fetchMock);
+    const { getPasswordRecoveryAvailability } = await import("./passwordRecoveryAvailability");
+
+    await expect(getPasswordRecoveryAvailability()).resolves.toEqual({ available: false });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(new URL(String(fetchMock.mock.calls[0][0])).pathname).toBe("/api/auth/password-recovery/availability");
+    expect((fetchMock.mock.calls[0][1] as RequestInit | undefined)?.method ?? "GET").toBe("GET");
+    expect((fetchMock.mock.calls[0][1] as RequestInit).credentials).toBe("include");
+    expect((fetchMock.mock.calls[0][1] as RequestInit).cache).toBe("no-store");
+  });
+
   it("performs login and refreshes CSRF state after authentication", async () => {
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(csrfResponse("before-login"))
@@ -164,6 +177,31 @@ describe("api.login", () => {
     await expect(api.updateProfile({ displayName: "Owner", preferredLanguage: "en" })).rejects.toThrow("CSRF token unavailable");
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(fetchMock.mock.calls[0][1].method ?? "GET").toBe("GET");
+  });
+
+  it("maps an unavailable API to a safe retryable error", async () => {
+    const fetchMock = vi.fn().mockRejectedValueOnce(new TypeError("private socket detail"));
+    vi.stubGlobal("fetch", fetchMock);
+    const { api, ApiError } = await import("./api");
+
+    const failure = await api.me().catch((error) => error);
+    expect(failure).toBeInstanceOf(ApiError);
+    expect(failure.status).toBe(503);
+    expect(failure.code).toBe("NETWORK_ERROR");
+    expect(failure.message).toBe("The service is temporarily unavailable. Please try again.");
+    expect(failure.message).not.toContain("private socket detail");
+  });
+
+  it("preserves caller cancellation for abortable workspace loads", async () => {
+    const controller = new AbortController();
+    const fetchMock = vi.fn().mockRejectedValueOnce(Object.assign(new Error("aborted"), { name: "AbortError" }));
+    vi.stubGlobal("fetch", fetchMock);
+    const { api } = await import("./api");
+
+    const failure = await api.listProjects("workspace-1", "Active", controller.signal).catch((error) => error);
+    expect(failure.name).toBe("AbortError");
+    expect(failure.code).not.toBe("NETWORK_ERROR");
+    expect(fetchMock.mock.calls[0][1].signal).toBe(controller.signal);
   });
 
   it("revokes other sessions and refreshes CSRF state after the security transition", async () => {

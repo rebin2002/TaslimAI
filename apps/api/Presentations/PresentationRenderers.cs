@@ -22,6 +22,7 @@ public sealed class PresentationRenderer : IPresentationRenderer
     private const string C = "http://schemas.openxmlformats.org/drawingml/2006/chart";
     private const int SlideWidth = 12_192_000;
     private const int SlideHeight = 6_858_000;
+    private const int MinColumnTextHeight = 120_000;
     private int shapeId;
 
     public RenderedPresentation Render(PresentationDraft draft, PresentationGenerationInput input, PresentationGenerationOptions options)
@@ -55,7 +56,7 @@ public sealed class PresentationRenderer : IPresentationRenderer
         shapeId = 1;
         var requestedLanguage = input.Language.Trim().ToLowerInvariant();
         var resolvedLanguage = requestedLanguage == "auto" ? draftLanguage : requestedLanguage;
-        var rtl = resolvedLanguage is "ar" or "ku" || slide.Title.Any(character => character >= '\u0600' && character <= '\u08ff');
+        var rtl = resolvedLanguage is "ar" or "ku" || SlideRequiresRtl(slide);
         var language = rtl ? (resolvedLanguage == "ku" ? "ku-Arab" : "ar-SA") : "en-US";
         var body = new StringBuilder();
         body.Append(ShapeTreeStart());
@@ -118,13 +119,74 @@ public sealed class PresentationRenderer : IPresentationRenderer
         var columns = block.Columns.ToArray();
         if (columns.Length == 0) return;
         var width = 10_200_000 / columns.Length;
+        var cardHeight = height - 130_000;
+        var topInset = 160_000;
+        var headingHeight = 420_000;
+        var headingGap = 100_000;
+        var bottomInset = 40_000;
+        if (cardHeight < topInset + headingHeight + headingGap + bottomInset + MinColumnTextHeight)
+        {
+            // Compact title, section, and closing blocks need smaller insets and heading space.
+            topInset = cardHeight / 6;
+            headingGap = cardHeight / 12;
+            bottomInset = Math.Min(bottomInset, cardHeight / 12);
+            var textHeight = cardHeight - topInset - headingGap - bottomInset;
+            headingHeight = Math.Clamp(textHeight * 2 / 5, MinColumnTextHeight, textHeight - MinColumnTextHeight);
+        }
+
+        var bodyTop = topInset + headingHeight + headingGap;
+        var bodyHeight = cardHeight - bodyTop - bottomInset;
         for (var index = 0; index < columns.Length; index++)
         {
             var x = 820_000 + index * width;
-            body.Append(Card(NextId(), x, y, width - 180_000, height - 130_000, "FFFFFF", "DCE6ED"));
-            body.Append(TextBox(NextId(), x + 140_000, y + 160_000, width - 460_000, 420_000, columns[index].Heading, "087E8B", 15, rtl, language, true, null));
-            body.Append(TextBox(NextId(), x + 140_000, y + 680_000, width - 460_000, height - 850_000, string.Join("\n", columns[index].Items.Select(item => $"• {item}")), "253B53", 13, rtl, language, false, null));
+            body.Append(Card(NextId(), x, y, width - 180_000, cardHeight, "FFFFFF", "DCE6ED"));
+            // Compact cards cannot hold a 15pt heading line plus several 13pt item lines inside their fixed
+            // boxes, and an explicit-size text box with no autofit element hands overflow to the application:
+            // PowerPoint (and LibreOffice) then draw every glyph past the box - across the card bottom. The
+            // rendered evidence for the #741 visual review measured 9-18% of column body ink outside cards on
+            // title/section/closing slides at 2-4 blocks in en/ar/ku. The emitter knows the text, box and
+            // metrics at render time, so it now ships the same "shrink text on overflow" answer PowerPoint
+            // would save: an explicit <a:normAutofit fontScale/> computed from a conservative line estimate.
+            // Box geometry is untouched, boxes that already fit at 100% keep the exact self-closed bodyPr
+            // (so the shipped full-height column contract, #887's caption geometry included, is byte-stable),
+            // and no text is ever truncated, split, or dropped.
+            var headingScale = ColumnTextFitScale(15, width - 460_000, headingHeight, rtl, [columns[index].Heading]);
+            var bodyScale = ColumnTextFitScale(13, width - 460_000, bodyHeight, rtl, columns[index].Items.Select(item => $"• {item}"));
+            body.Append(TextBox(NextId(), x + 140_000, y + topInset, width - 460_000, headingHeight, columns[index].Heading, "087E8B", 15, rtl, language, true, null, headingScale));
+            body.Append(TextBox(NextId(), x + 140_000, y + bodyTop, width - 460_000, bodyHeight, string.Join("\n", columns[index].Items.Select(item => $"• {item}")), "253B53", 13, rtl, language, false, null, bodyScale));
         }
+    }
+
+    // Returns a fontScale (percent x 1000, ECMA-376 CT_TextBody/CT_TextNormalAutofit) for a fixed-size
+    // column box, or 0 when the content already fits at 100% (emit no autofit element then). The estimate
+    // is deliberately conservative: 0.65 em average advance per character at the reduced size, and a line
+    // height of 1.25 em for the Latin font versus 1.50 em for Noto Sans Arabic, whose tall hhea metrics
+    // pushed RTL ink below the card in the pre-fix renders. Only the top default inset (45 720 EMU) is
+    // subtracted from the box: the bottom inset is not a clip line for drawn ink. The scan floors at 20%,
+    // where the remaining overflow lands inside the card's bottom inset band; pathological drafts beyond
+    // that still beat the shipped defect, which pushed every line past the card.
+    private static int ColumnTextFitScale(int sizePt, int boxCx, int boxCy, bool rtl, IEnumerable<string> lines)
+    {
+        var textWidth = boxCx - 182_880L; // default lIns + rIns
+        var textHeight = boxCy - 45_720L; // default tIns; bottom inset is not a clip line
+        if (textWidth <= 0 || textHeight <= 0) return 0;
+        var items = lines.ToArray();
+        var emu = (long)sizePt * 12_700L;
+        for (var scale = 100_000; scale >= 20_000; scale -= scale > 50_000 ? 5_000 : 2_500)
+        {
+            var charWidth = emu * 65L * scale / 10_000_000L;
+            var lineHeight = emu * (rtl ? 150L : 125L) * scale / 10_000_000L;
+            if (charWidth <= 0 || lineHeight <= 0) continue;
+            long total = 0;
+            foreach (var line in items)
+            {
+                var wrapped = (line.Length * charWidth + textWidth - 1) / textWidth;
+                total += Math.Max(1L, wrapped) * lineHeight;
+                if (total > textHeight) break;
+            }
+            if (total <= textHeight) return scale >= 100_000 ? 0 : scale;
+        }
+        return 20_000;
     }
 
     private void RenderMetrics(StringBuilder body, PresentationContentBlock block, int y, int height, bool rtl, string language)
@@ -185,23 +247,65 @@ public sealed class PresentationRenderer : IPresentationRenderer
         }
     }
 
+    // The provider decides where the Arabic script lands in a draft, so the bidi/layout decision cannot read
+    // the slide title alone. A slide whose body, subtitle, table cell, column heading or metric carries Arabic
+    // script while its title stays Latin would otherwise export every one of those runs in the Latin fallback
+    // typeface with a left-to-right base direction, which PowerPoint draws unshaped and reversed. The package
+    // still passes PresentationOutputIntegrityValidator, because that validator checks parts and relationships
+    // rather than run fonts, so nothing downstream notices. Scan the whole slide instead.
+    private static bool SlideRequiresRtl(PresentationSlide slide) =>
+        ContainsArabicScript(slide.Title)
+        || ContainsArabicScript(slide.Subtitle)
+        || slide.Blocks.Any(BlockRequiresRtl);
+
+    private static bool BlockRequiresRtl(PresentationContentBlock block) =>
+        ContainsArabicScript(block.Text)
+        || ContainsArabicScript(block.Label)
+        || ContainsArabicScript(block.Value)
+        || block.Items.Any(ContainsArabicScript)
+        || block.Columns.Any(column => ContainsArabicScript(column.Heading) || column.Items.Any(ContainsArabicScript))
+        || block.Rows.Any(row => row.Cells.Any(ContainsArabicScript))
+        || block.Metrics.Any(metric => ContainsArabicScript(metric.Label) || ContainsArabicScript(metric.Value) || ContainsArabicScript(metric.Detail));
+
+    private static bool ContainsArabicScript(string? value) => value?.Any(IsArabicScriptCharacter) == true;
+
+    private static bool IsArabicScriptCharacter(char character) => character >= '\u0600' && character <= '\u08ff';
+
     private string ShapeTreeStart() => "<p:spTree><p:nvGrpSpPr><p:cNvPr id=\"1\" name=\"\"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/>";
     private string Card(int id, int x, int y, int cx, int cy, string fill, string line) => Rectangle(id, x, y, cx, cy, fill, line, 12_000);
     private string Rectangle(int id, int x, int y, int cx, int cy, string fill, string line, int lineWidth) => $"<p:sp><p:nvSpPr><p:cNvPr id=\"{id}\" name=\"Shape {id}\"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x=\"{x}\" y=\"{y}\"/><a:ext cx=\"{cx}\" cy=\"{cy}\"/></a:xfrm><a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom><a:solidFill><a:srgbClr val=\"{fill}\"/></a:solidFill><a:ln w=\"{lineWidth}\"><a:solidFill><a:srgbClr val=\"{line}\"/></a:solidFill></a:ln></p:spPr><p:txBody><a:bodyPr/><a:lstStyle/><a:p/></p:txBody></p:sp>";
 
     private string TextBox(int id, int x, int y, int cx, int cy, string text, string color, int size, bool rtl, string language, bool bold, string? fill)
     {
+        return TextBox(id, x, y, cx, cy, text, color, size, rtl, language, bold, fill, 0);
+    }
+
+    private string TextBox(int id, int x, int y, int cx, int cy, string text, string color, int size, bool rtl, string language, bool bold, string? fill, int fontScalePercent)
+    {
         var paragraphs = string.Join("", text.Replace("\r", "").Split('\n').Select(line => $"<a:p><a:pPr algn=\"{(rtl ? "r" : "l")}\" rtl=\"{(rtl ? "1" : "0")}\"/><a:r><a:rPr lang=\"{language}\" sz=\"{size * 100}\" b=\"{(bold ? "1" : "0")}\" typeface=\"{Font(language)}\"/><a:t>{Escape(line)}</a:t></a:r><a:endParaRPr lang=\"{language}\"/></a:p>"));
         var fillXml = fill is null ? "<a:noFill/>" : $"<a:solidFill><a:srgbClr val=\"{fill}\"/></a:solidFill>";
-        return $"<p:sp><p:nvSpPr><p:cNvPr id=\"{id}\" name=\"Text {id}\"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x=\"{x}\" y=\"{y}\"/><a:ext cx=\"{cx}\" cy=\"{cy}\"/></a:xfrm><a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom>{fillXml}<a:ln><a:noFill/></a:ln></p:spPr><p:txBody><a:bodyPr wrap=\"square\" rtlCol=\"{(rtl ? "1" : "0")}\"/><a:lstStyle/>{paragraphs}</p:txBody></p:sp>";
+        var bodyPr = fontScalePercent > 0
+            ? $"<a:bodyPr wrap=\"square\" rtlCol=\"{(rtl ? "1" : "0")}\"><a:normAutofit fontScale=\"{fontScalePercent}\"/></a:bodyPr>"
+            : $"<a:bodyPr wrap=\"square\" rtlCol=\"{(rtl ? "1" : "0")}\"/>";
+        return $"<p:sp><p:nvSpPr><p:cNvPr id=\"{id}\" name=\"Text {id}\"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x=\"{x}\" y=\"{y}\"/><a:ext cx=\"{cx}\" cy=\"{cy}\"/></a:xfrm><a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom>{fillXml}<a:ln><a:noFill/></a:ln></p:spPr><p:txBody>{bodyPr}<a:lstStyle/>{paragraphs}</p:txBody></p:sp>";
     }
 
     private int NextId() => ++shapeId;
     private static string Font(string language) => language is "ar-SA" or "ku-Arab" ? "Noto Sans Arabic" : "Aptos";
     private static string Escape(string value) => SecurityElement.Escape(value) ?? string.Empty;
+    // ZipArchive stamps a new entry with DateTimeOffset.Now unless told otherwise, and the MS-DOS field
+    // carrying it resolves to two seconds. Two renders of a byte-identical draft then differ by one entry
+    // header byte whenever they straddle that boundary, so a package that is otherwise a pure function of
+    // its draft is not reproducible. 1980-01-01 is the epoch the format is built on, the earliest value it
+    // can represent, so pinning to it loses no range and takes the wall clock out of the output entirely.
+    // Verified timezone-independent: the pinned DOS fields are identical under UTC, Asia/Erbil and
+    // America/New_York. Declared here, next to its only use, so the fix does not touch the shared
+    // constant block that other open Presentation work (#741 / #1239) edits.
+    private static readonly DateTimeOffset ArchiveEntryTimestamp = new(1980, 1, 1, 0, 0, 0, TimeSpan.Zero);
     private static void Write(ZipArchive archive, string path, string content)
     {
         var entry = archive.CreateEntry(path, CompressionLevel.Optimal);
+        entry.LastWriteTime = ArchiveEntryTimestamp;
         using var writer = new StreamWriter(entry.Open(), new UTF8Encoding(false));
         writer.Write(content);
     }
@@ -222,5 +326,34 @@ public sealed class PresentationRenderer : IPresentationRenderer
     private static string SlideRelationships() => $"<?xml version=\"1.0\" encoding=\"UTF-8\"?><Relationships xmlns=\"{Rel}\"><Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout\" Target=\"../slideLayouts/slideLayout1.xml\"/></Relationships>";
     private static string SlideMaster() => $"<?xml version=\"1.0\" encoding=\"UTF-8\"?><p:sldMaster xmlns:a=\"{A}\" xmlns:r=\"{R}\" xmlns:p=\"{P}\"><p:cSld name=\"Taslim Master\"><p:spTree><p:nvGrpSpPr><p:cNvPr id=\"1\" name=\"\"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/></p:spTree></p:cSld><p:clrMap bg1=\"lt1\" tx1=\"dk1\" bg2=\"lt2\" tx2=\"dk2\" accent1=\"accent1\" accent2=\"accent2\" accent3=\"accent3\" accent4=\"accent4\" accent5=\"accent5\" accent6=\"accent6\" hlink=\"hlink\" folHlink=\"folHlink\"/><p:sldLayoutIdLst><p:sldLayoutId id=\"1\" r:id=\"rId2\"/></p:sldLayoutIdLst><p:txStyles><p:titleStyle/><p:bodyStyle/><p:otherStyle/></p:txStyles></p:sldMaster>";
     private static string SlideLayout() => $"<?xml version=\"1.0\" encoding=\"UTF-8\"?><p:sldLayout xmlns:a=\"{A}\" xmlns:r=\"{R}\" xmlns:p=\"{P}\" type=\"blank\"><p:cSld name=\"Blank\"><p:spTree><p:nvGrpSpPr><p:cNvPr id=\"1\" name=\"\"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/></p:spTree></p:cSld><p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr></p:sldLayout>";
-    private static string Theme() => $"<?xml version=\"1.0\" encoding=\"UTF-8\"?><a:theme xmlns:a=\"{A}\" name=\"Taslim Professional\"><a:themeElements><a:clrScheme name=\"Taslim Navy\"><a:dk1><a:sysClr val=\"windowText\" lastClr=\"000000\"/></a:dk1><a:lt1><a:sysClr val=\"window\" lastClr=\"FFFFFF\"/></a:lt1><a:dk2><a:srgbClr val=\"12304A\"/></a:dk2><a:lt2><a:srgbClr val=\"F8FAFC\"/></a:lt2><a:accent1><a:srgbClr val=\"087E8B\"/></a:accent1><a:accent2><a:srgbClr val=\"1D6FA5\"/></a:accent2><a:accent3><a:srgbClr val=\"E7A93B\"/></a:accent3><a:accent4><a:srgbClr val=\"60758A\"/></a:accent4><a:accent5><a:srgbClr val=\"B7DCE5\"/></a:accent5><a:accent6><a:srgbClr val=\"253B53\"/></a:accent6><a:hlink><a:srgbClr val=\"1D6FA5\"/></a:hlink><a:folHlink><a:srgbClr val=\"60758A\"/></a:folHlink></a:clrScheme><a:fontScheme name=\"Taslim Fonts\"><a:majorFont><a:latin typeface=\"Aptos Display\"/><a:ea typeface=\"\"/><a:cs typeface=\"Noto Sans Arabic\"/></a:majorFont><a:minorFont><a:latin typeface=\"Aptos\"/><a:ea typeface=\"\"/><a:cs typeface=\"Noto Sans Arabic\"/></a:minorFont></a:fontScheme><a:fmtScheme name=\"Taslim Format\"><a:fillStyleLst/><a:lnStyleLst/><a:effectStyleLst/><a:bgFillStyleLst/></a:fmtScheme></a:themeElements></a:theme>";
+    private static string Theme() => $"<?xml version=\"1.0\" encoding=\"UTF-8\"?><a:theme xmlns:a=\"{A}\" name=\"Taslim Professional\"><a:themeElements><a:clrScheme name=\"Taslim Navy\"><a:dk1><a:sysClr val=\"windowText\" lastClr=\"000000\"/></a:dk1><a:lt1><a:sysClr val=\"window\" lastClr=\"FFFFFF\"/></a:lt1><a:dk2><a:srgbClr val=\"12304A\"/></a:dk2><a:lt2><a:srgbClr val=\"F8FAFC\"/></a:lt2><a:accent1><a:srgbClr val=\"087E8B\"/></a:accent1><a:accent2><a:srgbClr val=\"1D6FA5\"/></a:accent2><a:accent3><a:srgbClr val=\"E7A93B\"/></a:accent3><a:accent4><a:srgbClr val=\"60758A\"/></a:accent4><a:accent5><a:srgbClr val=\"B7DCE5\"/></a:accent5><a:accent6><a:srgbClr val=\"253B53\"/></a:accent6><a:hlink><a:srgbClr val=\"1D6FA5\"/></a:hlink><a:folHlink><a:srgbClr val=\"60758A\"/></a:folHlink></a:clrScheme><a:fontScheme name=\"Taslim Fonts\"><a:majorFont><a:latin typeface=\"Aptos Display\"/><a:ea typeface=\"\"/><a:cs typeface=\"Noto Sans Arabic\"/></a:majorFont><a:minorFont><a:latin typeface=\"Aptos\"/><a:ea typeface=\"\"/><a:cs typeface=\"Noto Sans Arabic\"/></a:minorFont></a:fontScheme>{FormatScheme()}</a:themeElements></a:theme>";
+    // ECMA-376 Part 1 models a theme format scheme as CT_FormatScheme, which mandates four lists whose types
+    // (CT_FillStyleList, CT_LineStyleList, CT_EffectStyleList, CT_BackgroundFillStyleList) each pin
+    // minOccurs=maxOccurs=3. Self-closed empty lists therefore produced a schema-invalid theme part in every
+    // exported deck: PowerPoint reports such a package as damaged content and offers to repair it on open,
+    // which is exactly what the Presentation Studio release evidence promises not to ship. The entries below
+    // mirror the Office theme so every style resolves against the placeholder colour, and nothing here touches
+    // slide layout, geometry or run fonts.
+    private static string FormatScheme() => "<a:fmtScheme name=\"Taslim Format\">"
+        + "<a:fillStyleLst>"
+        + "<a:solidFill><a:schemeClr val=\"phClr\"/></a:solidFill>"
+        + "<a:gradFill rotWithShape=\"1\"><a:gsLst><a:gs pos=\"0\"><a:schemeClr val=\"phClr\"><a:lumMod val=\"110000\"/><a:satMod val=\"105000\"/><a:tint val=\"67000\"/></a:schemeClr></a:gs><a:gs pos=\"50000\"><a:schemeClr val=\"phClr\"><a:lumMod val=\"105000\"/><a:satMod val=\"103000\"/><a:tint val=\"73000\"/></a:schemeClr></a:gs><a:gs pos=\"100000\"><a:schemeClr val=\"phClr\"><a:lumMod val=\"105000\"/><a:satMod val=\"109000\"/><a:tint val=\"81000\"/></a:schemeClr></a:gs></a:gsLst><a:lin ang=\"5400000\" scaled=\"0\"/></a:gradFill>"
+        + "<a:gradFill rotWithShape=\"1\"><a:gsLst><a:gs pos=\"0\"><a:schemeClr val=\"phClr\"><a:satMod val=\"103000\"/><a:lumMod val=\"102000\"/><a:tint val=\"94000\"/></a:schemeClr></a:gs><a:gs pos=\"50000\"><a:schemeClr val=\"phClr\"><a:satMod val=\"110000\"/><a:lumMod val=\"100000\"/><a:shade val=\"100000\"/></a:schemeClr></a:gs><a:gs pos=\"100000\"><a:schemeClr val=\"phClr\"><a:lumMod val=\"99000\"/><a:satMod val=\"120000\"/><a:shade val=\"78000\"/></a:schemeClr></a:gs></a:gsLst><a:lin ang=\"5400000\" scaled=\"0\"/></a:gradFill>"
+        + "</a:fillStyleLst>"
+        + "<a:lnStyleLst>"
+        + "<a:ln w=\"6350\" cap=\"flat\" cmpd=\"sng\" algn=\"ctr\"><a:solidFill><a:schemeClr val=\"phClr\"/></a:solidFill><a:prstDash val=\"solid\"/><a:miter lim=\"800000\"/></a:ln>"
+        + "<a:ln w=\"12700\" cap=\"flat\" cmpd=\"sng\" algn=\"ctr\"><a:solidFill><a:schemeClr val=\"phClr\"/></a:solidFill><a:prstDash val=\"solid\"/><a:miter lim=\"800000\"/></a:ln>"
+        + "<a:ln w=\"19050\" cap=\"flat\" cmpd=\"sng\" algn=\"ctr\"><a:solidFill><a:schemeClr val=\"phClr\"/></a:solidFill><a:prstDash val=\"solid\"/><a:miter lim=\"800000\"/></a:ln>"
+        + "</a:lnStyleLst>"
+        + "<a:effectStyleLst>"
+        + "<a:effectStyle><a:effectLst/></a:effectStyle>"
+        + "<a:effectStyle><a:effectLst/></a:effectStyle>"
+        + "<a:effectStyle><a:effectLst><a:outerShdw blurRad=\"40000\" dist=\"20000\" dir=\"5400000\" rotWithShape=\"0\"><a:srgbClr val=\"000000\"><a:alpha val=\"35000\"/></a:srgbClr></a:outerShdw></a:effectLst></a:effectStyle>"
+        + "</a:effectStyleLst>"
+        + "<a:bgFillStyleLst>"
+        + "<a:solidFill><a:schemeClr val=\"phClr\"/></a:solidFill>"
+        + "<a:gradFill rotWithShape=\"1\"><a:gsLst><a:gs pos=\"0\"><a:schemeClr val=\"phClr\"><a:tint val=\"95000\"/><a:satMod val=\"104000\"/></a:schemeClr></a:gs><a:gs pos=\"100000\"><a:schemeClr val=\"phClr\"><a:lumMod val=\"105000\"/><a:satMod val=\"108000\"/></a:schemeClr></a:gs></a:gsLst><a:lin ang=\"5400000\" scaled=\"0\"/></a:gradFill>"
+        + "<a:gradFill rotWithShape=\"1\"><a:gsLst><a:gs pos=\"0\"><a:schemeClr val=\"phClr\"><a:satMod val=\"110000\"/><a:shade val=\"100000\"/><a:lumMod val=\"100000\"/></a:schemeClr></a:gs><a:gs pos=\"100000\"><a:schemeClr val=\"phClr\"><a:lumMod val=\"99000\"/><a:satMod val=\"120000\"/><a:shade val=\"78000\"/></a:schemeClr></a:gs></a:gsLst><a:lin ang=\"5400000\" scaled=\"0\"/></a:gradFill>"
+        + "</a:bgFillStyleLst>"
+        + "</a:fmtScheme>";
 }

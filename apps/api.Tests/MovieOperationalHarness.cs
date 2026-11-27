@@ -99,7 +99,8 @@ public static class MovieOperationalFixtures
         MovieOperationalDiagnostics? diagnostics = null,
         string title = "Operational E2E Feature",
         bool lastSeedStory = false,
-        int? sceneDurationSeconds = null)
+        int? sceneDurationSeconds = null,
+        int projectDurationSeconds = 30)
     {
         var storyPremise = lastSeedStory
             ? "A young farmer must protect the last seed through drought until the first rain."
@@ -133,7 +134,7 @@ public static class MovieOperationalFixtures
             mode = MovieProjectModes.Full,
             title,
             description = "A deterministic operational Movie V2 journey.",
-            durationSeconds = 30,
+            durationSeconds = projectDurationSeconds,
             aspectRatio = "16:9",
             style = "cinematic",
             language = "en",
@@ -435,6 +436,7 @@ public sealed class MovieOperationalE2ETests : IClassFixture<MovieOperationalApi
         Assert.NotNull(persistedClip);
         Assert.Equal(generated.Job.Id, persistedClip.GenerationJobId);
         Assert.NotNull(persistedClip.AssetId);
+        Assert.Equal(1, persistedClip.DurationSeconds);
 
         var take = await MovieOperationalFixtures.PostAsync<MovieV2TakeDto>(client,
             $"/api/movie-studio/shots/{fixture.Shot.Id}/takes", new
