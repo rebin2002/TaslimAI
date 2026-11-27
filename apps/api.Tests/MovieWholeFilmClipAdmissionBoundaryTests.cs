@@ -178,6 +178,31 @@ public sealed class MovieWholeFilmClipAdmissionBoundaryTests : IDisposable
         Assert.Equal(0, plainFactory.Calls.Calls(FakeProviderKind.Movie));
     }
 
+    [Fact]
+    public async Task LegacyLongSceneWithoutExplicitShotDurationReachesReadOnlyProductionPreflight()
+    {
+        using var client = plainFactory.CreateClient();
+        var fixture = await MovieOperationalFixtures.CreateFullMovieAsync(client, title: "Legacy long scene preflight");
+        using var scope = plainFactory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        var scene = await db.MovieScenes.SingleAsync(item => item.Id == fixture.Scene.Id);
+        var shot = await db.MovieShots.SingleAsync(item => item.Id == fixture.Shot.Id);
+        scene.DurationSeconds = ApprovedWholeFilmSeconds;
+        shot.DurationSeconds = null;
+        await db.SaveChangesAsync();
+        var usageBefore = await db.UsageTransactions.CountAsync();
+
+        using var response = await client.GetAsync($"/api/movie-studio/shots/{fixture.Shot.Id}/production/preflight?confirmationAccepted=true");
+        var body = await response.Content.ReadAsStringAsync();
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.NotEmpty(body);
+        Assert.False(await db.MovieClips.AnyAsync(item => item.MovieProjectId == fixture.Project.Project.Id));
+        Assert.False(await db.GenerationJobs.AnyAsync(item => item.WorkspaceId == fixture.Owner.PersonalWorkspace.Id));
+        Assert.Equal(usageBefore, await db.UsageTransactions.CountAsync());
+        Assert.Equal(0, plainFactory.Calls.Calls(FakeProviderKind.Movie));
+    }
+
     [Theory]
     [InlineData(7_201)]
     [InlineData(10_800)]
