@@ -33,10 +33,23 @@ public sealed class CheckoutSessionService(
             return new(false, null, null, "CHECKOUT_DISABLED", "Customer charging is intentionally disabled.");
         }
 
+        // The session is persisted with a trimmed key, so the replay lookup must compare the
+        // same normalized value. Comparing the raw request here let a replay that differed
+        // only by surrounding whitespace miss the recorded session and collide with the unique
+        // (WorkspaceId, IdempotencyKey) index, and it let a blank key be stored as an empty
+        // value that no later request could ever match. Fail closed before any write or
+        // provider call when no replay-safe key exists.
+        var normalizedIdempotencyKey = (idempotencyKey ?? string.Empty).Trim();
+        if (normalizedIdempotencyKey.Length == 0)
+        {
+            logger.LogWarning("Checkout request rejected because no replay-safe idempotency key was supplied. WorkspaceId={WorkspaceId}; PlanCode={PlanCode}", workspaceId, planCode);
+            return new(false, null, null, "CHECKOUT_IDEMPOTENCY_KEY_REQUIRED", "An idempotency key is required to keep checkout requests replay-safe.");
+        }
+
         var plan = await db.Plans.SingleOrDefaultAsync(item => item.Code == planCode && item.IsActive, cancellationToken)
             ?? throw new InvalidOperationException("The requested billing plan is not available.");
         var existing = await db.CheckoutSessions.SingleOrDefaultAsync(
-            item => item.WorkspaceId == workspaceId && item.IdempotencyKey == idempotencyKey,
+            item => item.WorkspaceId == workspaceId && item.IdempotencyKey == normalizedIdempotencyKey,
             cancellationToken);
         if (existing is not null)
         {
@@ -57,7 +70,7 @@ public sealed class CheckoutSessionService(
         var session = new CheckoutSession
         {
             Id = Guid.NewGuid(), WorkspaceId = workspaceId, PlanId = plan.Id, Provider = provider.Key,
-            Status = CheckoutSessionStatus.Created, IdempotencyKey = idempotencyKey.Trim(), Currency = plan.Currency,
+            Status = CheckoutSessionStatus.Created, IdempotencyKey = normalizedIdempotencyKey, Currency = plan.Currency,
             Amount = plan.MonthlyPriceUsd, CreatedAt = now, ExpiresAt = now.AddMinutes(30),
         };
         db.CheckoutSessions.Add(session);
@@ -70,7 +83,7 @@ public sealed class CheckoutSessionService(
                 .Select(item => item.ProviderCustomerReferenceValue)
                 .FirstOrDefaultAsync(cancellationToken);
             var result = await provider.CreateCheckoutSessionAsync(
-                new(idempotencyKey, plan.Code, plan.MonthlyPriceUsd, plan.Currency, customerReference, successUrl, cancelUrl),
+                new(normalizedIdempotencyKey, plan.Code, plan.MonthlyPriceUsd, plan.Currency, customerReference, successUrl, cancelUrl),
                 cancellationToken);
             session.ProviderSessionReference = result.ProviderSessionReference;
             session.Status = CheckoutSessionStatus.Open;
