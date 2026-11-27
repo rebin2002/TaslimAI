@@ -90,6 +90,32 @@ public sealed class ImageGenerationAvailabilityTests : IClassFixture<GenerationJ
             transaction.WorkspaceId == auth.PersonalWorkspace.Id && transaction.Feature == UsageFeature.Image));
     }
 
+    [Fact]
+    public async Task Invalid_image_request_is_validated_before_unavailable_provider_response()
+    {
+        using var client = providerUnavailableFactory.CreateClient();
+        var auth = await Register(client, $"image-provider-validation-order-{Guid.NewGuid():N}@example.com");
+        var response = await SendWithCsrf(client, new
+        {
+            workspaceId = auth.PersonalWorkspace.Id,
+            description = "A product image",
+            style = "unsupported-style",
+            aspectRatio = "square",
+            quality = "standard",
+        });
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        var body = await response.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal("IMAGE_STYLE_UNSUPPORTED", body.GetProperty("error").GetProperty("code").GetString());
+
+        using var scope = providerUnavailableFactory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        Assert.False(await db.GenerationJobs.AsNoTracking().AnyAsync(job =>
+            job.WorkspaceId == auth.PersonalWorkspace.Id && job.JobType == GenerationJobTypes.ImageGenerate));
+        Assert.False(await db.UsageTransactions.AsNoTracking().AnyAsync(transaction =>
+            transaction.WorkspaceId == auth.PersonalWorkspace.Id && transaction.Feature == UsageFeature.Image));
+    }
+
     private static async Task<AuthResponse> Register(HttpClient client, string email)
     {
         var csrf = await client.GetFromJsonAsync<JsonElement>("/api/auth/csrf");
