@@ -282,7 +282,7 @@ public sealed class DocumentPreviewDownloadIdentityRebindTests : IClassFixture<D
         return envelope;
     }
 
-    private async Task<CreateDocumentGenerationResponse> CreateJob(HttpClient client, Guid workspaceId, string title)
+    private async Task<CreateDocumentGenerationResponse> CreateJob(HttpClient client, Guid workspaceId, string title, string? idempotencyKey = null)
     {
         var response = await SendWithCsrf(client, HttpMethod.Post, "/api/document-generation/jobs", new
         {
@@ -294,7 +294,7 @@ public sealed class DocumentPreviewDownloadIdentityRebindTests : IClassFixture<D
             tone = "professional",
             outputFormat = "both",
             attachmentIds = Array.Empty<Guid>(),
-        });
+        }, idempotencyKey ?? DocumentTestRequests.NewKey());
         Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
         return (await response.Content.ReadFromJsonAsync<CreateDocumentGenerationResponse>())!;
     }
@@ -325,11 +325,12 @@ public sealed class DocumentPreviewDownloadIdentityRebindTests : IClassFixture<D
         return (await response.Content.ReadFromJsonAsync<AuthResponse>())!;
     }
 
-    private static async Task<HttpResponseMessage> SendWithCsrf(HttpClient client, HttpMethod method, string path, object? payload)
+    private static async Task<HttpResponseMessage> SendWithCsrf(HttpClient client, HttpMethod method, string path, object? payload, string? idempotencyKey = null)
     {
         var csrf = await client.GetFromJsonAsync<JsonElement>("/api/auth/csrf");
         using var request = new HttpRequestMessage(method, path);
         request.Headers.Add("X-CSRF-TOKEN", csrf.GetProperty("token").GetString()!);
+        if (idempotencyKey is not null) request.Headers.Add(DocumentTestRequests.IdempotencyHeader, idempotencyKey);
         if (payload is not null) request.Content = JsonContent.Create(payload);
         return await client.SendAsync(request);
     }

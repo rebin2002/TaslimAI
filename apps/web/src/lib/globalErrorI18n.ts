@@ -10,16 +10,7 @@ const languageToLocale: Record<string, Locale> = {
 
 function localeFromDocumentLanguage(language: string | null | undefined) {
   const normalized = language?.trim().toLowerCase();
-  if (!normalized) return null;
-
-  const exact = languageToLocale[normalized];
-  if (exact) return exact;
-
-  const baseLanguage = normalized.split("-")[0];
-  // The app's `ku` alias is broad; only exact `ku` or specific `ckb` tags
-  // identify the supported Sorani catalog without risking another variety.
-  if (baseLanguage === "ku") return null;
-  return languageToLocale[baseLanguage] ?? null;
+  return normalized ? languageToLocale[normalized] ?? null : null;
 }
 
 /**

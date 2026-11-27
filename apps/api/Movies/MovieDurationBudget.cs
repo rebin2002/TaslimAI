@@ -25,12 +25,19 @@ public static class MovieDurationBudgetDiagnosticSeverities
 /// </summary>
 public static class MovieDurationBudgetPolicy
 {
-    public const int MaxMovieDurationSeconds = 24 * 60 * 60;
+    public const int MaxMovieDurationSeconds = 120 * 60;
     public const int MaxSceneDurationSeconds = 24 * 60 * 60;
     public const int MaxShotDurationSeconds = 60 * 60;
+    public const string SingleClipDurationUnsupportedCode = "MOVIE_CLIP_DURATION_UNSUPPORTED";
     public const decimal ToleranceFraction = 0.02m;
     public const int MinimumToleranceSeconds = 1;
     public const int MaximumToleranceSeconds = 10;
+
+    public static bool IsSupportedSingleClipDuration(int durationSeconds) =>
+        durationSeconds is >= 1 and <= MaxShotDurationSeconds;
+
+    public static string SingleClipDurationUnsupportedMessage =>
+        $"A single Movie generation clip must be between 1 and {MaxShotDurationSeconds} seconds; split long-form work into provider-supported clips.";
 
     public static int ToleranceSecondsFor(long durationSeconds)
     {
@@ -173,7 +180,7 @@ public static class MovieDurationBudgetValidator
                 }
 
                 var shots = scene.Shots ?? [];
-                if (shots.Count == 0)
+                if (!shots.Any(item => item is not null && !item.Archived))
                 {
                     sceneDiagnostics.Add(Error("shots_missing", $"{scenePath}.shots", "At least one active shot is required to verify a scene runtime."));
                     sceneIncomplete = true;

@@ -168,12 +168,13 @@ vi.mock("next/link", async () => {
 // call would re-fire the workspace-keyed load effect on every render, so the
 // mount would never settle.
 const stable = vi.hoisted(() => ({
+  user: { id: "synthetic-test-user" },
   workspace: { id: "workspace-1", name: "Kurdistan Institute" },
   localeContext: { locale: "en", t: (key: string) => key },
 }));
 
 vi.mock("@/components/AuthProvider", () => ({
-  useAuth: () => ({ workspace: stable.workspace }),
+  useAuth: () => ({ user: stable.user, workspace: stable.workspace }),
 }));
 
 vi.mock("@/components/LocaleProvider", () => ({
