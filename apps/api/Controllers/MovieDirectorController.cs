@@ -21,9 +21,23 @@ public sealed class MovieDirectorController(IMovieDirectorService director, IMov
     public IActionResult CreateSalvagePlan(MovieSalvageDirectorRequest request)
     {
         if (!TryGetUserId(out _)) return Unauthorized();
-        try { return Ok(salvage.Plan(request)); }
-        catch (ArgumentNullException exception) { return ApiResults.Error(this, 400, "MOVIE_SALVAGE_REQUEST_INVALID", exception.Message); }
-        catch (ArgumentException exception) { return ApiResults.Error(this, 400, "MOVIE_SALVAGE_REQUEST_INVALID", exception.Message); }
+        if (request?.Context is null)
+        {
+            return ApiResults.Error(this, 400, "MOVIE_SALVAGE_REQUEST_INVALID", "The salvage plan request must include an edit context.");
+        }
+        try
+        {
+            return Ok(salvage.Plan(request));
+        }
+        catch (ArgumentException)
+        {
+            // ArgumentNullException and its peers carry framework guard text such as
+            // "Value cannot be null. (Parameter 'request.Context')". That detail names internal
+            // members and has no client value, so it is never echoed: the response keeps the
+            // repo's stable {error:{code,message}} envelope with a product-safe message,
+            // consistent with every other curated API rejection.
+            return ApiResults.Error(this, 400, "MOVIE_SALVAGE_REQUEST_INVALID", "The salvage plan request could not be understood.");
+        }
     }
 
     [HttpPost("projects/{movieProjectId:guid}/proposals")]
