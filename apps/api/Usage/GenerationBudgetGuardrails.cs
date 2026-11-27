@@ -44,6 +44,9 @@ public static class GenerationBudgetGuardrail
         GenerationBudgetSnapshot snapshot,
         GenerationBudgetOptions options)
     {
+        // An unrepresentable Movie price cannot be authorized by an optional budget policy.
+        if (estimate.UnknownReason == MovieGenerationCostEstimateReasons.ArithmeticOverflow)
+            return GenerationBudgetDecision.Reject("COST_ESTIMATE_UNKNOWN", "The provider cost could not be estimated safely.");
         if (!options.Enabled) return GenerationBudgetDecision.Allow();
         if (!estimate.IsKnown || !estimate.AmountUsd.HasValue)
         {

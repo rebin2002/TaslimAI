@@ -1,7 +1,7 @@
+using System.Data.Common;
 using System.Text.Json;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
-using Microsoft.EntityFrameworkCore.ChangeTracking;
 using Microsoft.EntityFrameworkCore.Diagnostics;
 using Taslim.Api.Authorization;
 using Taslim.Api.Contracts;
@@ -94,6 +94,15 @@ public sealed class MovieFinalAssemblyQueueLinkRecoveryTests
         Assert.Equal(MovieAssemblyStatuses.Queued, repaired.Status);
         Assert.Null(repaired.LastErrorCode);
         Assert.Equal(stranded.GenerationJobId, repaired.GenerationJobId);
+
+        // A later SaveChanges in this request cannot undo a worker's newer state.
+        await fixture.Db.MovieAssemblies.Where(row => row.Id == repaired.Id).ExecuteUpdateAsync(set => set
+            .SetProperty(row => row.Status, MovieAssemblyStatuses.Assembling)
+            .SetProperty(row => row.ProgressPercent, 20));
+        await fixture.Db.SaveChangesAsync();
+        var advanced = await fixture.Db.MovieAssemblies.AsNoTracking().SingleAsync(row => row.Id == repaired.Id);
+        Assert.Equal(MovieAssemblyStatuses.Assembling, advanced.Status);
+        Assert.Equal(20, advanced.ProgressPercent);
 
         // The pre-existing committed job row is the canonical one: nothing new is queued and
         // nothing is published twice.
@@ -250,37 +259,20 @@ public sealed class MovieFinalAssemblyQueueLinkRecoveryTests
     /// committed job and lets every other write proceed, so the injected fault is a transient
     /// link failure rather than a dead database.
     /// </summary>
-    private sealed class AssemblyLinkWriteFault(int budget) : SaveChangesInterceptor
+    private sealed class AssemblyLinkWriteFault(int budget) : DbCommandInterceptor
     {
         public int FaultedLinkWrites { get; private set; }
 
-        public override InterceptionResult<int> SavingChanges(DbContextEventData eventData, InterceptionResult<int> result)
+        public override ValueTask<InterceptionResult<int>> NonQueryExecutingAsync(DbCommand command,
+            CommandEventData eventData, InterceptionResult<int> result, CancellationToken cancellationToken = default)
         {
-            InjectFault(eventData.Context);
-            return base.SavingChanges(eventData, result);
-        }
-
-        public override ValueTask<InterceptionResult<int>> SavingChangesAsync(DbContextEventData eventData, InterceptionResult<int> result, CancellationToken cancellationToken = default)
-        {
-            InjectFault(eventData.Context);
-            return base.SavingChangesAsync(eventData, result, cancellationToken);
-        }
-
-        private void InjectFault(DbContext? context)
-        {
-            if (context is null || FaultedLinkWrites >= budget) return;
-            if (!context.ChangeTracker.Entries<MovieAssembly>().Any(IsLinkWrite)) return;
-            FaultedLinkWrites++;
-            throw new DbUpdateException(
-                "Simulated transient failure while linking the durable final-assembly row to its committed job.",
-                new IOException("Simulated transient database write failure (issue #696 fault injection)."));
-        }
-
-        private static bool IsLinkWrite(EntityEntry<MovieAssembly> entry)
-        {
-            if (entry.State != EntityState.Modified) return false;
-            if (entry.Entity.GenerationJobId is null) return false;
-            return entry.Property<Guid?>(nameof(MovieAssembly.GenerationJobId)).OriginalValue is null;
+            if (FaultedLinkWrites < budget && command.CommandText.StartsWith("UPDATE \"MovieAssemblies\"", StringComparison.Ordinal)
+                && command.CommandText.Contains("\"GenerationJobId\" =", StringComparison.Ordinal))
+            {
+                FaultedLinkWrites++;
+                throw new IOException("Simulated transient failure linking the final assembly to its committed job.");
+            }
+            return base.NonQueryExecutingAsync(command, eventData, result, cancellationToken);
         }
     }
 
