@@ -11,11 +11,14 @@ using Xunit;
 
 namespace Taslim.Api.Tests;
 
-public sealed class ActivityCenterTests : IClassFixture<GenerationJobsNoWorkerFactory>
+public sealed class ActivityCenterTests : IClassFixture<DocumentEnabledNoWorkerFactory>
 {
-    private readonly GenerationJobsNoWorkerFactory factory;
+    // This fixture projects an existing document.generate job, so it opts into
+    // Document Studio explicitly: the generic Generation Job route rejects that
+    // job type while the Document kill switch is off.
+    private readonly DocumentEnabledNoWorkerFactory factory;
 
-    public ActivityCenterTests(GenerationJobsNoWorkerFactory factory)
+    public ActivityCenterTests(DocumentEnabledNoWorkerFactory factory)
     {
         this.factory = factory;
         using var scope = factory.Services.CreateScope();
@@ -89,6 +92,85 @@ public sealed class ActivityCenterTests : IClassFixture<GenerationJobsNoWorkerFa
         Assert.DoesNotContain("model", json, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("storage", json, StringComparison.OrdinalIgnoreCase);
         Assert.Equal(created.Id, Guid.Parse(JsonDocument.Parse(json).RootElement.GetProperty("items")[0].GetProperty("jobId").GetString()!));
+    }
+
+    [Fact]
+    public async Task Activity_hides_creator_private_research_records_from_workspace_members()
+    {
+        using var ownerClient = factory.CreateClient();
+        var owner = await Register(ownerClient, $"activity-research-owner-{Guid.NewGuid():N}@example.com");
+        using var memberClient = factory.CreateClient();
+        var member = await Register(memberClient, $"activity-research-member-{Guid.NewGuid():N}@example.com");
+        var jobId = Guid.NewGuid();
+        var assetId = Guid.NewGuid();
+        var now = DateTime.UtcNow;
+
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            db.WorkspaceMembers.Add(new WorkspaceMember
+            {
+                Id = Guid.NewGuid(),
+                WorkspaceId = owner.PersonalWorkspace.Id,
+                UserId = member.User.Id,
+                Role = WorkspaceRole.Member,
+                JoinedAt = now,
+            });
+            db.GenerationJobs.Add(new GenerationJob
+            {
+                Id = jobId,
+                WorkspaceId = owner.PersonalWorkspace.Id,
+                CreatedByUserId = owner.User.Id,
+                JobType = GenerationJobTypes.ResearchGenerate,
+                Status = GenerationJobStatus.Succeeded,
+                Title = "Creator-private research title",
+                InputJson = "{\"private\":true}",
+                ProgressPercent = 100,
+                CreatedAt = now,
+                CompletedAt = now,
+                ConcurrencyToken = Guid.NewGuid(),
+            });
+            db.Assets.Add(new Asset
+            {
+                Id = assetId,
+                WorkspaceId = owner.PersonalWorkspace.Id,
+                CreatedByUserId = owner.User.Id,
+                SourceGenerationJobId = jobId,
+                Name = "Creator-private research asset",
+                AssetType = AssetTypes.File,
+                Status = AssetStatus.Active,
+                CreatedAt = now,
+                UpdatedAt = now,
+            });
+            await db.SaveChangesAsync();
+        }
+
+        var list = await memberClient.GetFromJsonAsync<ActivityListDto>($"/api/activity?workspaceId={owner.PersonalWorkspace.Id}");
+        Assert.NotNull(list);
+        Assert.Empty(list!.Items);
+        Assert.Equal(0, list.UnreadCount);
+        var memberJson = await memberClient.GetStringAsync($"/api/activity?workspaceId={owner.PersonalWorkspace.Id}");
+        Assert.DoesNotContain(jobId.ToString(), memberJson, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(assetId.ToString(), memberJson, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("Creator-private research title", memberJson, StringComparison.Ordinal);
+
+        var unread = await memberClient.GetFromJsonAsync<JsonElement>($"/api/activity/unread-count?workspaceId={owner.PersonalWorkspace.Id}");
+        Assert.Equal(0, unread.GetProperty("unreadCount").GetInt32());
+
+        var read = await SendWithCsrf(memberClient, HttpMethod.Post, $"/api/activity/{jobId}/read", new { workspaceId = owner.PersonalWorkspace.Id });
+        Assert.Equal(HttpStatusCode.Forbidden, read.StatusCode);
+
+        var readAll = await SendWithCsrf(memberClient, HttpMethod.Post, "/api/activity/read-all", new { workspaceId = owner.PersonalWorkspace.Id });
+        Assert.Equal(HttpStatusCode.OK, readAll.StatusCode);
+        using var verificationScope = factory.Services.CreateScope();
+        var verificationDb = verificationScope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        Assert.False(await verificationDb.ActivityReadStates.AnyAsync(item => item.UserId == member.User.Id && item.GenerationJobId == jobId));
+
+        var ownerList = await ownerClient.GetFromJsonAsync<ActivityListDto>($"/api/activity?workspaceId={owner.PersonalWorkspace.Id}");
+        var ownerItem = Assert.Single(ownerList!.Items);
+        Assert.Equal(jobId, ownerItem.JobId);
+        Assert.Equal(assetId, ownerItem.AssetId);
+        Assert.Equal("Creator-private research title", ownerItem.Title);
     }
 
     [Fact]

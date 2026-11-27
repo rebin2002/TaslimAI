@@ -128,6 +128,12 @@ describe("useDialogAccessibility focusability filter (independent review finding
     getAttribute(name: string): string | null {
       return this.attrs.get(name) ?? null;
     }
+    hasAttribute(name: string): boolean {
+      return this.attrs.has(name);
+    }
+    contains(element: FakeElement): boolean {
+      return this === element || this.children.some((child) => child.contains(element));
+    }
     matches(matcher: string): boolean {
       if (matcher === "[hidden]" && this.attrs.has("hidden")) return true;
       if (matcher === '[aria-hidden="true"]' && this.attrs.get("aria-hidden") === "true") return true;
@@ -231,6 +237,56 @@ describe("useDialogAccessibility focusability filter (independent review finding
     expect(evaluate(hiddenInput)).toBe(false);
   });
 
+  it("exempts only controls inside each disabled fieldset's first direct legend", () => {
+    const outer = new FakeElement("FIELDSET").set("disabled");
+    const firstLegend = new FakeElement("LEGEND");
+    const firstLegendButton = probe("first-legend-button");
+    firstLegendButton.checkVisibilityValue = true;
+    firstLegend.append(firstLegendButton);
+    outer.append(firstLegend);
+
+    const laterLegend = new FakeElement("LEGEND");
+    const laterLegendButton = probe("later-legend-button");
+    laterLegendButton.checkVisibilityValue = true;
+    laterLegend.append(laterLegendButton);
+    outer.append(laterLegend);
+    const outsideLegendButton = probe("outside-legend-button");
+    outsideLegendButton.checkVisibilityValue = true;
+    outer.append(outsideLegendButton);
+
+    expect(evaluate(firstLegendButton)).toBe(true);
+    expect(evaluate(laterLegendButton)).toBe(false);
+    expect(evaluate(outsideLegendButton)).toBe(false);
+  });
+
+  it("applies nested disabled fieldsets independently, including their own first-legend exception", () => {
+    const outer = new FakeElement("FIELDSET").set("disabled");
+    const outerLegend = new FakeElement("LEGEND");
+    outer.append(outerLegend);
+    const nestedInsideOuterLegend = new FakeElement("FIELDSET").set("disabled");
+    outerLegend.append(nestedInsideOuterLegend);
+    const nestedFirstLegend = new FakeElement("LEGEND");
+    nestedInsideOuterLegend.append(nestedFirstLegend);
+    const doublyExempt = probe("nested-first-legend");
+    doublyExempt.checkVisibilityValue = true;
+    nestedFirstLegend.append(doublyExempt);
+    const nestedOutsideFirstLegend = probe("nested-after-legend");
+    nestedOutsideFirstLegend.checkVisibilityValue = true;
+    nestedInsideOuterLegend.append(nestedOutsideFirstLegend);
+
+    const nestedOutsideOuterLegend = new FakeElement("FIELDSET").set("disabled");
+    outer.append(nestedOutsideOuterLegend);
+    const innerLegend = new FakeElement("LEGEND");
+    nestedOutsideOuterLegend.append(innerLegend);
+    const blockedByOuter = probe("nested-inner-legend");
+    blockedByOuter.checkVisibilityValue = true;
+    innerLegend.append(blockedByOuter);
+
+    expect(evaluate(doublyExempt)).toBe(true);
+    expect(evaluate(nestedOutsideFirstLegend)).toBe(false);
+    expect(evaluate(blockedByOuter)).toBe(false);
+  });
+
   it("excludes negative tabindex values", () => {
     const minusOne = probe("minus-one");
     minusOne.set("tabindex", "-1");
@@ -280,6 +336,22 @@ describe("useDialogAccessibility multi-instance stack gating", () => {
   // answer a document-level key now, which makes both failure modes
   // structurally impossible.
   const makeHandle = () => ({ token: Symbol("dialog") });
+  it("keeps the nested dialog on top when both layout effects mount together", () => {
+    const innerElement = { contains: () => false } as unknown as HTMLElement;
+    const outerElement = { contains: (element: HTMLElement) => element === innerElement } as unknown as HTMLElement;
+    const outer = { token: Symbol("outer"), element: outerElement };
+    const inner = { token: Symbol("inner"), element: innerElement };
+    openDialog(inner);
+    openDialog(outer);
+    try {
+      expect(shouldHandleDialogKey(inner, "Escape")).toBe(true);
+      expect(shouldHandleDialogKey(outer, "Tab")).toBe(false);
+    } finally {
+      closeDialog(inner);
+      closeDialog(outer);
+    }
+  });
+
   it("admits each open instance once and keeps a single top of stack", () => {
     const first = makeHandle();
     const second = makeHandle();

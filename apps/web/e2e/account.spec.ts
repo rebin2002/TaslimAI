@@ -52,7 +52,18 @@ test.describe("account profile persistence", () => {
 
     await page.locator(".account-control-grid select").first().selectOption("zh-CN");
     await page.locator(".account-control-grid select").nth(1).selectOption("ar");
+
+    // `click()` only dispatches the async submit handler, so the profile PATCH is
+    // still in flight when it resolves. The trace of run 45026956326 (job
+    // 137222534011, attempt 1) issued the GET below 13 ms after the click and
+    // 8.8 ms before the PATCH committed (21.7 ms, HTTP 200), so the first attempt
+    // legitimately read the pre-save "en" row and only passed after a retry.
+    // Wait for the save response before asserting on persisted state.
+    const saveCommitted = page.waitForResponse((response) =>
+      response.request().method() === "PATCH" && response.url().includes("/api/auth/profile"),
+    );
     await page.locator(".account-profile-card button.primary-button").click();
+    expect((await saveCommitted).ok()).toBe(true);
 
     const saved = await apiJson<AuthResponse>(page.request, "GET", "/api/auth/me");
     expect(saved.user.preferredLanguage).toBe("zh-CN");

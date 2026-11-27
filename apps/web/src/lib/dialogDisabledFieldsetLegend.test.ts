@@ -8,8 +8,7 @@ import { describe, expect, it } from "vitest";
 // cases hold the boundary with two legends and with a nested fieldset, in the
 // same dependency-free style as the adopted #1226 contract suite, so the
 // exemption cannot silently widen again. The fixture below is a real DOM shape,
-// not a selector stub: the hook only asks for `closest`, `parentElement`,
-// `tagName`, `children` and rendering state.
+// not a selector stub: parent, child and containment relationships follow the element tree.
 
 class FakeElement {
   tagName: string;
@@ -33,6 +32,12 @@ class FakeElement {
     child.parent = this;
     this.children.push(child);
     return this;
+  }
+  hasAttribute(name: string): boolean {
+    return this.attrs.has(name);
+  }
+  contains(element: FakeElement): boolean {
+    return this === element || this.children.some((child) => child.contains(element));
   }
   getAttribute(name: string): string | null {
     return this.attrs.get(name) ?? null;

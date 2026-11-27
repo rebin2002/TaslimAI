@@ -5,6 +5,7 @@ using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
 using Taslim.Api.Contracts;
 using Taslim.Api.Domain;
+using Taslim.Api.Files;
 using Taslim.Api.Infrastructure;
 using Taslim.Api.Persistence;
 
@@ -100,13 +101,16 @@ public sealed class GlobalSearchController(TaslimDbContext db) : ControllerBase
         // Keep asset search aligned with the asset-library privacy boundary:
         // project assets are shared only when their backing file is also
         // workspace-shareable; personal and conversation-backed assets remain
-        // visible only to their creator. Since #936 the asset-library boundary is
-        // AssetVisibility.ForWorkspaceMember, which additionally keeps project-shared
-        // Research report assets creator-private; the same provenance guard is mirrored
-        // here so search cannot disclose report metadata to co-members (#1042).
+        // visible only to their creator. Generated Research report assets with a
+        // ResearchGenerate source job are creator-private; mirror that provenance check
+        // here so search cannot disclose report metadata to co-members (#1042). Other
+        // Research-typed project assets retain their existing sharing behavior.
         var assetQuery = db.Assets.AsNoTracking()
             .Where(asset => workspaceIds.Contains(asset.WorkspaceId)
-                && (asset.AssetType != AssetTypes.Research || asset.CreatedByUserId == userId)
+                && (asset.AssetType != AssetTypes.Research
+                    || asset.SourceGenerationJobId == null
+                    || asset.SourceGenerationJob!.JobType != GenerationJobTypes.ResearchGenerate
+                    || asset.CreatedByUserId == userId)
                 && (asset.CreatedByUserId == userId
                     || (asset.ProjectId.HasValue && asset.Project != null && asset.Project.WorkspaceId == asset.WorkspaceId))
                 && (asset.CreatedByUserId == userId
@@ -137,19 +141,15 @@ public sealed class GlobalSearchController(TaslimDbContext db) : ControllerBase
         var assets = await LoadPageAsync(assetQuery, currentPage, perType, cancellationToken);
         AddGroup(groups, GlobalSearchResultTypes.Asset, assets, currentPage, perType);
 
-        // Project files are workspace-shared; personal and conversation-scoped
-        // files remain private to their uploader, even when a conversation also
-        // belongs to a project.
+        // Apply the same file visibility boundary as list/detail, including
+        // creator-private Research report backing files.
         var fileQuery = db.StoredFiles.AsNoTracking()
             .Where(file => workspaceIds.Contains(file.WorkspaceId)
                 && file.Status != StoredFileStatus.Deleted
-                && (file.UserId == userId
-                    || (file.ProjectId != null
-                        && file.ConversationId == null
-                        && file.Project != null
-                        && file.Project.WorkspaceId == file.WorkspaceId))
                 && (file.OriginalFileName.ToLower().Contains(search)
                     || (file.ExtractedText != null && file.ExtractedText.ToLower().Contains(search))))
+            .Where(StoredFileVisibility.ForWorkspaceMember(userId))
+            .Where(StoredFileVisibility.IsNotResearchReportOwnedByAnotherMember(userId))
             .OrderByDescending(file => file.CreatedAt)
             .ThenByDescending(file => file.Id)
             .Select(file => new GlobalSearchResultDto(

@@ -3,8 +3,10 @@ using System.Net.Http.Json;
 using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
+using Taslim.Api.Assets;
 using Taslim.Api.Contracts;
 using Taslim.Api.Domain;
+using Taslim.Api.Files;
 using Taslim.Api.Persistence;
 using Xunit;
 
@@ -41,6 +43,7 @@ public sealed class ResearchReportSurfaceBoundaryTests : IClassFixture<TaslimApi
 
         Guid reportAssetId;
         Guid sharedAssetId;
+        Guid manualResearchAssetId;
         using (var scope = factory.Services.CreateScope())
         {
             var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
@@ -55,13 +58,18 @@ public sealed class ResearchReportSurfaceBoundaryTests : IClassFixture<TaslimApi
 
             var now = DateTime.UtcNow;
             // Backing files are project-shared (no conversation), so the pre-existing
-            // stored-file clause lets both assets through; only the #936 provenance
-            // guard can discriminate. The shared File asset is the positive control.
+            // stored-file clause lets all assets through. The report is linked to a
+            // ResearchGenerate job as in normal publication; the manually-created
+            // Research asset is a positive control for non-job Research sharing.
             var reportFile = NewReadyFile(ownerAuth.PersonalWorkspace.Id, ownerAuth.User.Id, now, project.Id);
             var sharedFile = NewReadyFile(ownerAuth.PersonalWorkspace.Id, ownerAuth.User.Id, now, project.Id);
-            db.StoredFiles.AddRange(reportFile, sharedFile);
+            var manualResearchFile = NewReadyFile(ownerAuth.PersonalWorkspace.Id, ownerAuth.User.Id, now, project.Id);
+            var reportJob = NewResearchJob(ownerAuth.PersonalWorkspace.Id, project.Id, ownerAuth.User.Id, now);
+            db.StoredFiles.AddRange(reportFile, sharedFile, manualResearchFile);
+            db.GenerationJobs.Add(reportJob);
             reportAssetId = Guid.NewGuid();
             sharedAssetId = Guid.NewGuid();
+            manualResearchAssetId = Guid.NewGuid();
             db.Assets.AddRange(
                 new Asset
                 {
@@ -70,9 +78,24 @@ public sealed class ResearchReportSurfaceBoundaryTests : IClassFixture<TaslimApi
                     ProjectId = project.Id,
                     CreatedByUserId = ownerAuth.User.Id,
                     StoredFileId = reportFile.Id,
+                    SourceGenerationJobId = reportJob.Id,
                     Name = "Surface convergence marker report",
                     AssetType = AssetTypes.Research,
                     MimeType = reportFile.ContentType,
+                    Status = AssetStatus.Active,
+                    CreatedAt = now,
+                    UpdatedAt = now,
+                },
+                new Asset
+                {
+                    Id = manualResearchAssetId,
+                    WorkspaceId = ownerAuth.PersonalWorkspace.Id,
+                    ProjectId = project.Id,
+                    CreatedByUserId = ownerAuth.User.Id,
+                    StoredFileId = manualResearchFile.Id,
+                    Name = "Surface convergence marker manual research asset",
+                    AssetType = AssetTypes.Research,
+                    MimeType = manualResearchFile.ContentType,
                     Status = AssetStatus.Active,
                     CreatedAt = now,
                     UpdatedAt = now,
@@ -103,6 +126,7 @@ public sealed class ResearchReportSurfaceBoundaryTests : IClassFixture<TaslimApi
             .ToHashSet();
         Assert.Contains(reportAssetId, ownerAssetIds);
         Assert.Contains(sharedAssetId, ownerAssetIds);
+        Assert.Contains(manualResearchAssetId, ownerAssetIds);
 
         var memberSearch = await member.GetFromJsonAsync<GlobalSearchResponseDto>("/api/search?q=surface%20convergence%20marker");
         Assert.NotNull(memberSearch);
@@ -112,7 +136,112 @@ public sealed class ResearchReportSurfaceBoundaryTests : IClassFixture<TaslimApi
             .Select(item => item.Id)
             .ToHashSet();
         Assert.Contains(sharedAssetId, memberAssetIds);
+        Assert.Contains(manualResearchAssetId, memberAssetIds);
         Assert.DoesNotContain(reportAssetId, memberAssetIds);
+    }
+
+    [Fact]
+    public async Task Report_backing_file_metadata_is_creator_private_across_file_surfaces_but_shared_files_remain_visible()
+    {
+        using var owner = factory.CreateClient();
+        var ownerAuth = await (await Register(owner, "Backing File Owner", $"backing-file-owner-{Guid.NewGuid():N}@example.com"))
+            .Content.ReadFromJsonAsync<AuthResponse>();
+        Assert.NotNull(ownerAuth);
+        var project = await SendWithCsrf<ProjectDto>(owner, HttpMethod.Post, $"/api/workspaces/{ownerAuth!.PersonalWorkspace.Id}/projects", new { name = "Backing file privacy project" });
+
+        using var member = factory.CreateClient();
+        var memberAuth = await (await Register(member, "Backing File Member", $"backing-file-member-{Guid.NewGuid():N}@example.com"))
+            .Content.ReadFromJsonAsync<AuthResponse>();
+        Assert.NotNull(memberAuth);
+
+        var marker = $"report-backing-{Guid.NewGuid():N}";
+        var now = DateTime.UtcNow;
+        var reportFile = NewReadyFile(ownerAuth.PersonalWorkspace.Id, ownerAuth.User.Id, now, project.Id);
+        reportFile.OriginalFileName = $"{marker}-research-report.pdf";
+        reportFile.StoredFileName = $"{Guid.NewGuid():N}.pdf";
+        reportFile.ContentType = "application/pdf";
+        reportFile.Extension = ".pdf";
+        var privateReportFile = NewReadyFile(ownerAuth.PersonalWorkspace.Id, ownerAuth.User.Id, now, project.Id);
+        privateReportFile.ProjectId = null;
+        privateReportFile.OriginalFileName = $"{marker}-research-report.docx";
+        privateReportFile.StoredFileName = $"{Guid.NewGuid():N}.docx";
+        privateReportFile.ContentType = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+        privateReportFile.Extension = ".docx";
+        var sharedFile = NewReadyFile(ownerAuth.PersonalWorkspace.Id, ownerAuth.User.Id, now, project.Id);
+        sharedFile.OriginalFileName = $"{marker}-ordinary-shared.txt";
+        var reportJob = NewResearchJob(ownerAuth.PersonalWorkspace.Id, project.Id, ownerAuth.User.Id, now);
+
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            db.WorkspaceMembers.Add(new WorkspaceMember
+            {
+                Id = Guid.NewGuid(),
+                WorkspaceId = ownerAuth.PersonalWorkspace.Id,
+                UserId = memberAuth!.User.Id,
+                Role = WorkspaceRole.Member,
+                JoinedAt = now,
+            });
+            db.StoredFiles.AddRange(reportFile, privateReportFile, sharedFile);
+            db.GenerationJobs.Add(reportJob);
+            db.GenerationJobOutputs.AddRange(
+                new GenerationJobOutput
+                {
+                    Id = Guid.NewGuid(),
+                    GenerationJobId = reportJob.Id,
+                    StoredFileId = reportFile.Id,
+                    OutputType = GenerationJobOutputTypes.StoredFile,
+                    CreatedAt = now,
+                },
+                new GenerationJobOutput
+                {
+                    Id = Guid.NewGuid(),
+                    GenerationJobId = reportJob.Id,
+                    StoredFileId = privateReportFile.Id,
+                    OutputType = GenerationJobOutputTypes.StoredFile,
+                    CreatedAt = now,
+                });
+            await db.SaveChangesAsync();
+        }
+
+        var projectFilesPath = $"/api/workspaces/{ownerAuth.PersonalWorkspace.Id}/files?projectId={project.Id}";
+        var ownerFiles = await owner.GetFromJsonAsync<List<StoredFileDto>>(projectFilesPath);
+        var memberFiles = await member.GetFromJsonAsync<List<StoredFileDto>>(projectFilesPath);
+        Assert.Contains(ownerFiles!, file => file.Id == reportFile.Id);
+        Assert.Contains(ownerFiles!, file => file.Id == privateReportFile.Id);
+        Assert.Contains(ownerFiles!, file => file.Id == sharedFile.Id);
+        Assert.DoesNotContain(memberFiles!, file => file.Id == reportFile.Id);
+        Assert.DoesNotContain(memberFiles!, file => file.Id == privateReportFile.Id);
+        Assert.Contains(memberFiles!, file => file.Id == sharedFile.Id);
+
+        var ownerReportDetail = await owner.GetFromJsonAsync<StoredFileDto>($"/api/files/{reportFile.Id}");
+        Assert.Equal(reportFile.Id, ownerReportDetail!.Id);
+        var memberReportDetail = await member.GetAsync($"/api/files/{reportFile.Id}");
+        Assert.Equal(System.Net.HttpStatusCode.Forbidden, memberReportDetail.StatusCode);
+        var ownerPrivateReportDetail = await owner.GetFromJsonAsync<StoredFileDto>($"/api/files/{privateReportFile.Id}");
+        Assert.Equal(privateReportFile.Id, ownerPrivateReportDetail!.Id);
+        var memberPrivateReportDetail = await member.GetAsync($"/api/files/{privateReportFile.Id}");
+        Assert.Equal(System.Net.HttpStatusCode.Forbidden, memberPrivateReportDetail.StatusCode);
+        var memberSharedDetail = await member.GetFromJsonAsync<StoredFileDto>($"/api/files/{sharedFile.Id}");
+        Assert.Equal(sharedFile.Id, memberSharedDetail!.Id);
+
+        var escapedMarker = Uri.EscapeDataString(marker);
+        var ownerSearch = await owner.GetFromJsonAsync<GlobalSearchResponseDto>($"/api/search?q={escapedMarker}");
+        var memberSearch = await member.GetFromJsonAsync<GlobalSearchResponseDto>($"/api/search?q={escapedMarker}");
+        var ownerFileGroup = Assert.Single(ownerSearch!.Groups, group => group.Type == GlobalSearchResultTypes.File);
+        var memberFileGroup = Assert.Single(memberSearch!.Groups, group => group.Type == GlobalSearchResultTypes.File);
+        Assert.Equal(3, ownerFileGroup.Count);
+        Assert.Contains(ownerFileGroup.Items, item => item.Id == reportFile.Id);
+        Assert.Contains(ownerFileGroup.Items, item => item.Id == privateReportFile.Id);
+        Assert.Equal(1, memberFileGroup.Count);
+        Assert.DoesNotContain(memberFileGroup.Items, item => item.Id == reportFile.Id);
+        Assert.DoesNotContain(memberFileGroup.Items, item => item.Id == privateReportFile.Id);
+        Assert.Contains(memberFileGroup.Items, item => item.Id == sharedFile.Id);
+
+        var ownerOverview = await owner.GetFromJsonAsync<ProjectOverviewDto>($"/api/projects/{project.Id}/overview");
+        var memberOverview = await member.GetFromJsonAsync<ProjectOverviewDto>($"/api/projects/{project.Id}/overview");
+        Assert.Equal(3, ownerOverview!.Counts.Files);
+        Assert.Equal(1, memberOverview!.Counts.Files);
     }
 
     [Fact]
@@ -143,18 +272,38 @@ public sealed class ResearchReportSurfaceBoundaryTests : IClassFixture<TaslimApi
             var now = DateTime.UtcNow;
             var reportFile = NewReadyFile(ownerAuth.PersonalWorkspace.Id, ownerAuth.User.Id, now, project.Id);
             var sharedFile = NewReadyFile(ownerAuth.PersonalWorkspace.Id, ownerAuth.User.Id, now, project.Id);
-            db.StoredFiles.AddRange(reportFile, sharedFile);
+            var manualResearchFile = NewReadyFile(ownerAuth.PersonalWorkspace.Id, ownerAuth.User.Id, now, project.Id);
+            var reportJob = NewResearchJob(ownerAuth.PersonalWorkspace.Id, project.Id, ownerAuth.User.Id, now);
+            db.StoredFiles.AddRange(reportFile, sharedFile, manualResearchFile);
+            db.GenerationJobs.Add(reportJob);
+            var reportAssetId = Guid.NewGuid();
+            var manualResearchAssetId = Guid.NewGuid();
             db.Assets.AddRange(
                 new Asset
                 {
-                    Id = Guid.NewGuid(),
+                    Id = reportAssetId,
                     WorkspaceId = ownerAuth.PersonalWorkspace.Id,
                     ProjectId = project.Id,
                     CreatedByUserId = ownerAuth.User.Id,
                     StoredFileId = reportFile.Id,
+                    SourceGenerationJobId = reportJob.Id,
                     Name = "Overview surface report asset",
                     AssetType = AssetTypes.Research,
                     MimeType = reportFile.ContentType,
+                    Status = AssetStatus.Active,
+                    CreatedAt = now,
+                    UpdatedAt = now,
+                },
+                new Asset
+                {
+                    Id = manualResearchAssetId,
+                    WorkspaceId = ownerAuth.PersonalWorkspace.Id,
+                    ProjectId = project.Id,
+                    CreatedByUserId = ownerAuth.User.Id,
+                    StoredFileId = manualResearchFile.Id,
+                    Name = "Overview surface manual research asset",
+                    AssetType = AssetTypes.Research,
+                    MimeType = manualResearchFile.ContentType,
                     Status = AssetStatus.Active,
                     CreatedAt = now,
                     UpdatedAt = now,
@@ -178,12 +327,25 @@ public sealed class ResearchReportSurfaceBoundaryTests : IClassFixture<TaslimApi
 
         var ownerOverview = await owner.GetFromJsonAsync<ProjectOverviewDto>($"/api/projects/{project.Id}/overview");
         Assert.NotNull(ownerOverview);
-        Assert.Equal(2, ownerOverview!.Counts.Assets);
+        Assert.Equal(3, ownerOverview!.Counts.Assets);
 
         var memberOverview = await member.GetFromJsonAsync<ProjectOverviewDto>($"/api/projects/{project.Id}/overview");
         Assert.NotNull(memberOverview);
-        Assert.Equal(1, memberOverview!.Counts.Assets);
+        Assert.Equal(2, memberOverview!.Counts.Assets);
     }
+
+    private static GenerationJob NewResearchJob(Guid workspaceId, Guid projectId, Guid userId, DateTime now) => new()
+    {
+        Id = Guid.NewGuid(),
+        WorkspaceId = workspaceId,
+        ProjectId = projectId,
+        CreatedByUserId = userId,
+        JobType = GenerationJobTypes.ResearchGenerate,
+        Status = GenerationJobStatus.Succeeded,
+        InputJson = "{}",
+        CreatedAt = now,
+        CompletedAt = now,
+    };
 
     private static StoredFile NewReadyFile(Guid workspaceId, Guid userId, DateTime createdAt, Guid projectId) => new()
     {

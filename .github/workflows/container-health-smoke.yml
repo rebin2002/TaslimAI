@@ -2,7 +2,7 @@ name: Production container smoke
 
 on:
   push:
-    branches: [main, "parallel/**"]
+    branches: [main, "parallel/**", "feat/academic-workflow-plan-slice-20261125"]
   pull_request:
 
 permissions:

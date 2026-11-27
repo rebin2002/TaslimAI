@@ -1,9 +1,11 @@
 import AxeBuilder from "@axe-core/playwright";
 import type { Locator, Page } from "@playwright/test";
 import { expect, test } from "./fixtures";
+import { translate } from "../src/lib/i18n";
 import { resolve } from "node:path";
 
-const stylesheetPath = resolve(__dirname, "../src/app/onboarding-billing-ui.css");
+const onboardingStyles = resolve(__dirname, "../src/app/onboarding-first-login.css");
+const billingStyles = resolve(__dirname, "../src/app/account/billing/billing-layout.css");
 const screenshotDir = resolve(process.cwd(), "test-results");
 
 const fixtureBaseStyles = `
@@ -236,7 +238,8 @@ async function assertNoSeriousOrCriticalAxeViolations(page: Page, includeSelecto
 
 async function loadFixture(page: Page, html: string) {
   await page.setContent(html);
-  await page.addStyleTag({ path: stylesheetPath });
+  await page.addStyleTag({ path: onboardingStyles });
+  await page.addStyleTag({ path: billingStyles });
 }
 
 type Box = { x: number; y: number; width: number; height: number };
@@ -603,7 +606,7 @@ test.describe("issue #700 onboarding and billing layout", () => {
     await expect(page.locator(".billing-plan-option")).toHaveCount(2);
   });
 
-  test("checks first-login beta chooser presentation and modal keyboard accessibility for a mocked Free account", async ({ page }, testInfo) => {
+  test("checks first-login chooser presentation and modal keyboard accessibility for a mocked Free account", async ({ page }, testInfo) => {
     test.setTimeout(60_000);
     const traffic = await interceptLiveAppApi(page, null);
     let releaseAuth!: () => void;
@@ -688,17 +691,11 @@ test.describe("issue #700 onboarding and billing layout", () => {
     expect.soft(await dialogContainsFocus(), ".onboarding-card must contain focus after onboarding step 2 to 3").toBe(true);
 
     const workflowNames = (await dialog.locator(".onboarding-workflow strong").allTextContents()).map((name) => name.trim()).sort();
-    expect.soft(workflowNames, ".onboarding-workflow strong must expose only Chat, Image, Document, Presentation, and Movie").toEqual([
-      "Create a document",
-      "Create a presentation",
-      "Create an image",
-      "Movie Studio",
-      "Talk to Taslim",
-    ].sort());
-    const selectableExcluded = await dialog.locator(".onboarding-workflow").filter({ hasText: /Research|Social|Music|Voice/i }).allTextContents();
-    expect.soft(selectableExcluded, ".onboarding-workflow must not expose Research, Social, Music, or Voice choices").toEqual([]);
-    const onboardingForbiddenLinks = await dialog.locator("a[href^='/create/']").evaluateAll((elements) => elements.map((element) => (element as HTMLAnchorElement).getAttribute("href")));
-    expect.soft(onboardingForbiddenLinks, ".onboarding-card a[href^='/create/'] must not advertise excluded module routes").toEqual([]);
+    expect.soft(workflowNames, "first-login workflow names").toEqual(
+      ["project", "chat", "image", "document", "presentation", "research"]
+        .map((intent) => translate("en", `onboarding.workflow.${intent}.title`)).sort(),
+    );
+    await expect(dialog.locator("a[href^='/create/']")).toHaveCount(0);
 
     const onboardingScreenshotPath = testInfo.outputPath("issue-700-free-onboarding-beta-access-current.png");
     await page.screenshot({ path: onboardingScreenshotPath, fullPage: true });
@@ -722,7 +719,7 @@ test.describe("issue #700 onboarding and billing layout", () => {
     expect.soft(traffic.externalRequests, "network requests outside the local app/test API must remain blocked").toEqual([]);
     expect.soft(traffic.unexpectedApiCalls, "only explicitly mocked synthetic API routes may be contacted").toEqual([]);
   });
-  test("authenticated beta Create chooser preserves the approved Health Care tile across widths", async ({ authenticatedPage: page }) => {
+  test("authenticated Create chooser keeps its full studio catalogue visible across widths", async ({ authenticatedPage: page }) => {
     // The real E2E login supplies the server-session cookie required by /create.
     // Validate the post-login chooser separately from the synthetic onboarding modal.
     await page.goto("/create");
@@ -737,27 +734,16 @@ test.describe("issue #700 onboarding and billing layout", () => {
         })
         .map((element) => (element as HTMLAnchorElement).pathname)
         .sort());
-      expect.soft(visibleStudioHrefs, `visible a.studio-card[href^='/create/'] links at ${width}px must include approved Health Care navigation`).toEqual([
-        "/create/document",
-        "/create/health",
-        "/create/image",
-        "/create/movie",
-        "/create/presentation",
-        // #817 released Product Ad discovery on main after this spec's census
-        // was written; main's own chooser tests assert this tile is visible,
-        // so the beta layout lane must preserve it rather than hide it.
-        "/create/product-ad",
+      expect.soft(visibleStudioHrefs, `visible studios at ${width}px`).toEqual([
+        "/create/document", "/create/health", "/create/image", "/create/movie",
+        "/create/music", "/create/presentation", "/create/product-ad",
+        "/create/research", "/create/social", "/create/voice",
       ].sort());
-      for (const excludedPath of ["/create/research", "/create/social", "/create/music", "/create/voice", "/personal/health", "/health"]) {
-        expect.soft(await page.locator(`a.studio-card[href='${excludedPath}']`).isVisible(), `a.studio-card[href='${excludedPath}'] must not be visible in the beta chooser at ${width}px`).toBe(false);
-      }
-      // #793 on main deliberately exposes a localized, noindex, coming-soon
-      // Health Care entry. #701's older beta CSS must not hide it again.
-      await expect(page.locator('a.studio-card[href="/create/health"]')).toBeVisible();
+      await expect(page.locator(".studio-chooser-count")).toHaveText(String(visibleStudioHrefs.length));
       expect.soft(await page.evaluate(() => document.documentElement.scrollWidth), `Create chooser must not overflow horizontally at ${width}px`).toBeLessThanOrEqual(width);
     }
-    await expect(page.locator(".studio-category:has(a.studio-card[href='/create/social'])")).toBeHidden();
-    await expect(page.locator(".studio-chooser-count")).toBeHidden();
+    await expect(page.locator(".studio-category:has(a.studio-card[href='/create/social'])")).toBeVisible();
+    await expect(page.locator(".studio-chooser-count")).toBeVisible();
     expect.soft(await page.locator("a.studio-chat-link[href='/chat']").count(), "a.studio-chat-link[href='/chat'] must advertise allowed Chat").toBe(1);
   });
 

@@ -65,6 +65,9 @@ const PROBE_IDS = [
   "probe-inert-button",
   "probe-aria-hidden-button",
   "probe-negative-tabindex-link",
+  "probe-first-legend-button",
+  "probe-later-legend-button",
+  "probe-nested-legend-button",
 ] as const;
 
 function json(body: unknown) {
@@ -124,9 +127,34 @@ async function injectUnfocusableProbes(page: Page) {
     displayWrapper.append(displayInput);
     const fieldset = document.createElement("fieldset");
     fieldset.disabled = true;
+    const firstLegend = document.createElement("legend");
+    const firstLegendButton = document.createElement("button");
+    firstLegendButton.type = "button";
+    firstLegendButton.id = probeIds[6];
+    firstLegendButton.textContent = "first legend enabled";
+    firstLegend.append(firstLegendButton);
     const fieldsetInput = document.createElement("input");
     fieldsetInput.id = probeIds[2];
-    fieldset.append(fieldsetInput);
+    const laterLegend = document.createElement("legend");
+    const laterLegendButton = document.createElement("button");
+    laterLegendButton.type = "button";
+    laterLegendButton.id = probeIds[7];
+    laterLegendButton.textContent = "later legend disabled";
+    laterLegend.append(laterLegendButton);
+    const nestedFieldset = document.createElement("fieldset");
+    nestedFieldset.disabled = true;
+    const nestedLegend = document.createElement("legend");
+    const nestedLegendButton = document.createElement("button");
+    nestedLegendButton.type = "button";
+    nestedLegendButton.id = probeIds[8];
+    nestedLegendButton.textContent = "nested legend disabled by outer fieldset";
+    nestedLegend.append(nestedLegendButton);
+    nestedFieldset.append(nestedLegend);
+    fieldset.append(firstLegend, fieldsetInput, nestedFieldset, laterLegend);
+    // Keep this one valid control before the final action buttons. The invalid
+    // probes stay trailing, so the test exercises the dialog's boundary wrap
+    // as well as each fieldset's own sequential-focus rules.
+    anchor.before(fieldset);
     const inertWrapper = document.createElement("div");
     inertWrapper.setAttribute("inert", "");
     const inertButton = document.createElement("button");
@@ -144,7 +172,7 @@ async function injectUnfocusableProbes(page: Page) {
     negativeLink.href = "#probe";
     negativeLink.setAttribute("tabindex", "-2");
     negativeLink.textContent = "negatively tabbable";
-    for (const node of [invisible, displayWrapper, fieldset, inertWrapper, ariaWrapper, negativeLink]) {
+    for (const node of [invisible, displayWrapper, inertWrapper, ariaWrapper, negativeLink]) {
       anchor.after(node);
     }
   }, [...PROBE_IDS]);
@@ -216,6 +244,18 @@ test("project dialog keyboard cycle skips every non-focusable node the review fl
   await injectUnfocusableProbes(page);
   const expected = await expectedSequentialOrder(page);
   expect(expected.length, "the create dialog must expose a real keyboard cycle").toBeGreaterThanOrEqual(4);
+  const legendDescriptors = await page.evaluate(({ selector, ids }) => {
+    const dialog = document.querySelector<HTMLElement>(".project-form.modal-card");
+    if (!dialog) throw new Error("project dialog is not mounted");
+    const nodes = Array.from(dialog.querySelectorAll<HTMLElement>(selector));
+    return Object.fromEntries(ids.map((id) => {
+      const node = document.getElementById(id);
+      return [id, node ? `${node.tagName.toLowerCase()}@${nodes.indexOf(node)}` : "missing"];
+    }));
+  }, { selector: CANDIDATE_SELECTOR, ids: [PROBE_IDS[6], PROBE_IDS[7], PROBE_IDS[8]] });
+  expect(expected).toContain(legendDescriptors[PROBE_IDS[6]]);
+  expect(expected).not.toContain(legendDescriptors[PROBE_IDS[7]]);
+  expect(expected).not.toContain(legendDescriptors[PROBE_IDS[8]]);
 
   await nameField.focus();
   // The ground-truth list runs in DOM order from the dialog's first control

@@ -185,7 +185,7 @@ test.describe("basic accessibility smoke", () => {
   });
 
 
-  test("onboarding retains focus across every step, announces progress, and offers only five launch choices", async ({ page }) => {
+  test("onboarding retains focus across every step, announces progress, and offers all six first-login choices", async ({ page }) => {
     test.setTimeout(120_000);
     const traffic = await interceptOnboardingApi(page);
     const profiles: Array<{ locale: Locale; lang: string; dir: string; width: number; height: number }> = [
@@ -249,11 +249,10 @@ test.describe("basic accessibility smoke", () => {
         translate(profile.locale, "onboarding.workflow.image.title"),
         translate(profile.locale, "onboarding.workflow.document.title"),
         translate(profile.locale, "onboarding.workflow.presentation.title"),
-        translate(profile.locale, "navigation.movieStudio"),
+        translate(profile.locale, "onboarding.workflow.project.title"),
+        translate(profile.locale, "onboarding.workflow.research.title"),
       ].sort());
-      await expect(dialog.locator(".onboarding-workflow")).toHaveCount(5);
-      await expect(dialog.locator(".onboarding-workflow").filter({ hasText: translate(profile.locale, "navigation.movieStudio") }))
-        .toContainText(translate(profile.locale, "movieBody.quick.oneBrief"));
+      await expect(dialog.locator(".onboarding-workflow")).toHaveCount(6);
       await expect(dialog.locator("a[href^='/create/']")).toHaveCount(0);
 
       await dialog.locator(".onboarding-actions .onboarding-back").click();
@@ -333,27 +332,15 @@ test.describe("basic accessibility smoke", () => {
     { name: "Image", title: (locale) => translate(locale, "onboarding.workflow.image.title"), destination: "/create/image", intent: "image" },
     { name: "Document", title: (locale) => translate(locale, "onboarding.workflow.document.title"), destination: "/create/document", intent: "document" },
     { name: "Presentation", title: (locale) => translate(locale, "onboarding.workflow.presentation.title"), destination: "/create/presentation", intent: "presentation" },
-    { name: "Quick Movie", title: (locale) => translate(locale, "navigation.movieStudio"), destination: "/create/movie", intent: undefined },
+    { name: "Project", title: (locale) => translate(locale, "onboarding.workflow.project.title"), destination: "/projects?create=1", intent: "project" },
+    { name: "Research", title: (locale) => translate(locale, "onboarding.workflow.research.title"), destination: "/create/research", intent: "research" },
     { name: "Skip", title: null, destination: "/projects", intent: undefined },
   ];
 
-  // Destinations main moved behind requireAuthenticatedPage
-  // (apps/web/src/lib/serverAuth.ts): #1247 gated /create/document, /create/image and
-  // /projects, and main later gated /create/movie the same way. The uplift onto the batch-2
-  // server gates (79f2dc99, carried into this branch with main 2e740469) additionally gated
-  // /create/presentation, which is why the Presentation leg of this matrix was the only one
-  // red at the combined head: the reload really is redirected, and the assertion has to expect
-  // that redirect rather than the studio route. A full reload re-checks the real taslim.auth
-  // cookie server-side, rejects this mock-only session and redirects to the login page with the
-  // return path. Grow this set together with the server-side gate - the authoritative list is
-  // every page calling requireAuthenticatedPage; every other destination stays client-gated in
-  // this test's mock-only scope.
+  // These routes validate the server-side session on reload. The Project page
+  // asks the login route to return to /projects, including for ?create=1.
   const serverAuthenticatedDestinations = new Set([
-    "/create/document",
-    "/create/image",
-    "/create/movie",
-    "/create/presentation",
-    "/projects",
+    "/create/document", "/create/image", "/create/presentation", "/create/research", "/projects",
   ]);
 
   for (const profile of completionProfiles) {
@@ -382,7 +369,7 @@ test.describe("basic accessibility smoke", () => {
         const next = dialog.locator(".onboarding-actions .primary-button");
         await next.click();
         await next.click();
-        await expect(dialog.locator(".onboarding-workflow")).toHaveCount(5);
+        await expect(dialog.locator(".onboarding-workflow")).toHaveCount(6);
         const actualChoices = (await dialog.locator(".onboarding-workflow strong").allTextContents()).map((value) => value.trim()).sort();
         const expectedChoices = completionTargets.flatMap((choice) => choice.title ? [choice.title(profile.locale)] : []).sort();
         expect(actualChoices).toEqual(expectedChoices);
@@ -400,7 +387,7 @@ test.describe("basic accessibility smoke", () => {
         }
 
         await expect(dialog).toBeHidden();
-        await expect(page).toHaveURL((url) => url.pathname === target.destination);
+        await expect(page).toHaveURL((url) => url.pathname + url.search === target.destination);
         expect(traffic.csrfRequests).toEqual(["GET /api/auth/csrf"]);
         expect(traffic.completionRequests).toHaveLength(1);
         const completion = traffic.completionRequests[0];
@@ -424,9 +411,10 @@ test.describe("basic accessibility smoke", () => {
         await expect.poll(() => traffic.authMeResponses.length).toBeGreaterThan(authMeResponseCountBeforeReload);
         // The mock intercepts only browser API requests, so a server-authenticated
         // reload must reject this synthetic session; other routes stay client-gated.
-        if (serverAuthenticatedDestinations.has(target.destination)) {
+        const destinationPath = target.destination.split("?")[0];
+        if (serverAuthenticatedDestinations.has(destinationPath)) {
           await expect(page).toHaveURL(
-            (url) => url.pathname === "/login" && url.searchParams.get("next") === target.destination,
+            (url) => url.pathname === "/login" && url.searchParams.get("next") === destinationPath,
           );
         } else {
           await expect(page).toHaveURL((url) => url.pathname === target.destination);

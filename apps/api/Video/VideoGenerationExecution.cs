@@ -259,17 +259,18 @@ public sealed class VideoGenerationAdapterExecutionService(
         try
         {
             VideoGenerationContract.ValidateRequest(request);
-            ValidateDeclaredCapabilities(adapter.Capabilities);
+            var capabilities = adapter.Capabilities;
+            ValidateDeclaredCapabilities(capabilities);
             // Cost is a function of the priced resolution. A concrete requested
             // resolution is admissible only when the provider explicitly declared it;
             // an empty declared set carries no pricing evidence and admits none. A null
             // requested resolution keeps the provider-decides semantics unchanged.
             if (request.RequestedResolution is { } requestedResolution
-                && !adapter.Capabilities.SupportedResolutions.Contains(requestedResolution))
+                && !capabilities.SupportedResolutions.Contains(requestedResolution))
                 throw new VideoGenerationAdapterExecutionException(
                     VideoGenerationFailureCategory.UnsupportedCapability,
                     new(VideoGenerationErrorCode.UnsupportedCapability, false, "The requested video capability is not available."));
-            if (!adapter.Capabilities.Supports(request))
+            if (!capabilities.Supports(request))
                 throw new VideoGenerationAdapterExecutionException(
                     VideoGenerationFailureCategory.UnsupportedCapability,
                     new(VideoGenerationErrorCode.UnsupportedCapability, false, "The requested video capability is not available."));

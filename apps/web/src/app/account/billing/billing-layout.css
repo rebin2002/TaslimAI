@@ -9,6 +9,12 @@
   color: #172639;
 }
 
+.billing-page button:focus-visible,
+.billing-page a:focus-visible {
+  outline: 3px solid rgba(31, 95, 184, 0.42);
+  outline-offset: 3px;
+}
+
 .billing-page .usage-header {
   align-items: center;
   gap: 24px;
@@ -25,6 +31,15 @@
    in the reading order are unchanged. */
 .billing-page .back-link {
   min-height: 24px;
+}
+
+/* At the 160px layout viewport produced by phone-width 200% zoom, the root's global smooth
+   scrolling can leave Tab-focused controls horizontally stranded while its animation is in flight.
+   Keep browser-managed focus scrolling immediate on this route and only below the 320px canvas. */
+@media (max-width: 320px) {
+  html:has(.billing-page) {
+    scroll-behavior: auto;
+  }
 }
 
 .billing-page .usage-header h1 {

@@ -14,7 +14,6 @@ import {
   MessageSquare,
   Presentation,
   Search,
-  Video,
   Sparkles,
   type LucideIcon,
 } from "lucide-react";
@@ -35,38 +34,7 @@ const workflowIcons: Record<OnboardingIntent, LucideIcon> = {
   research: Search,
 };
 
-type OnboardingChoice = {
-  intent?: OnboardingIntent;
-  href: string;
-  titleKey: string;
-  descriptionKey: string;
-  icon: LucideIcon;
-};
-
 type OnboardingStep = "preferences" | "tour" | "workflow";
-
-// Keep the first-run offer list explicit: Project and Research are not beta
-// module choices. Movie opens the existing Quick mode without adding an API intent.
-const onboardingChoices: OnboardingChoice[] = [
-  ...onboardingWorkflowDefinitions
-    .filter((workflow) => workflow.intent === "chat"
-      || workflow.intent === "image"
-      || workflow.intent === "document"
-      || workflow.intent === "presentation")
-    .map((workflow) => ({
-      intent: workflow.intent,
-      href: workflow.href,
-      titleKey: workflow.titleKey,
-      descriptionKey: workflow.descriptionKey,
-      icon: workflowIcons[workflow.intent],
-    })),
-  {
-    href: "/create/movie",
-    titleKey: "navigation.movieStudio",
-    descriptionKey: "movieBody.quick.oneBrief",
-    icon: Video,
-  },
-];
 
 export function OnboardingGate() {
   const { user } = useAuth();
@@ -184,9 +152,9 @@ function OnboardingFlow({ user, openerRef }: Readonly<{ user: User; openerRef: R
           <h1 ref={stepHeadingRef} id="onboarding-title" tabIndex={-1}>{t("create.title")}</h1>
           <p className="onboarding-description">{t("onboarding.workflowDescription")}</p>
           <div className="onboarding-workflow-grid">
-            {onboardingChoices.map((workflow) => {
-              const Icon = workflow.icon;
-              return <button type="button" key={workflow.intent ?? workflow.href} className="onboarding-workflow" onClick={() => void finish(workflow.intent, workflow.href)} disabled={saving}>
+            {onboardingWorkflowDefinitions.map((workflow) => {
+              const Icon = workflowIcons[workflow.intent];
+              return <button type="button" key={workflow.intent} className="onboarding-workflow" onClick={() => void finish(workflow.intent, workflow.href)} disabled={saving}>
                 <span className="onboarding-workflow-icon"><Icon size={19} /></span>
                 <span><strong>{t(workflow.titleKey)}</strong><small>{t(workflow.descriptionKey)}</small></span>
                 <NextIcon className="onboarding-workflow-arrow" size={16} />

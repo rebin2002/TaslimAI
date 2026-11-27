@@ -13,6 +13,15 @@ const FOCUSABLE_SELECTOR = [
 
 const FORM_CONTROL_TAGS = new Set(["BUTTON", "INPUT", "SELECT", "TEXTAREA"]);
 
+function isDisabledByFieldset(element: HTMLElement): boolean {
+  for (let ancestor = element.parentElement; ancestor !== null; ancestor = ancestor.parentElement) {
+    if (ancestor.tagName !== "FIELDSET" || !ancestor.hasAttribute("disabled")) continue;
+    const firstLegend = Array.from(ancestor.children).find((child) => child.tagName === "LEGEND");
+    if (!firstLegend?.contains(element)) return true;
+  }
+  return false;
+}
+
 type VisibilityStyleReader = (element: Element) => { display: string; visibility: string };
 
 /**
@@ -32,21 +41,10 @@ export function isTabbableElement(element: HTMLElement, readStyle?: VisibilitySt
     const control = element as HTMLButtonElement | HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement;
     if (control.disabled) return false;
     if (element.getAttribute("disabled") !== null) return false;
-    // A disabled fieldset un-focuses every contained form control except the
-    // ones inside *that fieldset's own* legend (HTML living-standard sequential
-    // navigation). Two subtleties decide the answer. "Its own" is load-bearing:
-    // a legend belonging to a nested fieldset, or a stray second legend child,
-    // is not the element the exemption is written about. And the constraint is
-    // applied per disabled fieldset ancestor, not once for the nearest one: a
-    // control that escapes an inner disabled fieldset by sitting in that
-    // fieldset's legend is still inside an outer disabled fieldset, outside the
-    // outer legend, and Chromium refuses to focus it. Admitting such a control
-    // would let the focus trap enumerate something the browser itself will not
-    // tab into.
-    for (let ancestor = element.parentElement; ancestor !== null; ancestor = ancestor.parentElement) {
-      if (ancestor.tagName !== "FIELDSET" || ancestor.getAttribute("disabled") === null) continue;
-      if (!escapesDisabledFieldset(ancestor, element)) return false;
-    }
+    // Each disabled fieldset applies independently. Only descendants of that
+    // fieldset's first direct legend are exempt; later legends and nested
+    // disabled fieldsets still apply their own disabled state.
+    if (isDisabledByFieldset(element)) return false;
     if (element.tagName === "INPUT" && (element as HTMLInputElement).type === "hidden") return false;
   }
   const tabindex = element.getAttribute("tabindex");
@@ -77,37 +75,7 @@ export function isTabbableElement(element: HTMLElement, readStyle?: VisibilitySt
   return true;
 }
 
-/**
- * True when the control escapes `fieldset` because it sits inside that
- * fieldset's own legend - its first `legend` child. Measured in headless
- * Chromium by the #1226 lane: a control nested any deeper (a second legend
- * child, or a legend belonging to a nested fieldset) is skipped by the browser's
- * sequential-focus walk, and the bar applies once per disabled ancestor, which is
- * why the caller loops the ancestors instead of consulting `closest` once.
- *
- * The walk-up form is deliberate: it is exactly
- * `fieldset.querySelector(":scope > legend")?.contains(control)` - the shape the
- * #1226 lane measured - expressed with `parentElement` and `children` only, so it
- * also runs on the dependency-free DOM stubs this repo's unit tests use (which
- * implement neither `querySelector` nor `contains`, and whose frozen contract file
- * must keep passing unchanged).
- */
-function escapesDisabledFieldset(fieldset: Element, control: Element): boolean {
-  let legend: Element | null = null;
-  for (const child of Array.from(fieldset.children)) {
-    if (child.tagName === "LEGEND") {
-      legend = child;
-      break;
-    }
-  }
-  if (legend === null) return false;
-  for (let node = control.parentElement; node !== null && node !== fieldset; node = node.parentElement) {
-    if (node === legend) return true;
-  }
-  return false;
-}
-
-export type DialogHandle = { readonly token: symbol };
+export type DialogHandle = { readonly token: symbol; readonly element?: HTMLElement };
 
 // Single stack of mounted, open dialog-hook instances. Exactly one instance —
 // the top of the stack — answers document-level focusin/keydown traffic at a
@@ -118,7 +86,11 @@ export type DialogHandle = { readonly token: symbol };
 const dialogStack: DialogHandle[] = [];
 
 export function openDialog(handle: DialogHandle): void {
-  if (!dialogStack.includes(handle)) dialogStack.push(handle);
+  if (dialogStack.includes(handle)) return;
+  // React can run a child's layout effect before its parent's on the same commit.
+  const nested = dialogStack.findIndex((open) => open.element && handle.element?.contains(open.element));
+  if (nested === -1) dialogStack.push(handle);
+  else dialogStack.splice(nested, 0, handle);
 }
 
 export function closeDialog(handle: DialogHandle): void {
@@ -205,7 +177,7 @@ export function useDialogAccessibility<T extends HTMLElement>(open: boolean, onC
     if (!open || !dialogRef.current) return;
 
     const dialog = dialogRef.current;
-    const handle: DialogHandle = { token: Symbol("taslim-dialog") };
+    const handle: DialogHandle = { token: Symbol("taslim-dialog"), element: dialog };
     openDialog(handle);
     // True between a keydown the trap consumed (boundary wrap/rescue) and the
     // matching Tab keyup, whose browser default must be suppressed too.
@@ -217,7 +189,7 @@ export function useDialogAccessibility<T extends HTMLElement>(open: boolean, onC
     openerRef.current = opener;
     openerDescriptorRef.current = opener ? describeFocusTarget(opener) : null;
     const focusInitial = window.setTimeout(() => {
-      if (!dialog.isConnected) return;
+      if (!dialog.isConnected || !isTopDialog(handle)) return;
       const marked = dialog.querySelector<HTMLElement>("[data-dialog-autofocus]");
       const initial = marked && isTabbableElement(marked)
         ? marked
@@ -233,14 +205,7 @@ export function useDialogAccessibility<T extends HTMLElement>(open: boolean, onC
 
     function handleFocusIn(event: FocusEvent) {
       const target = event.target;
-      if (!(target instanceof Node)) return;
-      if (dialog.contains(target)) {
-        // Whichever dialog actually receives focus is the one the user works
-        // in; it becomes the sole handler until focus moves again.
-        raiseDialog(handle);
-        return;
-      }
-      if (!isTopDialog(handle)) return;
+      if (!isTopDialog(handle) || !(target instanceof Node) || dialog.contains(target)) return;
       focusBoundary(false);
     }
 
@@ -251,7 +216,7 @@ export function useDialogAccessibility<T extends HTMLElement>(open: boolean, onC
       if (event.key === "Escape") {
         if (!shouldHandleDialogKey(handle, "Escape")) return;
         event.preventDefault();
-        event.stopPropagation();
+        event.stopImmediatePropagation();
         onCloseRef.current();
         return;
       }
@@ -311,11 +276,20 @@ export function useDialogAccessibility<T extends HTMLElement>(open: boolean, onC
       document.removeEventListener("focusin", handleFocusIn, true);
       document.removeEventListener("keydown", handleKeyDown, true);
       document.removeEventListener("keyup", handleKeyUp, true);
+      const wasTop = isTopDialog(handle);
       closeDialog(handle);
       const opener = openerRef.current;
       const openerDescriptor = openerDescriptorRef.current;
-      if (opener || openerDescriptor) {
-        window.setTimeout(() => resolveFocusTarget(opener, openerDescriptor)?.focus(), 0);
+      if (wasTop) {
+        window.setTimeout(() => {
+          const target = resolveFocusTarget(opener, openerDescriptor);
+          const currentDialog = dialogStack.at(-1)?.element;
+          if (target && (!currentDialog || currentDialog.contains(target))) {
+            target.focus();
+          } else if (currentDialog && !currentDialog.contains(document.activeElement)) {
+            (focusableElements(currentDialog)[0] ?? currentDialog).focus();
+          }
+        }, 0);
       }
     };
   }, [open, restoreFocusRef]);

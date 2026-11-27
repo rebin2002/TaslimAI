@@ -6,6 +6,7 @@ using Microsoft.AspNetCore.HttpOverrides;
 using Microsoft.AspNetCore.Http.Features;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.Mvc.Controllers;
 using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
@@ -65,12 +66,13 @@ builder.Services.AddOptions<HealthOptions>()
     .Validate(options => options.ProbeTimeoutSeconds is >= 1 and <= 60, "Health:ProbeTimeoutSeconds must be between 1 and 60 seconds.")
     .ValidateOnStart();
 builder.Services.AddScoped<OperationalHealthService>();
-builder.Services.AddOptions<FileSettings>().Bind(builder.Configuration.GetSection("Files"));
-builder.Services.Configure<FormOptions>(options =>
-{
-    var maxFileSize = builder.Configuration.GetValue<long>("Files:MaxFileSizeBytes", 25 * 1024 * 1024);
-    options.MultipartBodyLengthLimit = maxFileSize + (1024 * 1024);
-});
+builder.Services.AddOptions<FileSettings>()
+    .Bind(builder.Configuration.GetSection("Files"))
+    .Validate(options => FileSettings.IsValidMaxFileSizeBytes(options.MaxFileSizeBytes), $"Files:MaxFileSizeBytes must be between 1 and {FileSettings.MaxUserUploadFileSizeBytes} bytes.")
+    .ValidateOnStart();
+var maxUploadRequestBodyBytes = builder.Configuration.GetValue<long>("Files:MaxFileSizeBytes", FileSettings.MaxUserUploadFileSizeBytes)
+    + FileSettings.MultipartFormOverheadBytes;
+builder.Services.Configure<FormOptions>(options => options.MultipartBodyLengthLimit = maxUploadRequestBodyBytes);
 
 builder.Services.Configure<ForwardedHeadersOptions>(options =>
 {
@@ -256,10 +258,9 @@ builder.Services.AddScoped<IProviderBenchmarkService, ProviderBenchmarkService>(
 builder.Services.AddSingleton<IProviderCostGuard, AllowAllProviderCostGuard>();
 builder.Services.AddSingleton(TimeProvider.System);
 // Academic Research Studio integration lane: Phase B evidence services + persistence and
-// the Phase C workflow engine over the shared context. Stage handlers (scholarly
-// discovery, screening, extraction, synthesis, drafting, verification) are registered by
-// their provider lanes through AddAcademicStageHandler; until then run/resume reports the
-// exact unconnected stage instead of executing stub work.
+// the Phase C workflow engine over the shared context. The deterministic Plan handler is
+// enabled only by an explicit API opt-in. Discovery, screening, extraction, synthesis, drafting and verification
+// remain unconnected and are reported as the exact missing stage.
 builder.Services.AddAcademicProjects(builder.Configuration);
 builder.Services.Configure<AutopilotOptions>(builder.Configuration.GetSection("Autopilot"));
 builder.Services.PostConfigure<AutopilotOptions>(options => options.Normalize());
@@ -430,7 +431,9 @@ if (builder.Configuration.GetValue("GenerationJobs:WorkerEnabled", !builder.Envi
     builder.Services.AddHostedService<GenerationJobWorker>();
 }
 builder.Services.Configure<AiOptions>(builder.Configuration.GetSection("Ai"));
-builder.Services.Configure<ImageGenerationOptions>(builder.Configuration.GetSection("ImageGeneration"));
+builder.Services.AddOptions<ImageGenerationOptions>()
+    .Bind(builder.Configuration.GetSection("ImageGeneration"))
+    .ValidateOnStart();
 builder.Services.Configure<DocumentGenerationOptions>(builder.Configuration.GetSection("DocumentGeneration"));
 builder.Services.AddOptions<PresentationGenerationOptions>()
     .Bind(builder.Configuration.GetSection("PresentationGeneration"))
@@ -581,6 +584,26 @@ if (app.Environment.IsDevelopment())
 
 app.UseCors("Frontend");
 app.UseRouting();
+app.Use(async (context, next) =>
+{
+    if (HttpMethods.IsPost(context.Request.Method)
+        && context.GetEndpoint()?.Metadata.GetMetadata<ControllerActionDescriptor>() is { ControllerName: "Files", ActionName: "Upload" })
+    {
+        var requestBodySizeFeature = context.Features.Get<IHttpMaxRequestBodySizeFeature>();
+        if (requestBodySizeFeature is { IsReadOnly: false })
+        {
+            requestBodySizeFeature.MaxRequestBodySize = maxUploadRequestBodyBytes;
+        }
+
+        if (context.Request.ContentLength is long contentLength && contentLength > maxUploadRequestBodyBytes)
+        {
+            context.Response.StatusCode = StatusCodes.Status413PayloadTooLarge;
+            return;
+        }
+    }
+
+    await next();
+});
 app.UseAuthentication();
 app.UseRateLimiter();
 app.UseMiddleware<AntiforgeryValidationMiddleware>();
@@ -598,10 +621,12 @@ static IResult LivenessEndpoint(OperationalHealthService health, HttpContext con
 app.MapGet("/health", LivenessEndpoint)
     .WithName("Health")
     .WithTags("System")
+    .RequireRateLimiting(RateLimiting.HealthLiveness)
     .AllowAnonymous();
 app.MapGet("/health/live", LivenessEndpoint)
     .WithName("HealthLive")
     .WithTags("System")
+    .RequireRateLimiting(RateLimiting.HealthLiveness)
     .AllowAnonymous();
 static async Task<IResult> ReadinessEndpoint(OperationalHealthService health, HttpContext context, CancellationToken cancellationToken)
 {
@@ -612,10 +637,12 @@ static async Task<IResult> ReadinessEndpoint(OperationalHealthService health, Ht
 app.MapGet("/health/ready", ReadinessEndpoint)
     .WithName("HealthReady")
     .WithTags("System")
+    .RequireRateLimiting(RateLimiting.Health)
     .AllowAnonymous();
 app.MapGet("/readiness", ReadinessEndpoint)
     .WithName("Readiness")
     .WithTags("System")
+    .RequireRateLimiting(RateLimiting.Health)
     .AllowAnonymous();
 app.MapControllers();
 
