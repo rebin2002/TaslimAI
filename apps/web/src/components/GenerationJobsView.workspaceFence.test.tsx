@@ -398,6 +398,34 @@ describe("generation history workspace isolation in the rendered page", () => {
 // attempt that produced it, and derives the inspected job from that read instead of remembering a
 // job record of its own.
 describe("generation history read freshness in the rendered page", () => {
+  it("polls the first running job without requiring the user to select it", async () => {
+    await mountView(workspaceA);
+    await settleList(0, [makeJob()]);
+
+    await runTimers();
+    expect(harness.api.getGenerationJob).toHaveBeenCalledTimes(1);
+    expect(harness.api.getGenerationJob).toHaveBeenCalledWith("job-a1");
+  });
+
+  it("returns to the newest job after leaving a workspace with an older job selected", async () => {
+    const newest = makeJob({ id: "new-job", title: "Newest job" });
+    const older = makeJob({ id: "old-job", title: "Older job" });
+    await mountView(workspaceA);
+    await settleList(0, [newest, older]);
+    await selectRow("Older job");
+    expect(findByClass(container, "generation-job-detail")[0].getAttribute("id")).toBe("generation-job-detail-old-job");
+
+    await switchWorkspace(workspaceB);
+    await settleList(1, []);
+    await switchWorkspace(workspaceA);
+    await settleList(2, [newest, older]);
+
+    expect(findByClass(container, "generation-job-detail")[0].getAttribute("id")).toBe("generation-job-detail-new-job");
+    await runTimers();
+    expect(harness.api.getGenerationJob).toHaveBeenCalledWith("new-job");
+    expect(harness.api.getGenerationJob).not.toHaveBeenCalledWith("old-job");
+  });
+
   it("does not repaint the previous read's detail panel when the session returns to a workspace", async () => {
     await mountView(workspaceA);
     await settleList(0, [makeJob()]);

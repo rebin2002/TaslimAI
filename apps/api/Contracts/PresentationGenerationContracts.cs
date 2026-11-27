@@ -20,7 +20,7 @@ public sealed class PresentationGenerationRequest
     [StringLength(160)] public string? BrandCompany { get; set; }
     public bool IncludeAgenda { get; set; } = true;
     public bool IncludeClosingNextSteps { get; set; } = true;
-    [MaxLength(8)] public IReadOnlyList<Guid> AttachmentIds { get; set; } = [];
+    [MaxLength(8)] public IReadOnlyList<Guid>? AttachmentIds { get; set; } = [];
 }
 
 public sealed record PresentationGenerationInput(
@@ -117,7 +117,7 @@ public static class PresentationGenerationContractMapper
         NormalizeOptional(request.BrandCompany),
         request.IncludeAgenda,
         request.IncludeClosingNextSteps,
-        request.AttachmentIds.Distinct().ToArray());
+        (request.AttachmentIds ?? []).Distinct().ToArray());
 
     public static string Normalize(string? value, string fallback) => string.IsNullOrWhiteSpace(value) ? fallback : value.Trim().ToLowerInvariant();
     public static string? NormalizeOptional(string? value) => string.IsNullOrWhiteSpace(value) ? null : value.Trim();

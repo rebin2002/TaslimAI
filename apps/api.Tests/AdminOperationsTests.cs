@@ -366,6 +366,59 @@ public sealed class AdminOperationsTests : IClassFixture<TaslimApiFactory>
         Assert.Equal(1, await verifyDb.AdminOperationAuditEvents.CountAsync(item => item.TargetId == jobId));
     }
 
+    [Fact]
+    public async Task Overlong_admin_recovery_idempotency_keys_are_rejected_without_truncation()
+    {
+        using var client = factory.CreateClient();
+        var auth = await Register(client, "Movie Recovery Key Boundary Administrator");
+        await AddAdminRole(auth.User.Email);
+        var jobId = Guid.NewGuid();
+        var now = DateTime.UtcNow;
+        var sharedPrefix = new string('A', 128);
+        var firstKey = $"{sharedPrefix}-request-one";
+        var secondKey = $"{sharedPrefix}-request-two";
+
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            db.GenerationJobs.Add(new GenerationJob
+            {
+                Id = jobId, WorkspaceId = auth.PersonalWorkspace.Id, CreatedByUserId = auth.User.Id,
+                JobType = GenerationJobTypes.MovieClipGenerate, Status = GenerationJobStatus.Running, InputJson = "{}",
+                CreatedAt = now.AddMinutes(-30), StartedAt = now.AddMinutes(-20), ClaimExpiresAt = now.AddMinutes(-5), RetryCount = 1,
+                ConcurrencyToken = Guid.NewGuid(),
+            });
+            await db.SaveChangesAsync();
+        }
+
+        var firstResponse = await SendWithCsrf(
+            client,
+            HttpMethod.Post,
+            $"/api/admin/operations/jobs/{jobId}/recover",
+            new { reason = "Reject an overlong recovery key before it can collide with another command." },
+            firstKey);
+        Assert.Equal(HttpStatusCode.Conflict, firstResponse.StatusCode);
+        var firstError = await firstResponse.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal("IDEMPOTENCY_KEY_TOO_LONG", firstError.GetProperty("error").GetProperty("code").GetString());
+
+        var secondResponse = await SendWithCsrf(
+            client,
+            HttpMethod.Post,
+            $"/api/admin/operations/jobs/{jobId}/recover",
+            new { reason = "Reject a distinct overlong recovery key rather than replaying a truncated prefix." },
+            secondKey);
+        Assert.Equal(HttpStatusCode.Conflict, secondResponse.StatusCode);
+        var secondError = await secondResponse.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal("IDEMPOTENCY_KEY_TOO_LONG", secondError.GetProperty("error").GetProperty("code").GetString());
+
+        using var verifyScope = factory.Services.CreateScope();
+        var verifyDb = verifyScope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        var job = await verifyDb.GenerationJobs.SingleAsync(item => item.Id == jobId);
+        Assert.Equal(GenerationJobStatus.Running, job.Status);
+        Assert.Equal(1, job.RetryCount);
+        Assert.Empty(await verifyDb.AdminOperationAuditEvents.Where(item => item.TargetId == jobId).ToListAsync());
+    }
+
     private async Task<AuthResponse> Register(HttpClient client, string displayName)
     {
         var response = await SendWithCsrf(client, HttpMethod.Post, "/api/auth/register", new
