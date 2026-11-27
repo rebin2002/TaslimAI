@@ -37,7 +37,7 @@ import {
 } from "@/lib/movieProductionWorkspace";
 import { hasActiveMovieProductionExecution, nextMovieProductionPollDelay } from "@/lib/movieProductionPolling";
 import { productionIntentForTier, type MovieResolutionTier } from "@/lib/movieProductionResolution";
-import { buildMovieRegenerationConfirmation, confirmMovieRegenerationIfAllowed, formatMovieRegenerationCost, movieRegenerationAttemptIsCurrent, newMovieRegenerationKeys, retireMovieRegenerationAttempt, type MovieRegenerationAttempt, type MovieRegenerationConfirmationState } from "@/lib/movieRegenerationConfirmation";
+import { buildMovieRegenerationConfirmation, confirmMovieRegenerationIfAllowed, formatMovieRegenerationCost, isDefinitiveMovieRegenerationRefusal, movieRegenerationAttemptIsCurrent, newMovieRegenerationKeys, retireMovieRegenerationAttempt, type MovieRegenerationAttempt, type MovieRegenerationConfirmationState } from "@/lib/movieRegenerationConfirmation";
 
 const filters: Array<{ id: ProductionWorkspaceFilter; label: string }> = [
   { id: "all", label: "All shots" },
@@ -207,6 +207,18 @@ export function MovieProductionWorkspace({ project, completionPercent, onRefresh
       const response = await work() as MovieSelectiveRegenerationResponse;
       if (actionToken !== regenerationActionTokenRef.current || !movieRegenerationAttemptIsCurrent(regenerationAttemptsRef.current.get(key), attempt)) return;
       const preview = buildMovieRegenerationConfirmation(response);
+      if (preview.blockedReason === "already-confirmed") {
+        retireRegenerationAttempt(attempt);
+        setConfirmation(null);
+        setLastAction(null);
+        try {
+          await onRefresh();
+          setRefreshError("");
+        } catch {
+          setRefreshError("Production status could not be refreshed. Reload the workspace to see the latest state.");
+        }
+        return;
+      }
       const copy = confirmationCopy(key, t);
       setConfirmation({
         key,
@@ -214,14 +226,27 @@ export function MovieProductionWorkspace({ project, completionPercent, onRefresh
         preview,
         attempt,
         confirm: async () => {
-          const confirmed = await confirmMovieRegenerationIfAllowed(preview, (requestId) => api.confirmMovieRegeneration(requestId, true, attempt.keys.confirm));
-          if (confirmed) retireRegenerationAttempt(attempt);
-          return confirmed;
+          try {
+            const confirmed = await confirmMovieRegenerationIfAllowed(preview, (requestId) => api.confirmMovieRegeneration(requestId, true, attempt.keys.confirm));
+            if (confirmed) retireRegenerationAttempt(attempt);
+            return confirmed;
+          } catch (cause) {
+            if (isDefinitiveMovieRegenerationRefusal(cause) && movieRegenerationAttemptIsCurrent(regenerationAttemptsRef.current.get(key), attempt)) {
+              retireRegenerationAttempt(attempt);
+              setLastAction(null);
+            }
+            throw cause;
+          }
         },
       });
     } catch (cause) {
-      if (actionToken === regenerationActionTokenRef.current && movieRegenerationAttemptIsCurrent(regenerationAttemptsRef.current.get(key), attempt))
+      if (actionToken === regenerationActionTokenRef.current && movieRegenerationAttemptIsCurrent(regenerationAttemptsRef.current.get(key), attempt)) {
+        if (isDefinitiveMovieRegenerationRefusal(cause)) {
+          retireRegenerationAttempt(attempt);
+          setLastAction(null);
+        }
         setError(cause instanceof Error ? cause.message : t("movieBody.production.regenerationPrepareError"));
+      }
     } finally {
       if (actionToken === regenerationActionTokenRef.current) setBusyKey("");
     }

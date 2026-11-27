@@ -1,4 +1,4 @@
-import type { MovieRegenerationCostPreview, MovieSelectiveRegenerationResponse } from "@/lib/api";
+import { ApiError, type MovieRegenerationCostPreview, type MovieSelectiveRegenerationResponse } from "@/lib/api";
 import { localeTag, type Locale } from "@/lib/i18n";
 
 export type MovieRegenerationIdempotencyKeys = { create: string; confirm: string };
@@ -17,20 +17,28 @@ export function retireMovieRegenerationAttempt(current: MovieRegenerationAttempt
   return movieRegenerationAttemptIsCurrent(current, candidate) ? undefined : current;
 }
 
+export function isDefinitiveMovieRegenerationRefusal(error: unknown): boolean {
+  return error instanceof ApiError && error.status >= 400 && error.status < 500
+    && ![408, 425, 429].includes(error.status);
+}
+
 export type MovieRegenerationConfirmationState = {
   requestId: string;
   preview: MovieRegenerationCostPreview;
   canConfirm: boolean;
-  blockedReason: "readiness-unavailable" | "server-blocked" | "confirmation-required" | null;
+  blockedReason: "already-confirmed" | "readiness-unavailable" | "server-blocked" | "confirmation-required" | null;
 };
 
 export function buildMovieRegenerationConfirmation(response: MovieSelectiveRegenerationResponse): MovieRegenerationConfirmationState {
   const preview = response.request.costPreview;
+  if (response.request.status === "Confirmed" || response.request.generationJobId || response.job) {
+    return { requestId: response.request.id, preview, canConfirm: false, blockedReason: "already-confirmed" };
+  }
   const blockedReason = !preview.guardrails
     ? "readiness-unavailable"
     : !preview.guardrails.canProceed
       ? "server-blocked"
-      : !preview.confirmationRequired
+      : response.request.status !== "PendingConfirmation" || !preview.confirmationRequired
         ? "confirmation-required"
         : null;
   return {

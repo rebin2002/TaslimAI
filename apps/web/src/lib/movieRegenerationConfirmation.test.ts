@@ -1,9 +1,9 @@
 import { describe, expect, it } from "vitest";
-import type { MovieRegenerationCostPreview, MovieSelectiveRegenerationResponse } from "@/lib/api";
-import { buildMovieRegenerationConfirmation, confirmMovieRegenerationIfAllowed, formatMovieRegenerationCost, movieRegenerationAttemptIsCurrent, newMovieRegenerationKeys, retireMovieRegenerationAttempt, type MovieRegenerationAttempt } from "./movieRegenerationConfirmation";
+import { ApiError, type MovieRegenerationCostPreview, type MovieSelectiveRegenerationResponse } from "@/lib/api";
+import { buildMovieRegenerationConfirmation, confirmMovieRegenerationIfAllowed, formatMovieRegenerationCost, isDefinitiveMovieRegenerationRefusal, movieRegenerationAttemptIsCurrent, newMovieRegenerationKeys, retireMovieRegenerationAttempt, type MovieRegenerationAttempt } from "./movieRegenerationConfirmation";
 
 function response(preview: MovieRegenerationCostPreview): MovieSelectiveRegenerationResponse {
-  return { request: { id: "regen-1", costPreview: preview } } as MovieSelectiveRegenerationResponse;
+  return { request: { id: "regen-1", status: "PendingConfirmation", costPreview: preview } } as MovieSelectiveRegenerationResponse;
 }
 
 function preview(overrides: Partial<MovieRegenerationCostPreview> = {}): MovieRegenerationCostPreview {
@@ -51,6 +51,34 @@ describe("Movie regeneration confirmation", () => {
     expect(confirmed).toBe(false);
     expect(state.blockedReason).toBe("readiness-unavailable");
     expect(calls).toEqual([]);
+  });
+
+  it("treats a confirmed create replay as completed even with an older positive cost preview", async () => {
+    const replay = response(preview());
+    replay.request.status = "Confirmed";
+    const state = buildMovieRegenerationConfirmation(replay);
+
+    expect(state.blockedReason).toBe("already-confirmed");
+    expect(await confirmMovieRegenerationIfAllowed(state, () => { throw new Error("Unexpected confirmation"); })).toBe(false);
+  });
+
+  it("recognizes an existing job and refuses to confirm an unknown request status", () => {
+    const replay = response(preview());
+    replay.request.generationJobId = "job-1";
+    expect(buildMovieRegenerationConfirmation(replay).blockedReason).toBe("already-confirmed");
+    replay.request.generationJobId = null;
+    replay.request.status = "Unknown";
+    expect(buildMovieRegenerationConfirmation(replay).canConfirm).toBe(false);
+  });
+
+  it("releases definitively refused attempts and preserves the keys for ambiguous or retryable responses", () => {
+    for (const status of [400, 403, 404, 409, 422]) {
+      expect(isDefinitiveMovieRegenerationRefusal(new ApiError(status, "Refused"))).toBe(true);
+    }
+    for (const status of [408, 425, 429, 500, 503]) {
+      expect(isDefinitiveMovieRegenerationRefusal(new ApiError(status, "Retry"))).toBe(false);
+    }
+    expect(isDefinitiveMovieRegenerationRefusal(new TypeError("Failed to fetch"))).toBe(false);
   });
 
   it("keeps a known estimate and formats an unknown estimate without inventing a price", () => {

@@ -2029,7 +2029,7 @@ public sealed class MovieStudioService(TaslimDbContext db, WorkspaceAccessServic
                 request.EstimatedProviderCostKnown,
                 estimate?.Currency ?? UsageCurrencies.Usd,
                 request.CostEstimateJson,
-                true,
+                request.Status == MovieRegenerationStatuses.PendingConfirmation,
                 estimate?.State ?? MovieGenerationCostEstimateStates.Unevaluated,
                 estimate?.MinimumAmountUsd,
                 estimate?.MaximumAmountUsd,
