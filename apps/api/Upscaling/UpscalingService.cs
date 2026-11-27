@@ -4,7 +4,6 @@ using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 using Taslim.Api.Authorization;
-using Taslim.Api.Assets;
 using Taslim.Api.Contracts;
 using Taslim.Api.Domain;
 using Taslim.Api.Infrastructure;
@@ -65,13 +64,17 @@ public sealed class UpscalingJobService(
             throw new UpscalingValidationException("PROJECT_NOT_IN_WORKSPACE", "The selected project is not in this workspace.");
 
         var source = await db.Assets
-            .Include(asset => asset.Project)
             .Include(asset => asset.StoredFile)
             .AsNoTracking()
-            .Where(AssetVisibility.ForWorkspaceMember(userId))
             .FirstOrDefaultAsync(asset => asset.Id == request.SourceAssetId && asset.WorkspaceId == request.WorkspaceId, cancellationToken);
         if (source is null)
             throw new UpscalingValidationException(UpscalingJobErrorCodes.SourceAssetNotFound, "The selected source asset could not be found.");
+        // An archived asset has been retired from active use: it is hidden from the
+        // default asset library and must not become the source of new upscaling work
+        // until its owner explicitly restores it. Fail closed like the other asset
+        // consumers (Movie selects, Social inputs) that require an active asset.
+        if (source.Status != AssetStatus.Active)
+            throw new UpscalingValidationException(UpscalingJobErrorCodes.SourceAssetUnsupported, "Archived assets cannot be upscaled. Restore the asset first.");
         if (source.AssetType is not (AssetTypes.Image or AssetTypes.Video))
             throw new UpscalingValidationException(UpscalingJobErrorCodes.SourceAssetUnsupported, "The selected source asset cannot be upscaled.");
         if (source.StoredFileId is null || source.StoredFile is null || source.StoredFile.Status != StoredFileStatus.Ready)

@@ -9,9 +9,11 @@ import { HomeComposer } from "@/components/HomeComposer";
 import { useAuth } from "@/components/AuthProvider";
 import { useLocale } from "@/components/LocaleProvider";
 import { StudioChooser } from "@/components/StudioChooser";
-import { api, type ActivityItem, type Asset, type Conversation, type Project } from "@/lib/api";
+import { ApiError, api, type ActivityItem, type Asset, type Conversation, type Project } from "@/lib/api";
 import { buildHomeRecentItems, hasInFlightActivity, type HomeRecentItem } from "@/lib/homeDashboardState";
+import { currentHomeDashboard, currentHomeProjectSelection, isHomeDashboardRequestCurrent, startHomeDashboardRequest } from "@/lib/homeDashboardRequest";
 import { createHomeCreationSubmissionGate, resolveHomeCreationPrompt } from "@/lib/homeCreation";
+import { getUserUploadSizeError } from "@/lib/fileUploadLimits";
 
 const promptChips = [
   { labelKey: "home.promptCampaign" },
@@ -29,6 +31,13 @@ export default function HomePage() {
   return <ProtectedPage><IdentityScopedHomeDashboard /></ProtectedPage>;
 }
 
+/**
+ * A Home composer holds unsent text, local File objects, selected project and
+ * private dashboard results. A same-tab account/workspace switch must remount
+ * all of it before the new principal can see or submit stale old-scope data.
+ * A key on the child handles this synchronously during render, unlike an
+ * effect that clears the previous account after one visible frame.
+ */
 function IdentityScopedHomeDashboard() {
   const { user, workspace, loading } = useAuth();
   if (loading || !user || !workspace) return null;
@@ -44,6 +53,10 @@ function HomeDashboard() {
   const [files, setFiles] = useState<File[]>([]);
   const [asking, setAsking] = useState(false);
   const submissionGate = useRef(createHomeCreationSubmissionGate());
+  // Auth transitions replace HomeDashboard by identity key. Use layout cleanup
+  // so the old principal's in-flight create loses permission synchronously
+  // during the transition commit, before passive effects or a stale promise can
+  // resume and submit private attachments under the former session.
   useLayoutEffect(() => {
     submissionGate.current.cancel();
     const gate = createHomeCreationSubmissionGate();
@@ -52,38 +65,72 @@ function HomeDashboard() {
   }, []);
   const [dashboard, setDashboard] = useState<DashboardData | null>(null);
   const [loading, setLoading] = useState(true);
-  const [loadError, setLoadError] = useState("");
+  const [loadError, setLoadError] = useState<{ workspaceId: string; message: string } | null>(null);
   const [askError, setAskError] = useState("");
+  // Only the newest load for the workspace that is actually mounted may
+  // publish: a dashboard started for a workspace the user has left, or for a
+  // component that has unmounted, must not replace the one now on screen.
+  const dashboardRequestSequence = useRef(0);
+  const activeWorkspaceId = useRef(workspace?.id ?? null);
+  if (activeWorkspaceId.current !== (workspace?.id ?? null)) activeWorkspaceId.current = workspace?.id ?? null;
 
   const loadDashboard = useCallback(async () => {
     if (!workspace) return;
+    const workspaceId = workspace.id;
+    const request = startHomeDashboardRequest(dashboardRequestSequence.current, workspaceId);
+    dashboardRequestSequence.current = request.sequence;
     setLoading(true);
     try {
       const [projects, conversations, activityResult, assetsResult] = await Promise.all([
-        api.listProjects(workspace.id, "Active"),
-        api.listConversations(workspace.id),
-        api.listActivity(workspace.id, 1, 12),
-        api.listAssets(workspace.id, { status: "Active", page: 1, pageSize: 12 }),
+        api.listProjects(workspaceId, "Active"),
+        api.listConversations(workspaceId),
+        api.listActivity(workspaceId, 1, 12),
+        api.listAssets(workspaceId, { status: "Active", page: 1, pageSize: 12 }),
       ]);
-      setDashboard({ workspaceId: workspace.id, projects, conversations, activity: activityResult.items, assets: assetsResult.items });
-      setLoadError("");
+      if (!isHomeDashboardRequestCurrent(request, dashboardRequestSequence.current, activeWorkspaceId.current)) return;
+      setDashboard({ workspaceId, projects, conversations, activity: activityResult.items, assets: assetsResult.items });
+      setLoadError(null);
     } catch (caught) {
-      setLoadError(caught instanceof Error ? caught.message : t("home.loadError"));
+      // A retired load cannot raise an alert over the mounted workspace.
+      if (isHomeDashboardRequestCurrent(request, dashboardRequestSequence.current, activeWorkspaceId.current)) {
+        setLoadError({ workspaceId, message: caught instanceof Error ? caught.message : t("home.loadError") });
+      }
     } finally {
-      setLoading(false);
+      if (isHomeDashboardRequestCurrent(request, dashboardRequestSequence.current, activeWorkspaceId.current)) setLoading(false);
     }
   }, [t, workspace]);
 
+  // Leaving a workspace retires its dashboard records at once: its private
+  // project names and activity badges must not stay on screen while the next
+  // workspace loads. Keyed on the id, so a same-workspace reload keeps its rows.
+  useEffect(() => {
+    dashboardRequestSequence.current += 1;
+    /* eslint-disable react-hooks/set-state-in-effect */
+    setDashboard(null);
+    setLoadError(null);
+    /* eslint-enable react-hooks/set-state-in-effect */
+  }, [workspace?.id]);
+
   // Fetch workspace-scoped records after authentication state is available.
-  // eslint-disable-next-line react-hooks/set-state-in-effect
-  useEffect(() => { void loadDashboard(); }, [loadDashboard]);
-  const visibleDashboard = dashboard?.workspaceId === workspace?.id ? dashboard : null;
-  const visibleLoadError = dashboard && !visibleDashboard ? "" : loadError;
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    void loadDashboard();
+    // A multi-request load outlives a fast navigation; stop paying for results
+    // no component instance will publish.
+    return () => { dashboardRequestSequence.current += 1; };
+  }, [loadDashboard]);
+
+  // Effects run after a render commits. Never render cached rows or errors from the
+  // previous workspace during the intervening frame before effect cleanup executes.
+  const visibleDashboard = currentHomeDashboard(dashboard, workspace?.id ?? null);
+  const visibleLoadError = loadError && loadError.workspaceId === workspace?.id ? loadError.message : "";
   const visibleLoading = loading || Boolean(dashboard && !visibleDashboard);
   const recentItems = useMemo(() => visibleDashboard ? buildHomeRecentItems(visibleDashboard, 4) : [], [visibleDashboard]);
   const hasWorkingGeneration = hasInFlightActivity(visibleDashboard?.activity ?? []);
   const projects = visibleDashboard?.projects ?? [];
-  const visibleProjectId = projects.some((project) => project.id === projectId) ? projectId : "";
+  // A project selected before the workspace switch must never be sent to the new
+  // workspace merely because its controlled select still carries the old id.
+  const visibleProjectId = currentHomeProjectSelection(projectId, projects);
 
   async function askTaslim() {
     const prompt = resolveHomeCreationPrompt(idea, files.length, locale);
@@ -93,26 +140,32 @@ function HomeDashboard() {
       return;
     }
     if (!workspace) return;
+    const uploadSizeError = files.map((file) => getUserUploadSizeError(file.size)).find((message) => message !== null);
+    if (uploadSizeError) {
+      setAskError(uploadSizeError);
+      return;
+    }
     const gate = submissionGate.current;
     if (!gate.tryStart()) return;
-    const workspaceId = workspace.id;
-    const selectedProjectId = visibleProjectId;
     setAsking(true);
     setAskError("");
     try {
-      const conversation = await api.createConversation(workspaceId, selectedProjectId ? { projectId: selectedProjectId } : {});
+      const conversation = await api.createConversation(workspace.id, visibleProjectId ? { projectId: visibleProjectId } : {});
       if (!gate.isActive()) return;
+      // Upload serially so a logout or workspace transition stops the next
+      // private attachment before its request starts. An already-sent upload
+      // cannot be retroactively undone by the client.
       const uploaded: Awaited<ReturnType<typeof api.uploadFile>>[] = [];
       for (const file of files) {
         if (!gate.isActive()) return;
-        uploaded.push(await api.uploadFile(workspaceId, file, { conversationId: conversation.id, projectId: selectedProjectId || undefined }));
+        uploaded.push(await api.uploadFile(workspace.id, file, { conversationId: conversation.id, projectId: visibleProjectId || undefined }));
       }
       if (!gate.isActive()) return;
       await api.sendMessage(conversation.id, prompt, undefined, uploaded.map((file) => file.id));
       if (!gate.isActive()) return;
       router.push(`/chat/${conversation.id}`);
-    } catch {
-      if (gate.isActive()) setAskError(t("home.askError"));
+    } catch (caught) {
+      if (gate.isActive()) setAskError(caught instanceof ApiError ? caught.message : t("home.askError"));
     } finally {
       const shouldUpdateUi = gate.isActive();
       gate.finish();

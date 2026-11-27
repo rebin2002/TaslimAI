@@ -4,6 +4,7 @@ import { ChevronDown, Paperclip, Send, X } from "lucide-react";
 import { useLocale } from "@/components/LocaleProvider";
 import type { Project } from "@/lib/api";
 import { canSubmitHomeCreation, isHomeCreationSubmitKey } from "@/lib/homeCreation";
+import { MAX_USER_UPLOAD_SIZE_MB } from "@/lib/fileUploadLimits";
 
 type HomeComposerProps = {
   value: string;
@@ -38,8 +39,7 @@ export function HomeComposer({ value, onChange, onSubmit, busy, projects, projec
         onChange={(event) => onChange(event.target.value)}
         onKeyDown={(event) => {
           if (isHomeCreationSubmitKey({
-            key: event.key,
-            shiftKey: event.shiftKey,
+            key: event.key, shiftKey: event.shiftKey,
             isComposing: event.nativeEvent.isComposing,
             keyCode: event.nativeEvent.keyCode,
           }) && !busy && canSubmitHomeCreation(value, files.length)) {
@@ -60,7 +60,7 @@ export function HomeComposer({ value, onChange, onSubmit, busy, projects, projec
         <div className="home-composer-context">
           <label className="home-composer-control">
             <input ref={fileInputRef} className="home-composer-file-input visually-hidden" type="file" multiple accept=".pdf,.docx,.txt,.md,.csv,.xlsx,.jpg,.jpeg,.png,.webp" onChange={(event) => { onFilesChange(Array.from(event.target.files ?? [])); event.currentTarget.value = ""; }} disabled={busy} />
-            <Paperclip size={15} /> <span>{t("home.attachAction")}</span>
+            <Paperclip size={15} /> <span>{t("home.attachAction")}</span> <small>{t("chat.fileLimit", { count: "5", size: String(MAX_USER_UPLOAD_SIZE_MB) })}</small>
           </label>
           <label className="home-composer-project">
             <span className="sr-only">{t("chat.projectSelector")}</span>

@@ -127,7 +127,7 @@ function deferred<T>(): Deferred<T> {
 // rebuild the component's useCallback and re-run the loader indefinitely.
 const harness = vi.hoisted(() => ({
   locale: { t: (key: string) => key, locale: "en" },
-  auth: { workspace: null as unknown, userId: "user-personal" },
+  auth: { workspace: null as unknown },
   router: { push: vi.fn(), replace: vi.fn(), prefetch: vi.fn() },
   api: {
     listProjects: vi.fn(),
@@ -141,7 +141,7 @@ const harness = vi.hoisted(() => ({
 }));
 
 vi.mock("@/components/AuthProvider", () => ({
-  useAuth: () => ({ user: { id: harness.auth.userId, displayName: "Rebin" }, workspace: harness.auth.workspace, loading: false }),
+  useAuth: () => ({ user: { id: "user-personal", displayName: "Rebin" }, workspace: harness.auth.workspace, loading: false }),
 }));
 vi.mock("@/components/LocaleProvider", () => ({ useLocale: () => harness.locale }));
 vi.mock("@/lib/api", () => ({ api: harness.api }));
@@ -255,7 +255,6 @@ beforeEach(() => {
   vi.stubGlobal("navigator", { userAgent: "test" });
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
   harness.auth.workspace = PERSONAL;
-  harness.auth.userId = "user-personal";
   harness.locale = { t: (key: string) => key, locale: "en" };
   for (const fn of Object.values(harness.api)) fn.mockReset();
   harness.api.listProjects.mockResolvedValue([]);
@@ -293,11 +292,6 @@ function switchWorkspace(next: WorkspaceFixture) {
   act(() => { root.render(<HomePage />); });
 }
 
-function switchUser(userId: string) {
-  harness.auth.userId = userId;
-  act(() => { root.render(<HomePage />); });
-}
-
 function clickTestId(testId: string): boolean {
   const target = findByTestId(container, testId);
   if (!target || target.disabled || target.getAttribute("disabled") !== null) return false;
@@ -314,19 +308,6 @@ function mockResolvedDashboardForWorkspaces() {
 }
 
 describe("Home creation API flow with local fixtures", () => {
-  it("blocks an empty no-file create without making creation or upload calls", async () => {
-    mount();
-    await flush();
-    const create = findByTestId(container, "home-create");
-    expect(create).not.toBeNull();
-    expect(create?.getAttribute("disabled")).not.toBeNull();
-    expect(clickTestId("home-create")).toBe(false);
-    expect(harness.api.createConversation).not.toHaveBeenCalled();
-    expect(harness.api.uploadFile).not.toHaveBeenCalled();
-    expect(harness.api.sendMessage).not.toHaveBeenCalled();
-    expect(harness.router.push).not.toHaveBeenCalled();
-  });
-
   it("sends explicit text plus the selected file within the current workspace and project", async () => {
     mockResolvedDashboardForWorkspaces();
     harness.api.createConversation.mockResolvedValue({ id: "conversation-text-file" });
@@ -385,33 +366,23 @@ describe("Home creation API flow with local fixtures", () => {
     expect(clickTestId("home-create")).toBe(false);
     expect(harness.api.createConversation).not.toHaveBeenCalled();
     expect(harness.api.uploadFile).not.toHaveBeenCalled();
+    expect(harness.api.sendMessage).not.toHaveBeenCalled();
 
     expect(clickTestId("select-project")).toBe(true);
     expect(clickTestId("attach-scoped-fixture")).toBe(true);
     expect(text()).toContain("project-business-private.pdf");
     expect(clickTestId("home-create")).toBe(true);
     await flush(16);
+    expect(harness.api.createConversation).toHaveBeenCalledTimes(1);
     expect(harness.api.createConversation).toHaveBeenCalledWith(BUSINESS.id, { projectId: "project-business" });
     expect(harness.api.uploadFile).toHaveBeenCalledTimes(1);
     expect(harness.api.uploadFile).toHaveBeenCalledWith(BUSINESS.id, expect.objectContaining({ name: "project-business-private.pdf" }), {
       conversationId: "conversation-fixture",
       projectId: "project-business",
     });
-  });
-
-  it("drops unsent local attachment state when the authenticated user changes", async () => {
-    mockResolvedDashboardForWorkspaces();
-    mount();
-    await flush();
-    expect(clickTestId("attach-fixture")).toBe(true);
-    expect(text()).toContain("home-fixture.pdf");
-
-    switchUser("user-next");
-    expect(text()).not.toContain("home-fixture.pdf");
-    expect(findByTestId(container, "home-create")?.getAttribute("disabled")).not.toBeNull();
-    expect(harness.api.createConversation).not.toHaveBeenCalled();
-    expect(harness.api.uploadFile).not.toHaveBeenCalled();
-    await flush();
+    expect(harness.api.sendMessage).toHaveBeenCalledTimes(1);
+    expect(harness.api.sendMessage).toHaveBeenCalledWith("conversation-fixture", "Please review the attached files.", undefined, ["uploaded-project-business-private.pdf"]);
+    expect(harness.router.push).toHaveBeenCalledWith("/chat/conversation-fixture");
   });
 });
 

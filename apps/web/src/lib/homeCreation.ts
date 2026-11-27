@@ -2,7 +2,10 @@ import type { Locale } from "@/lib/i18n";
 
 export const attachmentOnlyCreationPrompt = "Please review the attached files.";
 
-/** Keep attachment-only creation understandable in the active interface language. */
+/** Keep a no-text attachment-only create in the creator's chosen language.
+ * No provider or storage call happens here; only the future message text differs.
+ * Exhaustive locale keys prevent a newly added UI language silently using English.
+ */
 export const attachmentOnlyCreationPrompts: Readonly<Record<Locale, string>> = {
   en: attachmentOnlyCreationPrompt,
   ar: "يرجى مراجعة الملفات المرفقة.",
@@ -29,6 +32,7 @@ export function createHomeCreationSubmissionGate() {
       busy = true;
       return true;
     },
+    // Check after each awaited boundary before touching the old auth scope.
     isActive(): boolean { return busy && !cancelled; },
     finish(): void { busy = false; },
     cancel(): void {
@@ -38,7 +42,12 @@ export function createHomeCreationSubmissionGate() {
   };
 }
 
-/** Do not submit on Shift+Enter or while an IME is confirming a candidate. */
+/**
+ * IME-aware Enter admission for the Home creation composer. Enter is used to
+ * confirm candidate characters in Chinese/Japanese/Korean input; only a
+ * completed plain Enter may submit. The caller still enforces the same
+ * busy/content guard as the Create button.
+ */
 export function isHomeCreationSubmitKey(event: Readonly<{
   key: string;
   shiftKey: boolean;
@@ -47,4 +56,20 @@ export function isHomeCreationSubmitKey(event: Readonly<{
 }>): boolean {
   return event.key === "Enter" && !event.shiftKey
     && !event.isComposing && event.keyCode !== 229;
+}
+
+/** Keep only the newest private Home dashboard fetch authoritative. Locale and
+ * workspace transitions can start another request before an older one settles.
+ * Cancellation also invalidates requests after unmount, without changing the
+ * authenticated creation/upload gate.
+ */
+export function createLatestHomeDashboardReadGate() {
+  let generation = 0;
+  return {
+    begin(): () => boolean {
+      const current = ++generation;
+      return () => current === generation;
+    },
+    cancel(): void { generation++; },
+  };
 }

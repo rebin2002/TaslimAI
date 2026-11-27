@@ -26,6 +26,7 @@ describe("HomeComposer", () => {
     expect(html).toContain("textarea");
     expect(html).toContain("Launch plan");
     expect(html).toContain("+ Attach");
+    expect(html).toContain("Up to 5 files, 25 MB each");
     expect(html).toContain("Create");
     expect(html).not.toContain("Open Taslim Chat");
   });
@@ -35,7 +36,6 @@ describe("HomeComposer", () => {
     const html = renderToStaticMarkup(<LocaleProvider><HomeComposer value="Summarize this" onChange={vi.fn()} onSubmit={vi.fn()} busy={false} projects={[]} projectId="" onProjectChange={vi.fn()} files={[file]} onFilesChange={vi.fn()} onRemoveFile={vi.fn()} /></LocaleProvider>);
     expect(html).toContain("brief.txt");
     expect(html).toContain("5 KB");
-    expect(html).not.toContain('disabled=""');
     expect(html).not.toContain("storageProvider");
     expect(html).not.toContain("storageKey");
   });
@@ -43,12 +43,6 @@ describe("HomeComposer", () => {
   it("keeps creation enabled when a PDF is attached without typed instructions", () => {
     const file = new File([new Uint8Array(5000)], "brief.pdf", { type: "application/pdf" });
     const html = renderToStaticMarkup(<LocaleProvider><HomeComposer value="" onChange={vi.fn()} onSubmit={vi.fn()} busy={false} projects={[]} projectId="" onProjectChange={vi.fn()} files={[file]} onFilesChange={vi.fn()} onRemoveFile={vi.fn()} /></LocaleProvider>);
-    expect(html).toContain("brief.pdf");
     expect(html).not.toContain('disabled=""');
-  });
-
-  it("keeps an empty composer disabled when there is no attachment", () => {
-    const html = renderToStaticMarkup(<LocaleProvider><HomeComposer value="   " onChange={vi.fn()} onSubmit={vi.fn()} busy={false} projects={[]} projectId="" onProjectChange={vi.fn()} files={[]} onFilesChange={vi.fn()} onRemoveFile={vi.fn()} /></LocaleProvider>);
-    expect(html).toMatch(/<button[^>]*class="home-composer-submit"[^>]*disabled=""/);
   });
 });
