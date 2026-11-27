@@ -226,6 +226,19 @@ public sealed class AutopilotEventIntake(
             var winner = await db.AutopilotEvents.AsNoTracking()
                 .FirstOrDefaultAsync(item => item.SourceSystem == source && item.ExternalEventId == externalId, cancellationToken);
             if (winner is null) throw;
+            if (!string.Equals(winner.PayloadHash, payloadHash, StringComparison.Ordinal))
+            {
+                await audit.RecordAsync(AutopilotAuditFactory.Create(
+                    AutopilotAuditActions.EventRejected,
+                    AutopilotAuditOutcomes.Blocked,
+                    reason: "idempotency_key_payload_conflict",
+                    waveKey: signal.WaveKey,
+                    taskId: signal.TaskId,
+                    targetId: winner.Id,
+                    requestId: request.RequestId,
+                    dryRun: options.DryRun), cancellationToken);
+                return new AutopilotIntakeResult(AutopilotIntakeOutcomes.PayloadConflict, winner.Id, "idempotency_key_payload_conflict");
+            }
             return new AutopilotIntakeResult(AutopilotIntakeOutcomes.Duplicate, winner.Id, "concurrent_duplicate_delivery");
         }
 
@@ -341,6 +354,8 @@ public sealed class AutopilotEventIntake(
             var winner = await db.AutopilotEvents.AsNoTracking()
                 .FirstOrDefaultAsync(item => item.SourceSystem == source && item.ExternalEventId == externalId, cancellationToken);
             if (winner is null) throw;
+            if (!string.Equals(winner.PayloadHash, payloadHash, StringComparison.Ordinal))
+                return new AutopilotIntakeResult(AutopilotIntakeOutcomes.PayloadConflict, winner.Id, "idempotency_key_payload_conflict");
             return new AutopilotIntakeResult(AutopilotIntakeOutcomes.Duplicate, winner.Id, "concurrent_internal_signal");
         }
 
