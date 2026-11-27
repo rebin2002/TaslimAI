@@ -111,6 +111,7 @@ public sealed class VideoGenerationAdapterCapabilityPreflightTests
         var session = await service.SubmitAsync(Request());
 
         Assert.Equal(VideoGenerationState.Running, session.CurrentStatus.State);
+        Assert.Equal(1, adapter.CapabilityReads);
         Assert.Equal(1, adapter.SubmitCount);
     }
 
@@ -164,7 +165,15 @@ public sealed class VideoGenerationAdapterCapabilityPreflightTests
 
         public string AdapterKey => "capability-preflight-fake";
         public bool IsAvailable => true;
-        public VideoGenerationCapabilities Capabilities => capabilities;
+        public int CapabilityReads { get; private set; }
+        public VideoGenerationCapabilities Capabilities
+        {
+            get
+            {
+                CapabilityReads++;
+                return capabilities;
+            }
+        }
         public int SubmitCount { get; private set; }
 
         public Task<VideoGenerationSubmission> SubmitAsync(VideoGenerationRequest request, CancellationToken cancellationToken = default)

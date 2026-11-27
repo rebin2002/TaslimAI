@@ -121,8 +121,8 @@ public sealed class MovieBudgetDirectorService(
     // enforced per-clip ceiling, so a long-form brief is expanded into a shot grid instead of
     // being modelled as one oversized clip. These values plan cost only; they queue nothing,
     // reserve nothing, and call no provider.
-    internal const int MaxProjectPlanningDurationSeconds = 120 * 60;
-    internal const int MaxShotPlanningDurationSeconds = 60 * 60;
+    internal const int MaxProjectPlanningDurationSeconds = MovieDurationBudgetPolicy.MaxMovieDurationSeconds;
+    internal const int MaxShotPlanningDurationSeconds = MovieDurationBudgetPolicy.MaxShotDurationSeconds;
     internal const int DefaultUnplannedShotDurationSeconds = 60;
 
     public async Task<MovieBudgetDirectorEstimate> EstimateAsync(

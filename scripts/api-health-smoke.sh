@@ -38,6 +38,7 @@ validate_response() {
 import json
 import sys
 from pathlib import Path
+from urllib.request import parse_http_list
 
 headers_path, body_path, endpoint = sys.argv[1:]
 # curl --dump-header appends every response block of a redirect chain to the same
@@ -68,17 +69,23 @@ for position, line in enumerate(blocks[-1]):
     if ":" not in line:
         continue
     name, value = line.split(":", 1)
-    headers[name.lower()] = value.strip()
+    headers.setdefault(name.lower(), []).append(value.strip())
 
 if terminal_status != 200:
     raise SystemExit(f"{endpoint}: terminal HTTP response status is {terminal_status}, not 200")
 
-cache_control = headers.get("cache-control", "").lower()
-if "no-store" not in cache_control:
+def has_directive(name, expected):
+    return any(
+        directive.strip().lower() == expected
+        for field_value in headers.get(name, [])
+        for directive in parse_http_list(field_value)
+    )
+
+if not has_directive("cache-control", "no-store"):
     raise SystemExit(f"{endpoint}: terminal response is missing Cache-Control: no-store")
-if "no-cache" not in headers.get("pragma", "").lower():
+if not has_directive("pragma", "no-cache"):
     raise SystemExit(f"{endpoint}: terminal response is missing Pragma: no-cache")
-request_id = headers.get("x-request-id", "")
+request_id = headers.get("x-request-id", [""])[-1]
 if not request_id:
     raise SystemExit(f"{endpoint}: terminal response is missing X-Request-ID")
 
@@ -107,6 +114,9 @@ else:
     database = next((check for check in checks if check.get("name") == "database"), None)
     if database is None or database.get("status") != "available" or database.get("required") is not True:
         raise SystemExit(f"{endpoint}: required database check is not available")
+    storage = next((check for check in checks if check.get("name") == "storage"), None)
+    if storage is None or storage.get("status") != "available" or storage.get("required") is not True:
+        raise SystemExit(f"{endpoint}: required storage check is not available")
     for check in checks:
         if check.get("required") is True and check.get("status") != "available":
             raise SystemExit(f"{endpoint}: required check {check.get('name', '<unnamed>')} is not available")
@@ -156,7 +166,7 @@ probe_endpoint() {
   return 1
 }
 
-printf '%s\n' "[api-health-smoke] checking $BASE_URL"
+printf '%s\n' '[api-health-smoke] checking configured API base URL'
 probe_endpoint "/health/live"
 probe_endpoint "/health/ready"
 printf '%s\n' "[api-health-smoke] PASS — liveness and required dependency readiness are healthy"

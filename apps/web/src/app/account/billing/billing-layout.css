@@ -27,6 +27,15 @@
   min-height: 24px;
 }
 
+/* At the 160px layout viewport produced by phone-width 200% zoom, the root's global smooth
+   scrolling can leave Tab-focused controls horizontally stranded while its animation is in flight.
+   Keep browser-managed focus scrolling immediate on this route and only below the 320px canvas. */
+@media (max-width: 320px) {
+  html:has(.billing-page) {
+    scroll-behavior: auto;
+  }
+}
+
 .billing-page .usage-header h1 {
   max-width: 100%;
   margin: 9px 0 8px;

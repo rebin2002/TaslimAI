@@ -54,6 +54,7 @@ public sealed class MovieGuideService(TaslimDbContext db, MovieAuthorizationServ
         revision.Status = MovieGuideRevisionStatuses.Locked;
         revision.LockedAt = now;
         revision.LockedByUserId = userId;
+        SynchronizeLegacyProjection(guide, revision);
         guide.LockedRevisionNumber = revision.RevisionNumber;
         guide.LockedAt = now;
         guide.LockedByUserId = userId;
@@ -160,6 +161,30 @@ public sealed class MovieGuideService(TaslimDbContext db, MovieAuthorizationServ
 
     private static MovieGuideHistoryResponse ToHistory(MovieContinuityGuide guide) =>
         new(guide.Id, guide.CurrentRevisionNumber, guide.LockedRevisionNumber, guide.Revisions.OrderByDescending(item => item.RevisionNumber).Select(ToDto).ToArray());
+
+    private static void SynchronizeLegacyProjection(MovieContinuityGuide guide, MovieGuideRevision revision)
+    {
+        guide.VisualLanguage = ReadString(revision.VisualBibleJson, "visualLanguage");
+        guide.ColorAndLighting = ReadString(revision.VisualBibleJson, "colorAndLighting");
+        guide.CameraLanguage = ReadString(revision.CinematographyBibleJson, "cameraLanguage");
+        guide.SoundAndNarration = ReadString(revision.AudioBibleJson, "soundAndNarration");
+        guide.ContinuityRules = ReadString(revision.ContinuityBibleJson, "continuityRules");
+    }
+
+    private static string ReadString(string json, string propertyName)
+    {
+        try
+        {
+            using var document = JsonDocument.Parse(json);
+            return document.RootElement.TryGetProperty(propertyName, out var property) && property.ValueKind == JsonValueKind.String
+                ? property.GetString() ?? string.Empty
+                : string.Empty;
+        }
+        catch (JsonException)
+        {
+            return string.Empty;
+        }
+    }
 
     private static MovieGuideRevisionDto ToDto(MovieGuideRevision revision) =>
         new(revision.Id, revision.RevisionNumber, revision.Status, Sections(revision), revision.CreatedByUserId, revision.CreatedAt, revision.LockedAt, revision.LockedByUserId);

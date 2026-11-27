@@ -98,6 +98,51 @@ public sealed class MovieGenerationCostEstimatorTests
         Assert.Null(upscaleResult.MaximumAmountUsd);
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Overflow_in_movie_pricing_blocks_confirmed_generation_even_when_unknown_costs_are_allowed(bool budgetEnabled)
+    {
+        await using var connection = new SqliteConnection("DataSource=:memory:");
+        await connection.OpenAsync();
+        await using var db = CreateDb(connection);
+        await db.Database.EnsureCreatedAsync();
+        db.ProviderCapabilityPricings.Add(Route(
+            baseMin: 100000000000000000000m,
+            baseMax: 100000000000000000000m,
+            maxDuration: int.MaxValue));
+        await db.SaveChangesAsync();
+
+        var estimator = new MovieGenerationCostEstimator(db, Options.Create(new MovieGenerationCostEstimatorOptions
+        {
+            MaxDurationSeconds = int.MaxValue,
+            MaxEstimateUsd = 10_000m,
+        }));
+        var result = await estimator.EstimateAsync(Request(duration: int.MaxValue), "test-provider");
+
+        Assert.Equal(MovieGenerationCostEstimateStates.Unknown, result.State);
+        Assert.Equal(MovieGenerationCostEstimateReasons.ArithmeticOverflow, result.Reason);
+        Assert.Null(result.MaximumAmountUsd);
+
+        var guard = new GenerationCostGuardrailService(db, Options.Create(new GenerationBudgetOptions
+        {
+            Enabled = budgetEnabled,
+            RejectUnknownEstimates = false,
+            RequireConfirmationForUnknownEstimates = false,
+        }));
+        var userId = Guid.NewGuid();
+        var workspaceId = Guid.NewGuid();
+        var admission = await guard.EvaluateAsync(userId, workspaceId, null, result.ToGenerationCostEstimate(), confirmationAccepted: true);
+        Assert.False(admission.Allowed);
+        Assert.False(admission.CanProceed);
+        Assert.Equal("COST_ESTIMATE_UNKNOWN", admission.RejectionCode);
+
+        // A representable estimate over the configured estimator cap keeps its existing policy.
+        var ordinaryCap = MovieGenerationCostEstimate.Unknown(MovieGenerationCostEstimateReasons.EstimateCapExceeded);
+        var control = await guard.EvaluateAsync(userId, workspaceId, null, ordinaryCap.ToGenerationCostEstimate(), confirmationAccepted: true);
+        Assert.True(control.CanProceed);
+    }
+
     [Fact]
     public async Task No_matching_persisted_capability_is_unevaluated()
     {
@@ -134,7 +179,8 @@ public sealed class MovieGenerationCostEstimatorTests
         decimal? upscaleMax = null,
         int retryLimit = 8,
         int upscaleLimit = 3,
-        bool supportsUpscale = false) => new()
+        bool supportsUpscale = false,
+        int maxDuration = 3600) => new()
     {
         Id = Guid.NewGuid(),
         CapabilityKey = "movie.video",
@@ -145,7 +191,7 @@ public sealed class MovieGenerationCostEstimatorTests
         QualityTier = "Standard",
         ProcessingPath = upscaleMin.HasValue ? "upscale" : "native",
         SupportsUpscaling = supportsUpscale,
-        MaxDurationSeconds = 3600,
+        MaxDurationSeconds = maxDuration,
         MaxRetryAttempts = retryLimit,
         MaxUpscalePasses = upscaleLimit,
         BasePriceUsdPerSecondMin = baseMin,
