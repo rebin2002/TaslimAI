@@ -29,6 +29,17 @@ public sealed class AcademicSourceDiscoveryOptions
 
     public string? GoogleBooksApiKey { get; set; }
 
+    /// <summary>
+    /// Permit plaintext HTTP provider endpoints and hops. <strong>Not reachable from
+    /// configuration</strong> — the setter is internal, so the options binder ignores it and no
+    /// deployment section, environment variable or command-line entry can turn it on. It exists for
+    /// a test that injects its own transport against a local fixture, which is the only place a
+    /// plaintext scholarly read is ever appropriate; the production runtime always requires TLS.
+    /// The endpoint allow list, the resolved-address checks and the credential scrubbing stay
+    /// exactly as strict either way, because none of them is about the scheme.
+    /// </summary>
+    internal bool AllowInsecureProviderEndpoints { get; set; }
+
     /// <summary>Contact address used for the providers' polite pools (OpenAlex <c>mailto</c>, Crossref User-Agent). Recommended in production.</summary>
     public string? ContactMailto { get; set; }
 
@@ -70,6 +81,19 @@ public sealed class AcademicSourceDiscoveryOptions
     /// <summary>Combined budget for one adapter operation including retries and pagination.</summary>
     public int OperationTimeoutSeconds { get; set; } = 60;
 
+    /// <summary>
+    /// Budget for the whole discovery request, across every catalog it visits and every DOI it
+    /// checks. <see cref="OperationTimeoutSeconds"/> bounds ONE adapter operation, and because
+    /// participants are visited one after another, a search's own worst case is the SUM of them:
+    /// four catalogs and ten DOI checks at 60s each is a request that stays inside every per-call
+    /// timeout while holding a shared search slot for minutes. When this budget runs out the
+    /// search stops asking, returns what it already has, and says so honestly: the unanswered
+    /// participants are reported as timeouts, the batch is marked partial, and the caller never
+    /// sees a quiet empty "success". It can never be set below one request attempt plus one
+    /// second, so a mistuned value cannot make the feature unreachable.
+    /// </summary>
+    public int DiscoveryBudgetSeconds { get; set; } = 90;
+
     public int MaxPerPage { get; set; } = 25;
 
     /// <summary>Bounded pagination: an adapter never walks more than this many pages in one operation.</summary>
@@ -109,6 +133,12 @@ public sealed class AcademicSourceDiscoveryOptions
     {
         RequestTimeoutSeconds = Math.Clamp(RequestTimeoutSeconds, 2, 120);
         OperationTimeoutSeconds = Math.Clamp(OperationTimeoutSeconds, RequestTimeoutSeconds, 300);
+        // Never shorter than one request attempt plus a second, so a mistuned value cannot cut off
+        // every catalog before any of them could answer once. It is deliberately NOT floored at a
+        // whole operation budget: an operator tightening the request budget is choosing to accept
+        // honestly-reported partial results, which is the safer direction than a slot held open
+        // while each participant spends its own full timeout in sequence.
+        DiscoveryBudgetSeconds = Math.Max(RequestTimeoutSeconds + 1, Math.Clamp(DiscoveryBudgetSeconds, 1, 600));
         MaxPerPage = Math.Clamp(MaxPerPage, 1, 50);
         MaxPages = Math.Clamp(MaxPages, 1, 10);
         MaxResultsPerProvider = Math.Clamp(MaxResultsPerProvider, 1, 200);
@@ -180,6 +210,12 @@ public sealed class AcademicSourceDiscoveryOptions
             if (!Uri.TryCreate(url, UriKind.Absolute, out var uri)
                 || (uri.Scheme != Uri.UriSchemeHttps && uri.Scheme != Uri.UriSchemeHttp))
             { failures.Add($"{name} is not an absolute http(s) URL"); continue; }
+            // A plaintext provider base is a configuration error, not a degraded mode: every one of
+            // these endpoints serves HTTPS, so the only way to write an http:// one is a typo or a
+            // proxy that a scholarly read — whose query string carries the reader's search term, and
+            // for Google Books the configured key — was never meant to pass through.
+            if (uri.Scheme == Uri.UriSchemeHttp && !AllowInsecureProviderEndpoints)
+                failures.Add($"{name} uses plaintext HTTP; scholarly provider endpoints must be HTTPS");
             if (uri.UserInfo.Length > 0) { failures.Add($"{name} embeds credentials"); continue; }
             if (AcademicSourceUrlGuard.TryParseIpLiteral(uri.Host, out var literal) && !AcademicSourceUrlGuard.IsPubliclyRoutable(literal))
                 failures.Add($"{name} points at a non-public address");

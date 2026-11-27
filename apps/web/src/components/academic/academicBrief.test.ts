@@ -137,6 +137,18 @@ describe("validation", () => {
     expect(validateAcademicBrief(brief)).toContainEqual(expect.objectContaining({ messageKey: "error.peerReviewed.exceedsTotal", severity: "error" }));
   });
 
+  it("bounds total and peer-only targets by the studio's discovery limit", () => {
+    for (const field of ["minimumSources", "minimumPeerReviewed"] as const) {
+      const requirements = { ...briefFixture().requirements, minimumSources: null, minimumPeerReviewed: null };
+      const atLimit = briefFixture({ requirements: { ...requirements, [field]: 120 } });
+      const aboveLimit = briefFixture({ requirements: { ...requirements, [field]: 121 } });
+      expect(hasBlockingIssue(validateAcademicBrief(atLimit))).toBe(false);
+      expect(validateAcademicBrief(aboveLimit)).toContainEqual(
+        expect.objectContaining({ field, severity: "error", messageKey: "error.sourceCount.range" }),
+      );
+    }
+  });
+
   it("rejects out-of-range word counts and non-integers", () => {
     for (const wordCount of [12, briefLimits.wordCount.max + 1, 1500.5]) {
       expect(validateAcademicBrief(briefFixture({ requirements: { ...briefFixture().requirements, wordCount } })), String(wordCount)).toContainEqual(
@@ -154,6 +166,20 @@ describe("validation", () => {
     const tooMany = briefFixture({ reviewQuestions: ["a".repeat(20), "b".repeat(20), "c".repeat(20), "d".repeat(20), "e".repeat(20)] });
     expect(validateAcademicBrief(tooMany)).toContainEqual(expect.objectContaining({ messageKey: "error.reviewQuestions.max" }));
     expect(validateAcademicBrief(briefFixture({ reviewQuestions: [""] }))).toContainEqual(expect.objectContaining({ field: "reviewQuestion-0" }));
+  });
+
+  it("blocks a brief with too many keywords instead of silently dropping terms", () => {
+    const keywords = Array.from({ length: briefLimits.maxKeywords + 1 }, (_, index) => `keyword-${index + 1}`);
+    expect(parseKeywords(keywords.join(", "))).toEqual(keywords);
+    expect(validateAcademicBrief(briefFixture({ keywords }))).toContainEqual(
+      expect.objectContaining({ field: "keywords", severity: "error", messageKey: "error.keywords.max" }),
+    );
+  });
+
+  it("blocks a keyword longer than the server-supported limit", () => {
+    expect(validateAcademicBrief(briefFixture({ keywords: ["k".repeat(briefLimits.keyword.max + 1)] }))).toContainEqual(
+      expect.objectContaining({ field: "keywords", severity: "error", messageKey: "error.keyword.tooLong" }),
+    );
   });
 });
 
@@ -176,9 +202,9 @@ describe("review summary", () => {
 });
 
 describe("keyword parsing", () => {
-  it("splits, trims, de-duplicates case-insensitively and caps the list", () => {
+  it("splits, trims and de-duplicates case-insensitively without truncating", () => {
     expect(parseKeywords(" pricing,  Pricing ;reimbursement\n , ")).toEqual(["pricing", "reimbursement"]);
-    expect(parseKeywords(Array.from({ length: 20 }, (_, index) => `k${index}`).join(", "))).toHaveLength(briefLimits.maxKeywords);
+    expect(parseKeywords(Array.from({ length: 20 }, (_, index) => `k${index}`).join(", "))).toHaveLength(20);
   });
 });
 

@@ -113,12 +113,25 @@ const h = vi.hoisted(() => {
     pack: { locale: "en", t: translate },
     active: null as { locale: string; t: (key: string, variables?: Record<string, string>) => string } | null,
     projectId: "project-synthetic-a",
-    api: {
-      getProjectOverview: vi.fn(),
-      archiveProject: vi.fn(),
-      restoreProject: vi.fn(),
-      updateProject: vi.fn(),
-    },
+    api: (() => {
+      // The page writes through the revision fence. Each wrapper delegates to
+      // the mock beneath it, so the scenarios below keep driving and asserting
+      // on exactly the call they were written against, and a mutation's answer
+      // simply carries the revision the server committed with it.
+      const base = {
+        getProjectOverview: vi.fn(),
+        archiveProject: vi.fn(),
+        restoreProject: vi.fn(),
+        updateProject: vi.fn(),
+      };
+      return {
+        ...base,
+        archiveProjectWithRevision: async (projectId: string) => ({ project: await base.archiveProject(projectId), revision: null }),
+        restoreProjectWithRevision: async (projectId: string) => ({ project: await base.restoreProject(projectId), revision: null }),
+        getProjectWithRevision: async (projectId: string) => ({ project: await base.getProjectOverview(projectId), revision: null }),
+        updateProjectWithRevision: async (projectId: string, input: unknown) => ({ project: await base.updateProject(projectId, input), revision: null }),
+      };
+    })(),
     router: { push: vi.fn() },
     confirm: true,
   };
@@ -314,6 +327,21 @@ describe("project detail mutation route fence", () => {
     await settleArchive(0, projectAArchived);
     expect(headingText()).toBe("Alpha Fence Project");
     expect(buttonByText("projects.restore")).toBeTruthy();
+  });
+  it("ignores an archive response for the wrong project while the route still names the clicked project", async () => {
+    await mountView();
+    await settleOverview(0, overviewA);
+    await clickButton("projects.archive");
+    expect(archiveRequests.map((entry) => entry.projectId)).toEqual([projectA.id]);
+
+    // The click and route are still for A, but exercise a malformed/cross-boundary
+    // response carrying B. It must not rewrite A's displayed record or affordances.
+    await settleArchive(0, projectB);
+
+    expect(headingText()).toBe("Alpha Fence Project");
+    expect(buttonByText("projects.archive")).toBeTruthy();
+    expect(buttonByText("projects.restore")).toBeFalsy();
+    expect(container.textContent ?? "").not.toContain("Beta Fence Project");
   });
   it("still applies a same-project restore success to the displayed record", async () => {
     await mountView();

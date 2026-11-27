@@ -1,8 +1,11 @@
 import type { GenerationJob, GenerationJobStatus } from "./api";
 export const terminalJobStatuses: ReadonlySet<GenerationJobStatus> = new Set(["Succeeded", "Failed", "Cancelled"]);
+const activeJobStatuses: ReadonlySet<GenerationJobStatus> = new Set(["Pending", "Queued", "Running"]);
 
 export function isTerminalJob(job: GenerationJob | null | undefined) {
-  return Boolean(job && terminalJobStatuses.has(job.status));
+  // Fail closed when a newer server status reaches this older client: do not
+  // poll forever or offer cancellation for a state the client cannot interpret.
+  return Boolean(job && !activeJobStatuses.has(job.status));
 }
 
 // The history view reads a single workspace at a time. A response that describes a record from

@@ -139,16 +139,16 @@ describe("AcademicResearchStudio tabs", () => {
   });
 
   it("wires every tab to its own panel", () => {
-    expect(toText(renderTab({ tab: "sources" }))).toContain("Record what you have verified");
+    expect(toText(renderTab({ tab: "sources" }))).toContain("Find records, then verify them");
     expect(toText(renderTab({ tab: "evidence" }))).toContain("Add sources first");
     expect(toText(renderTab({ tab: "chapters" }))).toContain("Word allocation");
   });
 });
 
 describe("AcademicResearchStudio honesty", () => {
-  it("labels later-phase capabilities instead of offering controls for them", () => {
+  it("offers only the saved Plan checkpoint while labeling downstream capabilities", () => {
     expect(text).toContain("Coming in a later step");
-    expect(text).toContain("Starting an academic run is not available yet");
+    expect(text).toContain("The first saved workflow step is available");
     const evidenceState: Partial<AcademicWorkspaceState> = {
       tab: "evidence",
       sources: [verifiedSource()],
@@ -166,6 +166,8 @@ describe("AcademicResearchStudio honesty", () => {
       "Chapters",
       "Save draft",
       "Start over",
+      "Load saved plan",
+      "Save and prepare plan",
       "Use common practice for this discipline",
       "Add another question",
       "Remove",
@@ -173,6 +175,9 @@ describe("AcademicResearchStudio honesty", () => {
       "Optional",
       "Add to library",
       "Clear form",
+      // #1267 slice 1: standalone search and the persisted Plan checkpoint are
+      // explicit controls; the Plan action stops at its human-approval gate.
+      "Search",
     ]);
     for (const tab of ["plan", "sources", "evidence", "chapters"] as const) {
       const html = renderTab({ tab });
@@ -198,8 +203,8 @@ describe("AcademicResearchStudio honesty", () => {
     expect(text).not.toMatch(/\b(tab|page|field|sources|plan|evidence|chapters|mode|status|action|error|warning|stage|capability)\.[a-zA-Z]/);
   });
 
-  it("says plainly that the plan is reviewed before anything runs", () => {
-    expect(text).toContain("Nothing runs yet");
+  it("says plainly that the saved plan is reviewed before source discovery begins", () => {
+    expect(text).toContain("saved and reviewed before source discovery begins");
   });
 });
 
@@ -238,6 +243,7 @@ describe("AcademicResearchStudio with a filled brief", () => {
     expect(chaptersHtml).toContain('value="Original Contribution to Knowledge"');
     expect(chaptersHtml).toContain('value="Theoretical Framework"');
     expect(chaptersHtml).toContain("Chapter plan — Doctoral");
+    expect(chaptersHtml).toMatch(/<input\b(?=[^>]*\bid="[^"]+-title")(?=[^>]*\bmaxlength="200")[^>]*>/i);
   });
 
   it("lists the verified source with its own identifier on the Sources tab", () => {

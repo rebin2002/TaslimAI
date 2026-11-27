@@ -9,6 +9,20 @@ public sealed class AntiforgeryValidationMiddleware(
     IAntiforgery antiforgery,
     ILogger<AntiforgeryValidationMiddleware> logger)
 {
+    private static bool IsRequestBodyTooLarge(Exception exception)
+    {
+        for (Exception? current = exception; current is not null; current = current.InnerException)
+        {
+            if (current is Microsoft.AspNetCore.Server.Kestrel.Core.BadHttpRequestException
+                { StatusCode: StatusCodes.Status413PayloadTooLarge })
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     public async Task InvokeAsync(HttpContext context)
     {
         // All current state-changing /api endpoints are CSRF-protected. MVC's
@@ -35,6 +49,18 @@ public sealed class AntiforgeryValidationMiddleware(
                 // the same safe error envelope as authenticated API mutations. The
                 // MVC [ValidateAntiForgeryToken] attributes remain defense in depth.
                 await antiforgery.ValidateRequestAsync(context);
+            }
+            catch (Exception exception) when (IsRequestBodyTooLarge(exception))
+            {
+                logger.LogWarning(
+                    "Request body exceeded its configured limit during antiforgery validation for {Method} {Path}. TraceId={TraceId}",
+                    context.Request.Method,
+                    context.Request.Path,
+                    context.TraceIdentifier);
+
+                context.Response.Clear();
+                context.Response.StatusCode = StatusCodes.Status413PayloadTooLarge;
+                return;
             }
             catch (AntiforgeryValidationException exception)
             {

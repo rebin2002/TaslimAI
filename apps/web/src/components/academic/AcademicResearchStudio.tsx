@@ -14,8 +14,10 @@
  * instead of replacing it.
  *
  * Scope discipline (deliberate, and asserted by the tests):
- * - No network calls. The academic job pipeline, scholarly discovery, evidence
- *   extraction and document export are planned phases and appear as statuses.
+ * - Network calls are explicit: the Sources tab's read-only scholarly search and the Plan
+ *   tab's authenticated workspace-scoped create/load/run/approval actions. The Plan action
+ *   runs only the deterministic saved Plan stage; downstream discovery, evidence extraction
+ *   and document export remain visibly unconnected.
  * - No provider, model or cost information anywhere in customer-facing copy.
  * - Drafts persist through the privacy-scoped session draft store, keyed by user
  *   and workspace, and are never read across identities.
@@ -34,11 +36,11 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
-import { BookOpenCheck, FileText, ShieldCheck } from "lucide-react";
+import { BookOpenCheck, FileDown, FileText, ShieldCheck } from "lucide-react";
 import { useAuth } from "@/components/AuthProvider";
 import { useLocale } from "@/components/LocaleProvider";
 import { createAcademicLabels, createAcademicTranslator } from "./academicStrings";
-import { academicAssetsRoute, academicStandardRoute } from "./academicRoutes";
+import { academicAssetsRoute, academicExportRoute, academicStandardRoute, academicTemplatesRoute } from "./academicRoutes";
 import {
   applyDisciplineDefaults,
   countAccessLevels,
@@ -303,6 +305,9 @@ export function AcademicWorkspace({ principal, initialState }: AcademicWorkspace
           requireFullText={brief.requirements.requireFullText}
           t={ta}
           labels={labels}
+          // Search is workspace-scoped on the server, so the panel gets the same scope the
+          // draft is keyed by. Without it the search surface is honestly absent, not stubbed.
+          workspaceId={principal.workspaceId}
         />
       );
     }
@@ -341,6 +346,9 @@ export function AcademicWorkspace({ principal, initialState }: AcademicWorkspace
         t={ta}
         labels={labels}
         onJumpToField={jumpToField}
+        workspaceId={principal.workspaceId}
+        chapterHeadings={state.chapters.map((chapter) => chapter.title)}
+        language={locale}
       />
     );
   };
@@ -423,6 +431,12 @@ export function AcademicWorkspace({ principal, initialState }: AcademicWorkspace
         <p>{ta("footer.note")}</p>
         <Link href={academicAssetsRoute} className={styles.textLink}>
           <FileText size={14} aria-hidden="true" /> {ta("footer.assets")}
+        </Link>
+        <Link href={academicTemplatesRoute} className={styles.textLink}>
+          <BookOpenCheck size={14} aria-hidden="true" /> {ta("footer.templates")}
+        </Link>
+        <Link href={academicExportRoute} className={styles.textLink}>
+          <FileDown size={14} aria-hidden="true" /> {ta("footer.export")}
         </Link>
       </footer>
     </div>
