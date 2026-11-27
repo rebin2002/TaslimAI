@@ -111,11 +111,19 @@ describe("SSR cache isolation middleware", () => {
       "/login/extra",
       "/register/dashboard",
       "/login.json",
-      "/api/../projects",
     ]) {
       expect(isPublicDocPath(new URL(`http://localhost:3000${path}`).pathname), path).toBe(false);
       expect(policyFor(path).cacheControl, path).toBe(PRIVATE_DOC_CACHE_CONTROL);
     }
+  });
+
+  it("does not treat URL-constructor normalization as proof for the raw API traversal boundary", () => {
+    const rawPath = "/api/../projects";
+    // NextRequest and the WHATWG URL constructor normalize dot segments before
+    // this unit suite can inspect the matcher input. The production-container
+    // smoke sends the raw request with curl --path-as-is and checks its response.
+    expect(matcherAdmits(rawPath), rawPath).toBe(false);
+    expect(new URL(`http://localhost:3000${rawPath}`).pathname).toBe("/projects");
   });
 
   it("fails closed for unknown routes", () => {

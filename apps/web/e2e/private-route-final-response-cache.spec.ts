@@ -13,7 +13,9 @@ function expectPrivateNoStoreResponse(
   const cacheControl = (headers["cache-control"] ?? "").toLowerCase();
   const directives = cacheControl.split(",").map((directive) => directive.trim());
 
-  expect(directives, `${path}: Cache-Control`).toContain("no-store");
+  for (const directive of ["private", "no-cache", "no-store", "must-revalidate", "max-age=0"]) {
+    expect(directives, `${path}: Cache-Control`).toContain(directive);
+  }
   expect(
     directives.some((directive) => directive.split("=", 1)[0].trim() === "public"),
     `${path}: public directive`,
@@ -33,7 +35,10 @@ function expectPrivateNoStoreResponse(
     }
   }
 
-  expect(headers["x-robots-tag"] ?? "", `${path}: X-Robots-Tag`).toMatch(/\bnoindex\b/i);
+  const robots = (headers["x-robots-tag"] ?? "").toLowerCase().split(",").map((directive) => directive.trim());
+  for (const directive of ["noindex", "nofollow", "noarchive", "nosnippet"]) {
+    expect(robots, `${path}: X-Robots-Tag`).toContain(directive);
+  }
 }
 
 test.describe("browser-observed private route cache headers", () => {

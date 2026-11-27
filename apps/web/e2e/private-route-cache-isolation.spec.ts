@@ -16,11 +16,16 @@ function expectPrivateNoStoreResponse(headers: Record<string, string>, path: str
   const cacheControl = (headers["cache-control"] ?? "").toLowerCase();
   const directives = cacheControl.split(",").map((directive) => directive.trim());
 
-  expect(directives, `${path}: Cache-Control`).toContain("no-store");
+  for (const directive of ["private", "no-cache", "no-store", "must-revalidate", "max-age=0"]) {
+    expect(directives, `${path}: Cache-Control`).toContain(directive);
+  }
   expect(directives.some((directive) => directive.startsWith("public")), `${path}: public directive`).toBe(false);
   expect(directives.some((directive) => directive.startsWith("s-maxage")), `${path}: s-maxage directive`).toBe(false);
   expect(directives.some((directive) => directive.startsWith("max-age=") && directive !== "max-age=0"), `${path}: max-age`).toBe(false);
-  expect(headers["x-robots-tag"] ?? "", `${path}: X-Robots-Tag`).toMatch(/\bnoindex\b/i);
+  const robots = (headers["x-robots-tag"] ?? "").toLowerCase().split(",").map((directive) => directive.trim());
+  for (const directive of ["noindex", "nofollow", "noarchive", "nosnippet"]) {
+    expect(robots, `${path}: X-Robots-Tag`).toContain(directive);
+  }
 }
 
 function makeUser(marker: string): TestUser {
@@ -82,11 +87,8 @@ test.describe("authenticated SSR route cache isolation", () => {
     for (const path of ["/projects.rsc", "/chat.rsc", "/account/billing.rsc"]) {
       const response = await page.goto(path);
       expect(response, path).not.toBeNull();
-      expect(response!.status(), path).toBeLessThan(300);
-      const headers = response!.headers();
-      expect(headers["cache-control"] ?? "", path).toMatch(/no-store/);
-      expect(headers["cache-control"] ?? "", path).not.toMatch(/s-maxage|max-age=(?!0[,\s]|0$)/);
-      expect(headers["x-robots-tag"] ?? "", path).toMatch(/noindex/);
+      expect(response!.status(), path).toBe(200);
+      expectPrivateNoStoreResponse(response!.headers(), path);
     }
   });
 
