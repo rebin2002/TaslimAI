@@ -1,6 +1,9 @@
 using System.Text.Json;
+using Microsoft.Data.Sqlite;
+using Microsoft.EntityFrameworkCore;
 using Taslim.Api.Movies;
 using Taslim.Api.Domain;
+using Taslim.Api.Persistence;
 using Xunit;
 
 namespace Taslim.Api.Tests;
@@ -79,6 +82,30 @@ public sealed class MovieProductionGenerationOrchestratorTests
     }
 
     [Fact]
+    public void Single_clip_resolver_preserves_the_renderable_boundary_and_uses_a_short_project_fallback()
+    {
+        Assert.Equal(MovieDurationBudgetPolicy.MaxShotDurationSeconds,
+            MovieProductionGenerationOrchestrator.ResolveSingleClipDuration(
+                MovieDurationBudgetPolicy.MaxShotDurationSeconds, null, MovieDurationBudgetPolicy.MaxMovieDurationSeconds));
+        Assert.Equal(60, MovieProductionGenerationOrchestrator.ResolveSingleClipDuration(
+            null, null, MovieDurationBudgetPolicy.MaxMovieDurationSeconds));
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(3_601)]
+    [InlineData(7_200)]
+    public void Single_clip_resolver_rejects_invalid_or_whole_film_durations_without_truncating(int requestedDurationSeconds)
+    {
+        var exception = Assert.Throws<MovieProductionValidationException>(() =>
+            MovieProductionGenerationOrchestrator.ResolveSingleClipDuration(
+                requestedDurationSeconds, null, MovieDurationBudgetPolicy.MaxMovieDurationSeconds));
+
+        Assert.Equal(MovieDurationBudgetPolicy.SingleClipDurationUnsupportedCode, exception.Code);
+        Assert.Contains($"{MovieDurationBudgetPolicy.MaxShotDurationSeconds}", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Canonical_job_ownership_is_bound_to_the_persisted_clip_target()
     {
         var canonicalClipId = Guid.NewGuid();
@@ -90,5 +117,54 @@ public sealed class MovieProductionGenerationOrchestratorTests
         Assert.True(MovieProductionGenerationOrchestrator.JobTargetsClip(job, canonicalClipId));
         Assert.False(MovieProductionGenerationOrchestrator.JobTargetsClip(job, Guid.NewGuid()));
         Assert.False(MovieProductionGenerationOrchestrator.JobTargetsClip(new GenerationJob { InputJson = "not-json" }, canonicalClipId));
+    }
+
+    [Fact]
+    public async Task Duplicate_version_number_retries_with_the_next_database_owned_number()
+    {
+        await using var connection = new SqliteConnection("DataSource=:memory:");
+        await connection.OpenAsync();
+        await using var pragma = connection.CreateCommand();
+        pragma.CommandText = "PRAGMA foreign_keys = OFF";
+        await pragma.ExecuteNonQueryAsync();
+
+        var options = new DbContextOptionsBuilder<TaslimDbContext>()
+            .UseSqlite(connection)
+            .Options;
+        await using var db = new TaslimDbContext(options);
+        await db.Database.EnsureCreatedAsync();
+
+        var shotId = Guid.NewGuid();
+        db.MovieProductionVersions.Add(new MovieProductionVersion
+        {
+            Id = Guid.NewGuid(),
+            MovieShotId = shotId,
+            VersionNumber = 1,
+            CreatedByUserId = Guid.NewGuid(),
+            CreatedAt = DateTime.UtcNow,
+            UpdatedAt = DateTime.UtcNow,
+        });
+        await db.SaveChangesAsync();
+
+        var candidate = new MovieProductionVersion
+        {
+            Id = Guid.NewGuid(),
+            MovieShotId = shotId,
+            VersionNumber = 1,
+            CreatedByUserId = Guid.NewGuid(),
+            CreatedAt = DateTime.UtcNow,
+            UpdatedAt = DateTime.UtcNow,
+        };
+        db.MovieProductionVersions.Add(candidate);
+
+        await MovieProductionGenerationOrchestrator.PersistProductionVersionWithRetryAsync(db, candidate, CancellationToken.None);
+
+        Assert.Equal(2, candidate.VersionNumber);
+        Assert.Equal(new[] { 1, 2 }, await db.MovieProductionVersions
+            .AsNoTracking()
+            .Where(item => item.MovieShotId == shotId)
+            .OrderBy(item => item.VersionNumber)
+            .Select(item => item.VersionNumber)
+            .ToArrayAsync());
     }
 }

@@ -147,6 +147,77 @@ public sealed class MovieStudioCastTests : IClassFixture<GenerationJobsApiFactor
     }
 
     [Fact]
+    public async Task Cast_from_story_falls_back_to_approved_revision_when_current_revision_is_rejected()
+    {
+        using var client = factory.CreateClient();
+        var auth = await Register(client, "Rejected Story Cast Owner");
+        var movie = await CreateMovie(client, auth.PersonalWorkspace.Id);
+
+        var approvedStory = await SendWithCsrf<MovieStoryDto>(client, HttpMethod.Post, $"/api/movie-studio/projects/{movie.Project.Id}/story/revisions", new
+        {
+            premise = "A tested premise.",
+            logline = "An approved cast cue survives review.",
+            synopsis = "The approved screenplay establishes one character.",
+            treatment = "The approved screenplay remains the continuity source.",
+            authorship = "Human",
+            scenes = new[]
+            {
+                new
+                {
+                    sceneIdentifier = "A1",
+                    actNumber = 1,
+                    sequenceNumber = 1,
+                    slugline = "INT. ARCHIVE - DAY",
+                    synopsis = "The approved character enters.",
+                    elements = new[]
+                    {
+                        new { elementType = "Dialogue", content = "APPROVED_ONLY speaks.", characterName = "APPROVED_ONLY" },
+                    },
+                },
+            },
+        });
+        Assert.True(approvedStory.CurrentRevisionId.HasValue);
+        var approvedRevisionId = approvedStory.CurrentRevisionId.Value;
+        await SendWithCsrf<MovieStoryRevisionDto>(client, HttpMethod.Post, $"/api/movie-studio/projects/{movie.Project.Id}/story/revisions/{approvedRevisionId}/submit", null);
+        await SendWithCsrf<MovieStoryRevisionDto>(client, HttpMethod.Post, $"/api/movie-studio/projects/{movie.Project.Id}/story/revisions/{approvedRevisionId}/approve", null);
+
+        var rejectedStory = await SendWithCsrf<MovieStoryDto>(client, HttpMethod.Post, $"/api/movie-studio/projects/{movie.Project.Id}/story/revisions", new
+        {
+            premise = "A rejected premise.",
+            logline = "A rejected cast cue must not enter continuity.",
+            synopsis = "The rejected screenplay proposes an unapproved character.",
+            treatment = "Review rejects the new screenplay revision.",
+            authorship = "Human",
+            scenes = new[]
+            {
+                new
+                {
+                    sceneIdentifier = "B1",
+                    actNumber = 1,
+                    sequenceNumber = 1,
+                    slugline = "INT. ARCHIVE - NIGHT",
+                    synopsis = "The rejected character appears.",
+                    elements = new[]
+                    {
+                        new { elementType = "Dialogue", content = "REJECTED_ONLY speaks.", characterName = "REJECTED_ONLY" },
+                    },
+                },
+            },
+        });
+        Assert.True(rejectedStory.CurrentRevisionId.HasValue);
+        var rejectedRevisionId = rejectedStory.CurrentRevisionId.Value;
+        await SendWithCsrf<MovieStoryRevisionDto>(client, HttpMethod.Post, $"/api/movie-studio/projects/{movie.Project.Id}/story/revisions/{rejectedRevisionId}/submit", null);
+        await SendWithCsrf<MovieStoryRevisionDto>(client, HttpMethod.Post, $"/api/movie-studio/projects/{movie.Project.Id}/story/revisions/{rejectedRevisionId}/reject", new { reason = "The new character is not approved for continuity." });
+
+        var suggestions = await client.GetFromJsonAsync<Taslim.Api.Movies.MovieStoryCastSuggestionsDto>($"/api/movie-studio/projects/{movie.Project.Id}/cast/from-story");
+
+        Assert.NotNull(suggestions);
+        Assert.Equal("Approved", suggestions!.StoryRevisionStatus);
+        Assert.Contains(suggestions.Suggestions, item => item.Name == "APPROVED_ONLY");
+        Assert.DoesNotContain(suggestions.Suggestions, item => item.Name == "REJECTED_ONLY");
+    }
+
+    [Fact]
     public async Task Cast_read_models_return_only_cast_context_and_detail()
     {
         using var client = factory.CreateClient();
