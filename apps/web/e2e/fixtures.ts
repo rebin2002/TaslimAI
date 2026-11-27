@@ -96,13 +96,14 @@ export async function completeOnboarding(page: Page, traffic: OnboardingTraffic)
   const lang = await page.locator("html").getAttribute("lang");
   const locale: Locale = lang === "ar" ? "ar" : lang === "ckb" || lang === "ku" ? "ku" : "en";
   const choices = onboarding.locator(".onboarding-workflow");
-  await expect(choices).toHaveCount(5);
+  await expect(choices).toHaveCount(6);
   const expectedChoiceNames = [
     translate(locale, "onboarding.workflow.chat.title"),
     translate(locale, "onboarding.workflow.image.title"),
     translate(locale, "onboarding.workflow.document.title"),
     translate(locale, "onboarding.workflow.presentation.title"),
-    translate(locale, "navigation.movieStudio"),
+    translate(locale, "onboarding.workflow.project.title"),
+    translate(locale, "onboarding.workflow.research.title"),
   ].sort();
   const visibleChoiceNames = (await choices.locator("strong").allTextContents()).map((name) => name.trim()).sort();
   expect(visibleChoiceNames).toEqual(expectedChoiceNames);
