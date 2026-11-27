@@ -102,6 +102,7 @@ public static class DirectorScenePlanValidationReasonCodes
     public const string StoryUngrounded = "SCENE_PLAN_STORY_UNGROUNDED";
     public const string CharacterMismatch = "SCENE_PLAN_CHARACTER_MISMATCH";
     public const string InvalidSource = "SCENE_PLAN_INVALID_SOURCE";
+    public const string DuplicateTarget = "SCENE_PLAN_DUPLICATE_TARGET";
     public const string Placeholder = "SCENE_PLAN_PLACEHOLDER";
     public const string LanguageMismatch = "SCENE_PLAN_LANGUAGE_MISMATCH";
     public const string BaseRevisionMismatch = "SCENE_PLAN_BASE_REVISION_MISMATCH";
@@ -160,7 +161,8 @@ public sealed class MovieDirectorScenePlanValidator(
         AddIf(findings, payload.TotalEstimatedDurationSeconds != payload.Scenes.Sum(item => item.EstimatedDurationSeconds), DirectorScenePlanValidationReasonCodes.RuntimeMismatch, "totalEstimatedDurationSeconds");
         AddIf(findings, payload.TotalEstimatedDurationSeconds > targetDuration || payload.TotalEstimatedDurationSeconds < Math.Max(1, (int)Math.Ceiling(targetDuration * 0.8m)), DirectorScenePlanValidationReasonCodes.RuntimeMismatch, "totalEstimatedDurationSeconds");
 
-        var screenplayScenes = AllScreenplayScenes(context);
+        var screenplayTargets = AllScreenplayScenes(context).ToDictionary(item => item.Id, item => item.MovieSceneId);
+        var targetedMovieScenes = new HashSet<Guid>();
         var movieSceneIds = context.RelevantMovieScenes.Select(item => item.Id).ToHashSet();
         var knownCharacters = KnownCharacters(context);
         var sequenceNumbers = new HashSet<int>();
@@ -211,10 +213,19 @@ public sealed class MovieDirectorScenePlanValidator(
                     AddIf(findings, string.IsNullOrWhiteSpace(character) || character.Length > 160 || (knownCharacters.Count > 0 && !knownCharacters.Contains(Normalize(character))), DirectorScenePlanValidationReasonCodes.CharacterMismatch, "participatingCharacters");
                 }
             }
+            // Apply updates an explicit production scene first, otherwise a linked production scene.
+            // Unlinked screenplay material can ground several proposals that each create a new scene.
+            Guid? targetMovieSceneId = null;
             if (scene.SourceScreenplaySceneId is Guid screenplayId)
-                AddIf(findings, screenplayScenes.All(item => item.Id != screenplayId), DirectorScenePlanValidationReasonCodes.InvalidSource, "sourceScreenplaySceneId");
+                AddIf(findings, !screenplayTargets.TryGetValue(screenplayId, out targetMovieSceneId), DirectorScenePlanValidationReasonCodes.InvalidSource, "sourceScreenplaySceneId");
             if (scene.ExistingMovieSceneId is Guid movieSceneId)
-                AddIf(findings, !movieSceneIds.Contains(movieSceneId), DirectorScenePlanValidationReasonCodes.InvalidSource, "existingMovieSceneId");
+            {
+                var exists = movieSceneIds.Contains(movieSceneId);
+                AddIf(findings, !exists, DirectorScenePlanValidationReasonCodes.InvalidSource, "existingMovieSceneId");
+                if (exists) targetMovieSceneId = movieSceneId;
+            }
+            AddIf(findings, targetMovieSceneId is Guid targetId && !targetedMovieScenes.Add(targetId),
+                DirectorScenePlanValidationReasonCodes.DuplicateTarget, "target");
 
             combinedText.AddRange([
                 scene.Title, scene.NarrativePurpose, scene.StoryBeat, scene.LocationEnvironment,

@@ -393,4 +393,32 @@ describe("Production Kit workspace", () => {
     await act(async () => { refreshCast.resolve(initialCast); refreshWorld.resolve(initialWorld); await drain(); await drain(); });
     expect(selectedRecordName()).toContain("Cliffside");
   });
+
+  it.each(["write", "refresh"] as const)("keeps a completed approval when switching rooms during the %s", async (pending) => {
+    const projectId = "workspace-approval";
+    const write = deferred<void>();
+    const refreshedCast = deferred<MovieCast>();
+    harness.api.getMovieCast.mockResolvedValueOnce(workspaceCast(projectId, 0)).mockReturnValueOnce(refreshedCast.promise);
+    harness.api.getMovieWorld.mockResolvedValue(workspaceWorld(projectId));
+    harness.api.lockMovieCharacterFact.mockReturnValue(write.promise);
+
+    await mount(projectId);
+    const approve = findClass(container, "movie-kit-approve")[0];
+    expect(approve.getAttribute("disabled")).toBeNull();
+    await act(async () => { click(approve); await drain(); });
+    expect(harness.api.lockMovieCharacterFact).toHaveBeenCalledTimes(1);
+    if (pending === "refresh") {
+      await act(async () => { write.resolve(); await drain(); });
+      expect(harness.api.getMovieCast).toHaveBeenCalledTimes(2);
+    }
+    await act(async () => { click(locationTab()!); await drain(); });
+    if (pending === "write") await act(async () => { write.resolve(); await drain(); });
+    await act(async () => { refreshedCast.resolve(workspaceCast(projectId, 1)); await drain(); });
+    expect(selectedRecordName()).toContain("Harbor");
+
+    const characters = findButtons(container).find((node) => node.getAttribute("role") === "tab" && node.textContent?.includes("movieModule.cast.label"));
+    expect(characters).toBeDefined();
+    await act(async () => { click(characters!); await drain(); });
+    expect(findClass(container, "movie-kit-approve")[0].getAttribute("disabled")).not.toBeNull();
+  });
 });

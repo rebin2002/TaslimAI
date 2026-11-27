@@ -27,9 +27,19 @@ public sealed class MovieDirectorScenePlanActionExecutor(
             return new(false, "DIRECTOR_SCENE_PLAN_STALE", "The Story, Guide, Cast, World, or continuity context changed after this proposal was created. Create a fresh scene plan.", null);
 
         var validation = validator.Validate(payload, assembled.Value.Context, assembled.Value.SnapshotHash);
-        if (!validation.IsValid || validation.Output is null)
-            return new(false, "DIRECTOR_SCENE_PLAN_INVALID", "The scene-plan proposal no longer passes the current runtime and grounding checks. Create a fresh scene plan.", null, validation.ReasonCodes);
-        payload = validation.Output;
+        if (validation.IsValid && validation.Output is not null)
+        {
+            payload = validation.Output;
+        }
+        else
+        {
+            // Stored plans retain their apply-time failure contract. Only a duplicate-target
+            // finding is resolved below against the actual production rows, before any mutation.
+            var reasons = validation.ReasonCodes;
+            var otherReasons = reasons.Where(code => code != DirectorScenePlanValidationReasonCodes.DuplicateTarget).ToArray();
+            if (reasons.Count == 0 || otherReasons.Length > 0)
+                return new(false, "DIRECTOR_SCENE_PLAN_INVALID", "The scene-plan proposal no longer passes the current runtime and grounding checks. Create a fresh scene plan.", null, otherReasons);
+        }
 
         var screenplayScenes = (assembled.Value.Context.CurrentRevision?.Scenes ?? [])
             .Concat(assembled.Value.Context.ApprovedRevision?.Scenes ?? [])

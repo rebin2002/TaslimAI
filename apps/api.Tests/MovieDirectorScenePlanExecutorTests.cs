@@ -1,6 +1,8 @@
 using System.Text.Json;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Options;
 using Taslim.Api.Domain;
 using Taslim.Api.Persistence;
 using Taslim.Api.Movies;
@@ -10,8 +12,11 @@ namespace Taslim.Api.Tests;
 
 public sealed class MovieDirectorScenePlanExecutorTests
 {
-    [Fact]
-    public async Task Duplicate_existing_scene_targets_are_rejected_before_any_scene_mutation()
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(true, true)]
+    public async Task Duplicate_existing_scene_targets_are_rejected_before_any_scene_mutation(bool useProductionValidator, bool invalidDuration)
     {
         await using var connection = new SqliteConnection("Data Source=:memory:");
         await connection.OpenAsync();
@@ -40,7 +45,7 @@ public sealed class MovieDirectorScenePlanExecutorTests
             ["The red scarf remains tied."],
             "A restrained tracking shot.",
             ExistingMovieSceneId: seeded.SceneId);
-        var secondProposal = proposal with { Sequence = 2, Title = "The bridge closes", EstimatedDurationSeconds = 15 };
+        var secondProposal = proposal with { Sequence = 2, Title = "The bridge closes", EstimatedDurationSeconds = invalidDuration ? 1 : 15 };
         var payload = new DirectorScenePlanActionPayload(
             DirectorScenePlanActionTypes.PlanScenes,
             seeded.RevisionId,
@@ -60,12 +65,24 @@ public sealed class MovieDirectorScenePlanExecutorTests
             PayloadJson = JsonSerializer.Serialize(payload, DirectorJson.Options),
         };
 
-        var executor = new MovieDirectorScenePlanActionExecutor(db, assembler, new AcceptAllScenePlanValidator());
+        IMovieDirectorScenePlanValidator validator = useProductionValidator
+            ? new MovieDirectorScenePlanValidator(Options.Create(new MovieDirectorScenePlanningOptions()), NullLogger<MovieDirectorScenePlanValidator>.Instance)
+            : new AcceptAllScenePlanValidator();
+        var executor = new MovieDirectorScenePlanActionExecutor(db, assembler, validator);
         var execution = await executor.ExecuteAsync(action, seeded.UserId);
 
         Assert.False(execution.Succeeded);
-        Assert.Equal("DIRECTOR_SCENE_PLAN_DUPLICATE_TARGET", execution.FailureCode);
-        Assert.Contains("DIRECTOR_SCENE_PLAN_DUPLICATE_TARGET", execution.FailureReasonCodes ?? []);
+        if (invalidDuration)
+        {
+            Assert.Equal("DIRECTOR_SCENE_PLAN_INVALID", execution.FailureCode);
+            Assert.Contains(DirectorScenePlanValidationReasonCodes.RuntimeMismatch, execution.FailureReasonCodes ?? []);
+            Assert.DoesNotContain(DirectorScenePlanValidationReasonCodes.DuplicateTarget, execution.FailureReasonCodes ?? []);
+        }
+        else
+        {
+            Assert.Equal("DIRECTOR_SCENE_PLAN_DUPLICATE_TARGET", execution.FailureCode);
+            Assert.Contains("DIRECTOR_SCENE_PLAN_DUPLICATE_TARGET", execution.FailureReasonCodes ?? []);
+        }
         var persisted = await db.MovieScenes.SingleAsync(item => item.Id == seeded.SceneId);
         Assert.Equal("Original scene", persisted.Title);
         Assert.Equal("Original summary", persisted.Summary);
@@ -115,7 +132,7 @@ public sealed class MovieDirectorScenePlanExecutorTests
             WorkspaceId = workspaceId,
             CreatedByUserId = userId,
             Title = "Duplicate target film",
-            Description = "A deterministic scene-plan executor fixture.",
+            Description = "Mara crosses the old bridge at dawn.",
             DurationSeconds = 30,
             AspectRatio = "16:9",
             Language = "en",

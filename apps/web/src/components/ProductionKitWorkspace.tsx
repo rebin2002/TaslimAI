@@ -143,18 +143,29 @@ export function ProductionKitWorkspace({ projectId }: { projectId: string }) {
   }
   const loadGeneration = useRef(0);
   const selectionGeneration = useRef(0);
-  const currentProjectId = useRef(projectId);
+  const currentProjectId = useRef<string | null>(projectId);
+  const currentSelection = useRef({ room, selectedId });
+
+  useLayoutEffect(() => {
+    currentSelection.current = { room, selectedId };
+  }, [room, selectedId]);
 
   async function load(nextRoom = room, nextId: string | null = selectedId) {
     const requestProjectId = projectId;
     if (currentProjectId.current !== requestProjectId) return;
     const generation = ++loadGeneration.current;
     const selectionAtStart = selectionGeneration.current;
-    const isCurrentRequest = () => generation === loadGeneration.current && selectionAtStart === selectionGeneration.current && currentProjectId.current === requestProjectId;
+    const isCurrentLoad = () => generation === loadGeneration.current && currentProjectId.current === requestProjectId;
+    const isCurrentRequest = () => isCurrentLoad() && selectionAtStart === selectionGeneration.current;
     updateWorkspace(requestProjectId, { loading: true, error: "" });
     try {
       const [nextCast, nextWorld] = await Promise.all([api.getMovieCast(requestProjectId), api.getMovieWorld(requestProjectId)]);
-      if (!isCurrentRequest()) return;
+      if (!isCurrentLoad()) return;
+      if (!isCurrentRequest()) {
+        // A completed edit can update the project while the user views another record.
+        updateWorkspace(requestProjectId, { cast: nextCast, world: nextWorld });
+        return;
+      }
       const nextRecords = buildKitRecords(nextRoom, nextCast, nextWorld);
       const resolvedId = nextId && nextRecords.some((record) => record.id === nextId) ? nextId : nextRecords[0]?.id ?? null;
       updateWorkspace(requestProjectId, { cast: nextCast, world: nextWorld, room: nextRoom, selectedId: resolvedId, characterDetail: null });
@@ -171,7 +182,7 @@ export function ProductionKitWorkspace({ projectId }: { projectId: string }) {
       if (!isCurrentRequest()) return;
       updateWorkspace(requestProjectId, { error: cause instanceof Error ? cause.message : "The Production Kit could not be loaded." });
     } finally {
-      if (generation === loadGeneration.current && currentProjectId.current === requestProjectId) updateWorkspace(requestProjectId, { loading: false });
+      if (isCurrentLoad()) updateWorkspace(requestProjectId, { loading: false });
     }
   }
 
@@ -181,6 +192,7 @@ export function ProductionKitWorkspace({ projectId }: { projectId: string }) {
     selectionGeneration.current += 1;
     setWorkspaceState(emptyWorkspace(projectId));
     return () => {
+      currentProjectId.current = null;
       loadGeneration.current += 1;
       selectionGeneration.current += 1;
     };
@@ -211,11 +223,11 @@ export function ProductionKitWorkspace({ projectId }: { projectId: string }) {
 
   async function selectRoom(nextRoom: KitRoom) {
     const selection = ++selectionGeneration.current;
-    loadGeneration.current += 1;
     const requestProjectId = projectId;
     const isCurrentSelection = () => selection === selectionGeneration.current && currentProjectId.current === requestProjectId;
     const nextRecords = buildKitRecords(nextRoom, cast, world);
     const nextId = nextRecords[0]?.id ?? null;
+    currentSelection.current = { room: nextRoom, selectedId: nextId };
     updateWorkspace(requestProjectId, { room: nextRoom, selectedId: nextId, characterDetail: null, loading: false, busy: "", error: "" });
     if (nextRoom === "characters" && nextId) {
       try {
@@ -235,7 +247,7 @@ export function ProductionKitWorkspace({ projectId }: { projectId: string }) {
 
   async function selectRecord(id: string) {
     const selection = ++selectionGeneration.current;
-    loadGeneration.current += 1;
+    currentSelection.current = { room, selectedId: id };
     const requestProjectId = projectId;
     const isCurrentSelection = () => selection === selectionGeneration.current && currentProjectId.current === requestProjectId;
     updateWorkspace(requestProjectId, { selectedId: id, characterDetail: null, loading: false, busy: "", error: "" });
@@ -280,8 +292,7 @@ export function ProductionKitWorkspace({ projectId }: { projectId: string }) {
       } else if (requestRoom === "props" && selectedProp) {
         await api.updateMovieProp(selectedProp.id, { name: selectedProp.name, description: selectedProp.description, category: selectedProp.category, continuityNotes: selectedProp.continuityNotes, referenceAssetId: assetId });
       }
-      if (!isCurrentAction()) return;
-      await load(requestRoom, target.id);
+      await load(currentSelection.current.room, currentSelection.current.selectedId);
     } catch (cause) {
       if (!isCurrentAction()) return;
       updateWorkspace(requestProjectId, { error: cause instanceof Error ? cause.message : "The reference could not be attached." });
@@ -313,8 +324,7 @@ export function ProductionKitWorkspace({ projectId }: { projectId: string }) {
       } else {
         await api.addMovieContinuityLock(requestProjectId, { entityType: requestRoom === "locations" ? "location" : "prop", entityId: target.id, fieldName: "name", lockedValue: target.name, strength: "hard", reason: "Production Kit identity approved." });
       }
-      if (!isCurrentAction()) return;
-      await load(requestRoom, target.id);
+      await load(currentSelection.current.room, currentSelection.current.selectedId);
     } catch (cause) {
       if (!isCurrentAction()) return;
       updateWorkspace(requestProjectId, { error: cause instanceof Error ? cause.message : "The identity approval could not be saved." });
