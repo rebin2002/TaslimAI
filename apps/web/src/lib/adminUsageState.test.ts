@@ -26,12 +26,17 @@ describe("admin usage state", () => {
   });
 });
 
-
 describe("admin usage request ordering", () => {
   it("ignores an older report when a newer range request is active", () => {
     const first = startAdminUsageRequest(0, { fromUtc: "2026-09-01T00:00:00.000Z", toUtc: "2026-09-30T23:59:59.999Z" });
     const second = startAdminUsageRequest(first.sequence, { fromUtc: "2026-10-01T00:00:00.000Z", toUtc: "2026-10-31T23:59:59.999Z" });
     expect(isAdminUsageRequestCurrent(first, second.sequence)).toBe(false);
     expect(isAdminUsageRequestCurrent(second, second.sequence)).toBe(true);
+  });
+
+  it("keeps the range on the token so a delayed response can be attributed to its request", () => {
+    const range = { fromUtc: "2026-10-01T00:00:00.000Z", toUtc: "2026-10-31T23:59:59.999Z" };
+    const request = startAdminUsageRequest(3, range);
+    expect(request).toEqual({ sequence: 4, range });
   });
 });

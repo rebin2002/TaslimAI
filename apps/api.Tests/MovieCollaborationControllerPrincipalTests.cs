@@ -9,11 +9,15 @@ namespace Taslim.Api.Tests;
 
 public sealed class MovieCollaborationControllerPrincipalTests
 {
-    [Fact]
-    public async Task Malformed_authenticated_principal_is_rejected_by_every_collaboration_action()
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("not-a-guid")]
+    [InlineData("00000000-0000-0000-0000-000000000000")]
+    public async Task Malformed_authenticated_principal_is_rejected_by_every_collaboration_action(string? identifier)
     {
         var service = new RecordingMovieCollaborationService();
-        var controller = CreateController(service);
+        var controller = CreateController(service, identifier);
         var movieProjectId = Guid.NewGuid();
         var memberId = Guid.NewGuid();
         var commentId = Guid.NewGuid();
@@ -42,7 +46,7 @@ public sealed class MovieCollaborationControllerPrincipalTests
         Assert.Equal(0, service.CallCount);
     }
 
-    private static MovieCollaborationController CreateController(RecordingMovieCollaborationService service)
+    private static MovieCollaborationController CreateController(RecordingMovieCollaborationService service, string? identifier)
     {
         return new MovieCollaborationController(service)
         {
@@ -51,7 +55,7 @@ public sealed class MovieCollaborationControllerPrincipalTests
                 HttpContext = new DefaultHttpContext
                 {
                     User = new ClaimsPrincipal(new ClaimsIdentity(
-                        [new Claim(ClaimTypes.NameIdentifier, "not-a-guid")],
+                        identifier is null ? [] : [new Claim(ClaimTypes.NameIdentifier, identifier)],
                         authenticationType: "test")),
                 },
             },

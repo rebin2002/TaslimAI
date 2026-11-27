@@ -32,6 +32,93 @@ public sealed class GenerationCostGuardrailTests
     }
 
     [Fact]
+    public void Component_arithmetic_overflow_is_unknown_and_never_throws()
+    {
+        var estimator = new GenerationCostEstimator(Options.Create(new GenerationCostPricingOptions
+        {
+            Providers = new Dictionary<string, GenerationProviderPricingOptions>(StringComparer.OrdinalIgnoreCase)
+            {
+                ["provider"] = new() { VideoUsdPerSecond = 2m },
+            },
+        }));
+
+        var result = estimator.Estimate(new GenerationCostEstimationRequest("provider", VideoDurationSeconds: decimal.MaxValue));
+
+        Assert.False(result.IsKnown);
+        Assert.Null(result.AmountUsd);
+        Assert.Equal("estimate_overflow", result.UnknownReason);
+        Assert.Empty(result.Components);
+    }
+
+    [Fact]
+    public void Total_overflow_across_representable_components_is_unknown_and_never_throws()
+    {
+        const decimal large = 40_000_000_000_000_000_000_000_000_000m;
+        var estimator = new GenerationCostEstimator(Options.Create(new GenerationCostPricingOptions
+        {
+            Providers = new Dictionary<string, GenerationProviderPricingOptions>(StringComparer.OrdinalIgnoreCase)
+            {
+                ["provider"] = new() { VideoUsdPerSecond = large, MusicUsdPerSecond = large },
+            },
+        }));
+
+        var result = estimator.Estimate(new GenerationCostEstimationRequest("provider", VideoDurationSeconds: 1m, MusicDurationSeconds: 1m));
+
+        Assert.False(result.IsKnown);
+        Assert.Null(result.AmountUsd);
+        Assert.Equal("estimate_overflow", result.UnknownReason);
+        Assert.Empty(result.Components);
+    }
+
+    [Fact]
+    public void Extreme_but_representable_pricing_still_returns_a_known_rounded_estimate()
+    {
+        const decimal extremeButRepresentable = 100_000_000_000_000_000_000m;
+        var estimator = new GenerationCostEstimator(Options.Create(new GenerationCostPricingOptions
+        {
+            Providers = new Dictionary<string, GenerationProviderPricingOptions>(StringComparer.OrdinalIgnoreCase)
+            {
+                ["provider"] = new() { VideoUsdPerSecond = extremeButRepresentable },
+            },
+        }));
+
+        var result = estimator.Estimate(new GenerationCostEstimationRequest("provider", VideoDurationSeconds: 5m));
+
+        Assert.True(result.IsKnown);
+        Assert.Equal(extremeButRepresentable * 5m, result.AmountUsd);
+        Assert.Null(result.UnknownReason);
+        Assert.Single(result.Components);
+    }
+
+    [Fact]
+    public async Task Overflowed_estimate_is_fail_closed_by_guardrails_and_never_charged()
+    {
+        await using var connection = new SqliteConnection("DataSource=:memory:");
+        await connection.OpenAsync();
+        await using var db = CreateDb(connection);
+        var estimate = new GenerationCostEstimator(Options.Create(new GenerationCostPricingOptions
+        {
+            Providers = new Dictionary<string, GenerationProviderPricingOptions>(StringComparer.OrdinalIgnoreCase)
+            {
+                ["provider"] = new() { VideoUsdPerSecond = 2m },
+            },
+        })).Estimate(new GenerationCostEstimationRequest("provider", VideoDurationSeconds: decimal.MaxValue));
+        var service = new GenerationCostGuardrailService(db, Options.Create(new GenerationBudgetOptions
+        {
+            Enabled = true,
+            RejectUnknownEstimates = true,
+        }));
+
+        var result = await service.EvaluateAsync(Guid.NewGuid(), Guid.NewGuid(), null, estimate);
+
+        Assert.False(result.Allowed);
+        Assert.Equal("COST_ESTIMATE_UNKNOWN", result.RejectionCode);
+        Assert.Equal("estimate_overflow", result.Estimate.UnknownReason);
+        Assert.Null(result.Estimate.AmountUsd);
+        Assert.Equal("unknown", GenerationCostPreviewMapper.ToDto(result).EstimateStatus);
+    }
+
+    [Fact]
     public async Task Expensive_known_estimate_returns_warning_and_requires_confirmation()
     {
         await using var connection = new SqliteConnection("DataSource=:memory:");

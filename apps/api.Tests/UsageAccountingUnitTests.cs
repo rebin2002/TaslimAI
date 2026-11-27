@@ -216,13 +216,222 @@ public sealed class UsageAccountingUnitTests
         var first = await ledger.GetOrCreatePendingAsync(
             workspaceId, userId, null, firstConversation.Id, "reused-chat-request", UsageFeature.Chat);
 
-        await Assert.ThrowsAsync<InvalidOperationException>(() => ledger.GetOrCreatePendingAsync(
+        var conflict = await Assert.ThrowsAsync<UsageRequestScopeConflictException>(() => ledger.GetOrCreatePendingAsync(
             workspaceId, userId, null, secondConversation.Id, "reused-chat-request", UsageFeature.Chat));
+        // The conflict stays an InvalidOperationException so every existing handler keeps failing closed.
+        Assert.IsAssignableFrom<InvalidOperationException>(conflict);
 
         var saved = await db.UsageTransactions.SingleAsync();
         Assert.Equal(first.Id, saved.Id);
         Assert.Equal(firstConversation.Id, saved.ConversationId);
         Assert.Equal(UsageTransactionStatus.Pending, saved.Status);
+    }
+
+    [Fact]
+    public async Task A_chat_request_id_cannot_reopen_a_finished_turn_from_another_conversation()
+    {
+        await using var connection = new SqliteConnection("DataSource=:memory:");
+        await connection.OpenAsync();
+        var options = new DbContextOptionsBuilder<TaslimDbContext>().UseSqlite(connection).Options;
+        await using var db = new TaslimDbContext(options);
+        await db.Database.EnsureCreatedAsync();
+        var ledger = CreateLedger(db, new ConfigurationBuilder().Build());
+        var (workspaceId, userId) = await AddOwnerAsync(db, "usage-reopen@example.com");
+        var now = DateTime.UtcNow;
+        var firstConversation = new Conversation
+        {
+            Id = Guid.NewGuid(), WorkspaceId = workspaceId, UserId = userId, Title = "First conversation",
+            CreatedAt = now, UpdatedAt = now,
+        };
+        var secondConversation = new Conversation
+        {
+            Id = Guid.NewGuid(), WorkspaceId = workspaceId, UserId = userId, Title = "Second conversation",
+            CreatedAt = now, UpdatedAt = now,
+        };
+        db.Conversations.AddRange(firstConversation, secondConversation);
+        await db.SaveChangesAsync();
+
+        var first = await ledger.GetOrCreatePendingAsync(
+            workspaceId, userId, null, firstConversation.Id, "reused-reopen-request", UsageFeature.Chat,
+            estimatedProviderCostUsd: 1m);
+        // The first turn finished and its provider cost is known, so it is auditable accounting data.
+        first.Status = UsageTransactionStatus.Failed;
+        first.ProviderCostKnown = true;
+        first.ProviderCostUsd = 0.5m;
+        await db.SaveChangesAsync();
+
+        var conflict = await Assert.ThrowsAsync<UsageRequestScopeConflictException>(() =>
+            ledger.GetOrCreatePendingAsync(
+                workspaceId, userId, null, secondConversation.Id, "reused-reopen-request", UsageFeature.Chat));
+        Assert.Equal(UsageRequestScopeConflictException.ErrorCode, conflict.Code);
+
+        var after = await db.UsageTransactions.SingleAsync();
+        Assert.Equal(first.Id, after.Id);
+        Assert.Equal(UsageTransactionStatus.Failed, after.Status);
+        Assert.True(after.ProviderCostKnown);
+        Assert.Equal(0.5m, after.ProviderCostUsd);
+        Assert.Equal(1m, after.EstimatedProviderCostUsd);
+        Assert.Equal(firstConversation.Id, after.ConversationId);
+    }
+
+    [Fact]
+    public async Task A_rejected_cross_conversation_request_leaves_workspace_cost_exposure_known()
+    {
+        await using var connection = new SqliteConnection("DataSource=:memory:");
+        await connection.OpenAsync();
+        var options = new DbContextOptionsBuilder<TaslimDbContext>().UseSqlite(connection).Options;
+        await using var db = new TaslimDbContext(options);
+        await db.Database.EnsureCreatedAsync();
+        var ledger = CreateLedger(db, new ConfigurationBuilder().Build());
+        var (workspaceId, userId) = await AddOwnerAsync(db, "usage-guardrail@example.com");
+        var now = DateTime.UtcNow;
+        var firstConversation = new Conversation
+        {
+            Id = Guid.NewGuid(), WorkspaceId = workspaceId, UserId = userId, Title = "First conversation",
+            CreatedAt = now, UpdatedAt = now,
+        };
+        var secondConversation = new Conversation
+        {
+            Id = Guid.NewGuid(), WorkspaceId = workspaceId, UserId = userId, Title = "Second conversation",
+            CreatedAt = now, UpdatedAt = now,
+        };
+        db.Conversations.AddRange(firstConversation, secondConversation);
+        await db.SaveChangesAsync();
+
+        var first = await ledger.GetOrCreatePendingAsync(
+            workspaceId, userId, null, firstConversation.Id, "reused-guardrail-request", UsageFeature.Chat,
+            estimatedProviderCostUsd: 1m);
+        first.Status = UsageTransactionStatus.Failed;
+        first.ProviderCostKnown = true;
+        first.ProviderCostUsd = 0.5m;
+        await db.SaveChangesAsync();
+
+        var control = new UsageCostControl(
+            db,
+            Options.Create(new UsageControlOptions { GuardrailsEnabled = true, DailyWorkspaceProviderCostCeilingUsd = 100m }),
+            NullLogger<UsageCostControl>.Instance);
+
+        var before = await control.CheckPreflightAsync(workspaceId, UsageFeature.Image, 1m);
+        Assert.True(before.Allowed);
+
+        await Assert.ThrowsAsync<UsageRequestScopeConflictException>(() => ledger.GetOrCreatePendingAsync(
+            workspaceId, userId, null, secondConversation.Id, "reused-guardrail-request", UsageFeature.Chat));
+
+        var after = await control.CheckPreflightAsync(workspaceId, UsageFeature.Image, 1m);
+        Assert.True(after.Allowed);
+
+        // Control for the pre-fence shape: a reopened row with no estimate is exactly what makes the
+        // workspace exposure "unknown", which is what the fence prevents from ever being written.
+        first.Status = UsageTransactionStatus.Pending;
+        first.ProviderCostKnown = false;
+        first.EstimatedProviderCostUsd = null;
+        await db.SaveChangesAsync();
+        var poisoned = await control.CheckPreflightAsync(workspaceId, UsageFeature.Image, 1m);
+        Assert.False(poisoned.Allowed);
+        Assert.Equal("WORKSPACE_COST_UNKNOWN", poisoned.RejectionCode);
+    }
+
+    [Fact]
+    public async Task Reusing_a_usage_request_id_for_another_user_is_rejected_without_touching_their_ledger()
+    {
+        await using var connection = new SqliteConnection("DataSource=:memory:");
+        await connection.OpenAsync();
+        var options = new DbContextOptionsBuilder<TaslimDbContext>().UseSqlite(connection).Options;
+        await using var db = new TaslimDbContext(options);
+        await db.Database.EnsureCreatedAsync();
+        var ledger = CreateLedger(db, new ConfigurationBuilder().Build());
+        var (workspaceId, firstUserId) = await AddOwnerAsync(db, "usage-owner@example.com");
+        var secondUserId = Guid.NewGuid();
+        db.Users.Add(new ApplicationUser
+        {
+            Id = secondUserId, UserName = "intruder@example.com", NormalizedUserName = "INTRUDER@EXAMPLE.COM",
+            Email = "intruder@example.com", NormalizedEmail = "INTRUDER@EXAMPLE.COM", DisplayName = "Intruder",
+            CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow,
+        });
+        var now = DateTime.UtcNow;
+        var sharedConversation = new Conversation
+        {
+            Id = Guid.NewGuid(), WorkspaceId = workspaceId, UserId = firstUserId, Title = "Shared workspace conversation",
+            CreatedAt = now, UpdatedAt = now,
+        };
+        db.Conversations.Add(sharedConversation);
+        await db.SaveChangesAsync();
+
+        var owner = await ledger.GetOrCreatePendingAsync(
+            workspaceId, firstUserId, null, sharedConversation.Id, "cross-user-request", UsageFeature.Chat,
+            estimatedProviderCostUsd: 2m);
+
+        // Same workspace, same feature, same client-supplied request id, different accounting owner.
+        await Assert.ThrowsAsync<UsageRequestScopeConflictException>(() => ledger.GetOrCreatePendingAsync(
+            workspaceId, secondUserId, null, sharedConversation.Id, "cross-user-request", UsageFeature.Chat));
+
+        var saved = await db.UsageTransactions.SingleAsync();
+        Assert.Equal(owner.Id, saved.Id);
+        Assert.Equal(firstUserId, saved.UserId);
+        Assert.Equal(2m, saved.EstimatedProviderCostUsd);
+    }
+
+    [Fact]
+    public async Task Reusing_a_usage_request_id_for_another_project_is_rejected_without_rebinding_usage()
+    {
+        await using var connection = new SqliteConnection("DataSource=:memory:");
+        await connection.OpenAsync();
+        var options = new DbContextOptionsBuilder<TaslimDbContext>().UseSqlite(connection).Options;
+        await using var db = new TaslimDbContext(options);
+        await db.Database.EnsureCreatedAsync();
+        var ledger = CreateLedger(db, new ConfigurationBuilder().Build());
+        var (workspaceId, userId) = await AddOwnerAsync(db, "usage-projects@example.com");
+        var now = DateTime.UtcNow;
+        var firstProject = new Project
+        {
+            Id = Guid.NewGuid(), WorkspaceId = workspaceId, Name = "First project",
+            CreatedAt = now, UpdatedAt = now,
+        };
+        var secondProject = new Project
+        {
+            Id = Guid.NewGuid(), WorkspaceId = workspaceId, Name = "Second project",
+            CreatedAt = now, UpdatedAt = now,
+        };
+        db.Projects.AddRange(firstProject, secondProject);
+        await db.SaveChangesAsync();
+
+        var first = await ledger.GetOrCreatePendingAsync(
+            workspaceId, userId, firstProject.Id, null, "cross-project-request", UsageFeature.Generation);
+
+        await Assert.ThrowsAsync<UsageRequestScopeConflictException>(() => ledger.GetOrCreatePendingAsync(
+            workspaceId, userId, secondProject.Id, null, "cross-project-request", UsageFeature.Generation));
+
+        var saved = await db.UsageTransactions.SingleAsync();
+        Assert.Equal(first.Id, saved.Id);
+        Assert.Equal(firstProject.Id, saved.ProjectId);
+    }
+
+    [Fact]
+    public async Task Retrying_the_same_usage_scope_replays_the_existing_transaction_unchanged()
+    {
+        await using var connection = new SqliteConnection("DataSource=:memory:");
+        await connection.OpenAsync();
+        var options = new DbContextOptionsBuilder<TaslimDbContext>().UseSqlite(connection).Options;
+        await using var db = new TaslimDbContext(options);
+        await db.Database.EnsureCreatedAsync();
+        var ledger = CreateLedger(db, new ConfigurationBuilder().Build());
+        var (workspaceId, userId) = await AddOwnerAsync(db, "usage-replay@example.com");
+        var now = DateTime.UtcNow;
+        var conversation = new Conversation
+        {
+            Id = Guid.NewGuid(), WorkspaceId = workspaceId, UserId = userId, Title = "Conversation",
+            CreatedAt = now, UpdatedAt = now,
+        };
+        db.Conversations.Add(conversation);
+        await db.SaveChangesAsync();
+
+        var first = await ledger.GetOrCreatePendingAsync(
+            workspaceId, userId, null, conversation.Id, "legit-retry-request", UsageFeature.Chat);
+        var replay = await ledger.GetOrCreatePendingAsync(
+            workspaceId, userId, null, conversation.Id, "legit-retry-request", UsageFeature.Chat);
+
+        Assert.Equal(first.Id, replay.Id);
+        Assert.Single(await db.UsageTransactions.ToListAsync());
     }
 
     [Fact]

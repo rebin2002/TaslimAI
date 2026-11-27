@@ -61,8 +61,10 @@ public sealed class MovieCaptionsController(IMovieCaptionService captions) : Con
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> DeleteCue(Guid cueId, CancellationToken cancellationToken) => await Execute(async () =>
     {
-        await captions.DeleteCueAsync(UserId(), cueId, cancellationToken);
-        return NoContent();
+        var deleted = await captions.DeleteCueAsync(UserId(), cueId, cancellationToken);
+        // One not-found envelope covers both an unknown cue id and a cue outside the
+        // caller's visibility, so DELETE cannot be used to probe cue existence.
+        return deleted ? NoContent() : NotFoundResult("MOVIE_CAPTION_CUE_NOT_FOUND", "Caption cue not found.");
     });
 
     [HttpPost("projects/{movieProjectId:guid}/caption-tracks/import")]
@@ -87,7 +89,11 @@ public sealed class MovieCaptionsController(IMovieCaptionService captions) : Con
     private async Task<IActionResult> Execute(Func<Task<IActionResult>> action)
     {
         try { return await action(); }
-        catch (MovieCollaborationForbiddenException) { return Forbid(); }
+        // Caption deletion enforces permission through the fail-closed collaboration
+        // guard. A denial is only reachable for a cue the caller can already see, so it
+        // maps to 403 like the sibling Movie controllers instead of escaping as an
+        // unhandled 500; cues outside the caller's visibility answer 404 instead.
+        catch (MovieCollaborationForbiddenException exception) { return ApiResults.Error(this, 403, "MOVIE_PERMISSION_DENIED", exception.Message); }
         catch (MovieCaptionValidationException exception) { return ApiResults.Error(this, 400, "MOVIE_CAPTION_REQUEST_INVALID", exception.Message); }
         catch (MovieCaptionFormatException exception) { return ApiResults.Error(this, 400, "MOVIE_CAPTION_FORMAT_INVALID", exception.Message); }
     }
