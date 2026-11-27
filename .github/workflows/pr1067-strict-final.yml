@@ -1,0 +1,202 @@
+name: Temporary strict #1067 final evidence
+on:
+  push:
+    branches:
+      - validation/strict-next-start-evidence-20261127-d00d4434
+permissions:
+  contents: read
+jobs:
+  strict-evidence:
+    name: One hosted strict #1067 evidence run
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      BASE_SHA: d00d4434b21cc0779878fe016b20527518d0fb69
+      PR_HEAD: 61799376c5074931977390e382d19081f5126a50
+      EXPECTED_DOCKERFILE_BLOB: d86cb2a6dff1fcc598eaf1914a7c3c5ee76da7e0
+      EXPECTED_PACKAGE_LOCK_BLOB: bc4b6a3a0e734e689226940be7f7d491d199cae0
+      EXPECTED_HARNESS_BLOB: 66e0486d5d5ac976aaa75af9512ecf689a749143
+      EXPECTED_README_BLOB: 96cdfbb8e09b55dbe1a36ff9f33192aeff9ef636
+    steps:
+      - name: Fetch and verify exact PR base image source and PR-head harness
+        shell: bash
+        run: |
+          set -euo pipefail
+          OUT="$RUNNER_TEMP/pr1067-strict-final"
+          SOURCE="$RUNNER_TEMP/pr1067-base-source"
+          HARNESS_DIR="$RUNNER_TEMP/pr1067-pr-head-harness"
+          mkdir -p "$OUT" "$SOURCE" "$HARNESS_DIR"
+          git -C "$SOURCE" init --quiet
+          git -C "$SOURCE" remote add origin https://github.com/rebin2002/TaslimAI.git
+          git -C "$SOURCE" fetch --depth=1 origin "$BASE_SHA" >"$OUT/base-fetch.log" 2>&1
+          git -C "$SOURCE" checkout --detach FETCH_HEAD >>"$OUT/base-fetch.log" 2>&1
+          test "$(git -C "$SOURCE" rev-parse HEAD)" = "$BASE_SHA"
+          test "$(git -C "$SOURCE" rev-parse HEAD:apps/web/Dockerfile)" = "$EXPECTED_DOCKERFILE_BLOB"
+          test "$(git -C "$SOURCE" rev-parse HEAD:apps/web/package-lock.json)" = "$EXPECTED_PACKAGE_LOCK_BLOB"
+          curl --fail --silent --show-error --location --max-time 30 \
+            "https://raw.githubusercontent.com/rebin2002/TaslimAI/${PR_HEAD}/apps/web/e2e/strict/next-start-strict-gate.mjs" \
+            --output "$HARNESS_DIR/next-start-strict-gate.mjs"
+          curl --fail --silent --show-error --location --max-time 30 \
+            "https://raw.githubusercontent.com/rebin2002/TaslimAI/${PR_HEAD}/apps/web/e2e/strict/README.md" \
+            --output "$HARNESS_DIR/README.md"
+          test "$(git -C "$SOURCE" hash-object "$HARNESS_DIR/next-start-strict-gate.mjs")" = "$EXPECTED_HARNESS_BLOB"
+          test "$(git -C "$SOURCE" hash-object "$HARNESS_DIR/README.md")" = "$EXPECTED_README_BLOB"
+          cp "$HARNESS_DIR/next-start-strict-gate.mjs" "$OUT/next-start-strict-gate.mjs"
+          cp "$HARNESS_DIR/README.md" "$OUT/README.md"
+          sha256sum "$OUT/next-start-strict-gate.mjs" "$OUT/README.md" > "$OUT/source-file-sha256.txt"
+          {
+            printf 'base_sha=%s\n' "$BASE_SHA"
+            printf 'pr_head_sha=%s\n' "$PR_HEAD"
+            printf 'workflow_commit_sha=%s\n' "$GITHUB_SHA"
+            printf 'workflow_ref=%s\n' "$GITHUB_REF"
+            printf 'dockerfile_blob=%s\n' "$EXPECTED_DOCKERFILE_BLOB"
+            printf 'package_lock_blob=%s\n' "$EXPECTED_PACKAGE_LOCK_BLOB"
+            printf 'strict_harness_blob=%s\n' "$EXPECTED_HARNESS_BLOB"
+            printf 'strict_readme_blob=%s\n' "$EXPECTED_README_BLOB"
+            printf 'runtime_target=http://127.0.0.1:3000\n'
+            printf 'runtime_network_mode=none\n'
+            printf 'credentials=none; synthetic_api_url=https://synthetic.invalid\n'
+          } | tee "$OUT/input-identities.txt"
+          git -C "$SOURCE" rev-parse HEAD:apps/web/Dockerfile > "$OUT/dockerfile-blob.txt"
+          git -C "$SOURCE" rev-parse HEAD:apps/web/package-lock.json > "$OUT/package-lock-blob.txt"
+      - name: Harness preflight, self-test, and safe-target controls
+        shell: bash
+        run: |
+          set -euo pipefail
+          OUT="$RUNNER_TEMP/pr1067-strict-final"
+          HARNESS="$RUNNER_TEMP/pr1067-pr-head-harness/next-start-strict-gate.mjs"
+          node --version | tee "$OUT/node-version.txt"
+          node --check "$HARNESS"
+          echo 'node --check: PASS' | tee "$OUT/preflight.txt"
+          node "$HARNESS" --self-test >"$OUT/self-test.log" 2>&1
+          cat "$OUT/self-test.log"
+          grep -F '[self-test] literal loopback target guard: OK' "$OUT/self-test.log"
+          grep -E '\[control/fixed-shape.*verdict=PASS' "$OUT/self-test.log"
+          grep -E '\[negative-control/broken.*verdict=FAIL' "$OUT/self-test.log"
+          grep -F '[self-test] evaluator discrimination: OK' "$OUT/self-test.log"
+          test "$(grep -c 'status=400' "$OUT/self-test.log")" -eq 4
+          test "$(grep -c 'status=500' "$OUT/self-test.log")" -eq 4
+          test "$(grep -c 'status=200' "$OUT/self-test.log")" -eq 4
+          ss -H -ltn > "$OUT/listeners.before"
+          set +e
+          timeout 8s node "$HARNESS" --url http://localhost:3000 >"$OUT/localhost-guard.log" 2>&1
+          localhost_status=$?
+          timeout 8s node "$HARNESS" --serve >"$OUT/serve-guard.log" 2>&1
+          serve_status=$?
+          set -e
+          printf 'localhost_guard_exit=%s\nserve_guard_exit=%s\n' "$localhost_status" "$serve_status" | tee "$OUT/guard-exit-status.txt"
+          test "$localhost_status" -eq 2
+          test "$serve_status" -eq 2
+          grep -F 'Only literal http://127.0.0.1:PORT' "$OUT/localhost-guard.log"
+          grep -F -- '--serve is disabled' "$OUT/serve-guard.log"
+          ss -H -ltn > "$OUT/listeners.after"
+          cmp "$OUT/listeners.before" "$OUT/listeners.after"
+          echo 'invalid-target and disabled-serve controls started no listener' | tee "$OUT/no-listener-guard.txt"
+      - name: Build production image from exact PR base tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          OUT="$RUNNER_TEMP/pr1067-strict-final"
+          SOURCE="$RUNNER_TEMP/pr1067-base-source"
+          IMAGE=taslim-web:pr1067-strict-base-d00d4434
+          mkdir -p "$SOURCE/apps"
+          git -C "$SOURCE" archive --format=tar "$BASE_SHA" apps/web | tar -xf - -C "$SOURCE"
+          docker build \
+            --file "$SOURCE/apps/web/Dockerfile" \
+            --build-arg NEXT_PUBLIC_API_URL=https://synthetic.invalid \
+            --tag "$IMAGE" \
+            "$SOURCE/apps/web" >"$OUT/docker-build.log" 2>&1
+          cat "$OUT/docker-build.log"
+          docker image inspect "$IMAGE" > "$OUT/image-inspect.json"
+          IMAGE_ID="$(docker image inspect --format '{{.Id}}' "$IMAGE")"
+          REPO_DIGESTS="$(docker image inspect --format '{{json .RepoDigests}}' "$IMAGE")"
+          printf 'image_tag=%s\nimage_id=%s\nimage_repo_digests=%s\n' "$IMAGE" "$IMAGE_ID" "$REPO_DIGESTS" | tee "$OUT/image-identity.txt"
+      - name: Run exact strict harness in a no-network, no-port-binding container
+        shell: bash
+        run: |
+          set -euo pipefail
+          OUT="$RUNNER_TEMP/pr1067-strict-final"
+          HARNESS="$RUNNER_TEMP/pr1067-pr-head-harness/next-start-strict-gate.mjs"
+          IMAGE=taslim-web:pr1067-strict-base-d00d4434
+          CONTAINER="pr1067-strict-final-${GITHUB_RUN_ID}"
+          TARGET=http://127.0.0.1:3000
+          printf 'literal_harness_target=%s\n' "$TARGET" | tee "$OUT/runtime-target.txt"
+          cleanup() {
+            status=$?
+            trap - EXIT
+            docker logs --timestamps "$CONTAINER" > "$OUT/container.log" 2> "$OUT/docker-logs.stderr" || true
+            docker rm --force "$CONTAINER" >/dev/null 2>&1 || true
+            exit "$status"
+          }
+          trap cleanup EXIT
+          docker run --detach \
+            --network none \
+            --name "$CONTAINER" \
+            --env NODE_ENV=production \
+            --env PORT=3000 \
+            --env HOSTNAME=0.0.0.0 \
+            --env NEXT_TELEMETRY_DISABLED=1 \
+            --env NEXT_PUBLIC_API_URL=https://synthetic.invalid \
+            "$IMAGE" > "$OUT/container-id.txt"
+          docker inspect "$CONTAINER" > "$OUT/container-inspect.json"
+          python3 - "$OUT/container-inspect.json" "$OUT/isolation-proof.txt" <<'PY'
+          import json, sys
+          data = json.load(open(sys.argv[1], encoding="utf-8"))[0]
+          mode = data["HostConfig"].get("NetworkMode")
+          bindings = data["HostConfig"].get("PortBindings")
+          published = data.get("NetworkSettings", {}).get("Ports")
+          if mode != "none":
+              raise SystemExit(f"runtime network mode must be none, got {mode!r}")
+          if bindings is not None and (not isinstance(bindings, dict) or bindings):
+              raise SystemExit(f"host port bindings are not empty: {bindings!r}")
+          if published and any(value for value in published.values()):
+              raise SystemExit(f"published host ports detected: {published!r}")
+          with open(sys.argv[2], "w", encoding="utf-8") as out:
+              out.write(f"network_mode={mode}\n")
+              out.write(f"HostConfig.PortBindings={json.dumps(bindings, sort_keys=True)}\n")
+              out.write(f"NetworkSettings.Ports={json.dumps(published, sort_keys=True)}\n")
+              out.write("host_port_bindings=NONE\n")
+          print(open(sys.argv[2], encoding="utf-8").read(), end="")
+          PY
+          docker cp "$HARNESS" "$CONTAINER:/tmp/next-start-strict-gate.mjs"
+          ready=0
+          for attempt in $(seq 1 120); do
+            set +e
+            readiness_output=$(docker exec "$CONTAINER" node -e 'const h=require("node:http");const r=h.get("http://127.0.0.1:3000/",s=>{s.resume();s.on("end",()=>{console.log(`readiness_http_status=${s.statusCode}`);process.exit(0)})});r.setTimeout(2500,()=>{console.error("readiness timeout");r.destroy();process.exit(1)});r.on("error",e=>{console.error("readiness error: "+e.message);process.exit(1)})' 2>> "$OUT/readiness.stderr")
+            readiness_rc=$?
+            set -e
+            printf 'attempt=%s target=%s docker_exec_exit=%s output=%s\n' "$attempt" "$TARGET" "$readiness_rc" "$readiness_output" | tee -a "$OUT/readiness.log"
+            if [[ "$readiness_output" =~ readiness_http_status=([0-9]{3}) ]]; then
+              ready=1
+              break
+            fi
+            if [[ "$(docker inspect --format='{{.State.Running}}' "$CONTAINER" 2>/dev/null || true)" != "true" ]]; then
+              break
+            fi
+            sleep 1
+          done
+          if [[ "$ready" -ne 1 ]]; then
+            echo 'No completed readiness response from literal loopback within 120 seconds.' | tee "$OUT/readiness.log"
+            exit 2
+          fi
+          set +e
+          docker exec "$CONTAINER" node /tmp/next-start-strict-gate.mjs --url "$TARGET" >"$OUT/strict-harness.stdout" 2>"$OUT/strict-harness.stderr"
+          harness_rc=$?
+          set -e
+          printf '%s\n' "$harness_rc" > "$OUT/strict-harness.exit-status"
+          printf 'strict_harness_exit=%s\n' "$harness_rc" | tee "$OUT/strict-harness.status.txt"
+          printf '%s\n' '--- exact strict harness stdout ---'
+          cat "$OUT/strict-harness.stdout"
+          printf '%s\n' '--- exact strict harness stderr ---' >&2
+          cat "$OUT/strict-harness.stderr" >&2
+          docker inspect "$CONTAINER" > "$OUT/container-inspect-after-harness.json"
+          docker logs --timestamps "$CONTAINER" > "$OUT/container.log" 2> "$OUT/docker-logs.stderr" || true
+          exit "$harness_rc"
+      - name: Upload full strict evidence even when acceptance fails
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: pr1067-strict-final-${{ github.run_id }}
+          path: ${{ runner.temp }}/pr1067-strict-final/
+          if-no-files-found: warn
+          retention-days: 7
