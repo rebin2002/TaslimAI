@@ -195,9 +195,10 @@ public sealed class ResearchProjectReportAssetComemberPrivacyTests : IClassFixtu
     }
 
     // ---------------------------------------------------------------------------------------
-    // Leak recorders: each probe must FAIL CLOSED (non-2xx status) and must carry neither the
-    // document bytes nor the report identity. Successful status, byte equality with the
-    // creator's document, or an identity leak each add a line to the collected surface.
+    // Direct-read denial contracts: every co-member probe must return exactly 404 with the
+    // documented ASSET_NOT_FOUND envelope, and must carry neither document bytes nor report
+    // identity. Successful status, a different denial, leaked bytes, or leaked identity each
+    // add a line to the collected surface.
     // ---------------------------------------------------------------------------------------
 
     private static void RecordMetadataLeak(List<string> leaks, HttpResponseMessage response, string channel, string assetName)
@@ -206,6 +207,7 @@ public sealed class ResearchProjectReportAssetComemberPrivacyTests : IClassFixtu
         var contentType = response.Content.Headers.ContentType?.MediaType ?? string.Empty;
         var identityLeaked = body.Contains(assetName, StringComparison.OrdinalIgnoreCase)
             || body.Contains(ReportTitle, StringComparison.OrdinalIgnoreCase);
+        RecordAssetNotFoundContractViolation(leaks, response, channel, body);
         if (response.IsSuccessStatusCode || identityLeaked)
         {
             leaks.Add($"- {channel}: status {(int)response.StatusCode} ({contentType}), identity leaked: {(identityLeaked ? "yes" : "no")}, body: {Truncate(body)}");
@@ -223,9 +225,30 @@ public sealed class ResearchProjectReportAssetComemberPrivacyTests : IClassFixtu
         var textLeaked = body.Contains(ReportTitle, StringComparison.OrdinalIgnoreCase)
             || body.Contains(SourceUrlMarker, StringComparison.OrdinalIgnoreCase)
             || body.Contains(SourceTextMarker, StringComparison.OrdinalIgnoreCase);
+        RecordAssetNotFoundContractViolation(leaks, response, channel, body);
         if (response.IsSuccessStatusCode || documentDelivered || textLeaked)
         {
             leaks.Add($"- {channel}: status {(int)response.StatusCode} ({contentType}), bytes identical to the creator's document: {(bytes.SequenceEqual(creatorBytes) ? "yes" : "no")}, byte length {bytes.Length}, body: {Truncate(body)}");
+        }
+    }
+
+    private static void RecordAssetNotFoundContractViolation(List<string> leaks, HttpResponseMessage response, string channel, string body)
+    {
+        if (response.StatusCode != HttpStatusCode.NotFound)
+        {
+            leaks.Add($"- {channel}: expected HTTP 404 ASSET_NOT_FOUND, received {(int)response.StatusCode}; body: {Truncate(body)}");
+        }
+
+        try
+        {
+            using var envelope = JsonDocument.Parse(body);
+            var code = envelope.RootElement.GetProperty("error").GetProperty("code").GetString();
+            if (code != "ASSET_NOT_FOUND")
+                leaks.Add($"- {channel}: expected error.code ASSET_NOT_FOUND, received {code ?? "null"}; body: {Truncate(body)}");
+        }
+        catch (Exception exception) when (exception is JsonException or InvalidOperationException or KeyNotFoundException)
+        {
+            leaks.Add($"- {channel}: expected the JSON ASSET_NOT_FOUND error envelope, but it was missing or invalid; body: {Truncate(body)}");
         }
     }
 
