@@ -1,6 +1,7 @@
 using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
@@ -160,6 +161,8 @@ public sealed class ResearchPrivateSourceTests : IClassFixture<ResearchApiFactor
         var personal = AddReadyFile(owner.User.Id, null);
         var shared = AddReadyFile(owner.User.Id, project.Id);
         var otherPersonal = AddReadyFile(colleague.User.Id, null);
+        var reportBytes = Encoding.ASCII.GetBytes("%PDF-1.4\nSynthetic report fixture\n%%EOF");
+        otherPersonal.ContentHashSha256 = Convert.ToHexString(SHA256.HashData(reportBytes));
         await db.SaveChangesAsync();
 
         Task<PreparedGenerationOutput> Prepare(StoredFile file) => publisher.PrepareAsync(job,
@@ -167,6 +170,13 @@ public sealed class ResearchPrivateSourceTests : IClassFixture<ResearchApiFactor
         Assert.Equal(personal.Id, (await Prepare(personal)).Output.StoredFileId);
         await Assert.ThrowsAsync<InvalidOperationException>(() => Prepare(shared));
         await Assert.ThrowsAsync<InvalidOperationException>(() => Prepare(otherPersonal));
+
+        var generated = new GenerationHandlerOutput(GenerationJobOutputTypes.StoredFile, null, null,
+            new GeneratedFileArtifact("report.pdf", "application/pdf", reportBytes));
+        var refusedDuplicate = await Assert.ThrowsAsync<InvalidOperationException>(() => publisher.PrepareAsync(job, generated));
+        Assert.Equal("Generated output file is not available in the job scope.", refusedDuplicate.Message);
+        Assert.True(await db.StoredFiles.AsNoTracking().AnyAsync(file =>
+            file.Id == otherPersonal.Id && file.UserId == colleague.User.Id && file.Status == StoredFileStatus.Ready));
 
         job.JobType = GenerationJobTypes.SystemTest;
         Assert.Equal(shared.Id, (await Prepare(shared)).Output.StoredFileId);
