@@ -42,8 +42,7 @@ namespace Taslim.Api.Tests;
 /// (<see cref="IS3CompatibleObjectClient"/>) is a fake bucket; no live R2/S3 endpoint,
 /// credentials, provider traffic, or production data is involved.
 /// </summary>
-public sealed class WorkspaceFileUploadAmbiguousRetryTests
-    : IClassFixture<WorkspaceFileUploadAmbiguousRetryTests.AmbiguousOutcomeS3Api>
+public sealed class WorkspaceFileUploadAmbiguousRetryTests : IDisposable
 {
     // Synthetic, non-resolvable values; they exist only so the adapter runs with an
     // S3-configured profile in-process. They are never contacted.
@@ -53,14 +52,15 @@ public sealed class WorkspaceFileUploadAmbiguousRetryTests
     private const string SyntheticSecretKey = "synthetic-secret-key-not-secret";
     private const string StableUploadFailureMessage = "We couldn't store this file. Please try again.";
 
-    private readonly AmbiguousOutcomeS3Api api;
+    private readonly AmbiguousOutcomeS3Api api = new();
 
-    public WorkspaceFileUploadAmbiguousRetryTests(AmbiguousOutcomeS3Api api)
+    public WorkspaceFileUploadAmbiguousRetryTests()
     {
-        this.api = api;
         using var scope = api.Services.CreateScope();
         scope.ServiceProvider.GetRequiredService<TaslimDbContext>().Database.EnsureCreated();
     }
+
+    public void Dispose() => api.Dispose();
 
     [Fact]
     public async Task Retry_after_ambiguous_committed_put_persists_exactly_one_ready_attachment_and_one_object_copy()

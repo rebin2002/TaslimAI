@@ -87,13 +87,17 @@ public sealed class AiModelRouter(
         var tier = NormalizeTier(request.RequestedTier, settings.DefaultChatTier);
         var providerKey = settings.OpenAI.Enabled ? "openai" : settings.AllowMockProvider ? "mock" : throw new AiProviderUnavailableException();
         var requiresStructuredOutput = request.StructuredOutput is not null || request.JsonMode;
-        var model = catalog.GetForTier(tier, providerKey, requiresStructuredOutput)
-            ?? throw new AiProviderUnavailableException();
-        if (request.Attachments?.Any(attachment => !string.IsNullOrWhiteSpace(attachment.DataUrl)) == true && !model.SupportsVision)
+        var hasImageAttachments = request.Attachments?.Any(attachment => !string.IsNullOrWhiteSpace(attachment.DataUrl)) == true;
+        var model = catalog.GetForTier(tier, providerKey, requiresStructuredOutput, request.EnableStreaming);
+        if (hasImageAttachments && (model is null || !model.SupportsVision))
         {
-            model = catalog.All.FirstOrDefault(candidate => candidate.ProviderKey.Equals(providerKey, StringComparison.OrdinalIgnoreCase) && candidate.Enabled && candidate.SupportsVision && (!requiresStructuredOutput || candidate.SupportsStructuredOutput))
-                ?? throw new AiProviderUnavailableException();
+            model = catalog.All.FirstOrDefault(candidate => candidate.ProviderKey.Equals(providerKey, StringComparison.OrdinalIgnoreCase)
+                && candidate.Enabled
+                && candidate.SupportsVision
+                && (!requiresStructuredOutput || candidate.SupportsStructuredOutput)
+                && (!request.EnableStreaming || candidate.SupportsStreaming));
         }
+        if (model is null) throw new AiProviderUnavailableException();
 
         return new AiProviderSelection(providerKey, model.ModelKey, model.DisplayName, model.CapabilityTier, providerKey == "mock");
     }
@@ -214,7 +218,13 @@ public sealed class AiContextBuilder(IOptions<AiOptions> options)
         }
 
         selected.Reverse();
-        return new AiChatRequest(selected, systemInstruction, settings.DefaultChatTier, EnableStreaming: true, Attachments: files);
+        return new AiChatRequest(
+            selected,
+            systemInstruction,
+            settings.DefaultChatTier,
+            EnableStreaming: true,
+            Attachments: files,
+            MaxOutputTokens: Math.Clamp(settings.MaxChatOutputTokens, 256, 16_000));
     }
 
     private string BuildSystemInstruction(string? projectInstructions, string? projectContextNotes, IReadOnlyList<AiMemoryContext> personalMemories, IReadOnlyList<AiFileContext> files)
