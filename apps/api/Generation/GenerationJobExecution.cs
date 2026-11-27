@@ -1644,6 +1644,18 @@ await RecoverExpiredClaimsAsync(db, usage, movieExecutions, notifications, scope
         var publicationCommitted = false;
         AiUsageMetadata? providerUsage = null;
         GenerationProviderAttempt? providerAttempt = null;
+        var presentation = claimedJob.JobType == GenerationJobTypes.PresentationGenerate;
+        Task CancelExecutionAsync(CancellationToken token, OperationCanceledException? error = null,
+            string? terminalCode = null, string? terminalMessage = null)
+        {
+            var attempt = presentation ? providerAttempt : null;
+            var reportedUsd = presentation
+                ? (error as PresentationCancellationException)?.ReportedCostUsd ?? PresentationCancellationException.ReportedUsd(providerUsage)
+                : null;
+            return CancelRunningAsync(db, usage, claimedJob, claimedJob.ConcurrencyToken,
+                presentation ? CancellationToken.None : token, budget, attempt, reportedUsd, terminalCode, terminalMessage);
+        }
+
         var executionStarted = Stopwatch.GetTimestamp();
         logger.LogInformation(
             "Generation job execution started. JobId={JobId}; WorkspaceId={WorkspaceId}; JobType={JobType}; RequestId={RequestId}; RetryCount={RetryCount}",
@@ -1709,26 +1721,25 @@ await RecoverExpiredClaimsAsync(db, usage, movieExecutions, notifications, scope
             }
             var progress = new SerializedProgress(value => UpdateProgressSafelyAsync(claimedJob.Id, claimedJob.ConcurrencyToken, value, stoppingToken));
             var result = await handler.ExecuteAsync(claimedJob, progress, cancellation.Token);
+            providerUsage = result.Usage;
             await progress.DrainAsync();
             if ((GenerationJobTypes.MovieTypes.Contains(claimedJob.JobType) || GenerationJobTypes.MovieDialogueVoiceTypes.Contains(claimedJob.JobType))
                 && !result.Outputs.Any(output => output.Asset is not null
                     && (output.StoredFileId.HasValue || output.FileArtifact is not null || output.StreamArtifact is not null)))
                 throw new MovieVideoProviderOutputException();
-            providerUsage = result.Usage;
             var current = await db.GenerationJobs.FirstOrDefaultAsync(item => item.Id == claimedJob.Id, stoppingToken);
             if (current is null || current.Status != GenerationJobStatus.Running || current.ConcurrencyToken != claimedJob.ConcurrencyToken || current.CancellationRequested || cancellation.IsCancellationRequested)
             {
-                // A cancellation observed at this fence means the handler finished late while
-                // representation publication was still pending. The provider attempt must
-                // reach the same terminal state as the OperationCanceledException path, so
-                // telemetry never keeps a Started attempt for an already-Cancelled job.
-                if (providerAttempt is not null)
-                    await budget.CompleteAttemptAsync(providerAttempt, null, false, GenerationProviderAttemptStatus.Cancelled, GenerationJobErrorCodes.Cancelled, CancellationToken.None);
-                // F-36.1: for music this is the accepted-and-finished state, not an ordinary
-                // cancellation: the paid generation exists at the provider and only its delivery was
-                // lost, so the retry refusal must follow the outcome rather than the cancel verb.
+                // A cancellation at this fence may follow provider acceptance. Finalize non-Presentation
+                // attempt telemetry here; Presentation attempt/cost settlement remains inside the
+                // current-main cancellation wrapper.
+                if (!presentation && providerAttempt is not null)
+                    await budget.CompleteAttemptAsync(providerAttempt, null, false,
+                        GenerationProviderAttemptStatus.Cancelled, GenerationJobErrorCodes.Cancelled, CancellationToken.None);
+                // F-36.1: an accepted paid generation may still complete at the provider; persist its
+                // distinct outcome so retry cannot create a second paid generation.
                 var (acceptedFenceCode, acceptedFenceMessage) = AcceptedOutputCancellationContract(claimedJob);
-                await CancelRunningAsync(db, usage, claimedJob, claimedJob.ConcurrencyToken, stoppingToken, acceptedFenceCode, acceptedFenceMessage);
+                await CancelExecutionAsync(stoppingToken, null, acceptedFenceCode, acceptedFenceMessage);
                 return;
             }
             foreach (var output in result.Outputs)
@@ -1842,17 +1853,15 @@ await RecoverExpiredClaimsAsync(db, usage, movieExecutions, notifications, scope
             if (completed == 0)
             {
                 foreach (var publication in publications) await publisher.DiscardAsync(publication, stoppingToken);
-                // The fenced completion lost to a cancellation committed during publication.
-                // Prepared representations are discarded above and never become readable
-                // assets; the provider attempt is finalized with the same guard as the
-                // OperationCanceledException path so its terminal state matches the job.
-                if (providerAttempt is not null)
-                    await budget.CompleteAttemptAsync(providerAttempt, null, false, GenerationProviderAttemptStatus.Cancelled, GenerationJobErrorCodes.Cancelled, CancellationToken.None);
-                // F-36.1: for music this is the accepted-and-finished state, not an ordinary
-                // cancellation: the paid generation exists at the provider and only its delivery was
-                // lost, so the retry refusal must follow the outcome rather than the cancel verb.
+                // The fenced completion lost to cancellation during publication. Prepared
+                // representations are discarded above and never become readable assets.
+                if (!presentation && providerAttempt is not null)
+                    await budget.CompleteAttemptAsync(providerAttempt, null, false,
+                        GenerationProviderAttemptStatus.Cancelled, GenerationJobErrorCodes.Cancelled, CancellationToken.None);
+                // F-36.1: an accepted paid generation may still complete at the provider; persist its
+                // distinct outcome so retry cannot create a second paid generation.
                 var (acceptedFenceCode, acceptedFenceMessage) = AcceptedOutputCancellationContract(claimedJob);
-                await CancelRunningAsync(db, usage, claimedJob, claimedJob.ConcurrencyToken, stoppingToken, acceptedFenceCode, acceptedFenceMessage);
+                await CancelExecutionAsync(stoppingToken, null, acceptedFenceCode, acceptedFenceMessage);
                 return;
             }
             publicationCommitted = true;
@@ -1916,9 +1925,9 @@ await RecoverExpiredClaimsAsync(db, usage, movieExecutions, notifications, scope
             }
             if (GenerationJobTypes.MovieDialogueVoiceTypes.Contains(claimedJob.JobType))
                 await dialogueExecutions.MarkCancelledAsync(claimedJob.Id, CancellationToken.None);
-            await CancelRunningAsync(db, usage, claimedJob, claimedJob.ConcurrencyToken, stoppingToken);
+            await CancelExecutionAsync(stoppingToken);
         }
-        catch (OperationCanceledException cancellationException) when (cancellation.IsCancellationRequested)
+        catch (OperationCanceledException exception) when (cancellation.IsCancellationRequested)
         {
             if (!publicationCommitted)
                 foreach (var publication in publications) await publisher.DiscardAsync(publication, CancellationToken.None);
@@ -1931,26 +1940,19 @@ await RecoverExpiredClaimsAsync(db, usage, movieExecutions, notifications, scope
             }
             if (GenerationJobTypes.MovieDialogueVoiceTypes.Contains(claimedJob.JobType))
                 await dialogueExecutions.MarkCancelledAsync(claimedJob.Id, CancellationToken.None);
-            if (providerAttempt is not null)
-                await budget.CompleteAttemptAsync(providerAttempt, null, false, GenerationProviderAttemptStatus.Cancelled, GenerationJobErrorCodes.Cancelled, CancellationToken.None);
-            // F-36: WHICH cancellation was it? A music cancellation raised after the provider accepted
-            // the paid submission carries a distinct terminal code, because nothing cancels the accepted
-            // operation at the provider: the attempt may still finish and may still bill, so the retry
-            // endpoint must refuse it instead of treating it like an ordinary cancellation. Every other
-            // cancellation - including a music cancellation before acceptance - keeps its existing
-            // per-type code and stays retryable, which MusicRetryPostureIsolationTests pins both ways.
-            // The provider-attempt telemetry above deliberately keeps the generic Cancelled status: it
-            // records how the attempt ended for operators, not the customer-facing outcome.
-            var (cancelCode, cancelMessage) = cancellationException switch
+            if (!presentation && providerAttempt is not null)
+                await budget.CompleteAttemptAsync(providerAttempt, null, false,
+                    GenerationProviderAttemptStatus.Cancelled, GenerationJobErrorCodes.Cancelled, CancellationToken.None);
+            // A provider-accepted Music request may still settle and be billed after cancellation.
+            // Preserve the distinct durable retry-refusal code while the wrapper retains Presentation cost.
+            var (cancelCode, cancelMessage) = exception switch
             {
                 MusicProviderCancellationWithAcceptedSubmissionException { OutputConfirmedComplete: true } => (GenerationJobErrorCodes.MusicCancelledUndeliveredOutput, "The music generation was cancelled before the finished track could be delivered."),
                 MusicProviderCancellationWithAcceptedSubmissionException { OutputConfirmedComplete: false } => (GenerationJobErrorCodes.MusicCancelledUnconfirmedSubmission, "The music generation was cancelled after the provider accepted it, so its outcome has not been reconciled."),
                 _ => (CancellationCode(claimedJob), "The job was cancelled."),
             };
-            // Host shutdown cancels stoppingToken before this handler exits. Durable
-            // cancellation must still commit so the job does not remain Running until
-            // lease recovery on the next process.
-            await CancelRunningAsync(db, usage, claimedJob, claimedJob.ConcurrencyToken, CancellationToken.None, cancelCode, cancelMessage);
+            // Host shutdown cancels stoppingToken before this handler exits; keep settlement durable.
+            await CancelExecutionAsync(CancellationToken.None, exception, cancelCode, cancelMessage);
             logger.LogInformation(
                 "Generation job execution cancelled. JobId={JobId}; JobType={JobType}; RequestId={RequestId}; ElapsedMs={ElapsedMs}; UsageFinalized={UsageFinalized}",
                 claimedJob.Id, claimedJob.JobType, claimedJob.RequestId, (long)Stopwatch.GetElapsedTime(executionStarted).TotalMilliseconds, true);
@@ -2321,14 +2323,18 @@ var qualityFailure = exception as GenerationQualityControlException ?? exception
         }
     }
 
-    private static async Task CancelRunningAsync(TaslimDbContext db, IGenerationJobUsageService usage, GenerationJob job, Guid concurrencyToken, CancellationToken cancellationToken, string? terminalCode = null, string? terminalMessage = null)
+    private static async Task CancelRunningAsync(TaslimDbContext db, IGenerationJobUsageService usage,
+        GenerationJob job, Guid concurrencyToken, CancellationToken cancellationToken,
+        IGenerationBudgetService budget, GenerationProviderAttempt? attempt, decimal? reportedCostUsd,
+        string? terminalCode = null, string? terminalMessage = null)
     {
         var now = DateTime.UtcNow;
         await using var finalization = await db.Database.BeginTransactionAsync(cancellationToken);
-        // terminalCode is only supplied by the caller that KNOWS more than "the member cancelled" -
-        // today that is the accepted-but-unresolved music cancellation (F-36). Everything else keeps the
-        // existing per-type cancellation code and its retryability.
-        var cancelled = await db.GenerationJobs.Where(item => item.Id == job.Id && item.Status == GenerationJobStatus.Running && item.ConcurrencyToken == concurrencyToken && item.ClaimExpiresAt.HasValue && item.ClaimExpiresAt > now)
+        // Fence every terminal write on the active parent claim. This also preserves the narrower
+        // Presentation expiry fence from current main while protecting Music lease recovery.
+        var cancelled = await db.GenerationJobs
+            .Where(item => item.Id == job.Id && item.Status == GenerationJobStatus.Running && item.ConcurrencyToken == concurrencyToken)
+            .Where(item => item.ClaimExpiresAt.HasValue && item.ClaimExpiresAt > now)
             .ExecuteUpdateAsync(setters => setters
                 .SetProperty(item => item.Status, GenerationJobStatus.Cancelled)
                 .SetProperty(item => item.ErrorCode, terminalCode ?? CancellationCode(job))
@@ -2351,9 +2357,12 @@ var qualityFailure = exception as GenerationQualityControlException ?? exception
             await db.MovieSoundTracks.Where(track => track.GenerationJobId == job.Id)
                 .ExecuteUpdateAsync(setters => setters.SetProperty(track => track.Status, MovieSoundStatuses.Cancelled).SetProperty(track => track.UpdatedAt, now), cancellationToken);
         var transaction = await usage.BeginAsync(job, cancellationToken: cancellationToken);
-        // The usage ledger records the same code the job row carries, so a reconciliation pass sees the
-        // unknown submission outcome in both places rather than only in the job.
+        // The usage ledger records the same code as the job row so reconciliation sees an
+        // accepted-but-unresolved Music outcome in both durable records.
         await usage.CancelAsync(transaction, terminalCode ?? CancellationCode(job), cancellationToken);
+        if (attempt is not null)
+            await budget.CompleteAttemptAsync(attempt, reportedCostUsd, reportedCostUsd.HasValue,
+                GenerationProviderAttemptStatus.Cancelled, GenerationJobErrorCodes.Cancelled, cancellationToken);
         await finalization.CommitAsync(cancellationToken);
     }
 

@@ -99,7 +99,7 @@ public sealed class LateCompletionPresentationChatService : IChatCompletionServi
         await WaitUntilCancelledAsync(cancellationToken);
         return new AiGenerationResult(
             ValidDraftJson,
-            new AiUsageMetadata("presentation-cancel-ledger", "presentation-cancel-ledger", 100, null, 200, 0.002m, 0.002m, 8, "completed", true));
+            new AiUsageMetadata("presentation-cancel-ledger", "presentation-cancel-ledger", 100, null, 200, 0.002m, 0.002m, 8, "completed", true, Currency: "USD"));
     }
 
     public async IAsyncEnumerable<AiStreamEvent> StreamAsync(AiChatRequest request, [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken = default)
@@ -203,6 +203,10 @@ public sealed class PresentationCancellationLedgerApiTests : IClassFixture<Prese
         // Usage ledger terminal state: the reservation was finalized as Cancelled with a
         // zero customer charge, never Completed.
         var usage = await db.UsageTransactions.AsNoTracking().SingleAsync(item => item.GenerationJobId == jobId);
+        var attempt = await db.GenerationProviderAttempts.AsNoTracking().SingleAsync(item => item.GenerationJobId == jobId);
+        Assert.Equal(GenerationProviderAttemptStatus.Cancelled, attempt.Status);
+        Assert.True(attempt.ActualProviderCostKnown);
+        Assert.Equal(0.002m, attempt.ActualProviderCostUsd);
         Assert.Equal(UsageTransactionStatus.Cancelled, usage.Status);
         Assert.Equal(0m, usage.ChargedAmount);
         Assert.Equal(0m, usage.ProviderCostUsd);

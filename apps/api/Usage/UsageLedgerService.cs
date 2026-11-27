@@ -88,18 +88,20 @@ public sealed class UsageCostControl(
 
     private async Task<(decimal Cost, bool HasUnknown)> ProviderCostForWindowAsync(Guid workspaceId, DateTime start, DateTime end, CancellationToken cancellationToken)
     {
-        var rows = await db.UsageTransactions
-            .Where(item => item.WorkspaceId == workspaceId && item.CreatedAt >= start && item.CreatedAt < end)
-            .Select(item => new { item.Status, item.ProviderCostUsd, item.ProviderCostKnown, item.EstimatedProviderCostUsd })
-            .ToListAsync(cancellationToken);
-        var hasUnknown = rows.Any(item => item.Status != UsageTransactionStatus.Cancelled
-            && (item.Status == UsageTransactionStatus.Pending ? !item.EstimatedProviderCostUsd.HasValue : !item.ProviderCostKnown));
-        var cost = rows.Sum(item => item.Status == UsageTransactionStatus.Completed || item.Status == UsageTransactionStatus.Failed
-            ? item.ProviderCostKnown ? item.ProviderCostUsd : 0m
-            : item.Status == UsageTransactionStatus.Pending
-                ? item.EstimatedProviderCostUsd ?? 0m
-                : 0m);
-        return (cost, hasUnknown);
+        var window = db.UsageTransactions.AsNoTracking()
+            .Where(row => row.WorkspaceId == workspaceId && row.CreatedAt >= start && row.CreatedAt < end);
+        var amounts = window.Select(row => new
+        {
+            Cost = row.Status == UsageTransactionStatus.Completed || row.Status == UsageTransactionStatus.Failed
+                ? row.ProviderCostKnown ? row.ProviderCostUsd : 0m
+                : row.Status == UsageTransactionStatus.Pending ? row.EstimatedProviderCostUsd ?? 0m : 0m,
+            Unknown = row.Status != UsageTransactionStatus.Cancelled
+                && (row.Status == UsageTransactionStatus.Pending ? !row.EstimatedProviderCostUsd.HasValue : !row.ProviderCostKnown),
+        });
+        var cancelled = CancelledPresentationSpend.ForCancelledReservations(db, window)
+            .Select(cost => new { Cost = cost, Unknown = false });
+        var rows = await amounts.Concat(cancelled).ToListAsync(cancellationToken);
+        return (rows.Sum(row => row.Cost), rows.Any(row => row.Unknown));
     }
 
     private async Task<string?> FindAnomalyCodeAsync(UsageTransaction transaction, CancellationToken cancellationToken)

@@ -25,6 +25,7 @@ public sealed class ChatController(
     TaslimDbContext db,
     WorkspaceAccessService access,
     IChatCompletionService completion,
+    IAiModelRouter modelRouter,
     AiContextBuilder contextBuilder,
     IUsageLedgerService usageLedger,
     IOptions<Microsoft.AspNetCore.Mvc.JsonOptions> mvcJsonOptions,
@@ -42,8 +43,8 @@ public sealed class ChatController(
 
         if (request.ProjectId is not null)
         {
-            var belongsToWorkspace = await db.Projects.AnyAsync(project => project.Id == request.ProjectId && project.WorkspaceId == workspaceId, cancellationToken);
-            if (!belongsToWorkspace) return ApiResults.Error(this, StatusCodes.Status404NotFound, "PROJECT_NOT_FOUND", "Project not found.");
+            var belongsToActiveProject = await db.Projects.AnyAsync(project => project.Id == request.ProjectId && project.WorkspaceId == workspaceId && project.Status == ProjectStatuses.Active, cancellationToken);
+            if (!belongsToActiveProject) return ApiResults.Error(this, StatusCodes.Status404NotFound, "PROJECT_NOT_FOUND", "Project not found.");
         }
 
         var now = DateTime.UtcNow;
@@ -265,6 +266,11 @@ public sealed class ChatController(
                     return;
                 }
 
+                if (!await CanGenerateForStoredTurnAsync(sourceUser.Id, cancellationToken))
+                {
+                    await WriteEventAsync("message.failed", new { code = ProviderUnavailableCode, message = ProviderUnavailableMessage }, cancellationToken);
+                    return;
+                }
                 var claimed = await TryClaimFailedAssistantAsync(existing.Id, cancellationToken);
                 if (!claimed)
                 {
@@ -280,6 +286,11 @@ public sealed class ChatController(
                 // Ordinary sends reserve their pair atomically. Reserve the regeneration slot with
                 // the same compare-and-swap order, then recheck admission: a send that won after
                 // the initial check must not leave this older turn's answer after the newer turn.
+                if (!await CanGenerateForStoredTurnAsync(sourceUser.Id, cancellationToken))
+                {
+                    await WriteEventAsync("message.failed", new { code = ProviderUnavailableCode, message = ProviderUnavailableMessage }, cancellationToken);
+                    return;
+                }
                 var assistantSequence = await ReserveNextMessageSequenceAsync(conversation.Id, cancellationToken);
                 var laterUserMessageExists = await db.ChatMessages.AnyAsync(message =>
                     message.ConversationId == conversation.Id &&
@@ -619,6 +630,7 @@ public sealed class ChatController(
                 return PreparedChat.Failure(ApiResults.Error(this, StatusCodes.Status409Conflict, "MESSAGE_IN_PROGRESS", "That message is already being generated."));
             if (existingAssistant.Status == ChatMessageStatus.Failed)
             {
+                if (!await CanGenerateForStoredTurnAsync(existingUser.Id, cancellationToken)) return PreparedChat.Failure(ProviderUnavailable());
                 var claimed = await TryClaimFailedAssistantAsync(existingAssistant.Id, cancellationToken);
                 if (!claimed) return PreparedChat.Failure(ApiResults.Error(this, StatusCodes.Status409Conflict, "MESSAGE_IN_PROGRESS", "That message is already being generated."));
                 await db.Entry(existingAssistant).ReloadAsync(cancellationToken);
@@ -629,9 +641,6 @@ public sealed class ChatController(
         }
 
         var now = DateTime.UtcNow;
-        if (conversation.Title == "New chat") conversation.Title = BuildTitle(content);
-        conversation.UpdatedAt = now;
-        conversation.LastMessageAt = now;
         var userMessage = new ChatMessage
         {
             Id = Guid.NewGuid(),
@@ -653,9 +662,12 @@ public sealed class ChatController(
             CreatedAt = now.AddTicks(1),
             Sequence = 0,
         };
+        var admissionError = await PrepareAttachmentsForGenerationAsync(conversation, userMessage.Id, request.AttachmentIds, cancellationToken);
+        if (admissionError is not null) return PreparedChat.Failure(admissionError);
+        if (conversation.Title == "New chat") conversation.Title = BuildTitle(content);
+        conversation.UpdatedAt = now;
+        conversation.LastMessageAt = now;
         db.ChatMessages.AddRange(userMessage, assistantMessage);
-        var attachmentError = await AttachFilesAsync(conversation, userMessage, request.AttachmentIds, cancellationToken);
-        if (attachmentError is not null) return PreparedChat.Failure(attachmentError);
         await using var sequenceTransaction = await db.Database.BeginTransactionAsync(cancellationToken);
         var assistantSequence = await ReserveMessageSequencePairAsync(conversation.Id, cancellationToken);
         userMessage.Sequence = assistantSequence - 1;
@@ -853,12 +865,21 @@ public sealed class ChatController(
         return contextBuilder.Build(history.Select(message => new AiChatMessage(message.Role, message.Content)).ToList(), project?.Instructions, project?.ContextNotes, memories, fileContexts);
     }
 
-    private async Task<IActionResult?> AttachFilesAsync(Conversation conversation, ChatMessage message, IReadOnlyCollection<Guid>? requestedIds, CancellationToken cancellationToken)
+    private async Task<bool> CanGenerateForStoredTurnAsync(Guid userMessageId, CancellationToken cancellationToken)
+    {
+        var extensions = await db.ChatMessageAttachments.AsNoTracking()
+            .Where(attachment => attachment.ChatMessageId == userMessageId)
+            .Select(attachment => attachment.StoredFile.Extension)
+            .ToListAsync(cancellationToken);
+        return modelRouter.IsChatGenerationAvailable(extensions.Any(FileContentTypes.IsImage));
+    }
+
+    private async Task<IActionResult?> PrepareAttachmentsForGenerationAsync(Conversation conversation, Guid messageId, IReadOnlyCollection<Guid>? requestedIds, CancellationToken cancellationToken)
     {
         var ids = requestedIds?.Distinct().ToList() ?? [];
         var maximumAttachments = Math.Clamp(fileOptions.Value.MaxAttachmentsPerMessage, 1, 20);
         if (ids.Count > maximumAttachments) return ApiResults.Validation(this, $"You can attach up to {maximumAttachments} files to one message.");
-        if (ids.Count == 0) return null;
+        if (ids.Count == 0) return modelRouter.IsChatGenerationAvailable(false) ? null : ProviderUnavailable();
         var userId = GetUserId();
         var files = await db.StoredFiles
             .Where(file => ids.Contains(file.Id)
@@ -870,9 +891,10 @@ public sealed class ChatController(
         if (files.Count != ids.Count) return ApiResults.Error(this, StatusCodes.Status400BadRequest, "ATTACHMENT_NOT_AVAILABLE", "One or more selected files are unavailable.");
         if (files.Any(file => file.Status != StoredFileStatus.Ready || (!FileContentTypes.IsImage(file.Extension) && (file.TextExtractionStatus != FileExtractionStatus.Ready || string.IsNullOrWhiteSpace(file.ExtractedText)))))
             return ApiResults.Error(this, StatusCodes.Status422UnprocessableEntity, "ATTACHMENT_CONTENT_UNAVAILABLE", AttachmentContentFailureMessage);
+        if (!modelRouter.IsChatGenerationAvailable(files.Any(file => FileContentTypes.IsImage(file.Extension)))) return ProviderUnavailable();
         for (var index = 0; index < ids.Count; index++)
         {
-            db.ChatMessageAttachments.Add(new ChatMessageAttachment { ChatMessageId = message.Id, StoredFileId = ids[index], SortOrder = index });
+            db.ChatMessageAttachments.Add(new ChatMessageAttachment { ChatMessageId = messageId, StoredFileId = ids[index], SortOrder = index });
         }
         return null;
     }
@@ -1032,6 +1054,12 @@ public sealed class ChatController(
     private static object ErrorData(IActionResult result) => result is ObjectResult { Value: ErrorEnvelope envelope }
         ? new { code = envelope.Error.Code, message = envelope.Error.Message }
         : new { code = "CHAT_REQUEST_FAILED", message = "Taslim could not process that chat request." };
+
+    private const string ProviderUnavailableCode = "AI_PROVIDER_UNAVAILABLE";
+
+    private const string ProviderUnavailableMessage = "Taslim Chat is not available right now. Please try again later.";
+
+    private IActionResult ProviderUnavailable() => ApiResults.Error(this, StatusCodes.Status503ServiceUnavailable, ProviderUnavailableCode, ProviderUnavailableMessage);
 
     private IActionResult GenerationFailure() => ApiResults.Error(this, StatusCodes.Status503ServiceUnavailable, "AI_GENERATION_FAILED", "Taslim could not generate a response right now. Your message was saved.");
 

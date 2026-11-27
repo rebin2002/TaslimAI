@@ -23,6 +23,27 @@ public sealed class PresentationGenerationStageException(string stage, string co
     public AiUsageMetadata? Usage { get; } = usage;
 }
 
+internal sealed class PresentationCancellationException(CancellationToken cancellationToken, decimal? reportedCostUsd)
+    : OperationCanceledException(cancellationToken)
+{
+    public decimal? ReportedCostUsd { get; } = reportedCostUsd;
+
+    public static void ThrowIfCancelled(CancellationToken cancellationToken, AiUsageMetadata? usage)
+    {
+        if (!cancellationToken.IsCancellationRequested) return;
+
+        throw new PresentationCancellationException(cancellationToken, ReportedUsd(usage));
+    }
+
+    internal static decimal? ReportedUsd(AiUsageMetadata? usage)
+    {
+        var (amount, currency) = usage?.ProviderReport ?? (usage?.ActualCost, usage?.Currency);
+        return amount >= 0m && string.Equals(currency, UsageCurrencies.Usd, StringComparison.OrdinalIgnoreCase)
+            ? amount
+            : null;
+    }
+}
+
 public static class PresentationGenerationFailureCodes
 {
     public static string ForProvider(AiProviderException exception) => exception.FailureCategory switch
