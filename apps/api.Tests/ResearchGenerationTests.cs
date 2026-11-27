@@ -326,6 +326,52 @@ public sealed class ResearchGenerationTests : IClassFixture<ResearchApiFactory>
         Assert.Equal(HttpStatusCode.Forbidden, (await SendWithCsrf(member, HttpMethod.Post, $"/api/generation/jobs/{created.Job.Id}/cancel", null)).StatusCode);
     }
 
+    [Fact]
+    public async Task Research_project_report_assets_remain_private_to_the_creator()
+    {
+        using var owner = factory.CreateClient();
+        var ownerAuth = await Register(owner, $"research-asset-owner-{Guid.NewGuid():N}@example.com");
+        var project = await SendWithCsrf<ProjectDto>(owner, HttpMethod.Post, $"/api/workspaces/{ownerAuth.PersonalWorkspace.Id}/projects", new { name = "Private research project", type = "General" });
+
+        using var member = factory.CreateClient();
+        var memberAuth = await Register(member, $"research-asset-member-{Guid.NewGuid():N}@example.com");
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            db.WorkspaceMembers.Add(new WorkspaceMember
+            {
+                Id = Guid.NewGuid(),
+                WorkspaceId = ownerAuth.PersonalWorkspace.Id,
+                UserId = memberAuth.User.Id,
+                Role = WorkspaceRole.Member,
+                JoinedAt = DateTime.UtcNow,
+            });
+            await db.SaveChangesAsync();
+        }
+
+        var created = await SendWithCsrf<CreateResearchGenerationResponse>(owner, HttpMethod.Post, "/api/research-generation/jobs", new
+        {
+            workspaceId = ownerAuth.PersonalWorkspace.Id,
+            projectId = project.Id,
+            question = "Compare current solar opportunities",
+            useWebSources = true,
+            attachmentIds = Array.Empty<Guid>(),
+        });
+        var completed = await WaitForTerminal(owner, created.Job.Id);
+        Assert.Equal("Succeeded", completed.Status);
+
+        using var verificationScope = factory.Services.CreateScope();
+        var verificationDb = verificationScope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        var asset = await verificationDb.Assets.AsNoTracking().SingleAsync(item => item.SourceGenerationJobId == created.Job.Id);
+        var ownerAssets = await owner.GetFromJsonAsync<AssetListDto>($"/api/assets?workspaceId={ownerAuth.PersonalWorkspace.Id}&assetType=research");
+        Assert.Contains(ownerAssets!.Items, item => item.Id == asset.Id);
+        var memberAssets = await member.GetFromJsonAsync<AssetListDto>($"/api/assets?workspaceId={ownerAuth.PersonalWorkspace.Id}&assetType=research");
+        Assert.DoesNotContain(memberAssets!.Items, item => item.Id == asset.Id);
+        Assert.Equal(HttpStatusCode.OK, (await owner.GetAsync($"/api/assets/{asset.Id}")).StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, (await member.GetAsync($"/api/assets/{asset.Id}")).StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, (await member.GetAsync($"/api/assets/{asset.Id}/download")).StatusCode);
+    }
+
     private static async Task<AuthResponse> Register(HttpClient client, string email)
     {
         var response = await SendWithCsrf(client, HttpMethod.Post, "/api/auth/register", new { displayName = "Research Tester", email, password = "StrongPassword!123", preferredLanguage = "en" });
