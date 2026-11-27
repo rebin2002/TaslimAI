@@ -23,9 +23,16 @@ test.describe("Full movie module server authentication", () => {
     await expect(page.getByRole("main").getByRole("button", { name: /sign in/i })).toBeVisible();
     await expect(page.locator(".movie-full-workspace")).toHaveCount(0);
   });
-  test("rejects forged and expired sessions with a one-hop redirect", async ({ page, context }) => {
+  test("preserves the room path and repeated query values through sign-in", async ({ request }) => {
+    const room = "/create/movie/Test%20Project/story?view=notes&view=cast%20%26%20crew&scene=act%2Fone";
+    const response = await request.get(new URL(room, webUrl).toString(), { maxRedirects: 0 });
+    expect(response.status()).toBe(307);
+    expect(response.headers().location).toBe(`/login?next=${encodeURIComponent(room)}`);
+  });
+
+  test("redirects invalid session cookies to sign-in", async ({ page, context }) => {
     await page.goto("/login");
-    for (const value of ["forged-cookie-not-a-session", `expired-${randomUUID()}`]) {
+    for (const value of ["forged-cookie-not-a-session", `invalid-${randomUUID()}`]) {
       await context.addCookies([{ name: "taslim.auth", value, url: webUrl, httpOnly: true, sameSite: "Lax" }]);
       // Confirm the API itself refuses the synthetic session before asserting
       // that the server-rendered gate agrees with it.
@@ -39,7 +46,7 @@ test.describe("Full movie module server authentication", () => {
       expect(privateMarkup(await response.text()), `markup for ${value}`).toEqual([]);
     }
   });
-  test("serves the workspace to a genuine API-authenticated session without a login bounce", async ({ authenticatedPage }) => {
+  test("accepts a genuine session on the Movie module route without a login bounce", async ({ authenticatedPage }) => {
     const project = await createProject(authenticatedPage, "E2E Movie Route Auth Project");
     const route = `/create/movie/${project.id}/story`;
     const session = await authenticatedPage.request.get(`${E2E_API_URL}/api/auth/me`);
