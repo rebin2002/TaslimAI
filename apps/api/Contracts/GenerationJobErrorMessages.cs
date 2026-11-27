@@ -25,6 +25,7 @@ public static class GenerationJobErrorMessages
             GenerationJobErrorCodes.ImageOutputInvalid => "The image result was invalid. Please try again.",
             GenerationJobErrorCodes.ImageOutputStorageFailed => "The image was generated but could not be saved. Please try again.",
             GenerationJobErrorCodes.ImageCancelled => "The image generation was cancelled.",
+            GenerationJobErrorCodes.DocumentStudioUnavailable => "Document generation is not available right now.",
             GenerationJobErrorCodes.DocumentProviderUnavailable or GenerationJobErrorCodes.DocumentProviderConfiguration or GenerationJobErrorCodes.DocumentProviderUnsupportedRequest or GenerationJobErrorCodes.DocumentProviderRateLimited or GenerationJobErrorCodes.DocumentProviderTransientFailure => "Document generation is temporarily unavailable. Please try again later.",
             GenerationJobErrorCodes.DocumentContextTooLarge => "The selected source material is too large. Choose fewer or shorter documents.",
             GenerationJobErrorCodes.DocumentOutputInvalid => "The generated document was invalid. Please try again.",
