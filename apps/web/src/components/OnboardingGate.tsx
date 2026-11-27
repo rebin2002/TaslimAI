@@ -1,6 +1,6 @@
 "use client";
 
-import { useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type RefObject } from "react";
 import { useRouter } from "next/navigation";
 import {
   ArrowLeft,
@@ -14,12 +14,12 @@ import {
   MessageSquare,
   Presentation,
   Search,
-  Video,
   Sparkles,
   type LucideIcon,
 } from "lucide-react";
 import { useAuth } from "@/components/AuthProvider";
-import { localeNames, locales, useLocale } from "@/components/LocaleProvider";
+import { languagePackIds, languagePackNames, localeNames, locales, useLocale } from "@/components/LocaleProvider";
+import { languagePackDirection } from "@/lib/languagePackRegistry";
 import type { User } from "@/lib/api";
 import { onboardingFormDefaults, onboardingWorkflowDefinitions, shouldShowOnboarding, type OnboardingIntent } from "@/lib/onboarding";
 import type { Locale } from "@/lib/i18n";
@@ -34,73 +34,53 @@ const workflowIcons: Record<OnboardingIntent, LucideIcon> = {
   research: Search,
 };
 
-type OnboardingChoice = {
-  intent?: OnboardingIntent;
-  href: string;
-  titleKey: string;
-  descriptionKey: string;
-  icon: LucideIcon;
-};
-
 type OnboardingStep = "preferences" | "tour" | "workflow";
-
-// Keep the first-run offer list explicit: Project and Research are not beta
-// module choices. Movie opens the existing Quick mode without adding an API intent.
-const onboardingChoices: OnboardingChoice[] = [
-  ...onboardingWorkflowDefinitions
-    .filter((workflow) => workflow.intent === "chat"
-      || workflow.intent === "image"
-      || workflow.intent === "document"
-      || workflow.intent === "presentation")
-    .map((workflow) => ({
-      intent: workflow.intent,
-      href: workflow.href,
-      titleKey: workflow.titleKey,
-      descriptionKey: workflow.descriptionKey,
-      icon: workflowIcons[workflow.intent],
-    })),
-  {
-    href: "/create/movie",
-    titleKey: "navigation.movieStudio",
-    descriptionKey: "movieBody.quick.oneBrief",
-    icon: Video,
-  },
-];
 
 export function OnboardingGate() {
   const { user } = useAuth();
 
-  if (!user || !shouldShowOnboarding(user)) return null;
-  return <OnboardingFlow key={user.id} user={user} />;
+  const isOpen = Boolean(user && shouldShowOnboarding(user));
+  const openerRef = useRef<HTMLElement | null>(null);
+  useEffect(() => {
+    if (isOpen) return;
+    const rememberOpener = (event: FocusEvent) => {
+      const target = event.target;
+      if (target instanceof HTMLElement && target !== document.body && !target.closest('[role="dialog"]')) {
+        openerRef.current = target;
+      }
+    };
+    document.addEventListener("focusin", rememberOpener, true);
+    return () => document.removeEventListener("focusin", rememberOpener, true);
+  }, [isOpen]);
+  if (!user || !isOpen) return null;
+  return <OnboardingFlow key={user.id} user={user} openerRef={openerRef} />;
 }
 
-function OnboardingFlow({ user }: Readonly<{ user: User }>) {
+function OnboardingFlow({ user, openerRef }: Readonly<{ user: User; openerRef: RefObject<HTMLElement | null> }>) {
   const { completeOnboarding } = useAuth();
-  const { locale, setLocale, t } = useLocale();
+  const { locale, languagePackId, setLanguagePack, t } = useLocale();
   const router = useRouter();
   const [step, setStep] = useState<OnboardingStep>("preferences");
   const defaults = onboardingFormDefaults(user, locale);
   const [displayName, setDisplayName] = useState(defaults.displayName);
-  const [preferredLanguage, setPreferredLanguage] = useState<Locale>(defaults.preferredLanguage);
+  const [preferredLanguage, setPreferredLanguage] = useState<string>(defaults.preferredLanguage);
   const [defaultGenerationLanguage, setDefaultGenerationLanguage] = useState<Locale>(defaults.defaultGenerationLanguage);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   const showOnboarding = shouldShowOnboarding(user);
-  const stepHeadingRef = useRef<HTMLHeadingElement | null>(null);
-  // Onboarding is a blocking workflow with an explicit Skip action; Escape
-  // keeps focus inside instead of silently submitting that choice.
-  const dialogRef = useDialogAccessibility(showOnboarding, () => undefined);
-
+  const dialogRef = useDialogAccessibility(showOnboarding, () => undefined, openerRef);
+  const stepHeadingRef = useRef<HTMLHeadingElement>(null);
+  const previousStep = useRef(step);
   useLayoutEffect(() => {
-    // Replacing a step unmounts its focused controls. Move focus into the new
-    // step synchronously so it cannot fall back to BODY between steps.
-    stepHeadingRef.current?.focus();
+    // Keep the display-name autofocus on entry. A replaced step announces its own heading.
+    if (previousStep.current !== step) stepHeadingRef.current?.focus();
+    previousStep.current = step;
   }, [step]);
-
   if (!showOnboarding) return null;
+
   const steps: OnboardingStep[] = ["preferences", "tour", "workflow"];
   const currentStep = steps.indexOf(step) + 1;
-  const NextIcon = locale === "en" ? ArrowRight : ArrowLeft;
+  const NextIcon = languagePackDirection(languagePackId) === "ltr" ? ArrowRight : ArrowLeft;
 
   async function finish(intent?: OnboardingIntent, href = "/projects") {
     setSaving(true);
@@ -112,7 +92,8 @@ function OnboardingFlow({ user }: Readonly<{ user: User }>) {
         defaultGenerationLanguage,
         intent,
       });
-      setLocale(preferredLanguage);
+      // AuthProvider applies the persisted server preference only after the
+      // onboarding request succeeds; never write a transient preview to storage.
       router.push(href);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : t("onboarding.saveError"));
@@ -128,7 +109,7 @@ function OnboardingFlow({ user }: Readonly<{ user: User }>) {
           <button type="button" className="onboarding-skip" onClick={() => void finish()} disabled={saving}>{t("onboarding.skip")}</button>
         </header>
 
-        <div className="onboarding-progress" role="progressbar" aria-label={t("onboarding.progress", { current: String(currentStep), total: String(steps.length) })} aria-valuemin={1} aria-valuemax={steps.length} aria-valuenow={currentStep}>
+        <div className="onboarding-progress" role="progressbar" aria-valuemin={1} aria-valuemax={steps.length} aria-valuenow={currentStep} aria-label={t("onboarding.progress", { current: String(currentStep), total: String(steps.length) })}>
           {steps.map((item, index) => <span key={item} className={index < currentStep ? "is-complete" : ""} />)}
         </div>
 
@@ -138,9 +119,10 @@ function OnboardingFlow({ user }: Readonly<{ user: User }>) {
           <p className="onboarding-description">{t("onboarding.preferencesDescription")}</p>
           <div className="onboarding-fields">
             <label><span>{t("onboarding.displayName")}</span><input data-dialog-autofocus value={displayName} maxLength={120} onChange={(event) => setDisplayName(event.target.value)} placeholder={t("onboarding.displayNamePlaceholder")} autoComplete="name" /></label>
-            <label><span><Globe2 size={15} /> {t("onboarding.interfaceLanguage")}</span><select value={preferredLanguage} onChange={(event) => { const next = event.target.value as Locale; setPreferredLanguage(next); setLocale(next); }}>{locales.map((item) => <option key={item} value={item}>{localeNames[item]}</option>)}</select></label>
+            <label><span><Globe2 size={15} /> {t("onboarding.interfaceLanguage")}</span><select value={preferredLanguage} onChange={(event) => { const next = event.target.value; setPreferredLanguage(next); setLanguagePack(next, { persist: false, source: "user" }); }}>{languagePackIds.map((item) => <option key={item} value={item}>{languagePackNames[item]}</option>)}</select></label>
             <label><span><Languages size={15} /> {t("onboarding.generationLanguage")}</span><select value={defaultGenerationLanguage} onChange={(event) => setDefaultGenerationLanguage(event.target.value as Locale)}>{locales.map((item) => <option key={item} value={item}>{localeNames[item]}</option>)}</select></label>
           </div>
+          {preferredLanguage === "zh-CN" && <p className="onboarding-description" role="status">{t("onboarding.zhPreviewNote")}</p>}
           <footer className="onboarding-actions"><span>{t("onboarding.preferencesHint")}</span><button type="button" className="primary-button" onClick={() => setStep("tour")}><span>{t("onboarding.continue")}</span><NextIcon size={16} /></button></footer>
         </div>}
 
@@ -161,9 +143,9 @@ function OnboardingFlow({ user }: Readonly<{ user: User }>) {
           <h1 ref={stepHeadingRef} id="onboarding-title" tabIndex={-1}>{t("create.title")}</h1>
           <p className="onboarding-description">{t("onboarding.workflowDescription")}</p>
           <div className="onboarding-workflow-grid">
-            {onboardingChoices.map((workflow) => {
-              const Icon = workflow.icon;
-              return <button type="button" key={workflow.intent ?? workflow.href} className="onboarding-workflow" onClick={() => void finish(workflow.intent, workflow.href)} disabled={saving}>
+            {onboardingWorkflowDefinitions.map((workflow) => {
+              const Icon = workflowIcons[workflow.intent];
+              return <button type="button" key={workflow.intent} className="onboarding-workflow" onClick={() => void finish(workflow.intent, workflow.href)} disabled={saving}>
                 <span className="onboarding-workflow-icon"><Icon size={19} /></span>
                 <span><strong>{t(workflow.titleKey)}</strong><small>{t(workflow.descriptionKey)}</small></span>
                 <NextIcon className="onboarding-workflow-arrow" size={16} />

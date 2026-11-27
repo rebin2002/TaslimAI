@@ -9,7 +9,7 @@ import { useAuth } from "@/components/AuthProvider";
 import { useLocale } from "@/components/LocaleProvider";
 import { api, type NotificationItem, type NotificationList } from "@/lib/api";
 import { publishNotificationUnreadCount } from "@/components/ActivityBell";
-import { applyAllNotificationsRead, applyNotificationRead } from "@/lib/notificationReadState";
+import { applyAllNotificationsRead, applyNotificationRead, isNotificationMutationCurrent } from "@/lib/notificationReadState";
 const notificationPageSize = 20;
 const notificationLabels = {
   "generation.completed": "notification.generationCompleted",
@@ -83,10 +83,11 @@ export function NotificationCenterView() {
 
   async function markRead(item: NotificationItem): Promise<boolean> {
     if (!workspaceId || item.isRead) return true;
+    const generation = requestGeneration.current;
     setWorkingId(item.id);
     try {
       await api.markNotificationRead(workspaceId, item.id);
-      if (activeWorkspaceId.current !== workspaceId) return false;
+      if (!isNotificationMutationCurrent(generation, requestGeneration.current, activeWorkspaceId.current, workspaceId)) return false;
       const readAt = new Date().toISOString();
       const current = resultRef.current;
       if (current) {
@@ -98,10 +99,10 @@ export function NotificationCenterView() {
       setError("");
       return true;
     } catch {
-      if (activeWorkspaceId.current === workspaceId) setError(t("notification.readError"));
+      if (isNotificationMutationCurrent(generation, requestGeneration.current, activeWorkspaceId.current, workspaceId)) setError(t("notification.readError"));
       return false;
     } finally {
-      if (activeWorkspaceId.current === workspaceId) setWorkingId(null);
+      if (isNotificationMutationCurrent(generation, requestGeneration.current, activeWorkspaceId.current, workspaceId)) setWorkingId(null);
     }
   }
 
@@ -113,10 +114,11 @@ export function NotificationCenterView() {
 
   async function markAllRead() {
     if (!workspaceId || !result?.unreadCount) return;
+    const generation = requestGeneration.current;
     setWorkingId("all");
     try {
       await api.markAllNotificationsRead(workspaceId);
-      if (activeWorkspaceId.current !== workspaceId) return;
+      if (!isNotificationMutationCurrent(generation, requestGeneration.current, activeWorkspaceId.current, workspaceId)) return;
       const readAt = new Date().toISOString();
       const current = resultRef.current;
       if (current) {
@@ -127,9 +129,9 @@ export function NotificationCenterView() {
       }
       setError("");
     } catch {
-      if (activeWorkspaceId.current === workspaceId) setError(t("notification.readError"));
+      if (isNotificationMutationCurrent(generation, requestGeneration.current, activeWorkspaceId.current, workspaceId)) setError(t("notification.readError"));
     } finally {
-      if (activeWorkspaceId.current === workspaceId) setWorkingId(null);
+      if (isNotificationMutationCurrent(generation, requestGeneration.current, activeWorkspaceId.current, workspaceId)) setWorkingId(null);
     }
   }
 

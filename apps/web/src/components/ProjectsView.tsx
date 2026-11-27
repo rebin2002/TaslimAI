@@ -2,13 +2,15 @@
 import { localeTag } from "@/lib/i18n";
 
 import Link from "next/link";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Archive, ArrowUpRight, BriefcaseBusiness, CalendarDays, FolderOpen, Pencil, Plus, RotateCcw } from "lucide-react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { api, type Project, type ProjectInput } from "@/lib/api";
+import { ProjectRevisionSession } from "@/lib/projectRevision";
 import { useAuth } from "@/components/AuthProvider";
 import { useLocale } from "@/components/LocaleProvider";
 import { ProjectForm } from "@/components/ProjectForm";
+import { scopedProjectList } from "@/lib/projectListPagination";
 import { createRequestGuard, isAbortError } from "@/lib/requestLifecycle";
 
 const typeKey = (type: string) => `project.type.${type.toLowerCase()}`;
@@ -37,26 +39,45 @@ export function ProjectsView() {
   const [editing, setEditing] = useState<Project | undefined>();
   const [error, setError] = useState("");
   const formOpenerRef = useRef<HTMLElement | null>(null);
+  // Only the most recent tab/workspace load may publish its pages; a slow
+  // earlier walk must not overwrite the tab that replaced it. The guard both
+  // aborts the superseded request and fences its late result, so an unmount
+  // cancellation cannot leave a generation that still believes it is current.
   const loadGuard = useRef(createRequestGuard());
   const workspaceTypeLabel = workspace?.type === "Business" ? t("projects.businessWorkspace") : t("projects.personalWorkspace");
   const workspaceRoleLabel = workspace ? t(`projects.role.${workspace.role.toLowerCase()}`) : "";
+  const visibleProjects = scopedProjectList(projects, workspace?.id, status);
+  // The edit modal declares the revision the draft was built on. The session
+  // belongs to one project id: opening the editor for another row - or closing
+  // it and reopening - starts from no token at all, so a captured revision can
+  // never be replayed against a different project.
+  const editRevision = useMemo(() => (editing ? new ProjectRevisionSession(editing.id, "list-edit") : null), [editing]);
 
-  const load = useCallback(async () => {
+  const load = useCallback(async ({ preserveProjects = false }: { preserveProjects?: boolean } = {}) => {
     if (!workspace) {
       loadGuard.current.cancel();
       setProjects([]);
+      setError("");
       setLoading(false);
       return;
     }
     const request = loadGuard.current.begin();
     setLoading(true);
+    // Ordinary tab/workspace loads clear immediately. After an edit save, keep
+    // the keyed row mounted during revalidation so the dialog can restore focus
+    // to its opener before the refreshed list arrives.
+    if (!preserveProjects) setProjects([]);
     setError("");
     try {
-      const nextProjects = await api.listProjects(workspace.id, status, request.signal);
+      // A single request only ever returns one server page; walking all
+      // pages is what keeps the tab counts honest for large workspaces.
+      const items = await api.listAllProjects(workspace.id, status, request.signal);
       if (!request.isCurrent()) return;
-      setProjects(nextProjects);
+      setProjects(items);
     } catch (caught) {
       if (!request.isCurrent() || isAbortError(caught)) return;
+      // Never leave the pre-refresh copy on screen after a failed page walk.
+      if (preserveProjects) setProjects([]);
       setError(caught instanceof Error ? caught.message : t("projects.loadError"));
     } finally {
       if (request.isCurrent()) setLoading(false);
@@ -68,6 +89,8 @@ export function ProjectsView() {
     const guard = loadGuard.current;
     // eslint-disable-next-line react-hooks/set-state-in-effect
     void load();
+    // A multi-page walk outlives a fast navigation; stop paying for results
+    // no component instance will publish.
     return () => guard.cancel();
   }, [load]);
 
@@ -75,12 +98,6 @@ export function ProjectsView() {
     if (!workspace) return;
     const project = await api.createProject(workspace.id, input);
     router.push(`/projects/${project.id}`);
-  }
-
-  async function update(input: ProjectInput) {
-    if (!editing) return;
-    await api.updateProject(editing.id, input);
-    await load();
   }
 
   function openForm(project?: Project) {
@@ -91,12 +108,17 @@ export function ProjectsView() {
 
   async function archive(project: Project) {
     if (!window.confirm(t("projects.archiveConfirm"))) return;
-    await api.archiveProject(project.id);
+    const archived = await api.archiveProjectWithRevision(project.id);
+    // Status changes move the stamp; keep an open edit session honest about it.
+    // Adoption is conditional on the row content still matching this draft, so a
+    // status write never certifies a stale unsaved draft.
+    if (editRevision && editing?.id === project.id) editRevision.adopt(archived);
     await load();
   }
 
   async function restore(project: Project) {
-    await api.restoreProject(project.id);
+    const restored = await api.restoreProjectWithRevision(project.id);
+    if (editRevision && editing?.id === project.id) editRevision.adopt(restored);
     await load();
   }
 
@@ -107,7 +129,7 @@ export function ProjectsView() {
         <h1>{t("projects.title")}</h1>
         <p>{t("projects.subtitle")}</p>
       </div>
-      <button className="primary-button" onClick={() => setFormOpen(true)}><Plus size={16} /> {t("projects.newProject")}</button>
+      <button className="primary-button" onClick={() => openForm()}><Plus size={16} /> {t("projects.newProject")}</button>
     </div>
 
     <div className="workspace-banner projects-workspace-banner">
@@ -117,12 +139,12 @@ export function ProjectsView() {
     </div>
 
     <div className="project-tabs" role="tablist" aria-label={t("projects.title")}>
-      <button role="tab" aria-selected={status === "Active"} className={status === "Active" ? "is-active" : ""} onClick={() => setStatus("Active")}>{t("projects.active")} <span>{status === "Active" ? projects.length : ""}</span></button>
-      <button role="tab" aria-selected={status === "Archived"} className={status === "Archived" ? "is-active" : ""} onClick={() => setStatus("Archived")}>{t("projects.archived")} <span>{status === "Archived" ? projects.length : ""}</span></button>
+      <button role="tab" aria-selected={status === "Active"} className={status === "Active" ? "is-active" : ""} onClick={() => setStatus("Active")}>{t("projects.active")} <span>{status === "Active" ? visibleProjects.length : ""}</span></button>
+      <button role="tab" aria-selected={status === "Archived"} className={status === "Archived" ? "is-active" : ""} onClick={() => setStatus("Archived")}>{t("projects.archived")} <span>{status === "Archived" ? visibleProjects.length : ""}</span></button>
     </div>
 
     {error && <div className="inline-error" role="alert"><span>{error}</span> <button type="button" className="text-button" onClick={() => void load()}>{t("error.retry")}</button></div>}
-    {loading ? <div className="loading-state"><span className="loading-spinner" /></div> : projects.length === 0 ? <div className="projects-empty"><span className="empty-icon"><FolderOpen size={24} /></span><h2>{status === "Active" ? t("projects.emptyTitle") : t("projects.emptyArchivedTitle")}</h2><p>{status === "Active" ? t("projects.emptyDescription") : t("projects.emptyArchivedDescription")}</p>{status === "Active" && <button className="primary-button" onClick={() => setFormOpen(true)}><Plus size={16} /> {t("projects.newProject")}</button>}</div> : <div className="project-list project-list-premium">{projects.map((project) => <article className={`project-card project-card-premium ${projectAccent(project.type)}`} key={project.id}>
+    {loading && projects.length === 0 ? <div className="loading-state"><span className="loading-spinner" /></div> : visibleProjects.length === 0 ? <div className="projects-empty"><span className="empty-icon"><FolderOpen size={24} /></span><h2>{status === "Active" ? t("projects.emptyTitle") : t("projects.emptyArchivedTitle")}</h2><p>{status === "Active" ? t("projects.emptyDescription") : t("projects.emptyArchivedDescription")}</p>{status === "Active" && <button className="primary-button" onClick={() => openForm()}><Plus size={16} /> {t("projects.newProject")}</button>}</div> : <div className="project-list project-list-premium">{visibleProjects.map((project) => <article className={`project-card project-card-premium ${projectAccent(project.type)}`} key={project.id}>
       <Link href={`/projects/${project.id}`} className="project-card-main">
         <span className="project-card-icon"><FolderOpen size={19} /></span>
         <span className="project-card-copy"><span className="project-card-kicker">{t(typeKey(project.type))}</span><strong>{project.name}</strong><small>{project.description || t("projects.noDescription")}</small></span>
@@ -133,6 +155,6 @@ export function ProjectsView() {
         {status === "Active" ? <div><button onClick={() => openForm(project)} aria-label={t("projects.edit")}><Pencil size={14} /></button><button onClick={() => void archive(project)} aria-label={t("projects.archive")}><Archive size={14} /></button></div> : <button onClick={() => void restore(project)} className="restore-action"><RotateCcw size={14} /> {t("projects.restore")}</button>}
       </div>
     </article>)}</div>}
-    {formOpen && <ProjectForm project={editing} restoreFocusRef={formOpenerRef} onClose={() => { setFormOpen(false); setEditing(undefined); }} onSubmit={editing ? update : create} />}
+    {formOpen && workspace && (!editing || editing.workspaceId === workspace.id) && <ProjectForm project={editing} restoreFocusRef={formOpenerRef} onClose={() => { setFormOpen(false); setEditing(undefined); }} onSubmit={create} revision={editRevision} onSaved={(saved) => { setProjects((current) => current.map((project) => project.id === saved.id ? saved : project)); void load({ preserveProjects: true }); }} />}
   </div>;
 }

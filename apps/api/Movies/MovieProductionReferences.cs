@@ -367,6 +367,8 @@ public sealed class MovieProductionReferencePackageService(
         warnings.AddRange(worldSnapshot.Warnings.Take(MovieProductionReferenceLimits.MaxWarnings).Select(ToWarning));
         if (keyframe is null)
             warnings.Add(new("approved_keyframe_missing", "attention", "No approved production keyframe is available for this shot."));
+        else if (keyframe.AssetId is null && keyframe.FirstFrameAssetId is null && keyframe.LastFrameAssetId is null)
+            warnings.Add(new("approved_keyframe_blocking_asset_missing", "attention", "The approved production keyframe has no renderable asset evidence; the expensive production render must remain blocked until its output asset is available."));
         return warnings.Take(MovieProductionReferenceLimits.MaxWarnings).ToArray();
     }
 

@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { ArrowUpRight, Check, Compass, DoorOpen, Image as ImageIcon, LockKeyhole, MapPin, Package, Pencil, Plus, Route, Save, ShieldCheck, Sparkles, Sun, Theater } from "lucide-react";
 import { useLocale } from "@/components/LocaleProvider";
 import { api, type MovieLocation, type MovieLocationGeographyEntry, type MovieLocationGeographyOpening, type MovieLocationGeographyPath, type MovieLocationGeographySheet, type MovieProp, type MovieSet, type MovieWorldAsset, type MovieWorldReference, type MovieWorldWorkspace as WorldData } from "@/lib/api";
@@ -19,6 +19,10 @@ const rooms: { id: Room; label: string; icon: typeof MapPin; hint: string }[] = 
 ];
 
 const emptyForm: FormState = { name: "", description: "", visualContinuityNotes: "", category: "", environmentType: "practical", movieLocationId: "", visualDescription: "", timeOfDay: "", weather: "", continuityNotes: "", referenceAssetId: "" };
+
+export function isMovieWorldForProject(data: Pick<WorldData, "movieProjectId"> | null, requestedMovieProjectId: string): boolean {
+  return data?.movieProjectId === requestedMovieProjectId;
+}
 
 export function movieWorldProjectSwitchReset() {
   return {
@@ -49,7 +53,21 @@ function assetLabel(assetId: string | null | undefined, assets: MovieWorldAsset[
 }
 
 export function MovieWorldWorkspace({ projectId }: { projectId: string }) {
+  // A project switch starts a fresh view synchronously in reconciliation, not only after its
+  // request succeeds. This also makes A→B→A own a new A state while keeping mutation fences local.
+  return <MovieWorldProjectWorkspace key={projectId} projectId={projectId} />;
+}
+
+function MovieWorldProjectWorkspace({ projectId }: { projectId: string }) {
   const { t } = useLocale();
+  // Round-20 review fence: one token object is minted per project (re)load by the effect below.
+  // In-flight Movie World mutation continuations compare against it before applying shared parent
+  // state, keeping old-project records, selection, edit flags, or errors out of the new project.
+  // API calls retain their originating IDs; only client-state application is fenced.
+  const worldLoadRef = useRef({ projectId, generation: 0 });
+  // Child panels capture this render's token so their delayed onSaved/onChange callbacks cannot
+  // apply a result to a later project load, including when A is revisited after A→B→A.
+  const renderedWorldLoad = worldLoadRef.current;
   const [data, setData] = useState<WorldData | null>(null);
   const [room, setRoom] = useState<Room>("locations");
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -64,6 +82,7 @@ export function MovieWorldWorkspace({ projectId }: { projectId: string }) {
   const [error, setError] = useState("");
 
   useEffect(() => {
+    worldLoadRef.current = { projectId, generation: worldLoadRef.current.generation + 1 };
     let mounted = true;
     void api.getMovieWorld(projectId).then((result) => {
       if (!mounted) return;
@@ -110,6 +129,8 @@ export function MovieWorldWorkspace({ projectId }: { projectId: string }) {
 
   async function save() {
     if (!data || !form.name.trim() || !form.description.trim()) return;
+    const origin = worldLoadRef.current;
+    const stale = () => worldLoadRef.current !== origin;
     setSaving(true); setError("");
     try {
       const referenceAssetId = form.referenceAssetId.trim() || null;
@@ -119,6 +140,11 @@ export function MovieWorldWorkspace({ projectId }: { projectId: string }) {
           : room === "sets"
             ? await api.addMovieSet(projectId, { name: form.name, description: form.description, environmentType: form.environmentType, movieLocationId: form.movieLocationId || null, visualDescription: form.visualDescription || null, timeOfDay: form.timeOfDay || null, weather: form.weather || null, continuityNotes: form.continuityNotes || null, referenceAssetId })
             : await api.addMovieProp(projectId, { name: form.name, description: form.description, category: form.category || null, continuityNotes: form.continuityNotes || null, referenceAssetId });
+        // The create was answered after the user moved to another project: the durable write
+        // already happened server-side under the originating project, but appending its record
+        // (or stealing the selection/edit state) into whatever data is loaded now is the wrong
+        // project's view. Drop the frame; the next project's own load renders the truth.
+        if (stale()) return;
         setData((current) => current ? { ...current, world: { ...current.world, [room]: [...(current.world[room] as Entity[]), created] } } : current);
         setSelectedId(created.id); setCreating(false); setEditing(false);
       } else if (selected) {
@@ -127,25 +153,37 @@ export function MovieWorldWorkspace({ projectId }: { projectId: string }) {
           : room === "sets"
             ? await api.updateMovieSet(selected.id, { name: form.name, description: form.description, environmentType: form.environmentType, movieLocationId: form.movieLocationId || null, visualDescription: form.visualDescription || null, timeOfDay: form.timeOfDay || null, weather: form.weather || null, continuityNotes: form.continuityNotes || null, referenceAssetId })
             : await api.updateMovieProp(selected.id, { name: form.name, description: form.description, category: form.category || null, continuityNotes: form.continuityNotes || null, referenceAssetId });
+        if (stale()) return; // see the create arm above: never rewrites the newly loaded project
         setData((current) => current ? { ...current, world: { ...current.world, [room]: (current.world[room] as Entity[]).map((item) => item.id === updated.id ? updated : item) } } : current);
         setEditing(false);
       }
-    } catch (cause) { setError(cause instanceof Error ? cause.message : "The World record could not be saved."); }
-    finally { setSaving(false); }
+    } catch (cause) {
+      // A failure of the old project's request must not paint an error onto the new project.
+      if (!stale()) setError(cause instanceof Error ? cause.message : "The World record could not be saved.");
+    } finally {
+      // The new project may itself be mid-save; only the request that owned the spinner clears it.
+      if (!stale()) setSaving(false);
+    }
   }
 
   async function saveReference() {
     if (!data || !referenceName.trim()) return;
+    const origin = worldLoadRef.current;
+    const stale = () => worldLoadRef.current !== origin;
     setSaving(true); setError("");
     try {
       const reference = await api.addMovieWorldReference(projectId, { name: referenceName.trim(), kind: referenceKind, assetId: referenceAssetId || null });
+      if (stale()) return; // the reference belongs to the project we left, not the one now shown
       setData((current) => current ? { ...current, world: { ...current.world, references: [...current.world.references, reference] } } : current);
       setReferenceName(""); setReferenceAssetId(""); setAddingReference(false);
-    } catch (cause) { setError(cause instanceof Error ? cause.message : "The visual reference could not be registered."); }
-    finally { setSaving(false); }
+    } catch (cause) {
+      if (!stale()) setError(cause instanceof Error ? cause.message : "The visual reference could not be registered.");
+    } finally {
+      if (!stale()) setSaving(false);
+    }
   }
 
-  if (!data || data.movieProjectId !== projectId) return <div className="movie-world-loading"><span className="loading-spinner" /><p>{error || t("movieBody.loading")}</p></div>;
+  if (!data || !isMovieWorldForProject(data, projectId)) return <div className="movie-world-loading"><span className="loading-spinner" /><p>{error || t("movieBody.loading")}</p></div>;
 
   const usages = data.usageDetails.filter((usage) => usage.entityType === (room === "locations" ? "location" : room === "sets" ? "set" : "prop") && usage.entityId === selected?.id);
   const refs = data.world.references;
@@ -162,7 +200,7 @@ export function MovieWorldWorkspace({ projectId }: { projectId: string }) {
         {records.length ? <div className="movie-world-list">{records.map((item) => { const refAsset = assetLabel("referenceAssetId" in item ? item.referenceAssetId : null, data.assets); const locked = data.world.locks.some((lock) => lock.entityId === item.id); return <button type="button" key={item.id} className={`movie-world-list-item ${selected?.id === item.id ? "is-selected" : ""}`} onClick={() => { setSelectedId(item.id); setForm(formFor(room, item)); setEditing(false); }}><span className="movie-world-list-image">{refAsset?.canPreview ? <ImageIcon size={16} aria-hidden="true" /> : room === "locations" ? <MapPin size={16} /> : room === "sets" ? <Theater size={16} /> : <Package size={16} />}</span><span><strong>{item.name}</strong><small>{"category" in item ? item.category || "Continuity prop" : "environmentType" in item ? item.environmentType : "Physical location"}</small></span>{locked && <LockKeyhole size={13} className="is-locked" />}</button>; })}</div> : <div className="movie-world-empty"><MapPin size={19} /><strong>{t("movieBody.noRecords")}</strong><p>{t("movieBody.world.addFirst")}</p><button type="button" className="movie-world-add" onClick={startCreate}><Plus size={14} /> {t("movieBody.new")}</button></div>}
       </section>
       <section className="movie-world-inspector">
-        {editing ? <WorldEditor room={room} form={form} locations={data.world.locations} assets={data.assets} onChange={setField} onCancel={() => { setEditing(false); setCreating(false); }} onSave={() => void save()} saving={saving} /> : selected ? <><div className="movie-world-inspector-head"><div><span className="movie-workspace-kicker">{room.slice(0, -1)} identity</span><h3>{selected.name}</h3></div><button type="button" className="movie-world-edit" onClick={startEdit}><Pencil size={13} /> {t("movieBody.edit")}</button></div><p className="movie-world-description">{selected.description}</p><div className="movie-world-note-grid">{room === "locations" ? <Note label="Production / visual notes" value={(selected as MovieLocation).visualContinuityNotes} /> : room === "sets" ? <><Note label="Environment" value={(selected as MovieSet).environmentType} /><Note label="Visual direction" value={(selected as MovieSet).visualDescription} /><Note label="Time / weather" value={[(selected as MovieSet).timeOfDay, (selected as MovieSet).weather].filter(Boolean).join(" · ")} /><Note label="Continuity" value={(selected as MovieSet).continuityNotes} /></> : <><Note label="Ownership / usage context" value={(selected as MovieProp).category} /><Note label="Continuity" value={(selected as MovieProp).continuityNotes} /></>}</div>{selectedAsset && <AssetChip asset={selectedAsset} />}{room === "locations" && <GeographySheetPanel key={`${selected.id}:${(selected as MovieLocation).geographySheet?.updatedAt ?? "empty"}`} location={selected as MovieLocation} assets={data.assets} onSaved={(sheet) => setData((current) => current ? { ...current, world: { ...current.world, locations: current.world.locations.map((item) => item.id === selected.id ? { ...item, geographySheet: sheet } : item) } } : current)} />}{selectedSet && <VariationRail set={selectedSet} onChange={(updated) => setData((current) => current ? { ...current, world: { ...current.world, sets: current.world.sets.map((item) => item.id === updated.id ? updated : item) } } : current)} />}</> : <div className="movie-world-empty"><Sparkles size={20} /><strong>{t("movieBody.world.chooseRecord")}</strong><p>{t("movieBody.productionIdentity")}</p></div>}
+        {editing ? <WorldEditor room={room} form={form} locations={data.world.locations} assets={data.assets} onChange={setField} onCancel={() => { setEditing(false); setCreating(false); }} onSave={() => void save()} saving={saving} /> : selected ? <><div className="movie-world-inspector-head"><div><span className="movie-workspace-kicker">{room.slice(0, -1)} identity</span><h3>{selected.name}</h3></div><button type="button" className="movie-world-edit" onClick={startEdit}><Pencil size={13} /> {t("movieBody.edit")}</button></div><p className="movie-world-description">{selected.description}</p><div className="movie-world-note-grid">{room === "locations" ? <Note label="Production / visual notes" value={(selected as MovieLocation).visualContinuityNotes} /> : room === "sets" ? <><Note label="Environment" value={(selected as MovieSet).environmentType} /><Note label="Visual direction" value={(selected as MovieSet).visualDescription} /><Note label="Time / weather" value={[(selected as MovieSet).timeOfDay, (selected as MovieSet).weather].filter(Boolean).join(" · ")} /><Note label="Continuity" value={(selected as MovieSet).continuityNotes} /></> : <><Note label="Ownership / usage context" value={(selected as MovieProp).category} /><Note label="Continuity" value={(selected as MovieProp).continuityNotes} /></>}</div>{selectedAsset && <AssetChip asset={selectedAsset} />}{room === "locations" && <GeographySheetPanel key={`${selected.id}:${(selected as MovieLocation).geographySheet?.updatedAt ?? "empty"}`} location={selected as MovieLocation} assets={data.assets} onSaved={(sheet) => { if (worldLoadRef.current !== renderedWorldLoad) return; setData((current) => current ? { ...current, world: { ...current.world, locations: current.world.locations.map((item) => item.id === selected.id ? { ...item, geographySheet: sheet } : item) } } : current); }} />}{selectedSet && <VariationRail set={selectedSet} onChange={(updated) => { if (worldLoadRef.current !== renderedWorldLoad) return; setData((current) => current ? { ...current, world: { ...current.world, sets: current.world.sets.map((item) => item.id === updated.id ? updated : item) } } : current); }} />}</> : <div className="movie-world-empty"><Sparkles size={20} /><strong>{t("movieBody.world.chooseRecord")}</strong><p>{t("movieBody.productionIdentity")}</p></div>}
         {selected && <UsageRail usages={usages} />}
       </section>
     </div>

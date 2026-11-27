@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { movieWorldProjectSwitchReset } from "./MovieWorldWorkspace";
+import { movieWorldProjectSwitchReset, isMovieWorldForProject } from "./MovieWorldWorkspace";
 
 const source = readFileSync(new URL("./MovieWorldWorkspace.tsx", import.meta.url), "utf8");
 const apiSource = readFileSync(new URL("../lib/api.ts", import.meta.url), "utf8");
@@ -56,6 +56,13 @@ describe("Movie World workspace", () => {
     expect(reset.referenceKind).toBe("moodboard");
     expect(reset.referenceAssetId).toBe("");
     expect(reset.error).toBe("");
-    expect(source).toContain("data.movieProjectId !== projectId");
   });
+  it("matches the movie ID, not the containing parent project ID", () => {
+    const world = { movieProjectId: "movie-123", projectId: "parent-456" };
+    expect(isMovieWorldForProject(world, "movie-123")).toBe(true);
+    expect(isMovieWorldForProject(world, "parent-456")).toBe(false);
+    expect(isMovieWorldForProject(world, "movie-other")).toBe(false);
+    expect(isMovieWorldForProject(null, "movie-123")).toBe(false);
+  });
+
 });
