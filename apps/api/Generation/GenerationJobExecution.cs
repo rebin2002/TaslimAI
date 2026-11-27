@@ -6,6 +6,7 @@ using System.Text.Json.Nodes;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 using Taslim.Api.Ai;
+using Taslim.Api.Activity;
 using Taslim.Api.Assets;
 using Taslim.Api.Authorization;
 using Taslim.Api.Contracts;
@@ -173,9 +174,42 @@ public interface IGenerationJobService
     Task<bool> AbortPendingMovieProductionAsync(Guid userId, Guid jobId, CancellationToken cancellationToken = default);
     Task<GenerationJob?> RetryAsync(Guid userId, Guid jobId, CancellationToken cancellationToken = default, string? idempotencyKey = null, string? requestId = null);
     Task<GenerationJob?> GetAsync(Guid userId, Guid jobId, CancellationToken cancellationToken = default);
+    /// <summary>
+    /// <see cref="GetAsync"/> plus the live downloadability of exactly the renditions this job's
+    /// published <c>ResultJson</c> snapshot advertises, so the studio read path can answer each
+    /// advertised format from the current stored-file state instead of from the immutable
+    /// publication-time record (issue #1049).
+    ///
+    /// The production service resolves the live facts. The default keeps the historical payload
+    /// byte-for-byte intact for implementations that carry no availability data of their own: it
+    /// performs the same authorized read and pairs it with <c>null</c>, which the contract mapper
+    /// renders as the contract exactly as it is served today.
+    /// </summary>
+    Task<GenerationJobPublishedReadModel?> GetPublishedAsync(Guid userId, Guid jobId, CancellationToken cancellationToken = default) =>
+        ToReadModelWithoutAvailabilityAsync(GetAsync(userId, jobId, cancellationToken));
+
+    private static async Task<GenerationJobPublishedReadModel?> ToReadModelWithoutAvailabilityAsync(Task<GenerationJob?> read)
+    {
+        var job = await read;
+        return job is null ? null : new GenerationJobPublishedReadModel(job, null);
+    }
     Task<GenerationJobListDto?> ListAsync(Guid userId, GenerationJobFilter filter, CancellationToken cancellationToken = default);
     Task<GenerationJobCancelResult> CancelAsync(Guid userId, Guid jobId, CancellationToken cancellationToken = default);
 }
+
+/// <summary>
+/// An authorized generation-job read paired with the live availability of the renditions its
+/// published snapshot advertises.
+///
+/// The dictionary maps representation identity to "the download route would serve this rendition
+/// right now", the same fact <c>AssetService.GetDownloadAsync</c> enforces with
+/// <c>representation.StoredFile is { Status: StoredFileStatus.Ready }</c>. It is <c>null</c> when the
+/// snapshot advertises no renditions at all, which keeps the served contract byte-for-byte what it
+/// was before this seam existed, and is populated - failing closed per identity - as soon as the
+/// snapshot promises at least one download. The job's <c>ResultJson</c> is never rewritten here.
+/// </summary>
+public sealed record GenerationJobPublishedReadModel(GenerationJob Job, IReadOnlyDictionary<Guid, bool>? RepresentationAvailability);
+
 
 internal static class GenerationJobPublicationContract
 {
@@ -326,6 +360,7 @@ public sealed class GenerationJobService(
     IGenerationCostGuardrailService costGuardrails,
     IHttpContextAccessor httpContextAccessor,
     IOptions<ImageGenerationOptions> imageOptions,
+    IOptions<DocumentGenerationOptions> documentOptions,
     MovieCollaborationAccess? movieCollaboration = null) : IGenerationJobService
 {
     public async Task<GenerationJob> CreateAsync(Guid userId, CreateGenerationJobRequest request, CancellationToken cancellationToken = default, string? idempotencyKey = null, string? requestId = null, Guid? retryOfJobId = null)
@@ -336,8 +371,13 @@ public sealed class GenerationJobService(
             throw new GenerationJobForbiddenException();
         if (request.ProjectId.HasValue && !await db.Projects.AnyAsync(project => project.Id == request.ProjectId && project.WorkspaceId == request.WorkspaceId, cancellationToken))
             throw new GenerationJobValidationException("PROJECT_NOT_IN_WORKSPACE", "The selected project is not in this workspace.");
+        var normalizedKey = NormalizeIdempotencyKey(idempotencyKey);
+        var existingJob = normalizedKey is null ? null : await db.GenerationJobs.AsNoTracking()
+            .FirstOrDefaultAsync(item => item.CreatedByUserId == userId && item.IdempotencyKey == normalizedKey, cancellationToken);
+        MovieAssembly? assembly = null;
         if (GenerationJobTypes.MovieTypes.Contains(request.JobType.Trim()))
-            await ValidateMovieJobTargetAsync(userId, request, cancellationToken, retryOfJobId);
+            assembly = await ValidateMovieJobTargetAsync(userId, request, cancellationToken, retryOfJobId,
+                string.Equals(request.JobType.Trim(), GenerationJobTypes.MovieAssembly, StringComparison.OrdinalIgnoreCase) ? existingJob?.Id : null);
         else if (GenerationJobTypes.MovieDialogueVoiceTypes.Contains(request.JobType.Trim()))
             await ValidateMovieDialogueVoiceJobTargetAsync(userId, request, cancellationToken);
         else if (GenerationJobTypes.MovieSoundTypes.Contains(request.JobType.Trim()))
@@ -352,7 +392,6 @@ public sealed class GenerationJobService(
             throw new GenerationJobValidationException("INVALID_INPUT_JSON", "The job input is not valid JSON.");
         }
 
-        var normalizedKey = NormalizeIdempotencyKey(idempotencyKey);
         var normalizedJobType = GenerationJobTypes.Supported.First(type => string.Equals(type, request.JobType.Trim(), StringComparison.OrdinalIgnoreCase));
         var normalizedTitle = string.IsNullOrWhiteSpace(request.Title) ? null : request.Title.Trim();
         GenerationJob? retryOf = null;
@@ -365,15 +404,11 @@ public sealed class GenerationJobService(
                 throw new GenerationJobValidationException("RETRY_SOURCE_NOT_TERMINAL", "Only failed or cancelled jobs can be retried.");
         }
         var requestFingerprint = ComputeRequestFingerprint(request.WorkspaceId, request.ProjectId, normalizedJobType, normalizedTitle, request.InputJson, request.EstimatedProviderCostUsd, retryOfJobId);
-        if (normalizedKey is not null)
+        if (existingJob is not null)
         {
-            var existing = await db.GenerationJobs.AsNoTracking().FirstOrDefaultAsync(item => item.CreatedByUserId == userId && item.IdempotencyKey == normalizedKey, cancellationToken);
-            if (existing is not null)
-            {
-                if (!string.Equals(existing.RequestFingerprint, requestFingerprint, StringComparison.Ordinal))
-                    throw new GenerationJobValidationException("IDEMPOTENCY_KEY_REUSED", "This idempotency key was already used for a different generation request.");
-                return existing;
-            }
+            if (!string.Equals(existingJob.RequestFingerprint, requestFingerprint, StringComparison.Ordinal))
+                throw new GenerationJobValidationException("IDEMPOTENCY_KEY_REUSED", "This idempotency key was already used for a different generation request.");
+            return existingJob;
         }
 
         var estimate = request.InternalCostEstimate
@@ -424,11 +459,17 @@ public sealed class GenerationJobService(
         try
         {
             await db.SaveChangesAsync(cancellationToken);
+            if (assembly is not null)
+                await LinkMovieAssemblyForPublicationAsync(assembly, job, cancellationToken);
             await usage.BeginAsync(job, request.EstimatedProviderCostUsd, cancellationToken);
             await queue.EnqueueAsync(job.Id, cancellationToken);
-            job.Status = GenerationJobStatus.Queued;
-            job.QueuedAt = DateTime.UtcNow;
+            var queuedAt = DateTime.UtcNow;
             await transaction.CommitAsync(cancellationToken);
+            // The queue wrote these columns in SQL. Returning an entity with a pending
+            // tracked update could re-queue a worker's already claimed assembly job.
+            if (assembly is not null) db.Entry(job).State = EntityState.Detached;
+            job.Status = GenerationJobStatus.Queued;
+            job.QueuedAt = queuedAt;
             return job;
         }
         catch (DbUpdateException) when (normalizedKey is not null)
@@ -453,6 +494,11 @@ public sealed class GenerationJobService(
             throw new GenerationJobValidationException("RETRY_IDEMPOTENCY_REQUIRED", "A retry idempotency key is required.");
         if (string.Equals(source.JobType, GenerationJobTypes.ImageGenerate, StringComparison.OrdinalIgnoreCase) && !imageOptions.Value.Enabled)
             throw new GenerationJobValidationException(GenerationJobErrorCodes.ImageStudioUnavailable, "Image generation is not available right now.");
+        // Same fail-closed boundary as the Image gate above. Every retry entry
+        // point inherits it, so a caller that bypasses the Document Studio route
+        // still cannot resume provider spend while the studio is disabled.
+        if (string.Equals(source.JobType, GenerationJobTypes.DocumentGenerate, StringComparison.OrdinalIgnoreCase) && !documentOptions.Value.Enabled)
+            throw new GenerationJobValidationException(DocumentStudioAvailability.UnavailableCode, DocumentStudioAvailability.UnavailableMessage);
 
         var retryInputJson = source.InputJson;
         MovieDialogueTake? pendingDialogueTake = null;
@@ -513,29 +559,7 @@ public sealed class GenerationJobService(
         if (GenerationJobTypes.MovieTypes.Contains(source.JobType))
         {
             if (string.Equals(source.JobType, GenerationJobTypes.MovieAssembly, StringComparison.OrdinalIgnoreCase))
-            {
-                MovieFinalAssemblyInput? assemblyInput;
-                try { assemblyInput = JsonSerializer.Deserialize<MovieFinalAssemblyInput>(source.InputJson); }
-                catch (JsonException) { assemblyInput = null; }
-                if (assemblyInput is not null)
-                {
-                    var assembly = await db.MovieAssemblies.FirstOrDefaultAsync(item => item.Id == assemblyInput.AssemblyId && item.MovieProjectId == assemblyInput.MovieProjectId, cancellationToken);
-                    if (assembly is not null)
-                    {
-                        assembly.GenerationJobId = retry.Id;
-                        assembly.AssetId = null;
-                        assembly.Status = MovieAssemblyStatuses.Queued;
-                        assembly.QcStatus = MovieFinalAssemblyQcStatuses.NotRun;
-                        assembly.QcResultJson = null;
-                        assembly.LastErrorCode = null;
-                        assembly.ProgressPercent = 0;
-                        assembly.CheckpointJson = JsonSerializer.Serialize(new { phase = "retry_resume", progressPercent = 0 });
-                        assembly.UpdatedAt = DateTime.UtcNow;
-                        await db.SaveChangesAsync(cancellationToken);
-                    }
-                }
                 return retry;
-            }
             MovieGenerationInput? input;
             try { input = JsonSerializer.Deserialize<MovieGenerationInput>(source.InputJson); }
             catch (JsonException) { input = null; }
@@ -607,7 +631,35 @@ public sealed class GenerationJobService(
         catch (JsonException) { return null; }
     }
 
-    private async Task ValidateMovieJobTargetAsync(
+    private async Task LinkMovieAssemblyForPublicationAsync(MovieAssembly assembly, GenerationJob job, CancellationToken cancellationToken)
+    {
+        // Only the original planned target or the terminal job being retried can transfer
+        // ownership. The queue row and usage reservation become visible in this same commit.
+        var target = db.MovieAssemblies.Where(item => item.Id == assembly.Id
+            && item.MovieProjectId == assembly.MovieProjectId
+            && item.RequestFingerprint == assembly.RequestFingerprint
+            && item.GenerationJobId == job.RetryOfJobId);
+        if (!job.RetryOfJobId.HasValue)
+            target = target.Where(item => item.Status == MovieAssemblyStatuses.Planned);
+        else
+            target = target.Where(item => item.GenerationJob != null
+                && (item.GenerationJob.Status == GenerationJobStatus.Failed || item.GenerationJob.Status == GenerationJobStatus.Cancelled));
+        var checkpoint = JsonSerializer.Serialize(new { phase = job.RetryOfJobId.HasValue ? "retry_resume" : "queued", progressPercent = 0 });
+        var updated = await target.ExecuteUpdateAsync(setters => setters
+            .SetProperty(item => item.GenerationJobId, job.Id)
+            .SetProperty(item => item.Status, MovieAssemblyStatuses.Queued)
+            .SetProperty(item => item.AssetId, (Guid?)null)
+            .SetProperty(item => item.QcStatus, MovieFinalAssemblyQcStatuses.NotRun)
+            .SetProperty(item => item.QcResultJson, (string?)null)
+            .SetProperty(item => item.LastErrorCode, (string?)null)
+            .SetProperty(item => item.ProgressPercent, 0)
+            .SetProperty(item => item.CheckpointJson, checkpoint)
+            .SetProperty(item => item.UpdatedAt, job.CreatedAt), cancellationToken);
+        if (updated != 1)
+            throw new GenerationJobValidationException("MOVIE_ASSEMBLY_TARGET_INVALID", "The final assembly target is invalid or already claimed.");
+    }
+
+    private async Task<MovieAssembly?> ValidateMovieJobTargetAsync(
         Guid userId,
         CreateGenerationJobRequest request,
         CancellationToken cancellationToken,
@@ -623,17 +675,18 @@ public sealed class GenerationJobService(
             catch (JsonException) { assemblyInput = null; }
             var assembly = assemblyInput is null
                 ? null
-                : await db.MovieAssemblies.Include(item => item.MovieProject).FirstOrDefaultAsync(item => item.Id == assemblyInput.AssemblyId, cancellationToken);
+                : await db.MovieAssemblies.AsNoTracking().Include(item => item.MovieProject).FirstOrDefaultAsync(item => item.Id == assemblyInput.AssemblyId, cancellationToken);
             if (assemblyInput is null || assemblyInput.MovieProjectId == Guid.Empty || assemblyInput.AssemblyId == Guid.Empty || assembly is null
                 || assembly.MovieProjectId != assemblyInput.MovieProjectId
                 || assembly.MovieProject.WorkspaceId != request.WorkspaceId
                 || request.ProjectId != assembly.MovieProject.ProjectId
-                || (assembly.GenerationJobId is not null && !retryOfJobId.HasValue)
+                || (assembly.GenerationJobId != retryOfJobId && assembly.GenerationJobId != allowedLinkedGenerationJobId)
+                || !string.Equals(assembly.RequestFingerprint, assemblyInput.RequestFingerprint, StringComparison.Ordinal)
                 || !string.Equals(assembly.IdempotencyKey, assemblyInput.IdempotencyKey, StringComparison.Ordinal))
                 throw new GenerationJobValidationException("MOVIE_ASSEMBLY_TARGET_INVALID", "The final assembly target is invalid or already claimed.");
             if (assembly.MovieProject.CreatedByUserId != userId && (movieCollaboration is null || !await movieCollaboration.HasPermissionAsync(userId, assembly.MovieProjectId, MoviePermissions.FinalApproval, cancellationToken)))
                 throw new GenerationJobForbiddenException();
-            return;
+            return assembly;
         }
         if (!isQuickMovie && !string.Equals(request.JobType.Trim(), GenerationJobTypes.MovieClipGenerate, StringComparison.OrdinalIgnoreCase))
             throw new GenerationJobValidationException("MOVIE_JOB_TARGET_INVALID", "Movie jobs must be created through a validated movie clip target.");
@@ -655,6 +708,7 @@ public sealed class GenerationJobService(
             throw new GenerationJobValidationException("MOVIE_JOB_TARGET_INVALID", "The movie job target does not belong to the selected project or is no longer available.");
         if (clip.MovieProject.CreatedByUserId != userId && (movieCollaboration is null || !await movieCollaboration.HasPermissionAsync(userId, clip.MovieProjectId, MoviePermissions.Generate, cancellationToken)))
             throw new GenerationJobForbiddenException();
+        return null;
     }
 
     private async Task ValidateMovieDialogueVoiceJobTargetAsync(Guid userId, CreateGenerationJobRequest request, CancellationToken cancellationToken)
@@ -700,21 +754,129 @@ public sealed class GenerationJobService(
         return job;
     }
 
+    public async Task<GenerationJobPublishedReadModel?> GetPublishedAsync(Guid userId, Guid jobId, CancellationToken cancellationToken = default)
+    {
+        // Authorization stays exactly where it was: the availability half below only ever runs on a
+        // job this caller has already been allowed to read.
+        var job = await GetAsync(userId, jobId, cancellationToken);
+        if (job is null) return null;
+        return new GenerationJobPublishedReadModel(job, await ReadPublishedRepresentationAvailabilityAsync(userId, job, cancellationToken));
+    }
+
+    /// <summary>
+    /// Answers every rendition the published <c>ResultJson</c> snapshot advertises with the answer the
+    /// download route would give <em>this</em> viewer right now, in ONE projected query regardless of
+    /// how many renditions the snapshot names (issue #1049: the snapshot is baked at completion and is
+    /// never rewritten, so after a retention prune it still promises a download the route refuses with
+    /// <c>409 ASSET_FILE_UNAVAILABLE</c>).
+    ///
+    /// The answer comes from <see cref="AssetService.CanDownloadRepresentation"/>, the same predicate
+    /// <c>AssetService.GetDownloadAsync</c> enforces and <c>AssetContractMapper.ToDto</c> reports, so
+    /// the studio half of the contract cannot advertise a rendition the route refuses. File status is
+    /// only one of its three branches: a Ready file the viewer may not read (conversation-scoped or
+    /// non-shared) and a Ready document rendition whose stored metadata disagrees with the file are
+    /// both refusals, and the studio views have to withdraw for them exactly as the library lane does
+    /// (#1041 / #1092 invariant, applied to the studio path it did not cover).
+    ///
+    /// The set is bounded by construction: the identities come from this authorized job's snapshot and
+    /// nothing else is asked for, only the columns the shared predicate reads are projected (no bytes,
+    /// storage keys, hashes or neighbouring rows), and each identity is additionally pinned to the
+    /// authorized job's own workspace so a stale or foreign identity inside a snapshot fails closed
+    /// instead of reporting another workspace's file state.
+    ///
+    /// Returns <c>null</c> when the snapshot advertises no rendition at all, which leaves the served
+    /// contract byte-for-byte unchanged; a job that promises downloads gets a complete, fail-closed
+    /// answer for each of them.
+    /// </summary>
+    private async Task<IReadOnlyDictionary<Guid, bool>?> ReadPublishedRepresentationAvailabilityAsync(Guid userId, GenerationJob job, CancellationToken cancellationToken)
+    {
+        var advertised = GenerationJobContractMapper.AdvertisedRepresentationIds(job.ResultJson);
+        if (advertised.Count == 0) return null;
+        var advertisedIds = advertised.ToList();
+        var workspaceId = job.WorkspaceId;
+        var rows = await db.AssetRepresentations.AsNoTracking()
+            .Where(representation => advertisedIds.Contains(representation.Id)
+                && representation.Asset.WorkspaceId == workspaceId)
+            .Select(representation => new
+            {
+                representation.Id,
+                representation.AssetId,
+                representation.StoredFileId,
+                representation.RepresentationType,
+                representation.FileName,
+                RepresentationContentType = representation.ContentType,
+                representation.SizeBytes,
+                AssetWorkspaceId = representation.Asset.WorkspaceId,
+                AssetType = representation.Asset.AssetType,
+                // StoredFile is a required relationship (inner join), so these are always present in
+                // a returned row; Project is optional, hence the explicit null branch that EF can
+                // translate to a CASE instead of dereferencing a missing join partner.
+                FileId = representation.StoredFile.Id,
+                FileStatus = representation.StoredFile.Status,
+                FileWorkspaceId = representation.StoredFile.WorkspaceId,
+                FileUserId = representation.StoredFile.UserId,
+                FileProjectId = representation.StoredFile.ProjectId,
+                FileConversationId = representation.StoredFile.ConversationId,
+                FileProjectWorkspaceId = representation.StoredFile.Project == null
+                    ? (Guid?)null
+                    : representation.StoredFile.Project.WorkspaceId,
+                FileContentType = representation.StoredFile.ContentType,
+                FileExtension = representation.StoredFile.Extension,
+                FileSizeBytes = representation.StoredFile.SizeBytes,
+            })
+            .ToListAsync(cancellationToken);
+
+        // Seeded unavailable, then confirmed from the loaded state: an advertised rendition whose row
+        // is gone entirely, and one whose stored file row is gone, is a rendition the route cannot
+        // serve either, so both stay false.
+        var availability = new Dictionary<Guid, bool>(advertisedIds.Count);
+        foreach (var id in advertisedIds) availability[id] = false;
+        foreach (var row in rows)
+        {
+            // Rebuilt from the projection rather than loaded as tracked graph entities: the predicate
+            // reads exactly these members, and only its own answer leaves this method.
+            var asset = new Asset { Id = row.AssetId, WorkspaceId = row.AssetWorkspaceId, AssetType = row.AssetType };
+            var representation = new AssetRepresentation
+            {
+                Id = row.Id,
+                AssetId = row.AssetId,
+                StoredFileId = row.StoredFileId,
+                RepresentationType = row.RepresentationType,
+                FileName = row.FileName,
+                ContentType = row.RepresentationContentType,
+                SizeBytes = row.SizeBytes,
+            };
+            var file = new StoredFile
+            {
+                Id = row.FileId,
+                WorkspaceId = row.FileWorkspaceId,
+                UserId = row.FileUserId,
+                ProjectId = row.FileProjectId,
+                ConversationId = row.FileConversationId,
+                Project = row.FileProjectWorkspaceId is null
+                    ? null
+                    : new Project { Id = row.FileProjectId ?? Guid.Empty, WorkspaceId = row.FileProjectWorkspaceId.Value },
+                Status = row.FileStatus,
+                ContentType = row.FileContentType,
+                Extension = row.FileExtension,
+                SizeBytes = row.FileSizeBytes,
+            };
+            availability[row.Id] = AssetService.CanDownloadRepresentation(asset, representation, file, userId);
+        }
+        return availability;
+    }
+
     public async Task<GenerationJobListDto?> ListAsync(Guid userId, GenerationJobFilter filter, CancellationToken cancellationToken = default)
     {
         if (!await access.IsMemberAsync(userId, filter.WorkspaceId, cancellationToken)) return null;
         var page = ApiPagination.NormalizePage(filter.Page);
         var pageSize = ApiPagination.NormalizePageSize(filter.PageSize);
-        // Mirrors IsPrivateExecutionRecord: research records and unscoped presentation export
-        // records stay with their creator because their result JSON references assets that other
-        // workspace members cannot read, and unscoped social records carry creator-private posts
-        // in their result JSON (#349). Expressed as a translatable predicate so paging and the
-        // total count stay consistent with the hidden records.
-        var query = db.GenerationJobs.AsNoTracking().Where(job => job.WorkspaceId == filter.WorkspaceId &&
-            (job.CreatedByUserId == userId
-                || (job.JobType != GenerationJobTypes.ResearchGenerate
-                    && (job.JobType != GenerationJobTypes.PresentationGenerate || job.ProjectId != null)
-                    && (job.JobType != GenerationJobTypes.SocialGenerate || job.ProjectId != null))));
+        // Keep list visibility on the same SQL-translatable policy as the Activity Center and
+        // project overview, including provider-specific deterministic JobType folding.
+        var query = CreatorPrivacyFence.VisibleToMember(
+            db.GenerationJobs.AsNoTracking().Where(job => job.WorkspaceId == filter.WorkspaceId),
+            userId,
+            db.Database.ProviderName);
         if (filter.Status.HasValue) query = query.Where(job => job.Status == filter.Status.Value);
         if (filter.ProjectId.HasValue) query = query.Where(job => job.ProjectId == filter.ProjectId.Value);
         if (!string.IsNullOrWhiteSpace(filter.JobType)) query = query.Where(job => job.JobType == filter.JobType);
@@ -770,13 +932,9 @@ public sealed class GenerationJobService(
     }
 
     // Execution records that describe creator-private output must not disclose the output's
-    // identifiers. Research records embed report text derived from private uploads, and a
-    // presentation job without a project publishes an asset that AssetVisibility keeps private
-    // to its creator, so the asset id, representation ids and exported file name carried in the
-    // presentation result JSON are private to that creator as well. A Social job without a
-    // project produces creator-private posts, so the result JSON carrying those posts is private
-    // to the creator too (#349). Project-scoped jobs keep the intentional workspace sharing
-    // surface for both the record and the asset.
+    // identifiers. Research records embed report text derived from private uploads; unscoped
+    // Presentation exports and Social posts also carry creator-private result data. Project-scoped
+    // Presentation and Social jobs keep the intentional workspace-sharing surface.
     private static bool IsPrivateExecutionRecord(GenerationJob job, Guid userId) =>
         job.CreatedByUserId != userId
         && (string.Equals(job.JobType, GenerationJobTypes.ResearchGenerate, StringComparison.OrdinalIgnoreCase)
@@ -1305,7 +1463,7 @@ public sealed class GenerationJobWorker(
         }
     }
 
-    private async Task<GenerationJob?> ClaimAsync(TaslimDbContext db, CancellationToken cancellationToken)
+    internal async Task<GenerationJob?> ClaimAsync(TaslimDbContext db, CancellationToken cancellationToken)
     {
         var isSqlite = db.Database.ProviderName?.Contains("Sqlite", StringComparison.OrdinalIgnoreCase) == true;
         if (isSqlite)
@@ -1666,6 +1824,7 @@ public sealed class GenerationJobWorker(
             failureUsage ??= (exception as PresentationGenerationStageException)?.Usage;
             failureUsage ??= (exception as ResearchGenerationStageException)?.Usage;
             failureUsage ??= (exception as SocialGenerationStageException)?.Usage;
+            failureUsage ??= ResolveMovieDialogueFailureUsage(exception);
 var qualityFailure = exception as GenerationQualityControlException ?? exception.InnerException as GenerationQualityControlException;
             if (qualityFailure is not null)
             {
@@ -2089,6 +2248,9 @@ var qualityFailure = exception as GenerationQualityControlException ?? exception
             : string.Equals(job.JobType, GenerationJobTypes.VoiceGenerate, StringComparison.OrdinalIgnoreCase)
                 ? GenerationJobErrorCodes.VoiceCancelled
             : GenerationJobErrorCodes.Cancelled;
+
+    internal static AiUsageMetadata? ResolveMovieDialogueFailureUsage(Exception exception) =>
+        (exception as MovieDialogueVoiceOutputInvalidException)?.Usage;
 
     private static string MapFailureCode(Exception exception, string jobType)
     {

@@ -71,6 +71,10 @@ public static class DocumentOutputIntegrityValidator
             foreach (var part in new[] { "[Content_Types].xml", "_rels/.rels", "word/document.xml" })
                 _ = archive.GetEntry(part) ?? throw new DocumentOutputIntegrityException($"The DOCX package is missing required part '{part}'.");
             var contentTypes = RequireRoot(ParseRequiredXml(archive, "[Content_Types].xml"), "Types", ContentTypesNamespace, "[Content_Types].xml");
+            // The package parts and their content types can both be valid while the
+            // OPC root relationships never address the main document part. Word then
+            // refuses the file even though it is a well-formed archive, so the
+            // relationship itself is the boundary that must be proven here.
             var relationships = RequireRoot(ParseRequiredXml(archive, "_rels/.rels"), "Relationships", RelationshipsNamespace, "_rels/.rels");
             var hasMainDocumentRelationship = relationships.Elements(XName.Get("Relationship", RelationshipsNamespace)).Any(item =>
                 string.Equals(item.Attribute("Type")?.Value, OfficeDocumentRelationshipType, StringComparison.Ordinal)

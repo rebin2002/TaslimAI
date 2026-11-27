@@ -90,7 +90,9 @@ export function parseVoiceJobResult(job: GenerationJob | null): VoiceJobResult |
   if (!job?.resultJson) return null;
   try {
     const parsed = JSON.parse(job.resultJson) as VoiceJobResult;
-    if (typeof parsed !== "object" || parsed === null || typeof parsed.assetId !== "string" || parsed.assetType !== "audio") return null;
+    // A successful provider result without a usable asset identity is malformed;
+    // reject it here so no result UI state can render a player for an empty id.
+    if (typeof parsed !== "object" || parsed === null || typeof parsed.assetId !== "string" || parsed.assetId.trim() === "" || parsed.assetType !== "audio") return null;
     return {
       assetId: parsed.assetId,
       assetType: "audio",
