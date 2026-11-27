@@ -3060,6 +3060,43 @@ namespace Taslim.Api.Persistence.Migrations
                     b.ToTable("GenerationProviderAttempts");
                 });
 
+            modelBuilder.Entity("Taslim.Api.Domain.PasswordResetEmailOutboxEntry", b =>
+                {
+                    b.Property<Guid>("UserId")
+                        .HasColumnType("uuid");
+
+                    b.Property<int>("AttemptCount")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("LastFailureCode")
+                        .HasMaxLength(80)
+                        .HasColumnType("character varying(80)");
+
+                    b.Property<DateTime>("LastRequestedAt")
+                        .IsConcurrencyToken()
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<DateTime?>("LeaseExpiresAt")
+                        .IsConcurrencyToken()
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<DateTime>("NextAttemptAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("Status")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("character varying(20)");
+
+                    b.HasKey("UserId");
+
+                    b.HasIndex("LeaseExpiresAt");
+
+                    b.HasIndex("Status", "NextAttemptAt");
+
+                    b.ToTable("PasswordResetEmailOutbox", (string)null);
+                });
+
             modelBuilder.Entity("Taslim.Api.Domain.PaymentAttempt", b =>
                 {
                     b.Property<Guid>("Id")
@@ -10506,6 +10543,15 @@ namespace Taslim.Api.Persistence.Migrations
                         .IsRequired();
 
                     b.Navigation("GenerationJob");
+                });
+
+            modelBuilder.Entity("Taslim.Api.Domain.PasswordResetEmailOutboxEntry", b =>
+                {
+                    b.HasOne("Taslim.Api.Domain.ApplicationUser", null)
+                        .WithMany()
+                        .HasForeignKey("UserId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
                 });
 
             modelBuilder.Entity("Taslim.Api.Domain.PaymentAttempt", b =>
