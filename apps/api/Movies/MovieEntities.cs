@@ -1028,11 +1028,19 @@ public static class MovieStudioValidation
     public const int AdditionalInstructionsMaxLength = 8_000;
     public const int CreativeDirectionFieldMaxLength = 4_000;
     public const int ContinuityRulesMaxLength = 8_000;
+    // A new Full movie also writes the brief to the tighter root Project column.
+    // Other create shapes write the description only to MovieProject.Description.
+    public const int MovieDescriptionMaxLength = 8_000;
+    public const int NewRootProjectDescriptionMaxLength = 2_000;
 
     public static string? Validate(MovieStudioCreateRequest request)
     {
         if (string.IsNullOrWhiteSpace(request.Title) || request.Title.Trim().Length > 160) return "Add a movie title.";
-        if (string.IsNullOrWhiteSpace(request.Description) || request.Description.Trim().Length > 8000) return "Describe the movie in 1–8,000 characters.";
+        var descriptionMaxLength = request.Mode == MovieProjectModes.Full && request.ProjectId is null
+            ? NewRootProjectDescriptionMaxLength
+            : MovieDescriptionMaxLength;
+        if (string.IsNullOrWhiteSpace(request.Description) || request.Description.Trim().Length > descriptionMaxLength)
+            return $"Describe the movie in 1–{descriptionMaxLength:N0} characters.";
         if (request.Mode is not (MovieProjectModes.Quick or MovieProjectModes.Full)) return "Choose Quick Movie or Full Movie Project.";
         var maxDurationSeconds = request.Mode == MovieProjectModes.Full ? MaxProjectDurationSeconds : MaxQuickDurationSeconds;
         if (request.DurationSeconds < 1 || request.DurationSeconds > maxDurationSeconds)
