@@ -190,6 +190,42 @@ public sealed class MovieCollaborationTests : IClassFixture<TaslimApiFactory>
     }
 
     [Fact]
+    public async Task Removed_assignment_assignee_cannot_update_their_previous_assignment()
+    {
+        using var owner = factory.CreateClient();
+        var ownerAuth = await Register(owner, "Revocation Assignment Owner");
+        var movie = await CreateMovie(owner, ownerAuth.PersonalWorkspace.Id, "Revocation assignment film");
+        using var writer = factory.CreateClient();
+        var writerAuth = await Register(writer, "Revocation Assignment Writer");
+        await AddWorkspaceMember(ownerAuth.PersonalWorkspace.Id, writerAuth.User.Id);
+
+        var member = await SendWithCsrf<MovieTeamMemberDto>(owner, HttpMethod.Post, $"/api/movie-studio/projects/{movie.Project.Id}/collaboration/team", new
+        {
+            userId = writerAuth.User.Id,
+            role = MovieTeamRoles.Writer,
+            permissions = Array.Empty<string>(),
+        });
+        var assignment = await SendWithCsrf<MovieAssignmentDto>(owner, HttpMethod.Post, $"/api/movie-studio/projects/{movie.Project.Id}/collaboration/assignments", new
+        {
+            targetType = MovieCollaborationTargetTypes.Project,
+            targetId = movie.Project.Id,
+            assigneeUserId = writerAuth.User.Id,
+            title = "Write the first draft",
+            status = MovieAssignmentStatuses.Open,
+        });
+
+        using (var removed = await SendWithCsrf(owner, HttpMethod.Delete, $"/api/movie-studio/projects/{movie.Project.Id}/collaboration/team/{member.Id}", null))
+            Assert.Equal(HttpStatusCode.NoContent, removed.StatusCode);
+
+        using var forbidden = await SendWithCsrf(writer, HttpMethod.Patch, $"/api/movie-studio/projects/{movie.Project.Id}/collaboration/assignments/{assignment.Id}", new
+        {
+            status = MovieAssignmentStatuses.Completed,
+            description = "Draft delivered after removal.",
+        });
+        Assert.Equal(HttpStatusCode.Forbidden, forbidden.StatusCode);
+    }
+
+    [Fact]
     public async Task Production_credit_requires_current_human_team_member_and_never_creates_ai_identity()
     {
         using var owner = factory.CreateClient();
