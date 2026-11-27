@@ -135,6 +135,7 @@ async function interceptOnboardingApi(page: Page, options: { initialLocale?: Loc
       // Legitimate login-page read behind the #1247 redirect; anything still
       // unmodelled keeps landing in `unexpectedApiCalls` as a strict signal.
       else if (url.pathname === "/api/auth/password-policy") body = passwordPolicyResponse();
+      else if (url.pathname === "/api/auth/password-recovery/availability") body = { available: false };
       else {
         unexpectedApiCalls.push(`${method} ${url.pathname}`);
         await route.fulfill({ status: 404, contentType: "application/json", body: JSON.stringify({ error: "unmocked_test_endpoint" }) });

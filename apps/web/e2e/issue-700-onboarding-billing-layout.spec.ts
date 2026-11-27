@@ -204,6 +204,7 @@ async function interceptLiveAppApi(page: Page, onboardingCompletedAt: string | n
       // Mock the exact contract (deterministic values from the isolated test
       // API) so the read-only census keeps blocking every unmocked endpoint.
       else if (url.pathname === "/api/auth/password-policy") body = { requiredLength: 10, requireUppercase: true, requireLowercase: true, requireDigit: true, requireNonAlphanumeric: true, requiredUniqueChars: 1 };
+      else if (url.pathname === "/api/auth/password-recovery/availability") body = { available: false };
       else {
         unexpectedApiCalls.push(`${method} ${url.pathname}`);
         await route.fulfill({ status: 404, contentType: "application/json", body: JSON.stringify({ error: "unmocked_test_endpoint" }) });

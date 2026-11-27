@@ -344,11 +344,30 @@ test.describe("issue #700 section A: first-login onboarding at 200% browser zoom
   test("keeps the real authenticated first-login flow read-only after signup and outside billing", async ({ browser, testUser }) => {
     const user = scopedTestUser(testUser, "read-only-first-login");
     const { page, traffic } = await openFirstLogin(browser, LOCALES[0], { width: 1280 / ZOOM, height: 900 / ZOOM }, user);
+
+    // Measure a signed-in document load and the guided flow separately from signup's CSRF requests.
+    const signedInStart = traffic.apiCalls.length;
+    const [sessionResponse] = await Promise.all([
+      page.waitForResponse(response => response.ok() && new URL(response.url()).pathname === "/api/auth/me"),
+      page.reload(),
+    ]);
+    const { personalWorkspace } = await sessionResponse.json() as { personalWorkspace: { id: string } };
+    const allowedReads = new Set([
+      "/api/auth/me",
+      "/api/notifications/unread-count",
+      `/api/workspaces/${personalWorkspace.id}/projects`,
+    ]);
+    await expect(page.getByRole("dialog")).toBeVisible();
     await advanceStep(page);
     await advanceStep(page);
     await page.locator(".onboarding-skip").focus();
     await walkTabStops(page, 4);
 
+    const signedInCalls = traffic.apiCalls.slice(signedInStart);
+    expect(signedInCalls).toContainEqual({ method: "GET", path: "/api/auth/me" });
+    expect(signedInCalls.filter(call => call.method !== "GET" || !allowedReads.has(call.path)),
+      "the signed-in onboarding page may only read the session, unread count and the user's workspace projects",
+    ).toEqual([]);
     const unexpectedWrites = traffic.apiCalls.filter((call) => !["GET", "HEAD"].includes(call.method) && call.path !== "/api/auth/register");
     expect(unexpectedWrites, `the signed-in flow must not mutate after signup: ${JSON.stringify(unexpectedWrites)}`).toEqual([]);
     expect(traffic.externalRequests, `nothing may leave the app or E2E API origins: ${JSON.stringify(traffic.externalRequests)}`).toEqual([]);
