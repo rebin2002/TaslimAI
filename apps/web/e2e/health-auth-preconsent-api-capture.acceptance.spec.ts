@@ -289,9 +289,12 @@ test.describe("Health Care authenticated route: deny-by-default API capture on t
     expect(classify("https://telemetry.example.test/v1/collect").appShell, "third-party traffic is not shell").toBe(false);
     expect(classify("http://localhost:3000/_next/static/chunks/app.js").isApi, "a chunk is out of scope").toBe(false);
   });
+  // The authenticated fixture completes setup on /projects. A fresh tab shares its
+  // session and local storage, but prevents that setup page's in-flight project reads
+  // from being attributed to the real Health navigation measured below.
   for (const locale of locales) {
     test(`${locale.code}: the real authenticated pre-consent navigation stays inside the allow-list`, async ({ authenticatedPage }, testInfo) => {
-      const page = authenticatedPage;
+      const page = await authenticatedPage.context().newPage();
       await saveHealthTestLocale(page, locale.select, locale.tag);
       // Installed after the locale write so only the Health Care navigation is measured.
       const guard = await installShellGuard(page);
@@ -320,7 +323,9 @@ test.describe("Health Care authenticated route: deny-by-default API capture on t
     });
   }
   test("negative control: generic endpoint families are denied and flagged in the same real navigation", async ({ authenticatedPage }, testInfo) => {
-    const page = authenticatedPage;
+    const page = await authenticatedPage.context().newPage();
+    await page.goto("/account");
+    await expect(page).toHaveURL(/\/account$/);
     const guard = await installShellGuard(page);
     await page.goto(HEALTH_ROUTE);
     await expectPreConsentSurface(page, locales[0]);

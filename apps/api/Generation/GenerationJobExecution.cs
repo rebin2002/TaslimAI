@@ -2333,8 +2333,7 @@ var qualityFailure = exception as GenerationQualityControlException ?? exception
         // Fence every terminal write on the active parent claim. This also preserves the narrower
         // Presentation expiry fence from current main while protecting Music lease recovery.
         var cancelled = await db.GenerationJobs
-            .Where(item => item.Id == job.Id && item.Status == GenerationJobStatus.Running && item.ConcurrencyToken == concurrencyToken)
-            .Where(item => item.ClaimExpiresAt.HasValue && item.ClaimExpiresAt > now)
+            .Where(item => item.Id == job.Id && item.Status == GenerationJobStatus.Running && item.ConcurrencyToken == concurrencyToken && item.ClaimExpiresAt.HasValue && item.ClaimExpiresAt > now)
             .ExecuteUpdateAsync(setters => setters
                 .SetProperty(item => item.Status, GenerationJobStatus.Cancelled)
                 .SetProperty(item => item.ErrorCode, terminalCode ?? CancellationCode(job))
