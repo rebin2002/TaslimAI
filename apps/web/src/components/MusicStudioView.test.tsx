@@ -70,6 +70,20 @@ function storedCandidate(asset: Asset) {
 
 const emptyState = { candidate: null, previewObjectUrl: null, rejectedReasonKey: null };
 
+describe("Music Studio artifact download", () => {
+  const musicSource = readFileSync(new URL("./MusicStudioView.tsx", import.meta.url), "utf8");
+
+  it("resolves the finished job's download against the artifact's stored-file state", () => {
+    // The result action is artifact-aware now, so it may not keep a raw
+    // asset-file link that survives a pruned or expired stored file.
+    expect(musicSource).toContain("findMediaJobArtifact(recentMusic, result?.assetId)");
+    expect(musicSource).toContain("state={resultArtifactState}");
+    expect(musicSource).not.toMatch(/<a className="music-action-button is-primary" href=\{api\.assetFileUrl\(result\.assetId\)\}/);
+    // The library row hid its download once the file was gone; it stays that way.
+    expect(musicSource).toContain('{asset.hasFile && <a className="music-icon-action"');
+  });
+});
+
 describe("Music Studio reference audio panel", () => {
   it("discards private previews and in-flight library results when the active workspace changes", () => {
     const source = readFileSync(new URL("./MusicStudioView.tsx", import.meta.url), "utf8");

@@ -56,7 +56,7 @@ public interface IAutopilotOrchestrator
 
     Task<AutopilotControlSnapshot> GetControlAsync(CancellationToken cancellationToken = default);
 
-    Task<AutopilotControlSnapshot> SetControlAsync(bool? paused, bool? killSwitch, Guid? actorUserId, string reason, CancellationToken cancellationToken = default);
+    Task<AutopilotControlSnapshot> SetControlAsync(bool? paused, bool? killSwitch, Guid? actorUserId, string reason, string? requestId = null, CancellationToken cancellationToken = default);
 }
 
 public sealed class AutopilotOrchestrator(
@@ -188,69 +188,62 @@ public sealed class AutopilotOrchestrator(
         // be translated to SQL, and an untranslatable predicate aborts this whole cycle.
         var terminalEventStatuses = AutopilotEventStatuses.Terminal.ToArray();
         var maxRunReconciliations = Math.Max(1, settings.MaxWatchdogReconciliations);
-        var stalledRuns = await db.AutopilotRuns
+        var stalledRuns = db.AutopilotRuns
             .Where(item => item.State == AutopilotRunStates.AwaitingEvents || item.State == AutopilotRunStates.InProgress)
             .Where(item => item.LastEventAt != null && item.LastEventAt < staleBefore)
-            .Where(item => item.ReconciliationCount < maxRunReconciliations)
-            .OrderBy(item => item.UpdatedAt)
+            .Where(item => item.ReconciliationCount < maxRunReconciliations);
+        var candidates = await stalledRuns.OrderBy(item => item.UpdatedAt)
+            .Select(item => new { item.Id, item.WaveKey, item.State })
             .Take(100)
             .ToListAsync(cancellationToken);
 
-        foreach (var run in stalledRuns)
+        foreach (var candidate in candidates)
         {
-            // Persisted statuses are only ever written from these same constants, so the
-            // translated membership test matches the set it is derived from.
-            var hasPendingEvent = await db.AutopilotEvents.AsNoTracking()
-                .AnyAsync(item => item.WaveKey == run.WaveKey
-                    && !terminalEventStatuses.Contains(item.Status), cancellationToken);
-            if (hasPendingEvent) continue;
-
-            // Recovery re-drives the same run row the event path writes, so it must
-            // hold the same exclusive wave lease: without it, a watchdog pass and a
-            // completion event applied by any controller instance can rewrite one run
-            // state machine concurrently, which is exactly what the fencing lease (and
-            // its documented single-writer contract) exists to prevent. A contended
-            // wave is left untouched for the next pass and spends no recovery budget.
-            var lease = await locks.AcquireAsync(EfAutopilotLockService.WaveResource(run.WaveKey), "autopilot-watchdog", cancellationToken);
+            // The database keeps the acquired lock row write-locked through commit. A failed
+            // release or interrupted recovery rolls back the lease, run, handoff and audit together.
+            await using var transaction = await db.Database.BeginTransactionAsync(cancellationToken);
+            var lease = await locks.AcquireAsync(EfAutopilotLockService.WaveResource(candidate.WaveKey), "autopilot-watchdog", cancellationToken);
             if (!lease.IsAcquired)
             {
                 Record(context, AutopilotAuditFactory.Create(
                     AutopilotAuditActions.LockContended,
                     AutopilotAuditOutcomes.Contended,
                     reason: "watchdog_wave_lease_contended",
-                    waveKey: run.WaveKey,
-                    runState: run.State,
-                    targetId: run.Id,
+                    waveKey: candidate.WaveKey,
+                    runState: candidate.State,
+                    targetId: candidate.Id,
                     dryRun: settings.DryRun));
                 context.EventsSkipped++;
-                await FlushAsync(context, cancellationToken);
-                continue;
             }
-
-            try
+            else
             {
-                await AdvanceRunAsync(run, context, recovered: true, cancellationToken);
-                if (run.ReconciliationCount >= maxRunReconciliations)
+                // A completion can arrive after the candidate scan. Recheck its state, budget
+                // and outstanding events under the same wave lease used by the event processor.
+                var run = await stalledRuns.SingleOrDefaultAsync(item => item.Id == candidate.Id
+                    && !db.AutopilotEvents.Any(e => e.WaveKey != null && e.WaveKey.Trim() == item.WaveKey
+                        && !terminalEventStatuses.Contains(e.Status)), cancellationToken);
+                if (run is not null)
                 {
-                    // Budget spent: the run stays where a human can see it, and the stop is
-                    // surfaced once instead of the watchdog re-driving it on every pass.
-                    Record(context, AutopilotAuditFactory.Create(
-                        AutopilotAuditActions.WatchdogReconciled,
-                        AutopilotAuditOutcomes.Failed,
-                        reason: "watchdog_reconciliation_exhausted",
-                        statusDetail: $"run_reconciliations:{run.ReconciliationCount}",
-                        waveKey: run.WaveKey,
-                        runState: run.State,
-                        targetId: run.Id,
-                        dryRun: settings.DryRun));
+                    await AdvanceRunAsync(run, context, recovered: true, cancellationToken);
+                    if (run.ReconciliationCount >= maxRunReconciliations)
+                    {
+                        Record(context, AutopilotAuditFactory.Create(
+                            AutopilotAuditActions.WatchdogReconciled,
+                            AutopilotAuditOutcomes.Failed,
+                            reason: "watchdog_reconciliation_exhausted",
+                            statusDetail: $"run_reconciliations:{run.ReconciliationCount}",
+                            waveKey: run.WaveKey,
+                            runState: run.State,
+                            targetId: run.Id,
+                            dryRun: settings.DryRun));
+                    }
                 }
-            }
-            finally
-            {
-                await locks.ReleaseAsync(lease, CancellationToken.None);
             }
 
             await FlushAsync(context, cancellationToken);
+            if (lease.IsAcquired && !await locks.ReleaseAsync(lease, cancellationToken))
+                throw new DbUpdateConcurrencyException("The watchdog lost ownership of the wave before committing recovery.");
+            await transaction.CommitAsync(cancellationToken);
         }
 
         context.EventsExamined = staleEvents.Count + expiredClaims.Count;
@@ -282,7 +275,7 @@ public sealed class AutopilotOrchestrator(
         return Snapshot(control);
     }
 
-    public async Task<AutopilotControlSnapshot> SetControlAsync(bool? paused, bool? killSwitch, Guid? actorUserId, string reason, CancellationToken cancellationToken = default)
+    public async Task<AutopilotControlSnapshot> SetControlAsync(bool? paused, bool? killSwitch, Guid? actorUserId, string reason, string? requestId = null, CancellationToken cancellationToken = default)
     {
         var control = await EnsureControlAsync(cancellationToken);
         if (paused.HasValue) control.Paused = paused.Value;
@@ -296,6 +289,7 @@ public sealed class AutopilotOrchestrator(
             reason: reason,
             statusDetail: $"paused={control.Paused};killSwitch={control.KillSwitchEngaged}",
             actorUserId: actorUserId,
+            requestId: requestId,
             dryRun: settings.DryRun));
         await db.SaveChangesAsync(cancellationToken);
         return Snapshot(control);
@@ -832,6 +826,8 @@ public sealed class AutopilotOrchestrator(
         TransitionRun(run, AutopilotRunStates.ReleaseEligible, "release_eligible", context);
         await PrepareHandoffAsync(run, context, cancellationToken);
         await FlushAsync(context, cancellationToken);
+        if (!recovered)
+            MergeNextWave(context, await nextWaves.TryLaunchNextWavesAsync(cancellationToken));
     }
 
     private async Task PrepareHandoffAsync(AutopilotRun run, AutopilotCycleContext context, CancellationToken cancellationToken)
@@ -891,8 +887,6 @@ public sealed class AutopilotOrchestrator(
                 targetId: run.Id,
                 dryRun: true));
             await EvaluateNextWaveEligibilityAsync(run, context, cancellationToken);
-            await FlushAsync(context, cancellationToken);
-            MergeNextWave(context, await nextWaves.TryLaunchNextWavesAsync(cancellationToken));
             return;
         }
 
@@ -939,10 +933,6 @@ public sealed class AutopilotOrchestrator(
                 dryRun: false));
         }
 
-        // The production release stays a human decision; the next *development*
-        // batch may still start when the operator has explicitly allowed it.
-        await FlushAsync(context, cancellationToken);
-        MergeNextWave(context, await nextWaves.TryLaunchNextWavesAsync(cancellationToken));
     }
 
     private async Task EvaluateNextWaveEligibilityAsync(AutopilotRun run, AutopilotCycleContext context, CancellationToken cancellationToken)

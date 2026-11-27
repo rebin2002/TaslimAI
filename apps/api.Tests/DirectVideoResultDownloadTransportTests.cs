@@ -57,9 +57,11 @@ public sealed class DirectVideoResultDownloadTransportTests
     }
 
     [Fact]
-    public async Task A_path_traversal_provider_file_name_is_sanitized_before_the_artifact_is_persistable()
+    public async Task A_path_traversal_provider_file_name_is_sanitized_before_any_persistence_decision()
     {
-        var handler = new DownloadHandler(fileName: "../../etc/passwd");
+        // The traversal prefix is resolved away before the name informs any decision,
+        // and the remaining base name is never echoed with its path intact.
+        var handler = new DownloadHandler(fileName: "../../etc/clip.mp4");
         using var client = new HttpClient(handler);
         var adapter = CreateAdapter(client);
 
@@ -67,8 +69,30 @@ public sealed class DirectVideoResultDownloadTransportTests
         var status = await adapter.GetStatusAsync("provider-job-1");
         var output = await adapter.RetrieveAsync("provider-job-1", status);
 
-        Assert.Equal("passwd", output.FileName);
+        Assert.Equal("clip.mp4", output.FileName);
         Assert.DoesNotContain("..", output.FileName, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task A_path_traversal_base_name_the_storage_boundary_cannot_persist_is_rejected_before_the_download_lease()
+    {
+        // "../../etc/passwd" sanitises to the extensionless "passwd", which
+        // GeneratedMediaSecurity.ValidateDescriptor could never persist. The output
+        // upload preflight now names that at the adapter boundary from transport
+        // metadata alone, instead of handing the artifact downstream to fail later
+        // as a storage error with the wrong operator-facing code.
+        var handler = new DownloadHandler(fileName: "../../etc/passwd");
+        using var client = new HttpClient(handler);
+        var adapter = CreateAdapter(client);
+
+        await adapter.SubmitAsync(Request());
+        var status = await adapter.GetStatusAsync("provider-job-1");
+
+        await Assert.ThrowsAsync<DirectVideoOutputNormalizationException>(
+            () => adapter.RetrieveAsync("provider-job-1", status));
+        // The HEAD probe ran, so the declaration was judged; the body GET lease is
+        // never handed back for an unstorable output.
+        Assert.Equal(new HttpMethod[] { HttpMethod.Post, HttpMethod.Get, HttpMethod.Head }, handler.Methods);
     }
 
     [Fact]

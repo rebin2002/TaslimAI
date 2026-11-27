@@ -197,6 +197,78 @@ public sealed class AutopilotWatchdogLeaseFenceTests : IDisposable
             .ToListAsync());
     }
 
+    [Fact]
+    public async Task Recovery_rechecks_the_run_budget_after_acquiring_the_wave()
+    {
+        using var host = new LeaseHost(maxReconciliations: 5);
+        var runId = host.SeedStalledRun("wave-budget-changed", LastEvidenceUtc);
+        using var db = host.CreateContext();
+        // Reproduce a budget change between selection and ownership, without racing timers.
+        await db.Database.ExecuteSqlRawAsync("""
+            CREATE TRIGGER budget_changed_on_acquire AFTER INSERT ON AutopilotLocks
+            WHEN NEW.HeldBy = 'autopilot-watchdog'
+            BEGIN
+                UPDATE AutopilotRuns SET ReconciliationCount = 5 WHERE WaveKey = 'wave-budget-changed';
+            END;
+            """);
+
+        host.Clock.AdvanceTo(FirstPassUtc);
+        await host.ReconcileAsync("hourly_watchdog");
+
+        var run = await db.AutopilotRuns.AsNoTracking().SingleAsync(item => item.Id == runId);
+        Assert.Equal(5, run.ReconciliationCount);
+        Assert.Equal(LastEvidenceUtc, run.UpdatedAt);
+    }
+
+    [Fact]
+    public async Task Incomplete_wave_progress_is_persisted_before_releasing_its_lease()
+    {
+        using var host = new LeaseHost(maxReconciliations: 5);
+        var runId = host.SeedStalledRun("wave-flush-before-release", LastEvidenceUtc);
+        using var db = host.CreateContext();
+        await db.Database.ExecuteSqlRawAsync("""
+            CREATE TRIGGER check_run_at_release BEFORE UPDATE OF OwnerToken ON AutopilotLocks
+            WHEN NEW.OwnerToken = '' AND NEW.HeldBy = 'autopilot-watchdog'
+            BEGIN
+                SELECT CASE WHEN (SELECT ReconciliationCount FROM AutopilotRuns
+                    WHERE WaveKey = 'wave-flush-before-release') <> 1
+                    THEN RAISE(ABORT, 'watchdog released an unpersisted run') END;
+            END;
+            """);
+
+        host.Clock.AdvanceTo(FirstPassUtc);
+        await host.ReconcileAsync("hourly_watchdog");
+
+        Assert.Equal(1, (await db.AutopilotRuns.AsNoTracking().SingleAsync(item => item.Id == runId)).ReconciliationCount);
+        Assert.Equal(string.Empty, (await db.AutopilotLocks.AsNoTracking().SingleAsync()).OwnerToken);
+    }
+
+    [Fact]
+    public async Task Failed_wave_lease_release_rolls_back_recovery_and_exhaustion_audit()
+    {
+        using var host = new LeaseHost(maxReconciliations: 1);
+        var runId = host.SeedStalledRun("wave-failed-release", LastEvidenceUtc);
+        using var db = host.CreateContext();
+        // Zero rows affected exercises the real lease service's failed owner/token comparison.
+        await db.Database.ExecuteSqlRawAsync("""
+            CREATE TRIGGER refuse_release BEFORE UPDATE OF OwnerToken ON AutopilotLocks
+            WHEN NEW.OwnerToken = '' AND NEW.HeldBy = 'autopilot-watchdog'
+            BEGIN
+                SELECT RAISE(IGNORE);
+            END;
+            """);
+
+        host.Clock.AdvanceTo(FirstPassUtc);
+        await Assert.ThrowsAsync<DbUpdateConcurrencyException>(() => host.ReconcileAsync("hourly_watchdog"));
+
+        var run = await db.AutopilotRuns.AsNoTracking().SingleAsync(item => item.Id == runId);
+        Assert.Equal(0, run.ReconciliationCount);
+        Assert.Equal(LastEvidenceUtc, run.UpdatedAt);
+        Assert.False(await db.AutopilotLocks.AsNoTracking().AnyAsync());
+        Assert.False(await db.AutopilotAuditEvents.AsNoTracking().AnyAsync(
+            item => item.TargetId == runId && item.Reason == "watchdog_reconciliation_exhausted"));
+    }
+
     public void Dispose()
     {
         // Nothing unmanaged is held at class level; each case owns its host via using.

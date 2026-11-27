@@ -22,6 +22,16 @@
  *   the studio is a follow-up for whoever lands that lane.
  * - It calls nothing: no fetch, no API client, no provider, no cost endpoint,
  *   and it reads no secrets. Charging and provider activation are untouched.
+ * - Its accessibility semantics are part of this lane: the handoff control is
+ *   `aria-disabled` rather than natively `disabled`, because a natively
+ *   disabled button leaves the sequential focus order and a keyboard-only
+ *   user can then neither reach the preview's primary action nor find out why
+ *   the draft is withheld. Activation while blocked reports the reason
+ *   through `onBlocked` and never reaches the submit path, so the control
+ *   stays fail-closed while staying reachable.
+ * - Region ids come from `useId()`, so two previews on one page do not share
+ *   one accessible name or one described-by target, and the ready/blocked
+ *   sentence is a polite live region the control describes.
  * - It claims no provider capability. The capability catalog on current main
  *   reports `SupportsLyricsToVocals: false` with empty language and dialect
  *   sets for every provider key, including the third-party keys, so sung
@@ -29,7 +39,7 @@
  *   not an execution promise, and `docs/MUSIC_STUDIO_PREFLIGHT_UI.md` records
  *   which blockers must clear before that wording can change.
  */
-import type { ReactElement } from "react";
+import { useId, type ReactElement } from "react";
 import {
   buildMusicLyricsDraft,
   musicLyricsDefaultDialects,
@@ -384,17 +394,23 @@ export function MusicLyricsPreflightPanel({
   const result = evaluateMusicLyricsPreflight(input);
   const handoff = result.admissible && result.payload !== null;
   const dialectShown = result.dialect === undefined ? "unresolved" : result.dialect === null ? "none" : result.dialect;
+  // Instance-unique ids: `aria-labelledby` and `aria-describedby` resolve
+  // document-wide, so a shared literal id would name every panel after the
+  // first one and point every control at the first status sentence.
+  const panelId = useId();
+  const headingId = `${panelId}-heading`;
+  const statusId = `${panelId}-status`;
 
   return (
     <section
       className="music-lyrics-preflight"
-      aria-labelledby="music-lyrics-preflight-heading"
+      aria-labelledby={headingId}
       data-admissible={handoff ? "true" : "false"}
       data-blocked-reason={result.blockedReason ?? "none"}
       dir={result.direction}
       lang={result.languageTag}
     >
-      <h2 id="music-lyrics-preflight-heading">{text.heading}</h2>
+      <h2 id={headingId}>{text.heading}</h2>
 
       <div className="music-lyrics-preflight-summary">
         <h3>{text.summaryHeading}</h3>
@@ -430,21 +446,27 @@ export function MusicLyricsPreflightPanel({
         ))}
       </ul>
 
-      <div className="music-lyrics-preflight-issues" aria-live="polite">
+      <div className="music-lyrics-preflight-issues">
         <h3>{text.issuesHeading}</h3>
-        {result.issues.length === 0 ? (
-          <p>{text.noIssues}</p>
-        ) : (
-          <ul>
-            {result.issues.map((issue, index) => (
-              <li key={`${issue.code}-${issue.sectionId ?? "global"}-${index}`} data-issue-code={issue.code}>
-                {issue.code === musicLyricsPreflightGateIssueCode
-                  ? text.invisibleOnlyIssue
-                  : `${issue.code}${issue.sectionId ? ` (${issue.sectionId})` : ""}`}
-              </li>
-            ))}
-          </ul>
-        )}
+        {/* A stable live region: the heading stays out of it, so an AT does
+            not re-read the block title on every keystroke, and the region
+            element itself is never swapped when the draft flips between the
+            clean sentence and the issue list. */}
+        <div className="music-lyrics-preflight-issues-live" aria-live="polite">
+          {result.issues.length === 0 ? (
+            <p>{text.noIssues}</p>
+          ) : (
+            <ul>
+              {result.issues.map((issue, index) => (
+                <li key={`${issue.code}-${issue.sectionId ?? "global"}-${index}`} data-issue-code={issue.code}>
+                  {issue.code === musicLyricsPreflightGateIssueCode
+                    ? text.invisibleOnlyIssue
+                    : `${issue.code}${issue.sectionId ? ` (${issue.sectionId})` : ""}`}
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
       </div>
 
       <div className="music-lyrics-preflight-capability">
@@ -452,13 +474,20 @@ export function MusicLyricsPreflightPanel({
         <p>{text.capabilityNotice}</p>
       </div>
 
-      <p className="music-lyrics-preflight-status" data-ready={handoff ? "true" : "false"}>
+      <p
+        className="music-lyrics-preflight-status"
+        id={statusId}
+        role="status"
+        aria-live="polite"
+        data-ready={handoff ? "true" : "false"}
+      >
         {handoff ? text.readyNotice : text.blockedNotice}
       </p>
 
       <button
         type="button"
-        disabled={!handoff}
+        aria-disabled={handoff ? undefined : "true"}
+        aria-describedby={statusId}
         onClick={() => {
           if (handoff && result.payload) {
             onHandoff?.(result.payload);

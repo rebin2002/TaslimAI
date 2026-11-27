@@ -166,7 +166,7 @@ public sealed class MovieSalvageDirector : IMovieSalvageDirector
                 false,
                 true,
                 true,
-                true,
+                false,
                 true,
                 "Use only after the bounded salvage options are exhausted or evidence shows the source cannot be repaired.",
                 "This is the fallback because a new shot replaces more raw footage, continuity context, and review work than a local repair.",
