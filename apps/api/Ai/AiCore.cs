@@ -17,7 +17,13 @@ public sealed record AiChatRequest(
     IReadOnlyList<AiFileContext>? Attachments = null,
     int? MaxOutputTokens = null,
     bool JsonMode = false,
-    AiStructuredOutputSpec? StructuredOutput = null);
+    AiStructuredOutputSpec? StructuredOutput = null)
+{
+    internal static AiChatRequest ForConversation(AiOptions settings, IReadOnlyList<AiChatMessage> messages,
+        string systemInstruction, IReadOnlyList<AiFileContext>? files = null) =>
+        new(messages, systemInstruction, settings.DefaultChatTier, EnableStreaming: true, Attachments: files,
+            MaxOutputTokens: Math.Clamp(settings.MaxChatOutputTokens, 256, 16_000));
+}
 
 public sealed record AiProviderSelection(
     string ProviderKey,
@@ -71,7 +77,7 @@ public interface IAiModelRouter
     /// <c>IImageGenerationProviderReadiness</c> gate in front of Image Studio.
     /// The probe never contacts a provider.
     /// </summary>
-    bool IsChatGenerationAvailable();
+    bool IsChatGenerationAvailable(bool hasImageAttachments);
 }
 
 public interface IChatCompletionService
@@ -91,7 +97,10 @@ public sealed class AiModelRouter(
 {
     private readonly AiOptions settings = options.Value;
 
-    public AiProviderSelection Select(AiChatRequest request)
+    public AiProviderSelection Select(AiChatRequest request) =>
+        Select(request, request.Attachments?.Any(attachment => !string.IsNullOrWhiteSpace(attachment.DataUrl)) == true);
+
+    private AiProviderSelection Select(AiChatRequest request, bool hasImageAttachments)
     {
         var tier = NormalizeTier(request.RequestedTier, settings.DefaultChatTier);
         // OpenAiProvider refuses every call when the credential is missing, so the
@@ -100,7 +109,6 @@ public sealed class AiModelRouter(
         var openAiIsUsable = settings.OpenAI.Enabled && !string.IsNullOrWhiteSpace(settings.OpenAI.ApiKey);
         var providerKey = openAiIsUsable ? "openai" : settings.AllowMockProvider ? "mock" : throw new AiProviderUnavailableException();
         var requiresStructuredOutput = request.StructuredOutput is not null || request.JsonMode;
-        var hasImageAttachments = request.Attachments?.Any(attachment => !string.IsNullOrWhiteSpace(attachment.DataUrl)) == true;
         var model = catalog.GetForTier(tier, providerKey, requiresStructuredOutput, request.EnableStreaming);
         if (hasImageAttachments && (model is null || !model.SupportsVision))
         {
@@ -115,11 +123,11 @@ public sealed class AiModelRouter(
         return new AiProviderSelection(providerKey, model.ModelKey, model.DisplayName, model.CapabilityTier, providerKey == "mock");
     }
 
-    public bool IsChatGenerationAvailable()
+    public bool IsChatGenerationAvailable(bool hasImageAttachments)
     {
         try
         {
-            Select(new AiChatRequest([], settings.SystemInstruction, string.Empty));
+            Select(AiChatRequest.ForConversation(settings, [], settings.SystemInstruction), hasImageAttachments);
             return true;
         }
         catch (AiProviderUnavailableException)
@@ -244,13 +252,7 @@ public sealed class AiContextBuilder(IOptions<AiOptions> options)
         }
 
         selected.Reverse();
-        return new AiChatRequest(
-            selected,
-            systemInstruction,
-            settings.DefaultChatTier,
-            EnableStreaming: true,
-            Attachments: files,
-            MaxOutputTokens: Math.Clamp(settings.MaxChatOutputTokens, 256, 16_000));
+        return AiChatRequest.ForConversation(settings, selected, systemInstruction, files);
     }
 
     private string BuildSystemInstruction(string? projectInstructions, string? projectContextNotes, IReadOnlyList<AiMemoryContext> personalMemories, IReadOnlyList<AiFileContext> files)

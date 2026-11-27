@@ -300,9 +300,105 @@ public sealed class ChatProviderReadinessTests : IClassFixture<ChatProviderUnava
         var mockReady = new AiModelRouter(Options.Create(new AiOptions { AllowMockProvider = true, OpenAI = new OpenAiOptions { Enabled = false } }), catalog);
         var openAiReady = new AiModelRouter(Options.Create(new AiOptions { AllowMockProvider = false, OpenAI = new OpenAiOptions { Enabled = true, ApiKey = "test-only" } }), catalog);
 
-        Assert.False(refused.IsChatGenerationAvailable());
-        Assert.True(mockReady.IsChatGenerationAvailable());
-        Assert.True(openAiReady.IsChatGenerationAvailable());
+        Assert.False(refused.IsChatGenerationAvailable(false));
+        Assert.True(mockReady.IsChatGenerationAvailable(false));
+        Assert.True(openAiReady.IsChatGenerationAvailable(false));
+        Assert.False(mockReady.IsChatGenerationAvailable(true));
+        // The default Smart OpenAI model has no vision; the streaming Advanced model is eligible.
+        Assert.True(openAiReady.IsChatGenerationAvailable(true));
+    }
+
+    private sealed class MockCapabilityFactory(bool streaming, string tier = "Smart") : TaslimApiFactory
+    {
+        protected override void ConfigureWebHost(IWebHostBuilder builder)
+        {
+            base.ConfigureWebHost(builder);
+            builder.UseSetting("Ai:OpenAI:Enabled", "false");
+            builder.UseSetting("Ai:AllowMockProvider", "true");
+            builder.UseSetting("Ai:DefaultChatTier", tier);
+            builder.UseSetting("Ai:Models:mock:ProviderKey", "mock");
+            builder.UseSetting("Ai:Models:mock:SupportsStreaming", streaming.ToString());
+            builder.UseSetting("Ai:Models:mock:SupportsVision", "false");
+        }
+    }
+
+    [Theory]
+    [InlineData(false, "Smart", false)]
+    [InlineData(true, "Advanced", false)]
+    [InlineData(true, "Smart", true)]
+    public async Task New_turn_refuses_incompatible_model_before_writing(bool streaming, string tier, bool attachImage)
+    {
+        using var factory = new MockCapabilityFactory(streaming, tier);
+        using var client = factory.CreateClient();
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        db.Database.EnsureCreated();
+        var auth = await Register(client, "Capability Owner");
+        var conversation = await CreateConversation(client, auth.PersonalWorkspace.Id);
+        var ids = attachImage ? new[] { await SeedImageAsync(db, auth) } : Array.Empty<Guid>();
+        var payload = new { content = "Hello Taslim", requestId = Guid.NewGuid().ToString("N"), attachmentIds = ids };
+
+        var normal = await SendWithCsrf(client, HttpMethod.Post, $"/api/conversations/{conversation.Id}/messages", payload);
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, normal.StatusCode);
+        Assert.Equal(UnavailableCode, (await normal.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("error").GetProperty("code").GetString());
+        var streamed = await SendWithCsrf(client, HttpMethod.Post, $"/api/conversations/{conversation.Id}/messages/stream", payload);
+        var events = await streamed.Content.ReadAsStringAsync();
+        Assert.DoesNotContain("event: message.started", events);
+        Assert.Equal(UnavailableCode, ExtractEventData(events, "message.failed").RootElement.GetProperty("code").GetString());
+
+        Assert.Equal((0, 0, 0m), await PersistedState(factory, auth.PersonalWorkspace.Id, conversation.Id));
+        Assert.Equal(0L, (await db.Conversations.AsNoTracking().SingleAsync(item => item.Id == conversation.Id)).NextMessageSequence);
+        Assert.False(await db.ChatMessageAttachments.AnyAsync());
+    }
+
+    [Fact]
+    public async Task Regeneration_and_failed_send_retry_use_the_original_turns_image_requirements()
+    {
+        using var factory = new MockCapabilityFactory(streaming: true);
+        using var client = factory.CreateClient();
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        db.Database.EnsureCreated();
+        var auth = await Register(client, "Original Attachment Owner");
+        var conversation = await CreateConversation(client, auth.PersonalWorkspace.Id);
+        var assistantId = await SeedCompletedExchangeAsync(conversation, factory);
+        var user = await db.ChatMessages.SingleAsync(message => message.ConversationId == conversation.Id && message.Role == ChatMessageRole.User);
+        var fileId = await SeedImageAsync(db, auth);
+        db.ChatMessageAttachments.Add(new ChatMessageAttachment { ChatMessageId = user.Id, StoredFileId = fileId });
+        await db.SaveChangesAsync();
+
+        var regen = await SendWithCsrf(client, HttpMethod.Post, $"/api/conversations/{conversation.Id}/messages/{assistantId}/regenerate",
+            new { requestId = Guid.NewGuid().ToString("N") });
+        var events = await regen.Content.ReadAsStringAsync();
+        Assert.DoesNotContain("event: message.started", events);
+        Assert.Equal(UnavailableCode, ExtractEventData(events, "message.failed").RootElement.GetProperty("code").GetString());
+
+        var assistant = await db.ChatMessages.SingleAsync(message => message.Id == assistantId);
+        Assert.Equal(ChatMessageStatus.Completed, assistant.Status);
+        assistant.Status = ChatMessageStatus.Failed;
+        await db.SaveChangesAsync();
+        var retry = await SendWithCsrf(client, HttpMethod.Post, $"/api/conversations/{conversation.Id}/messages",
+            new { content = user.Content, requestId = user.RequestId, attachmentIds = Array.Empty<Guid>() });
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, retry.StatusCode);
+        Assert.Equal(UnavailableCode, (await retry.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("error").GetProperty("code").GetString());
+        await db.Entry(assistant).ReloadAsync();
+        Assert.Equal(ChatMessageStatus.Failed, assistant.Status);
+        Assert.Equal((2, 0, 0m), await PersistedState(factory, auth.PersonalWorkspace.Id, conversation.Id));
+        Assert.Equal(2L, (await db.Conversations.AsNoTracking().SingleAsync(item => item.Id == conversation.Id)).NextMessageSequence);
+    }
+
+    private static async Task<Guid> SeedImageAsync(TaslimDbContext db, AuthResponse auth)
+    {
+        var id = Guid.NewGuid();
+        db.StoredFiles.Add(new StoredFile
+        {
+            Id = id, WorkspaceId = auth.PersonalWorkspace.Id, UserId = auth.User.Id,
+            OriginalFileName = "sample.png", StoredFileName = "sample.png", Extension = ".png",
+            ContentType = "image/png", StorageKey = id.ToString("N"), SizeBytes = 1,
+            CreatedAt = DateTime.UtcNow, Status = StoredFileStatus.Ready,
+        });
+        await db.SaveChangesAsync();
+        return id;
     }
 
     private static async Task<(int MessageCount, int ReservationCount, decimal ChargedAmount)> PersistedState(TaslimApiFactory factory, Guid workspaceId, Guid conversationId)
@@ -318,9 +414,9 @@ public sealed class ChatProviderReadinessTests : IClassFixture<ChatProviderUnava
         return (messageCount, transactions.Count, transactions.Sum(transaction => transaction.ChargedAmount));
     }
 
-    private async Task<Guid> SeedCompletedExchangeAsync(ConversationDto conversation)
+    private async Task<Guid> SeedCompletedExchangeAsync(ConversationDto conversation, TaslimApiFactory? factory = null)
     {
-        using var scope = unavailableFactory.Services.CreateScope();
+        using var scope = (factory ?? unavailableFactory).Services.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
         var tracked = await db.Conversations.FirstAsync(item => item.Id == conversation.Id);
         var now = DateTime.UtcNow;
