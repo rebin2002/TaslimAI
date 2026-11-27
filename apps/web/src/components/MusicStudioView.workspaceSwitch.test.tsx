@@ -161,7 +161,7 @@ describe("Music Studio workspace switching", () => {
     expect(harness.api.cancelGenerationJob).not.toHaveBeenCalled();
   });
 
-  it("keeps B's loading and resolved state when delayed A successes and a failed A request settle out of order", async () => {
+  it.each(["resolves", "rejects"] as const)("keeps B's state when the old workspace project list %s after switching", async (projectOutcome) => {
     const aProjectsActive = deferred<Project[]>();
     const aProjectsArchived = deferred<Project[]>();
     const aRecentMusic = deferred<AssetPage>();
@@ -182,7 +182,11 @@ describe("Music Studio workspace switching", () => {
     await mount();
     expect(container.textContent).toContain("music.libraryLoading");
     await switchWorkspace("workspace-b");
-    expect(container.textContent).not.toContain("workspace-a");
+    for (const workspaceId of ["workspace-a", "workspace-b"]) {
+      expect(harness.api.listProjects).toHaveBeenCalledWith(workspaceId, "Active");
+      expect(harness.api.listProjects).toHaveBeenCalledWith(workspaceId, "Archived");
+    }
+    expect(findProjectSelect(container).value).toBe("");
     expect(container.textContent).toContain("music.libraryLoading");
     expect(container.textContent).toContain("music.reference.loading");
 
@@ -195,12 +199,15 @@ describe("Music Studio workspace switching", () => {
     expect(container.textContent).toContain("B reference clip.mp3");
     await setControlValue(findProjectSelect(container), "project-b");
 
-    // Resolve the old library and reference reads first, then fail the old project batch.
-    // None may replace, clear, or relabel the currently selected B view.
+    // Complete the old requests only after B's content and selected project are visible.
     aRecentMusic.resolve(page([musicAsset("workspace-a", "late-a-track", "Late A track")]));
     aReferenceAssets.resolve(page([musicAsset("workspace-a", "late-a-reference", "Late A reference.mp3")]));
     aProjectsArchived.resolve([project("workspace-a", "late-a-project", "Late A project")]);
-    aProjectsActive.reject(new Error("synthetic delayed A project failure"));
+    if (projectOutcome === "resolves") {
+      aProjectsActive.resolve([project("workspace-a", "late-a-active", "Late A active project")]);
+    } else {
+      aProjectsActive.reject(new Error("synthetic delayed A project failure"));
+    }
     await flush();
 
     expect(container.textContent).toContain("B recent track");
@@ -209,6 +216,7 @@ describe("Music Studio workspace switching", () => {
     expect(container.textContent).not.toContain("Late A reference.mp3");
     expect(Array.from(findProjectSelect(container).options).map((option) => option.textContent)).toContain("Workspace B project");
     expect(Array.from(findProjectSelect(container).options).map((option) => option.textContent)).not.toContain("Late A project");
+    expect(Array.from(findProjectSelect(container).options).map((option) => option.textContent)).not.toContain("Late A active project");
     expect(findProjectSelect(container).value).toBe("project-b");
     expect(harness.api.createMusicGenerationJob).not.toHaveBeenCalled();
     expect(harness.api.getGenerationJob).not.toHaveBeenCalled();

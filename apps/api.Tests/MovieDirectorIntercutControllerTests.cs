@@ -1,4 +1,5 @@
 using System.Security.Claims;
+using System.Text.Json;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.RateLimiting;
@@ -17,8 +18,10 @@ namespace Taslim.Api.Tests;
 
 public sealed class MovieDirectorIntercutControllerTests
 {
-    [Fact]
-    public async Task Foreign_and_missing_timeline_ids_are_rejected_but_owned_timeline_remains_review_only()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Foreign_and_missing_timeline_ids_are_rejected_but_owned_timeline_remains_review_only(bool separateWorkspace)
     {
         await using var connection = new SqliteConnection("Data Source=:memory:");
         await connection.OpenAsync();
@@ -28,6 +31,8 @@ public sealed class MovieDirectorIntercutControllerTests
         var now = DateTime.UtcNow;
         var userId = Guid.NewGuid();
         var workspaceId = Guid.NewGuid();
+        var foreignWorkspaceId = separateWorkspace ? Guid.NewGuid() : workspaceId;
+        var foreignOwnerId = separateWorkspace ? Guid.NewGuid() : userId;
         var requestedProjectId = Guid.NewGuid();
         var foreignProjectId = Guid.NewGuid();
         var implicitProjectId = Guid.NewGuid();
@@ -45,9 +50,15 @@ public sealed class MovieDirectorIntercutControllerTests
         db.Users.Add(new ApplicationUser { Id = userId, UserName = "intercut-owner", NormalizedUserName = "INTERCUT-OWNER", DisplayName = "Intercut Owner", CreatedAt = now, UpdatedAt = now });
         db.Workspaces.Add(new Workspace { Id = workspaceId, Name = "Intercut Workspace", Slug = $"intercut-{Guid.NewGuid():N}", Type = WorkspaceType.Personal, CreatedAt = now, UpdatedAt = now });
         db.WorkspaceMembers.Add(new WorkspaceMember { Id = Guid.NewGuid(), WorkspaceId = workspaceId, UserId = userId, Role = WorkspaceRole.Owner });
+        if (separateWorkspace)
+        {
+            db.Users.Add(new ApplicationUser { Id = foreignOwnerId, UserName = "unrelated-owner", NormalizedUserName = "UNRELATED-OWNER", DisplayName = "Unrelated owner", CreatedAt = now, UpdatedAt = now });
+            db.Workspaces.Add(new Workspace { Id = foreignWorkspaceId, Name = "Unrelated workspace", Slug = $"unrelated-{foreignWorkspaceId:N}", Type = WorkspaceType.Personal, CreatedAt = now, UpdatedAt = now });
+            db.WorkspaceMembers.Add(new WorkspaceMember { Id = Guid.NewGuid(), WorkspaceId = foreignWorkspaceId, UserId = foreignOwnerId, Role = WorkspaceRole.Owner });
+        }
         db.MovieProjects.AddRange(
             new MovieProject { Id = requestedProjectId, WorkspaceId = workspaceId, CreatedByUserId = userId, Title = "Requested", Description = "Requested.", DurationSeconds = 30, Guide = new MovieContinuityGuide { Id = Guid.NewGuid(), UpdatedAt = now }, CreatedAt = now, UpdatedAt = now },
-            new MovieProject { Id = foreignProjectId, WorkspaceId = workspaceId, CreatedByUserId = userId, Title = "Foreign", Description = "Foreign.", DurationSeconds = 30, Guide = new MovieContinuityGuide { Id = Guid.NewGuid(), UpdatedAt = now }, CreatedAt = now, UpdatedAt = now },
+            new MovieProject { Id = foreignProjectId, WorkspaceId = foreignWorkspaceId, CreatedByUserId = foreignOwnerId, Title = "Foreign project detail", Description = "Foreign.", DurationSeconds = 30, Guide = new MovieContinuityGuide { Id = Guid.NewGuid(), UpdatedAt = now }, CreatedAt = now, UpdatedAt = now },
             new MovieProject { Id = implicitProjectId, WorkspaceId = workspaceId, CreatedByUserId = userId, Title = "Implicit Timeline", Description = "Implicit timeline fixture.", DurationSeconds = 30, Guide = new MovieContinuityGuide { Id = Guid.NewGuid(), UpdatedAt = now }, CreatedAt = now, UpdatedAt = now });
         db.MovieTeamMembers.Add(new MovieTeamMember { Id = Guid.NewGuid(), MovieProjectId = requestedProjectId, UserId = userId, Role = MovieTeamRoles.Producer, IsProjectOwner = true, CreatedAt = now, UpdatedAt = now });
         db.MovieTeamMembers.Add(new MovieTeamMember { Id = Guid.NewGuid(), MovieProjectId = implicitProjectId, UserId = userId, Role = MovieTeamRoles.Producer, IsProjectOwner = true, CreatedAt = now, UpdatedAt = now });
@@ -107,11 +118,18 @@ public sealed class MovieDirectorIntercutControllerTests
         var foreignResult = await controller.CreateIntercutProposal(requestedProjectId, request, CancellationToken.None);
         var foreignError = Assert.IsType<ObjectResult>(foreignResult);
         Assert.Equal(400, foreignError.StatusCode);
+        var foreignEnvelope = Assert.IsType<ErrorEnvelope>(foreignError.Value);
+        Assert.Equal(MovieIntercutPlanCodes.TimelineProjectMismatch, foreignEnvelope.Error.Code);
+        var payload = JsonSerializer.Serialize(foreignEnvelope);
+        Assert.DoesNotContain(foreignTimelineId.ToString(), payload, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(foreignProjectId.ToString(), payload, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("Foreign project detail", payload, StringComparison.OrdinalIgnoreCase);
 
         request.TimelineId = Guid.NewGuid();
         var missingResult = await controller.CreateIntercutProposal(requestedProjectId, request, CancellationToken.None);
         var missingError = Assert.IsType<ObjectResult>(missingResult);
         Assert.Equal(400, missingError.StatusCode);
+        Assert.Equal(foreignEnvelope.Error, Assert.IsType<ErrorEnvelope>(missingError.Value).Error);
 
         request.TimelineId = ownedTimelineId;
         request.BaseTimelineVersion = 2;
