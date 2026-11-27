@@ -3,20 +3,41 @@ import { localeTag } from "@/lib/i18n";
 
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { ArrowUpRight, BookOpen, CheckCircle2, Download, ExternalLink, FileText, FolderOpen, LoaderCircle, RefreshCw, Search, Sparkles, XCircle } from "lucide-react";
 import { useAuth } from "@/components/AuthProvider";
 import { AccessibleProgressBar } from "@/components/AccessibleProgressBar";
 import { useLocale } from "@/components/LocaleProvider";
+import { academicRoute } from "@/components/academic/academicRoutes";
+import { isAcademicResearchVisible } from "@/lib/academicResearchVisibility";
+import { createAcademicTranslator } from "@/components/academic/academicStrings";
 import { ApiError, api, type Asset, type GenerationJob, type Project, type ResearchJobResult, type ResearchSource, type StoredFile } from "@/lib/api";
+import {
+  filterStudioDownloadableRepresentations,
+  readStudioRepresentationDownloadability,
+  type StudioRepresentationAvailabilityFacts,
+} from "@/lib/studioRepresentationAvailability";
 import { canCancelResearchJob, clearResearchActiveJobId, displayResearchProgress, isCurrentResearchJob, isResearchSourceReady, isRestorableResearchJob, isSafeExternalUrl, mergeResearchSources, nextResearchPollDelay, parseResearchJobResult, persistResearchActiveJobId, readResearchActiveJobId, researchSourcesPanelStatus, researchStudioState, shouldPollResearchJob, type ResearchSourcesLoadStatus } from "@/lib/researchStudioState";
 
 const extensions = [".pdf", ".docx", ".txt", ".md", ".csv", ".xlsx"];
+const useIsomorphicLayoutEffect = typeof window === "undefined" ? useEffect : useLayoutEffect;
 type Depth = "quick" | "standard" | "deep";
 type ReportType = "research_report" | "market_research" | "competitor_research" | "company_research" | "product_research" | "industry_research" | "general_research";
 type Language = "auto" | "en" | "ar" | "ku";
 
 type Translate = (key: string, values?: Record<string, string>) => string;
+type ResearchDownloadOperation = { jobId: string; workspaceId: string; workspaceGeneration: number; assetId: string; representationId: string; jobSnapshot: GenerationJob };
+
+export function sameResearchDownloadContext(previous: GenerationJob | null, next: GenerationJob | null) {
+  const snapshot = (job: GenerationJob | null) => {
+    const parsed = job ? parseResearchJobResult(job) : null;
+    const representations = (parsed?.representations ?? [])
+      .filter((representation) => ["docx", "pdf"].includes(representation.type))
+      .map((representation) => [representation.id, representation.type, representation.fileName, representation.contentType]);
+    return [job?.id ?? null, job?.workspaceId ?? null, parsed?.assetId ?? null, representations];
+  };
+  return JSON.stringify(snapshot(previous)) === JSON.stringify(snapshot(next));
+}
 
 export function ResearchStudioView() {
   const { workspace } = useAuth();
@@ -40,7 +61,7 @@ export function ResearchStudioView() {
   const [excludedDomains, setExcludedDomains] = useState("");
   const [additionalInstructions, setAdditionalInstructions] = useState("");
   const [useWebSources, setUseWebSources] = useState(true);
-  const [current, setCurrent] = useState<GenerationJob | null>(null);
+  const [current, setCurrentState] = useState<GenerationJob | null>(null);
   const [sourceDetails, setSourceDetails] = useState<ResearchSource[]>([]);
   const [loadingSources, setLoadingSources] = useState(true);
   const [sourcesLoadStatus, setSourcesLoadStatus] = useState<ResearchSourcesLoadStatus>("loading");
@@ -49,9 +70,33 @@ export function ResearchStudioView() {
   const [retryingCompleted, setRetryingCompleted] = useState(false);
   const [error, setError] = useState("");
   const [downloadError, setDownloadError] = useState("");
+  const [downloadingRepresentationId, setDownloadingRepresentationId] = useState<string | null>(null);
+  const currentJobRef = useRef<GenerationJob | null>(null);
+  const activeDownloadRef = useRef<ResearchDownloadOperation | null>(null);
   const restoreJobId = useRef<string | null>(null);
   const observedWorkspaceId = useRef<string | null>(workspace?.id ?? null);
   const workspaceGeneration = useRef(0);
+
+  const invalidateActiveDownload = useCallback(() => {
+    const wasActive = activeDownloadRef.current !== null;
+    activeDownloadRef.current = null;
+    setDownloadingRepresentationId(null);
+    if (wasActive) setWorking(false);
+  }, []);
+
+  const setCurrentJob = useCallback((next: GenerationJob | null) => {
+    const previous = currentJobRef.current;
+    if (!sameResearchDownloadContext(previous, next)) invalidateActiveDownload();
+    currentJobRef.current = next;
+    setCurrentState(next);
+  }, [invalidateActiveDownload]);
+
+  // Invalidate before a late download continuation can cross a committed workspace change.
+  useIsomorphicLayoutEffect(() => {
+    if (observedWorkspaceId.current !== (workspace?.id ?? null)) activeDownloadRef.current = null;
+  }, [workspace?.id]);
+
+  useEffect(() => () => { activeDownloadRef.current = null; }, []);
 
   const loadInputs = useCallback(async () => {
     if (!workspace) return;
@@ -59,14 +104,13 @@ export function ResearchStudioView() {
     const workspaceVersion = workspaceGeneration.current;
     setLoadingSources(true);
     try {
-      const [active, archived, available, researchAssets] = await Promise.all([
+      const [active, available, researchAssets] = await Promise.all([
         api.listProjects(workspaceId, "Active"),
-        api.listProjects(workspaceId, "Archived"),
         api.listFiles(workspaceId),
         api.listAssets(workspaceId, { assetType: "research", pageSize: 4, sort: "recent" }),
       ]);
       if (observedWorkspaceId.current !== workspaceId || workspaceGeneration.current !== workspaceVersion) return;
-      setProjects([...active, ...archived]);
+      setProjects(active);
       setFiles(available.filter((file) => extensions.includes(file.extension.toLowerCase())));
       setRecentResearch(researchAssets.items);
     } catch {
@@ -86,8 +130,9 @@ export function ResearchStudioView() {
     if (observedWorkspaceId.current === nextWorkspaceId) return;
     observedWorkspaceId.current = nextWorkspaceId;
     workspaceGeneration.current += 1;
+    invalidateActiveDownload();
     restoreJobId.current = null;
-    setCurrent(null);
+    setCurrentJob(null);
     setSourceDetails([]);
     setSourcesLoadStatus("loading");
     setProjects([]);
@@ -114,7 +159,7 @@ export function ResearchStudioView() {
     setLoadingSources(true);
     setError("");
     setDownloadError("");
-  }, [searchParams, workspace?.id]);
+  }, [searchParams, workspace?.id, invalidateActiveDownload, setCurrentJob]);
 
   // This effect synchronizes authenticated workspace inputs into the local form.
   // eslint-disable-next-line react-hooks/set-state-in-effect
@@ -133,14 +178,22 @@ export function ResearchStudioView() {
         clearResearchActiveJobId(workspaceId);
         return;
       }
-      setCurrent(job);
+      setCurrentJob(job);
       setPollRetry(0);
     }).catch((cause) => {
       if (!active || workspaceGeneration.current !== workspaceVersion || restoreJobId.current !== storedJobId) return;
       if (cause instanceof ApiError && (cause.status === 403 || cause.status === 404)) clearResearchActiveJobId(workspaceId);
     });
     return () => { active = false; };
-  }, [workspace, current]);
+  }, [workspace, current, setCurrentJob]);
+  // Keep an in-view completed report readable, but never restore terminal jobs
+  // when Research Studio is opened again from Create. Saved assets live in Assets.
+  useEffect(() => {
+    if (current && !shouldPollResearchJob(current) && isCurrentResearchJob(current, workspace?.id ?? "")) {
+      clearResearchActiveJobId(current.workspaceId);
+      restoreJobId.current = null;
+    }
+  }, [current, workspace?.id]);
   useEffect(() => {
     if (!current || !shouldPollResearchJob(current)) return;
     const jobId = current.id;
@@ -150,7 +203,7 @@ export function ResearchStudioView() {
       try {
         const next = await api.getGenerationJob(jobId);
         if (!active || workspaceGeneration.current !== workspaceVersion || current.id !== jobId || !isCurrentResearchJob(next, current.workspaceId, jobId)) return;
-        setCurrent(next);
+        setCurrentJob(next);
         setPollRetry(0);
         setError("");
       } catch {
@@ -160,7 +213,7 @@ export function ResearchStudioView() {
       }
     }, nextResearchPollDelay(current, pollRetry) ?? 700);
     return () => { active = false; window.clearTimeout(timer); };
-  }, [current, pollRetry, t]);
+  }, [current, pollRetry, t, setCurrentJob]);
   useEffect(() => {
     if (!current || current.status !== "Succeeded") return;
     const parsed = parseResearchJobResult(current);
@@ -226,7 +279,7 @@ export function ResearchStudioView() {
       });
       if (workspaceGeneration.current !== workspaceVersion || observedWorkspaceId.current !== workspaceId || !isCurrentResearchJob(job, workspaceId)) return;
       persistResearchActiveJobId(workspaceId, job.id);
-      setCurrent(job);
+      setCurrentJob(job);
       setPollRetry(0);
     } catch {
       if (workspaceGeneration.current === workspaceVersion && observedWorkspaceId.current === workspaceId) setError(t("research.createError"));
@@ -246,7 +299,7 @@ export function ResearchStudioView() {
       await api.cancelGenerationJob(jobId);
       const next = await api.getGenerationJob(jobId);
       if (workspaceGeneration.current !== workspaceVersion || current.id !== jobId || !isCurrentResearchJob(next, workspaceId, jobId)) return;
-      setCurrent(next);
+      setCurrentJob(next);
     } catch {
       if (workspaceGeneration.current === workspaceVersion && current.id === jobId) setError(t("research.cancelError"));
     } finally {
@@ -263,7 +316,7 @@ export function ResearchStudioView() {
     setError("");
     try {
       const next = await api.getGenerationJob(jobId);
-      if (workspaceGeneration.current === workspaceVersion && current.id === jobId && isCurrentResearchJob(next, workspaceId, jobId)) setCurrent(next);
+      if (workspaceGeneration.current === workspaceVersion && current.id === jobId && isCurrentResearchJob(next, workspaceId, jobId)) setCurrentJob(next);
     } catch {
       if (workspaceGeneration.current === workspaceVersion && current.id === jobId) setError(t("research.completedLoadError"));
     } finally {
@@ -288,15 +341,36 @@ export function ResearchStudioView() {
   }
 
   async function downloadRepresentation(representationId: string, fileName: string) {
-    if (!result?.assetId) return;
+    if (!result?.assetId || !current || !workspace || current.workspaceId !== workspace.id) return;
     const assetId = result.assetId;
-    const jobId = current?.id;
-    const workspaceVersion = workspaceGeneration.current;
+    const operation: ResearchDownloadOperation = {
+      jobId: current.id,
+      workspaceId: workspace.id,
+      workspaceGeneration: workspaceGeneration.current,
+      assetId,
+      representationId,
+      jobSnapshot: current,
+    };
+    activeDownloadRef.current = operation;
     setWorking(true);
+    setDownloadingRepresentationId(representationId);
     setDownloadError("");
+    const isCurrentContext = () => {
+      const activeJob = currentJobRef.current;
+      const activeResult = activeJob ? parseResearchJobResult(activeJob) : null;
+      return workspaceGeneration.current === operation.workspaceGeneration
+        && observedWorkspaceId.current === operation.workspaceId
+        && activeJob !== null
+        && activeJob.id === operation.jobId
+        && activeJob.workspaceId === operation.workspaceId
+        && activeResult?.assetId === operation.assetId
+        && sameResearchDownloadContext(operation.jobSnapshot, activeJob)
+        && (activeResult?.representations ?? []).some((representation) => representation.id === operation.representationId && ["docx", "pdf"].includes(representation.type));
+    };
+    const isCurrentOperation = () => activeDownloadRef.current === operation && isCurrentContext();
     try {
-      const blob = await api.downloadAssetRepresentation(assetId, representationId);
-      if (workspaceGeneration.current !== workspaceVersion || current?.id !== jobId) return;
+      const blob = await api.downloadAssetRepresentation(operation.assetId, operation.representationId);
+      if (!isCurrentOperation()) return;
       const url = URL.createObjectURL(blob);
       const anchor = window.document.createElement("a");
       anchor.href = url;
@@ -304,9 +378,17 @@ export function ResearchStudioView() {
       anchor.click();
       window.setTimeout(() => URL.revokeObjectURL(url), 0);
     } catch {
-      if (workspaceGeneration.current === workspaceVersion && current?.id === jobId) setDownloadError(t("research.downloadError"));
+      if (isCurrentOperation()) setDownloadError(t("research.downloadError"));
     } finally {
-      if (workspaceGeneration.current === workspaceVersion && current?.id === jobId) setWorking(false);
+      if (activeDownloadRef.current !== operation) return;
+      activeDownloadRef.current = null;
+      if (!isCurrentContext()) {
+        setWorking(false);
+        setDownloadingRepresentationId(null);
+        return;
+      }
+      setWorking(false);
+      setDownloadingRepresentationId(null);
     }
   }
 
@@ -333,9 +415,11 @@ export function ResearchStudioView() {
   }
 
   function createAnother() {
+    invalidateActiveDownload();
+    setWorking(false);
     restoreJobId.current = null;
     if (workspace) clearResearchActiveJobId(workspace.id);
-    setCurrent(null);
+    setCurrentJob(null);
     setSourceDetails([]);
     setSourcesLoadStatus("loading");
     setError("");
@@ -345,6 +429,12 @@ export function ResearchStudioView() {
 
   const parsed = parseResearchJobResult(current);
   const result = mergeResearchSources(parsed, sourceDetails);
+  // #1049: the published ResultJson snapshot is immutable, so a rendition can be pruned after
+  // completion while the snapshot still advertises its download button. The live per-representation
+  // facts arrive as the optional `representationDownloads` companion field (#1117/#1124 API half),
+  // read through the shared studio helper. No field, no change: legacy payloads keep advertising
+  // every rendition exactly as before.
+  const representationDownloadability = readStudioRepresentationDownloadability(current);
   const state = researchStudioState(current, result);
   const readyFiles = files.filter((file) => isResearchSourceReady(file));
   const progress = displayResearchProgress(current);
@@ -356,6 +446,9 @@ export function ResearchStudioView() {
           <p className="section-eyebrow">{t("research.eyebrow")}</p>
           <h1>{t("research.title")}</h1>
           <p>{t("research.subtitle")}</p>
+          {isAcademicResearchVisible() ? (
+            <Link className="secondary-button" href={academicRoute}>{createAcademicTranslator(locale)("mode.academicTitle")}</Link>
+          ) : null}
         </div>
         <span className="research-studio-header-icon" aria-hidden="true"><BookOpen size={26} /></span>
       </header>
@@ -411,9 +504,9 @@ export function ResearchStudioView() {
       ) : state === "failed" || state === "cancelled" ? (
         <section className="account-card research-generation-state research-terminal-state" aria-live="polite"><XCircle size={28} /><p className="section-eyebrow">{t(`jobs.status${statusKey}`)}</p><h2>{current.errorMessage || t("research.failedSafe")}</h2><div className="research-result-actions"><button className="primary-button" onClick={createAnother}><RefreshCw size={15} /> {t("research.createAnother")}</button><Link className="secondary-button" href="/assets">{t("research.openAssets")}</Link></div></section>
       ) : state === "succeeded" && result?.assetId ? (
-        <ResearchResultView result={result} sourcesLoadStatus={sourcesLoadStatus} onRetrySources={() => void retrySources()} working={working} downloadError={downloadError} onDownload={(id, name) => void downloadRepresentation(id, name)} onExport={() => void downloadSourceManifest()} onCreateAnother={createAnother} t={t} />
+        <ResearchResultView result={result} downloadability={representationDownloadability} sourcesLoadStatus={sourcesLoadStatus} onRetrySources={() => void retrySources()} working={working} downloadingRepresentationId={downloadingRepresentationId} downloadError={downloadError} onDownload={(id, name) => void downloadRepresentation(id, name)} onExport={() => void downloadSourceManifest()} onCreateAnother={createAnother} t={t} />
       ) : state === "completed-unavailable" ? (
-        <section className="account-card research-generation-state research-terminal-state"><RefreshCw size={28} /><p className="section-eyebrow">{t("jobs.statusSucceeded")}</p><h2>{t("research.completedLoadError")}</h2><p>{t("research.completedLoadHint")}</p><div className="research-result-actions"><button className="primary-button" onClick={() => void retryCompleted()} disabled={retryingCompleted}>{retryingCompleted ? t("research.working") : t("research.retry")}</button><Link className="secondary-button" href="/assets">{t("research.openAssets")}</Link></div></section>
+        <section className="account-card research-generation-state research-terminal-state"><RefreshCw size={28} /><p className="section-eyebrow">{t("jobs.statusSucceeded")}</p><h2>{t("research.completedLoadError")}</h2><p>{t("research.completedLoadHint")}</p><div className="research-result-actions"><button className="primary-button" onClick={() => void retryCompleted()} disabled={retryingCompleted}>{retryingCompleted ? t("research.working") : t("research.retry")}</button><Link className="secondary-button" href="/assets">{t("research.openAssets")}</Link><button className="secondary-button" onClick={createAnother}><RefreshCw size={15} /> {t("research.createAnother")}</button></div></section>
       ) : (
         <ResearchProgressView current={current} statusKey={statusKey} progress={progress} error={error} working={working} onCancel={() => void cancel()} t={t} />
       )}
@@ -426,8 +519,14 @@ function ResearchProgressView({ current, statusKey, progress, error, working, on
   return <section className="account-card research-generation-state research-progress-state" aria-live="polite"><div className="research-progress-topline"><div className="research-progress-icon"><LoaderCircle size={24} aria-hidden="true" /></div><div><p className="section-eyebrow">{t("research.progressEyebrow")}</p><h2>{t(`jobs.status${statusKey}`)}</h2></div></div><p className="research-progress-copy">{t("research.progressText")}</p><div className="research-job-status-line"><span className={`research-job-dot research-job-dot-${current.status.toLowerCase()}`} aria-hidden="true" /><strong>{t(`jobs.status${statusKey}`)}</strong><span>{t("research.jobProgress")}</span><b>{progress}%</b></div><AccessibleProgressBar className="generation-progress-track" label={t("jobs.progress")} value={progress} />{error && <div className="form-error" role="alert"><XCircle size={15} /> {error}</div>}{canCancelResearchJob(current) && <button className="secondary-button generation-cancel-button" onClick={onCancel} disabled={working}><XCircle size={15} /> {t("research.cancel")}</button>}</section>;
 }
 
-export function ResearchResultView({ result, sourcesLoadStatus, onRetrySources, working, downloadError, onDownload, onExport, onCreateAnother, t }: { result: ResearchJobResult; sourcesLoadStatus: ResearchSourcesLoadStatus; onRetrySources: () => void; working: boolean; downloadError: string; onDownload: (id: string, name: string) => void; onExport: () => void; onCreateAnother: () => void; t: Translate }) {
+export function ResearchResultView({ result, downloadability = null, sourcesLoadStatus, onRetrySources, working, downloadingRepresentationId = null, downloadError, onDownload, onExport, onCreateAnother, t }: { result: ResearchJobResult; sourcesLoadStatus: ResearchSourcesLoadStatus; onRetrySources: () => void; working: boolean; downloadError: string; onDownload: (id: string, name: string) => void; onExport: () => void; onCreateAnother: () => void; t: Translate; downloadability?: StudioRepresentationAvailabilityFacts | null; downloadingRepresentationId?: string | null }) {
   const sources = result.sources ?? [];
+  // Only the report renditions the Research result advertises are download controls, and only
+  // for as long as the API says their stored file is Ready. The gate runs after the type filter
+  // so a withheld PDF never disturbs the ready DOCX beside it, and the sources-CSV export keeps
+  // its own route (it is not a representation download).
+  const advertisedRepresentations = (result.representations ?? []).filter((representation) => ["docx", "pdf"].includes(representation.type));
+  const downloadableRepresentations = filterStudioDownloadableRepresentations(advertisedRepresentations, downloadability);
   return <section className="research-report-shell" aria-live="polite" aria-labelledby="research-result-title">
     <div className="research-result-heading"><div><p className="section-eyebrow">{t("research.resultEyebrow")}</p><h2 id="research-result-title">{result.title || t("research.resultTitle")}</h2>{result.subtitle && <p className="research-report-subtitle">{result.subtitle}</p>}</div><span className="form-success"><CheckCircle2 size={16} /> {t("research.savedToAssets")}</span></div>
     <div className="research-result-meta"><span>{t("research.sourceCount", { count: String(result.sourceCount ?? sources.length) })}</span><span>·</span><span>{t("research.references")}</span></div>
@@ -442,7 +541,25 @@ export function ResearchResultView({ result, sourcesLoadStatus, onRetrySources, 
     </div>
     <details className="research-mobile-sources"><summary><span>{t("research.sourcesTitle")}</span><strong>{sources.length}</strong></summary><ResearchSourcesPanel sources={sources} load={sourcesLoadStatus} onRetry={onRetrySources} t={t} /></details>
     {downloadError && <div className="form-error" role="alert"><XCircle size={15} /> {downloadError}</div>}
-    <div className="research-result-actions">{result.representations?.filter((representation) => ["docx", "pdf"].includes(representation.type)).map((representation) => <button className="secondary-button" key={representation.id} type="button" onClick={() => onDownload(representation.id, representation.fileName)} disabled={working}><Download size={15} /> {representation.type.toUpperCase()}</button>)}{!result.representations?.some((representation) => ["docx", "pdf"].includes(representation.type)) && <span className="research-no-downloads">{t("research.noDownloads")}</span>}<button className="secondary-button" type="button" onClick={onExport} disabled={working}><Download size={15} /> {t("research.references")} CSV</button><Link className="secondary-button" href="/assets">{t("research.openAssets")}</Link><button className="primary-button" onClick={onCreateAnother}><RefreshCw size={15} /> {t("research.createAnother")}</button></div>
+    <div className="research-result-actions">
+      {downloadableRepresentations.map((representation) => (
+        <button
+          className="secondary-button"
+          key={representation.id}
+          type="button"
+          onClick={() => onDownload(representation.id, representation.fileName)}
+          disabled={working}
+          aria-label={`${t("document.downloadLabel")} ${representation.type.toUpperCase()}`}
+          aria-busy={downloadingRepresentationId === representation.id}
+        >
+          <Download size={15} /> {representation.type.toUpperCase()}
+        </button>
+      ))}
+      {downloadableRepresentations.length === 0 && <span className="research-no-downloads">{t("research.noDownloads")}</span>}
+      <button className="secondary-button" type="button" onClick={onExport} disabled={working}><Download size={15} /> {t("research.references")} CSV</button>
+      <Link className="secondary-button" href="/assets">{t("research.openAssets")}</Link>
+      <button className="primary-button" onClick={onCreateAnother}><RefreshCw size={15} /> {t("research.createAnother")}</button>
+    </div>
   </section>;
 }
 
