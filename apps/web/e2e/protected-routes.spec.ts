@@ -48,6 +48,10 @@ test.describe("anonymous protected-route boundary", () => {
 // `taslim.auth` cookie with a one-hop 307 to /login and serve a genuine
 // API-authenticated session without an HTTP bounce.
 const newlyServerGatedRoutes = [
+  // /account gained a server-side gate on this lane (requireAuthenticatedPage
+  // in apps/web/src/app/account/page.tsx), so it returns to the verification
+  // census it was held out of in fac313f4 while the gate was still client-only.
+  { path: "/account" },
   { path: "/create" },
   { path: "/create/document" },
   { path: "/create/social" },
