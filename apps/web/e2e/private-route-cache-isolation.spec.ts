@@ -11,13 +11,20 @@ import { test, expect, apiJson, registerInUi, logoutInUi, E2E_PASSWORD, type Tes
 
 const ALPHA_MARKER = `ALPHA-SESSION-PRIVATE-${Date.now()}`;
 const BETA_MARKER = `BETA-SESSION-PRIVATE-${Date.now()}`;
+const productionServer = process.env.E2E_SERVER_MODE === "production";
 
 function expectPrivateNoStoreResponse(headers: Record<string, string>, path: string): void {
   const cacheControl = (headers["cache-control"] ?? "").toLowerCase();
   const directives = cacheControl.split(",").map((directive) => directive.trim());
 
-  for (const directive of ["private", "no-cache", "no-store", "must-revalidate", "max-age=0"]) {
-    expect(directives, `${path}: Cache-Control`).toContain(directive);
+  if (productionServer) {
+    for (const directive of ["private", "no-cache", "no-store", "must-revalidate", "max-age=0"]) {
+      expect(directives, `${path}: Cache-Control`).toContain(directive);
+    }
+  } else {
+    // Next development mode currently emits bare `no-store`; production-only
+    // directives are asserted when this spec runs against `next start`.
+    expect(directives, `${path}: Cache-Control`).toContain("no-store");
   }
   expect(directives.some((directive) => directive.startsWith("public")), `${path}: public directive`).toBe(false);
   expect(directives.some((directive) => directive.startsWith("s-maxage")), `${path}: s-maxage directive`).toBe(false);
@@ -45,11 +52,8 @@ test.describe("authenticated SSR route cache isolation", () => {
   test("workspace home document is never shared-cacheable", async ({ page }) => {
     const response = await page.goto("/chat");
     expect(response).not.toBeNull();
-    // Fail closed: no shared-cache lifetime may survive on a private route,
-    // and the document must be marked private and unindexable.
-    // `next dev` collapses every document to bare `no-store`, so the portable
-    // contract is: never shared-cacheable, always no-store, always noindex.
-    // A production `next start` answers with the full private directive list.
+    // Both modes must be non-shared-cacheable and unindexable; production runs
+    // additionally require the full private directive list from `next start`.
     expectPrivateNoStoreResponse(response!.headers(), "/chat");
   });
 
