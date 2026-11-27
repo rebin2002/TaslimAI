@@ -168,6 +168,39 @@ public sealed class MovieDirectorStoryTests : IClassFixture<MovieDirectorStoryAp
         Assert.Equal(DirectorActionStatuses.Cancelled, persistedProposal.Actions.Single().Status);
     }
 
+    [Theory]
+    [InlineData(120, null, 3_601)]
+    [InlineData(120, 3_601, null)]
+    public async Task Oversized_effective_shot_duration_is_rejected_before_director_proposal_estimation_or_persistence(
+        int projectDurationSeconds, int? sceneDurationSeconds, int? shotDurationSeconds)
+    {
+        using var client = factory.CreateClient();
+        var auth = await Register(client, "Oversized Director Shot Owner");
+        var movie = await CreateMovie(client, auth.PersonalWorkspace.Id, projectDurationSeconds);
+        await LockGuide(client, movie.Project.Id);
+        var scene = await SendWithCsrf<MovieSceneDto>(client, HttpMethod.Post, $"/api/movie-studio/projects/{movie.Project.Id}/scenes", new { title = "Long clip scene", summary = "A scene for an unsupported stored shot.", durationSeconds = sceneDurationSeconds });
+        var shot = await SendWithCsrf<MovieShotDto>(client, HttpMethod.Post, $"/api/movie-studio/scenes/{scene.Id}/shots", new { description = "An oversized shot." });
+
+        if (shotDurationSeconds.HasValue)
+        {
+            using var scope = factory.Services.CreateScope();
+            var db = scope.ServiceProvider.GetRequiredService<Taslim.Api.Persistence.TaslimDbContext>();
+            var persistedShot = await db.MovieShots.SingleAsync(item => item.Id == shot.Id);
+            persistedShot.DurationSeconds = shotDurationSeconds.Value;
+            await db.SaveChangesAsync();
+        }
+
+        using var refusal = await SendWithCsrf(client, HttpMethod.Post, $"/api/movie-director/projects/{movie.Project.Id}/proposals", new { shotId = shot.Id });
+        var body = await refusal.Content.ReadAsStringAsync();
+        Assert.Equal(HttpStatusCode.BadRequest, refusal.StatusCode);
+        Assert.Contains(MovieDurationBudgetPolicy.SingleClipDurationUnsupportedMessage, body, StringComparison.Ordinal);
+
+        using var verifyScope = factory.Services.CreateScope();
+        var verifyDb = verifyScope.ServiceProvider.GetRequiredService<Taslim.Api.Persistence.TaslimDbContext>();
+        Assert.False(await verifyDb.DirectorProposals.AnyAsync(item => item.MovieProjectId == movie.Project.Id));
+        Assert.False(await verifyDb.DirectorDecisions.AnyAsync(item => item.MovieShotId == shot.Id));
+    }
+
     [Fact]
     public async Task Malformed_story_target_is_rejected_without_mutating_story()
     {
