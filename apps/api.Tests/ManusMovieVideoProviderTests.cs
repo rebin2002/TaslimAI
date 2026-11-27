@@ -137,6 +137,72 @@ public sealed class ManusMovieVideoProviderTests
     }
 
     [Fact]
+    public async Task Retrieval_accepts_bounded_chunked_video_response_when_metadata_size_is_known()
+    {
+        var handler = new RecordingHandler(request =>
+        {
+            if (request.Method == HttpMethod.Get && request.RequestUri!.Host == "cdn.example.test")
+                return new HttpResponseMessage(HttpStatusCode.OK)
+                {
+                    Content = new ChunkedVideoContent(Encoding.UTF8.GetBytes("clip"), "video/mp4"),
+                };
+            throw new InvalidOperationException($"Unexpected request: {request.Method} {request.RequestUri}");
+        });
+        var provider = CreateProvider(handler, EnabledOptions());
+        var status = new MovieVideoProviderStatus(
+            MovieVideoProviderJobStatus.Succeeded,
+            100,
+            MetadataJson: JsonSerializer.Serialize(new
+            {
+                providerTaskId = TaskId,
+                outputUrl = "https://cdn.example.test/clip.mp4",
+                contentType = "video/mp4",
+                fileName = "clip.mp4",
+                sizeBytes = 4,
+                durationSeconds = 5,
+            }));
+
+        var output = await provider.RetrieveAsync(TaskId, status, CancellationToken.None);
+        await using var stream = await output.OpenReadAsync(CancellationToken.None);
+        using var copy = new MemoryStream();
+        await stream.CopyToAsync(copy);
+
+        Assert.Equal("clip", Encoding.UTF8.GetString(copy.ToArray()));
+        Assert.Equal(4, output.SizeBytes);
+    }
+
+    [Fact]
+    public async Task Retrieval_rejects_chunked_video_response_that_exceeds_metadata_size()
+    {
+        var handler = new RecordingHandler(request =>
+        {
+            if (request.Method == HttpMethod.Get && request.RequestUri!.Host == "cdn.example.test")
+                return new HttpResponseMessage(HttpStatusCode.OK)
+                {
+                    Content = new ChunkedVideoContent(Encoding.UTF8.GetBytes("clips"), "video/mp4"),
+                };
+            throw new InvalidOperationException($"Unexpected request: {request.Method} {request.RequestUri}");
+        });
+        var provider = CreateProvider(handler, EnabledOptions());
+        var status = new MovieVideoProviderStatus(
+            MovieVideoProviderJobStatus.Succeeded,
+            100,
+            MetadataJson: JsonSerializer.Serialize(new
+            {
+                providerTaskId = TaskId,
+                outputUrl = "https://cdn.example.test/clip.mp4",
+                contentType = "video/mp4",
+                fileName = "clip.mp4",
+                sizeBytes = 4,
+                durationSeconds = 5,
+            }));
+
+        var output = await provider.RetrieveAsync(TaskId, status, CancellationToken.None);
+        await using var stream = await output.OpenReadAsync(CancellationToken.None);
+        await Assert.ThrowsAsync<MovieVideoProviderOutputException>(() => stream.CopyToAsync(Stream.Null));
+    }
+
+    [Fact]
     public async Task Unsupported_request_and_non_video_output_are_rejected()
     {
         var provider = CreateProvider(new RecordingHandler(_ => JsonResponse($"{{\"ok\":true,\"task_id\":\"{TaskId}\"}}")), EnabledOptions());
@@ -160,6 +226,179 @@ public sealed class ManusMovieVideoProviderTests
         var output = await badProvider.RetrieveAsync(TaskId, metadataStatus, CancellationToken.None);
 
         await Assert.ThrowsAsync<MovieVideoProviderOutputException>(() => output.OpenReadAsync(CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task Retrieval_rejects_chunked_video_response_that_stops_before_the_metadata_size()
+    {
+        // sizeBytes says 4 but the body only carries "cli": a truncated download must not be
+        // handed to the transcode stage as a completed asset.
+        var handler = new RecordingHandler(request =>
+        {
+            if (request.Method == HttpMethod.Get && request.RequestUri!.Host == "cdn.example.test")
+                return new HttpResponseMessage(HttpStatusCode.OK)
+                {
+                    Content = new ChunkedVideoContent(Encoding.UTF8.GetBytes("cli"), "video/mp4"),
+                };
+            throw new InvalidOperationException($"Unexpected request: {request.Method} {request.RequestUri}");
+        });
+        var provider = CreateProvider(handler, EnabledOptions());
+        var status = new MovieVideoProviderStatus(
+            MovieVideoProviderJobStatus.Succeeded,
+            100,
+            MetadataJson: JsonSerializer.Serialize(new
+            {
+                providerTaskId = TaskId,
+                outputUrl = "https://cdn.example.test/clip.mp4",
+                contentType = "video/mp4",
+                fileName = "clip.mp4",
+                sizeBytes = 4,
+                durationSeconds = 5,
+            }));
+
+        var output = await provider.RetrieveAsync(TaskId, status, CancellationToken.None);
+        await using var stream = await output.OpenReadAsync(CancellationToken.None);
+        await Assert.ThrowsAsync<MovieVideoProviderOutputException>(() => stream.CopyToAsync(Stream.Null));
+    }
+
+    [Fact]
+    public async Task Retrieval_rejects_extra_video_bytes_observed_by_a_synchronous_read()
+    {
+        var handler = new RecordingHandler(request =>
+        {
+            if (request.Method == HttpMethod.Get && request.RequestUri!.Host == "cdn.example.test")
+                return new HttpResponseMessage(HttpStatusCode.OK)
+                {
+                    Content = new ChunkedVideoContent(Encoding.UTF8.GetBytes("clips"), "video/mp4"),
+                };
+            throw new InvalidOperationException($"Unexpected request: {request.Method} {request.RequestUri}");
+        });
+        var provider = CreateProvider(handler, EnabledOptions());
+        var status = new MovieVideoProviderStatus(
+            MovieVideoProviderJobStatus.Succeeded,
+            100,
+            MetadataJson: JsonSerializer.Serialize(new
+            {
+                providerTaskId = TaskId,
+                outputUrl = "https://cdn.example.test/clip.mp4",
+                contentType = "video/mp4",
+                fileName = "clip.mp4",
+                sizeBytes = 4,
+                durationSeconds = 5,
+            }));
+
+        var output = await provider.RetrieveAsync(TaskId, status, CancellationToken.None);
+        await using var stream = await output.OpenReadAsync(CancellationToken.None);
+        var buffer = new byte[64];
+        Assert.Equal(4, stream.Read(buffer, 0, buffer.Length));
+        Assert.Throws<MovieVideoProviderOutputException>(() => stream.Read(buffer, 0, buffer.Length));
+    }
+
+    [Fact]
+    public async Task Retrieval_rejects_a_seek_past_the_declared_video_length_instead_of_reading_invalidly()
+    {
+        var handler = new RecordingHandler(request =>
+        {
+            if (request.Method == HttpMethod.Get && request.RequestUri!.Host == "cdn.example.test")
+                return new HttpResponseMessage(HttpStatusCode.OK)
+                {
+                    Content = new StreamContent(new MemoryStream(Encoding.UTF8.GetBytes("clip")))
+                    {
+                        Headers = { ContentType = new MediaTypeHeaderValue("video/mp4") },
+                    },
+                };
+            throw new InvalidOperationException($"Unexpected request: {request.Method} {request.RequestUri}");
+        });
+        var provider = CreateProvider(handler, EnabledOptions());
+        var status = new MovieVideoProviderStatus(
+            MovieVideoProviderJobStatus.Succeeded,
+            100,
+            MetadataJson: JsonSerializer.Serialize(new
+            {
+                providerTaskId = TaskId,
+                outputUrl = "https://cdn.example.test/clip.mp4",
+                contentType = "video/mp4",
+                fileName = "clip.mp4",
+                sizeBytes = 4,
+                durationSeconds = 5,
+            }));
+
+        var output = await provider.RetrieveAsync(TaskId, status, CancellationToken.None);
+        await using var stream = await output.OpenReadAsync(CancellationToken.None);
+        Assert.True(stream.CanSeek, "expected the seekable response stream to expose seeking");
+
+        // Reading back inside the window stays legal and re-arms the over-read probe.
+        stream.Position = 1;
+        var slice = new byte[2];
+        Assert.Equal(2, await stream.ReadAsync(slice, 0, 2));
+        Assert.Equal("li", Encoding.UTF8.GetString(slice));
+
+        var pastEnd = Assert.Throws<MovieVideoProviderOutputException>(() => stream.Position = 5);
+        Assert.NotNull(pastEnd);
+        Assert.Throws<MovieVideoProviderOutputException>(() => stream.Seek(9, SeekOrigin.Begin));
+    }
+
+    [Fact]
+    public async Task Retrieval_disposes_response_when_opening_the_response_stream_fails()
+    {
+        var content = new StreamOpenFailureContent();
+        var handler = new RecordingHandler(request =>
+        {
+            if (request.Method == HttpMethod.Get && request.RequestUri!.Host == "cdn.example.test")
+                return new HttpResponseMessage(HttpStatusCode.OK) { Content = content };
+            throw new InvalidOperationException($"Unexpected request: {request.Method} {request.RequestUri}");
+        });
+        var provider = CreateProvider(handler, EnabledOptions());
+        var status = new MovieVideoProviderStatus(
+            MovieVideoProviderJobStatus.Succeeded,
+            100,
+            MetadataJson: JsonSerializer.Serialize(new
+            {
+                providerTaskId = TaskId,
+                outputUrl = "https://cdn.example.test/clip.mp4",
+                contentType = "video/mp4",
+                fileName = "clip.mp4",
+                sizeBytes = 4,
+                durationSeconds = 5,
+            }));
+
+        var output = await provider.RetrieveAsync(TaskId, status, CancellationToken.None);
+        await Assert.ThrowsAsync<IOException>(() => output.OpenReadAsync(CancellationToken.None));
+
+        Assert.True(content.WasDisposed);
+        Assert.Single(handler.Requests);
+    }
+
+    [Fact]
+    public async Task Retrieval_disposes_response_even_when_inner_stream_async_disposal_fails()
+    {
+        var content = new TrackingStreamContent(new AsyncDisposeFailureStream(Encoding.UTF8.GetBytes("clip")));
+        var handler = new RecordingHandler(request =>
+        {
+            if (request.Method == HttpMethod.Get && request.RequestUri!.Host == "cdn.example.test")
+                return new HttpResponseMessage(HttpStatusCode.OK) { Content = content };
+            throw new InvalidOperationException($"Unexpected request: {request.Method} {request.RequestUri}");
+        });
+        var provider = CreateProvider(handler, EnabledOptions());
+        var status = new MovieVideoProviderStatus(
+            MovieVideoProviderJobStatus.Succeeded,
+            100,
+            MetadataJson: JsonSerializer.Serialize(new
+            {
+                providerTaskId = TaskId,
+                outputUrl = "https://cdn.example.test/clip.mp4",
+                contentType = "video/mp4",
+                fileName = "clip.mp4",
+                sizeBytes = 4,
+                durationSeconds = 5,
+            }));
+
+        var output = await provider.RetrieveAsync(TaskId, status, CancellationToken.None);
+        var stream = await output.OpenReadAsync(CancellationToken.None);
+        await Assert.ThrowsAsync<IOException>(() => stream.DisposeAsync().AsTask());
+
+        Assert.True(content.WasDisposed);
+        Assert.Single(handler.Requests);
     }
 
     private static ManusMovieVideoProvider CreateProvider(HttpMessageHandler handler, MovieVideoOptions options) =>
@@ -231,6 +470,93 @@ public sealed class ManusMovieVideoProviderTests
         content.Headers.ContentType = new MediaTypeHeaderValue(contentType);
         content.Headers.ContentLength = bytes.Length;
         return new HttpResponseMessage(HttpStatusCode.OK) { Content = content };
+    }
+
+    private sealed class StreamOpenFailureContent : HttpContent
+    {
+        public bool WasDisposed { get; private set; }
+
+        public StreamOpenFailureContent() => Headers.ContentType = new MediaTypeHeaderValue("video/mp4");
+
+        protected override Task<Stream> CreateContentReadStreamAsync() =>
+            Task.FromException<Stream>(new IOException("synthetic stream-open failure"));
+
+        protected override Task<Stream> CreateContentReadStreamAsync(CancellationToken cancellationToken) =>
+            Task.FromException<Stream>(new IOException("synthetic stream-open failure"));
+
+        protected override Task SerializeToStreamAsync(Stream stream, TransportContext? context) =>
+            Task.FromException(new IOException("synthetic stream-open failure"));
+
+        protected override bool TryComputeLength(out long length)
+        {
+            length = 0;
+            return false;
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing) WasDisposed = true;
+            base.Dispose(disposing);
+        }
+    }
+
+    private sealed class TrackingStreamContent : HttpContent
+    {
+        private readonly Stream stream;
+        public bool WasDisposed { get; private set; }
+
+        public TrackingStreamContent(Stream stream)
+        {
+            this.stream = stream;
+            Headers.ContentType = new MediaTypeHeaderValue("video/mp4");
+        }
+
+        protected override Task<Stream> CreateContentReadStreamAsync() => Task.FromResult(stream);
+
+        protected override Task<Stream> CreateContentReadStreamAsync(CancellationToken cancellationToken) => Task.FromResult(stream);
+
+        protected override Task SerializeToStreamAsync(Stream destination, TransportContext? context) => stream.CopyToAsync(destination);
+
+        protected override bool TryComputeLength(out long length)
+        {
+            length = 0;
+            return false;
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing) WasDisposed = true;
+            base.Dispose(disposing);
+        }
+    }
+
+    private sealed class AsyncDisposeFailureStream(byte[] bytes) : MemoryStream(bytes)
+    {
+        public override ValueTask DisposeAsync()
+        {
+            base.Dispose();
+            return ValueTask.FromException(new IOException("synthetic stream-disposal failure"));
+        }
+    }
+
+    private sealed class ChunkedVideoContent : HttpContent
+    {
+        private readonly byte[] bytes;
+
+        public ChunkedVideoContent(byte[] bytes, string contentType)
+        {
+            this.bytes = bytes;
+            Headers.ContentType = new MediaTypeHeaderValue(contentType);
+        }
+
+        protected override Task SerializeToStreamAsync(Stream stream, TransportContext? context) =>
+            stream.WriteAsync(bytes).AsTask();
+
+        protected override bool TryComputeLength(out long length)
+        {
+            length = 0;
+            return false;
+        }
     }
 
     private sealed class RecordingHandler(Func<HttpRequestMessage, HttpResponseMessage> responseFactory) : HttpMessageHandler

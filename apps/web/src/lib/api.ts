@@ -3,6 +3,7 @@ import { API_URL, assetFileUrl, assetRepresentationUrl } from "./apiBase";
 import { awaitWithChatStreamWatchdog, CHAT_STREAM_WATCHDOG_TIMEOUT_MS, ChatStreamTransportError } from "./chatStreamTransport";
 import { collectAllProjectPages } from "./projectListPagination";
 import { isAbortError } from "./requestLifecycle";
+import { getUserUploadSizeError } from "./fileUploadLimits";
 import {
   isIdempotentRead,
   isThrottleRetryStatus,
@@ -1654,7 +1655,9 @@ export const api = {
     const query = params.toString();
     return request<StoredFile[]>(`/api/workspaces/${workspaceId}/files${query ? `?${query}` : ""}`);
   },
-  uploadFile: (workspaceId: string, file: File, scope: { projectId?: string; conversationId?: string } = {}) => {
+  uploadFile: async (workspaceId: string, file: File, scope: { projectId?: string; conversationId?: string } = {}) => {
+    const sizeError = getUserUploadSizeError(file.size);
+    if (sizeError) throw new ApiError(400, sizeError, undefined, "FILE_TOO_LARGE");
     const form = new FormData();
     form.append("file", file);
     if (scope.projectId) form.append("projectId", scope.projectId);
