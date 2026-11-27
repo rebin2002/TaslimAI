@@ -14,6 +14,12 @@ public static class ProductionConfigurationValidator
         if (string.IsNullOrWhiteSpace(connectionString) || connectionString.Contains("change-me", StringComparison.OrdinalIgnoreCase))
             throw new InvalidOperationException("Production database configuration is missing or uses a placeholder value.");
 
+        var migrationTimeoutSeconds = configuration.GetValue(
+            "Database:MigrationTimeoutSeconds",
+            DatabaseMigrator.DefaultTimeoutSeconds);
+        if (migrationTimeoutSeconds is < DatabaseMigrator.MinimumTimeoutSeconds or > DatabaseMigrator.MaximumTimeoutSeconds)
+            throw new InvalidOperationException($"Production Database:MigrationTimeoutSeconds must be between {DatabaseMigrator.MinimumTimeoutSeconds} and {DatabaseMigrator.MaximumTimeoutSeconds} seconds.");
+
         var origins = configuration.GetSection("AllowedOrigins").Get<string[]>() ?? [];
         if (origins.Length == 0)
             throw new InvalidOperationException("Production AllowedOrigins must contain at least one HTTPS origin.");

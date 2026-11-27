@@ -188,7 +188,7 @@ jobs:
           Files__LocalRootPath: ${{ github.workspace }}/.e2e-files
         run: |
           mkdir -p .e2e-files
-          nohup dotnet run --project apps/api --urls http://127.0.0.1:5000 > /tmp/taslim-api.log 2>&1 &
+          nohup dotnet run --no-build --project apps/api --urls http://127.0.0.1:5000 > /tmp/taslim-api.log 2>&1 &
           bash scripts/api-health-smoke.sh http://127.0.0.1:5000
       - name: Run browser tests
         env:
