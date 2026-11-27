@@ -24,10 +24,12 @@ test.describe("Full movie module server authentication", () => {
     await expect(page.locator(".movie-full-workspace")).toHaveCount(0);
   });
   test("preserves the room path and repeated query values through sign-in", async ({ request }) => {
-    const room = "/create/movie/Test%20Project/story?view=notes&view=cast%20%26%20crew&scene=act%2Fone";
-    const response = await request.get(new URL(room, webUrl).toString(), { maxRedirects: 0 });
-    expect(response.status()).toBe(307);
-    expect(response.headers().location).toBe(`/login?next=${encodeURIComponent(room)}`);
+    for (const project of ["Test%20Project", "100%25", "literal%2520"]) {
+      const room = `/create/movie/${project}/story?view=notes&view=cast%20%26%20crew&scene=act%2Fone`;
+      const response = await request.get(new URL(room, webUrl).toString(), { maxRedirects: 0 });
+      expect(response.status()).toBe(307);
+      expect(response.headers().location).toBe(`/login?next=${encodeURIComponent(room)}`);
+    }
   });
 
   test("redirects invalid session cookies to sign-in", async ({ page, context }) => {
