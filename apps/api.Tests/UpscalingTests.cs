@@ -106,42 +106,57 @@ public sealed class UpscalingTests : IClassFixture<GenerationJobsNoWorkerFactory
     }
 
     [Fact]
-    public async Task Workspace_member_cannot_submit_another_members_private_asset_for_upscaling()
+    public async Task Create_rejects_archived_source_asset_without_persisting_a_job()
     {
-        using var ownerClient = factory.CreateClient();
-        var owner = await Register(ownerClient, $"upscale-private-owner-{Guid.NewGuid():N}@example.com");
-        var source = await CreateSourceAsset(owner);
+        using var client = factory.CreateClient();
+        var auth = await Register(client, $"upscale-archived-{Guid.NewGuid():N}@example.com");
+        var source = await CreateSourceAsset(auth);
 
-        using var memberClient = factory.CreateClient();
-        var member = await Register(memberClient, $"upscale-private-member-{Guid.NewGuid():N}@example.com");
-        using (var scope = factory.Services.CreateScope())
-        {
-            var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
-            db.WorkspaceMembers.Add(new WorkspaceMember
-            {
-                Id = Guid.NewGuid(),
-                WorkspaceId = owner.PersonalWorkspace.Id,
-                UserId = member.User.Id,
-                Role = WorkspaceRole.Member,
-                JoinedAt = DateTime.UtcNow,
-            });
-            await db.SaveChangesAsync();
-        }
+        // Archiving is the supported way to retire an asset: it leaves the default
+        // asset library and must stop being usable as the source of new upscaling work.
+        var archive = await SendWithCsrf(client, HttpMethod.Post, $"/api/assets/{source.Id}/archive", null);
+        Assert.Equal(HttpStatusCode.OK, archive.StatusCode);
+        var archived = await archive.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal("Archived", archived.GetProperty("status").GetString());
+        Assert.True(archived.GetProperty("archivedAt").ValueKind != JsonValueKind.Null);
 
-        var response = await SendWithCsrf(memberClient, HttpMethod.Post, "/api/upscaling/jobs", new
+        var response = await SendWithCsrf(client, HttpMethod.Post, "/api/upscaling/jobs", new
         {
-            workspaceId = owner.PersonalWorkspace.Id,
+            workspaceId = auth.PersonalWorkspace.Id,
             sourceAssetId = source.Id,
             targetResolution = "1080p",
-        });
+        }, $"upscale-archived-{Guid.NewGuid():N}");
 
         Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
         var body = await response.Content.ReadFromJsonAsync<JsonElement>();
-        Assert.Equal(UpscalingJobErrorCodes.SourceAssetNotFound, body.GetProperty("error").GetProperty("code").GetString());
+        Assert.Equal(UpscalingJobErrorCodes.SourceAssetUnsupported, body.GetProperty("error").GetProperty("code").GetString());
+        Assert.DoesNotContain("Provider", await response.Content.ReadAsStringAsync());
 
-        using var verifyScope = factory.Services.CreateScope();
-        var verifyDb = verifyScope.ServiceProvider.GetRequiredService<TaslimDbContext>();
-        Assert.False(await verifyDb.UpscalingJobs.AnyAsync(job => job.SourceAssetId == source.Id && job.CreatedByUserId == member.User.Id));
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        Assert.Equal(0, await db.UpscalingJobs.CountAsync(job => job.SourceAssetId == source.Id));
+    }
+
+    [Fact]
+    public async Task Create_admits_the_same_source_asset_again_once_it_is_restored()
+    {
+        using var client = factory.CreateClient();
+        var auth = await Register(client, $"upscale-restored-{Guid.NewGuid():N}@example.com");
+        var source = await CreateSourceAsset(auth);
+
+        Assert.Equal(HttpStatusCode.OK, (await SendWithCsrf(client, HttpMethod.Post, $"/api/assets/{source.Id}/archive", null)).StatusCode);
+        Assert.Equal(HttpStatusCode.OK, (await SendWithCsrf(client, HttpMethod.Post, $"/api/assets/{source.Id}/restore", null)).StatusCode);
+
+        var job = await SendWithCsrf<UpscalingJobDto>(client, HttpMethod.Post, "/api/upscaling/jobs", new
+        {
+            workspaceId = auth.PersonalWorkspace.Id,
+            sourceAssetId = source.Id,
+            targetResolution = "4k",
+        }, $"upscale-restored-{Guid.NewGuid():N}");
+
+        Assert.Equal(source.Id, job.SourceAssetId);
+        Assert.Equal("4k", job.TargetResolution);
+        Assert.Equal("Pending", job.Status);
     }
 
     [Fact]

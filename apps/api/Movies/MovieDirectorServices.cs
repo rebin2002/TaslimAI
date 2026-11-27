@@ -599,9 +599,13 @@ public sealed class MovieDirectorService(
         if (shot is null) throw new DirectorValidationException("Select a shot before creating a Director proposal.");
         if (request.BudgetLimitUsd is < 0) throw new DirectorValidationException("Budget limit cannot be negative.");
 
+        var scene = context.Context.Scenes.First(item => item.Shots.Any(candidate => candidate.Id == shot.Id));
+        var durationSeconds = shot.DurationSeconds ?? scene.DurationSeconds ?? Math.Min(movie.DurationSeconds, 60);
+        if (!MovieDurationBudgetPolicy.IsSupportedSingleClipDuration(durationSeconds))
+            throw new DirectorValidationException(MovieDurationBudgetPolicy.SingleClipDurationUnsupportedMessage);
         var recommendation = qualityPlanner.Recommend(new DirectorShotPlanningRequest(
             shot.Id, request.Importance, request.Complexity, request.BudgetSensitivity,
-            shot.DurationSeconds ?? Math.Min(movie.DurationSeconds, 60), context.Context.Guide.ContinuityRules.Length > 0,
+            durationSeconds, context.Context.Guide.ContinuityRules.Length > 0,
             request.RequestedQuality, request.BudgetLimitUsd));
         var rationale = recommendation.Reasons.ToArray();
         var now = DateTime.UtcNow;
@@ -619,7 +623,7 @@ public sealed class MovieDirectorService(
         {
             Id = Guid.NewGuid(), WorkspaceId = movie.WorkspaceId, MovieProjectId = movie.Id, DirectorProposalId = proposal.Id,
             ActionType = DirectorActionTypes.GenerateShot, Status = DirectorActionStatuses.PendingApproval, ApprovalRequired = true,
-            PayloadJson = JsonSerializer.Serialize(new DirectorGenerateShotPayload(shot.Id, recommendation.QualityLevel, shot.DurationSeconds ?? 60, recommendation.EstimatedCostUsd)), CreatedAt = now,
+            PayloadJson = JsonSerializer.Serialize(new DirectorGenerateShotPayload(shot.Id, recommendation.QualityLevel, durationSeconds, recommendation.EstimatedCostUsd)), CreatedAt = now,
         };
         proposal.Actions.Add(action);
         db.DirectorProposals.Add(proposal);
@@ -818,11 +822,8 @@ public sealed class MovieDirectorService(
         }
         var executor = executors.FirstOrDefault(item => string.Equals(item.ActionType, action.ActionType, StringComparison.OrdinalIgnoreCase));
         if (executor is null) throw new DirectorActionExecutionException("DIRECTOR_ACTION_UNSUPPORTED", "This Director action is not available.");
-        var startedAt = DateTime.UtcNow;
-        if (!await TryClaimReadyActionAsync(db, action.Id, startedAt, cancellationToken))
-            throw new DirectorActionExecutionException("DIRECTOR_ACTION_ALREADY_RUNNING", "This Director action is already running or has already completed.");
         action.Status = DirectorActionStatuses.Running;
-        action.StartedAt = startedAt;
+        action.StartedAt = DateTime.UtcNow;
         db.DirectorHistoryEvents.Add(new DirectorHistoryEvent { Id = Guid.NewGuid(), WorkspaceId = action.WorkspaceId, DirectorActionId = action.Id, DirectorProposalId = action.DirectorProposalId, EventType = DirectorHistoryEventTypes.ActionStarted, CreatedAt = DateTime.UtcNow });
         await db.SaveChangesAsync(cancellationToken);
 
@@ -839,22 +840,6 @@ public sealed class MovieDirectorService(
         db.DirectorHistoryEvents.Add(new DirectorHistoryEvent { Id = Guid.NewGuid(), WorkspaceId = action.WorkspaceId, DirectorActionId = action.Id, DirectorProposalId = action.DirectorProposalId, EventType = execution.Succeeded ? DirectorHistoryEventTypes.ActionSucceeded : DirectorHistoryEventTypes.ActionFailed, SafeDetailsJson = JsonSerializer.Serialize(new { execution.FailureCode }), CreatedAt = now });
         await db.SaveChangesAsync(cancellationToken);
         return new DirectorActionExecutionResponse(ToDto(action), ToDto(result));
-    }
-
-    internal static async Task<bool> TryClaimReadyActionAsync(
-        TaslimDbContext db,
-        Guid actionId,
-        DateTime startedAt,
-        CancellationToken cancellationToken)
-    {
-        var affected = await db.DirectorActions
-            .Where(item => item.Id == actionId
-                && item.Status == DirectorActionStatuses.Ready
-                && item.Proposal.Status == DirectorProposalStatuses.Approved)
-            .ExecuteUpdateAsync(setters => setters
-                .SetProperty(item => item.Status, DirectorActionStatuses.Running)
-                .SetProperty(item => item.StartedAt, startedAt), cancellationToken);
-        return affected == 1;
     }
 
     private async Task<DirectorProposalDto?> SetProposalStatusAsync(Guid userId, Guid proposalId, bool approve, CancellationToken cancellationToken)
@@ -1110,7 +1095,13 @@ public sealed class MovieDirectorActionExecutor(TaslimDbContext db, IMovieStudio
         var shot = await db.MovieShots.AsNoTracking().Include(item => item.Scene).ThenInclude(item => item.MovieProject)
             .FirstOrDefaultAsync(item => item.Id == payload.ShotId && item.Scene.MovieProjectId == action.MovieProjectId && item.Scene.MovieProject.WorkspaceId == action.WorkspaceId, cancellationToken);
         if (shot is null) return new(false, "DIRECTOR_ACTION_TARGET_INVALID", "The Director shot target is invalid.", null);
-        var duration = Math.Clamp(shot.DurationSeconds ?? shot.Scene.DurationSeconds ?? Math.Min(shot.Scene.MovieProject.DurationSeconds, 60), 1, 3600);
+        var duration = shot.DurationSeconds ?? shot.Scene.DurationSeconds ?? Math.Min(shot.Scene.MovieProject.DurationSeconds, 60);
+        if (!MovieDurationBudgetPolicy.IsSupportedSingleClipDuration(duration))
+            return new(
+                false,
+                MovieDurationBudgetPolicy.SingleClipDurationUnsupportedCode,
+                MovieDurationBudgetPolicy.SingleClipDurationUnsupportedMessage,
+                null);
         var estimate = costEstimator.Estimate(new GenerationCostEstimationRequest(provider.Key, VideoDurationSeconds: duration * QualityMultiplier(payload.QualityLevel)));
         var result = await movies.GenerateShotAsync(executingUserId, shot.Id, new MovieStudioGenerationRequest($"Director: {payload.QualityLevel}", estimate.AmountUsd, estimate), cancellationToken, action.IdempotencyKey ?? $"director:{action.Id:N}");
         return result is null

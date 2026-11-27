@@ -132,6 +132,18 @@ public static class MovieShotProductionContractSerialization
 
 public static class MovieShotProductionContractValidation
 {
+    // The runtime policy is the single source of the shot ceiling; the DTO validator must not carry a
+    // second literal that can drift from it.
+    private const int MaximumShotSeconds = MovieDurationBudgetPolicy.MaxShotDurationSeconds;
+
+    /// <summary>
+    /// Every bound below is measured on the value exactly as submitted, not on a trimmed view of it.
+    /// The shot write path stores the submitted object verbatim
+    /// (<c>MovieStudioService.AddShotAsync</c> and <c>MovieStudioService.UpdateShotPlanningAsync</c>
+    /// serialize it without trimming) and later returns it as
+    /// <c>productionContract.targetOutputRequirements</c>, so a trimmed view describes a different
+    /// string than the one that is persisted and cannot be the enforcement basis.
+    /// </summary>
     public static string? Validate(
         int? durationSeconds,
         string? narrativeImportance,
@@ -141,7 +153,7 @@ public static class MovieShotProductionContractValidation
         string? upscaleSuitability,
         MovieShotTargetOutputRequirements? targetOutputRequirements)
     {
-        if (durationSeconds is < 1 or > 3600) return "Shot duration must be between 1 second and 60 minutes.";
+        if (durationSeconds is < 1 or > MaximumShotSeconds) return $"Shot duration must be between 1 second and {MaximumShotSeconds / 60} minutes.";
         if (!IsSupportedOptional(narrativeImportance, MovieShotNarrativeImportance.Supported)) return "Choose a supported narrative importance.";
         if (!IsSupportedOptional(continuitySensitivity, MovieShotContinuitySensitivities.Supported)) return "Choose a supported continuity sensitivity.";
         if (!IsSupportedOptional(upscaleSuitability, MovieShotUpscaleSuitabilities.Supported)) return "Choose a supported upscale suitability.";
@@ -150,21 +162,21 @@ public static class MovieShotProductionContractValidation
         {
             if (!MovieShotComplexityLevels.Supported.Contains(productionComplexity.Level ?? string.Empty)) return "Choose a supported production complexity level.";
             if (productionComplexity.Drivers is { Count: > 16 }) return "Production complexity supports at most 16 drivers.";
-            if (productionComplexity.Drivers?.Any(driver => string.IsNullOrWhiteSpace(driver) || driver.Trim().Length > 120) == true) return "Production complexity drivers must be 120 characters or fewer.";
-            if (productionComplexity.Notes?.Trim().Length > 2_000) return "Production complexity notes must be 2,000 characters or fewer.";
+            if (productionComplexity.Drivers?.Any(driver => string.IsNullOrWhiteSpace(driver) || Exceeds(driver, 120)) == true) return "Production complexity drivers must be 120 characters or fewer.";
+            if (Exceeds(productionComplexity.Notes, 2_000)) return "Production complexity notes must be 2,000 characters or fewer.";
         }
 
         if (qualityRequirements is not null)
         {
             if (!MovieQualityLevels.Supported.Contains(qualityRequirements.MinimumLevel ?? string.Empty)) return "Choose a supported minimum quality level.";
             if (qualityRequirements.AcceptanceCriteria is { Count: > 16 }) return "Quality requirements support at most 16 acceptance criteria.";
-            if (qualityRequirements.AcceptanceCriteria?.Any(criteria => string.IsNullOrWhiteSpace(criteria) || criteria.Trim().Length > 500) == true) return "Quality acceptance criteria must be 500 characters or fewer.";
-            if (qualityRequirements.Notes?.Trim().Length > 2_000) return "Quality requirement notes must be 2,000 characters or fewer.";
+            if (qualityRequirements.AcceptanceCriteria?.Any(criteria => string.IsNullOrWhiteSpace(criteria) || Exceeds(criteria, 500)) == true) return "Quality acceptance criteria must be 500 characters or fewer.";
+            if (Exceeds(qualityRequirements.Notes, 2_000)) return "Quality requirement notes must be 2,000 characters or fewer.";
         }
 
         if (targetOutputRequirements is not null)
         {
-            if (targetOutputRequirements.AspectRatio?.Trim().Length > 20) return "Target output aspect ratio must be 20 characters or fewer.";
+            if (Exceeds(targetOutputRequirements.AspectRatio, 20)) return "Target output aspect ratio must be 20 characters or fewer.";
             if (new[]
                 {
                     targetOutputRequirements.ResolutionIntent,
@@ -172,12 +184,14 @@ public static class MovieShotProductionContractValidation
                     targetOutputRequirements.ColorIntent,
                     targetOutputRequirements.AudioIntent,
                     targetOutputRequirements.FormatIntent,
-                }.Any(value => value?.Trim().Length > 120)) return "Target output intents must be 120 characters or fewer.";
-            if (targetOutputRequirements.Notes?.Trim().Length > 2_000) return "Target output notes must be 2,000 characters or fewer.";
+                }.Any(value => Exceeds(value, 120))) return "Target output intents must be 120 characters or fewer.";
+            if (Exceeds(targetOutputRequirements.Notes, 2_000)) return "Target output notes must be 2,000 characters or fewer.";
         }
 
         return null;
     }
+
+    private static bool Exceeds(string? value, int bound) => value is not null && value.Length > bound;
 
     private static bool IsSupportedOptional(string? value, IReadOnlySet<string> supported) =>
         string.IsNullOrWhiteSpace(value) || supported.Contains(value.Trim());
