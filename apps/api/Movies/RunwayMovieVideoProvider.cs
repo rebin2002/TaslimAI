@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Net;
+using System.Net.Sockets;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using Microsoft.Extensions.Options;
@@ -41,8 +42,28 @@ public sealed class RunwayMovieVideoProvider(
     public async Task<MovieVideoSubmission> SubmitAsync(MovieVideoGenerationRequest request, CancellationToken cancellationToken)
     {
         EnsureAvailable();
+        // A reference image is addressed by an object-store URL whose scope is
+        // enforced by the shared download policy. A refusal there is an admission
+        // decision about this request, so it has to surface as the same
+        // established unsupported-request outcome for permanent policy rejection.
+        // Temporary resolver failures are not request rejection: preserve their
+        // transient provider-unavailable classification and never submit the POST.
         if (Uri.TryCreate(request.SourceImageUri, UriKind.Absolute, out var sourceUri) && sourceUri.Scheme == Uri.UriSchemeHttps)
-            await urlPolicy.EnsureSafeAsync(sourceUri, cancellationToken);
+        {
+            try { await urlPolicy.EnsureSafeAsync(sourceUri, cancellationToken); }
+            catch (InvalidDataException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw new OperationCanceledException(cancellationToken);
+            }
+            catch (InvalidDataException exception) when (IsTransientReferenceUrlResolutionFailure(exception))
+            {
+                throw new MovieVideoProviderException(GenerationJobErrorCodes.MovieProviderUnavailable, true);
+            }
+            catch (InvalidDataException)
+            {
+                throw new MovieVideoProviderException(GenerationJobErrorCodes.MovieProviderUnsupportedRequest, false);
+            }
+        }
         var payload = BuildPayload(request, out var endpoint);
         var response = await SendJsonWithRetryAsync(HttpMethod.Post, endpoint, payload, cancellationToken);
         var task = Deserialize<RunwayTaskResponse>(response) ?? throw Failure();
@@ -181,6 +202,14 @@ public sealed class RunwayMovieVideoProvider(
         if (request.Operation is not (MovieStudioOperations.QuickMovie or MovieStudioOperations.SceneClip))
             throw new MovieVideoProviderException(GenerationJobErrorCodes.MovieGenerationFailed, false);
         if (!string.IsNullOrWhiteSpace(request.ContinuationProviderJobId))
+            throw new MovieVideoProviderException(GenerationJobErrorCodes.MovieProviderUnsupportedRequest, false);
+        // The shared Movie contract carries approved keyframe/reference inputs, but this
+        // adapter has no provider-bound representation for them. Never silently turn a
+        // reference-backed production request into text-to-video.
+        if (!string.IsNullOrWhiteSpace(request.ReferencePackageJson)
+            || !string.IsNullOrWhiteSpace(request.FirstFrameImageUri)
+            || !string.IsNullOrWhiteSpace(request.LastFrameImageUri)
+            || request.ReferenceImages is { Count: > 0 })
             throw new MovieVideoProviderException(GenerationJobErrorCodes.MovieProviderUnsupportedRequest, false);
         if (request.DurationSeconds is < 2 or > 10)
             throw new MovieVideoProviderException(GenerationJobErrorCodes.MovieProviderUnsupportedRequest, false);
@@ -382,6 +411,10 @@ public sealed class RunwayMovieVideoProvider(
         try { return JsonSerializer.Deserialize<T>(body, JsonOptions); }
         catch (JsonException) { throw Failure(); }
     }
+
+    private static bool IsTransientReferenceUrlResolutionFailure(InvalidDataException exception) =>
+        exception.InnerException is SocketException socketException
+        && socketException.SocketErrorCode is SocketError.TryAgain or SocketError.TimedOut;
 
     private static MovieVideoProviderException Failure() => new(GenerationJobErrorCodes.MovieGenerationFailed, false);
     private static string GenerationJobCodes() => GenerationJobErrorCodes.MovieGenerationFailed;

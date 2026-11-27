@@ -57,17 +57,7 @@ public sealed class ImageGenerationDedupPublicationTests : IClassFixture<ImageGe
             await db.SaveChangesAsync();
         }
 
-        var response = await SendWithCsrf(client, new
-        {
-            workspaceId = auth.PersonalWorkspace.Id,
-            description = "A deterministic image whose storage reference must remain safe.",
-            style = "product",
-            aspectRatio = "square",
-            quality = "standard",
-        });
-        Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
-        var created = (await response.Content.ReadFromJsonAsync<CreateImageGenerationResponse>())!;
-        var terminal = await WaitForTerminal(client, created.Job.Id);
+        var terminal = await GenerateImage(client, auth.PersonalWorkspace.Id, "A deterministic image whose storage reference must remain safe.");
 
         Assert.Equal("Failed", terminal.Status);
         Assert.Equal(GenerationJobErrorCodes.ImageOutputStorageFailed, terminal.ErrorCode);
@@ -77,8 +67,42 @@ public sealed class ImageGenerationDedupPublicationTests : IClassFixture<ImageGe
         var verifyDb = verifyScope.ServiceProvider.GetRequiredService<TaslimDbContext>();
         var existingFile = await verifyDb.StoredFiles.AsNoTracking().SingleAsync(file => file.Id == existingFileId);
         Assert.Equal(StoredFileStatus.Ready, existingFile.Status);
-        Assert.False(await verifyDb.Assets.AsNoTracking().AnyAsync(asset => asset.SourceGenerationJobId == created.Job.Id));
-        Assert.False(await verifyDb.GenerationJobOutputs.AsNoTracking().AnyAsync(output => output.GenerationJobId == created.Job.Id));
+        Assert.False(await verifyDb.Assets.AsNoTracking().AnyAsync(asset => asset.SourceGenerationJobId == terminal.Id));
+        Assert.False(await verifyDb.GenerationJobOutputs.AsNoTracking().AnyAsync(output => output.GenerationJobId == terminal.Id));
+    }
+
+    [Fact]
+    public async Task Image_jobs_reuse_the_ready_file_from_a_successful_publication()
+    {
+        using var client = factory.CreateClient();
+        var auth = await Register(client, $"image-dedup-committed-{Guid.NewGuid():N}@example.com");
+        var workspaceId = auth.PersonalWorkspace.Id;
+        var first = await GenerateImage(client, workspaceId, "First deterministic product image.");
+        Assert.Equal("Succeeded", first.Status);
+        var storedFileId = Assert.Single(first.Outputs).StoredFileId;
+        Assert.NotNull(storedFileId);
+
+        var second = await GenerateImage(client, workspaceId, "Second deterministic product image using the same fixture bytes.");
+        Assert.Equal("Succeeded", second.Status);
+        Assert.NotEqual(first.Id, second.Id);
+        Assert.Equal(storedFileId, Assert.Single(second.Outputs).StoredFileId);
+
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        Assert.Equal(2, await db.Assets.CountAsync(asset => asset.StoredFileId == storedFileId
+            && (asset.SourceGenerationJobId == first.Id || asset.SourceGenerationJobId == second.Id)));
+        Assert.True(await db.StoredFiles.AnyAsync(file => file.Id == storedFileId && file.Status == StoredFileStatus.Ready));
+    }
+
+    private static async Task<GenerationJobDto> GenerateImage(HttpClient client, Guid workspaceId, string description)
+    {
+        using var response = await SendWithCsrf(client, new
+        {
+            workspaceId, description, style = "product", aspectRatio = "square", quality = "standard",
+        });
+        Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
+        var created = (await response.Content.ReadFromJsonAsync<CreateImageGenerationResponse>())!;
+        return await WaitForTerminal(client, created.Job.Id);
     }
 
     private static async Task<AuthResponse> Register(HttpClient client, string email)

@@ -68,8 +68,11 @@ public sealed class MovieCollaborationService(TaslimDbContext db, WorkspaceAcces
             .Where(item => item.MovieProjectId == movieProjectId).OrderByDescending(item => item.IsProjectOwner).ThenBy(item => item.CreatedAt).ToListAsync(cancellationToken);
         var comments = await db.MovieComments.AsNoTracking().Include(item => item.AuthorUser).Include(item => item.Mentions).ThenInclude(item => item.MentionedUser)
             .Where(item => item.MovieProjectId == movieProjectId).OrderBy(item => item.CreatedAt).ToListAsync(cancellationToken);
+        // The review feed is the team-review audit trail: newest first, with equal
+        // timestamps ranked by descending id - the same tie rule the operations
+        // dashboard audit feed pins - so repeated reads never reorder tied rows.
         var reviews = await db.MovieReviews.AsNoTracking().Include(item => item.RequestedByUser).Include(item => item.ReviewerUser)
-            .Where(item => item.MovieProjectId == movieProjectId).OrderByDescending(item => item.CreatedAt).ToListAsync(cancellationToken);
+            .Where(item => item.MovieProjectId == movieProjectId).OrderByDescending(item => item.CreatedAt).ThenByDescending(item => item.Id).ToListAsync(cancellationToken);
         var assignments = await db.MovieProductionAssignments.AsNoTracking().Include(item => item.AssigneeUser).Include(item => item.AssignedByUser)
             .Where(item => item.MovieProjectId == movieProjectId).OrderBy(item => item.Status).ThenBy(item => item.DueAt).ToListAsync(cancellationToken);
         var credits = await db.MovieProductionCredits.AsNoTracking().Include(item => item.User).Where(item => item.MovieProjectId == movieProjectId)
@@ -113,9 +116,7 @@ public sealed class MovieCollaborationService(TaslimDbContext db, WorkspaceAcces
         if (!await workspaceAccess.IsMemberAsync(member.UserId, movie.WorkspaceId, cancellationToken)) throw new MovieCollaborationValidationException("The user is no longer a member of the movie workspace.");
         member.Role = request.Role.Trim();
         member.UpdatedAt = DateTime.UtcNow;
-        db.MovieTeamMemberPermissions.RemoveRange(member.PermissionOverrides);
-        member.PermissionOverrides = [];
-        ApplyOverrides(member, request.Permissions ?? [], request.PermissionOverrides ?? []);
+        ReconcileOverrides(member, request.Permissions ?? [], request.PermissionOverrides ?? []);
         await db.SaveChangesAsync(cancellationToken);
         return await LoadMemberDtoAsync(member.Id, cancellationToken);
     }
@@ -182,10 +183,21 @@ public sealed class MovieCollaborationService(TaslimDbContext db, WorkspaceAcces
         await authorization.RequireAsync(userId, movieProjectId, review.IsFinal ? MovieOperationalActions.FinalReviewDecision : MovieOperationalActions.ReviewsDecision, cancellationToken);
         if (!MovieReviewStatuses.Decisions.Contains(request.Status)) throw new MovieCollaborationValidationException("Choose Approved, ChangesRequested, or Rejected.");
         if (!string.IsNullOrWhiteSpace(request.DecisionNote) && request.DecisionNote.Trim().Length > 4000) throw new MovieCollaborationValidationException("Decision note cannot exceed 4,000 characters.");
-        review.Status = request.Status.Trim();
-        review.DecisionNote = MovieStudioHelpers.Clean(request.DecisionNote);
-        review.ReviewedAt = DateTime.UtcNow;
-        await db.SaveChangesAsync(cancellationToken);
+        var decision = MovieReviewStatuses.Decisions.First(item => string.Equals(item, request.Status.Trim(), StringComparison.OrdinalIgnoreCase));
+        var note = MovieStudioHelpers.Clean(request.DecisionNote);
+        var now = DateTime.UtcNow;
+        // The decision is the recorded audit event for this review and it is written once.
+        // Deciding atomically from Pending means a replayed or delayed request can neither
+        // overwrite the recorded decision nor silently lose a concurrent decision through
+        // last-write-wins; the stale attempt is refused and the audit trail stays intact.
+        // A genuinely different cut earns a freshly requested review instead.
+        var updated = await db.MovieReviews
+            .Where(item => item.Id == reviewId && item.Status == MovieReviewStatuses.Pending)
+            .ExecuteUpdateAsync(setters => setters
+                .SetProperty(item => item.Status, decision)
+                .SetProperty(item => item.DecisionNote, note)
+                .SetProperty(item => item.ReviewedAt, now), cancellationToken);
+        if (updated == 0) throw new MovieCollaborationValidationException("This review already carries a recorded decision. Request a new review instead of overwriting the audit trail.");
         return await LoadReviewDtoAsync(review.Id, cancellationToken);
     }
 
@@ -276,6 +288,47 @@ public sealed class MovieCollaborationService(TaslimDbContext db, WorkspaceAcces
         member.PermissionOverrides = permissions.Select(permission => new MovieTeamMemberPermission { Id = Guid.NewGuid(), MovieTeamMemberId = member.Id, Permission = permission.Trim(), Granted = true })
             .Concat(overrides.Select(item => new MovieTeamMemberPermission { Id = Guid.NewGuid(), MovieTeamMemberId = member.Id, Permission = item.Permission.Trim(), Granted = item.Granted }))
             .ToList();
+    }
+
+    /// <summary>
+    /// Reconciles the persisted permission overrides of an existing team member in place:
+    /// surviving permissions keep their row and only flip the Granted flag when the decision
+    /// changes, permissions the request no longer names are deleted, and only genuinely new
+    /// permissions are inserted.
+    ///
+    /// The previous behaviour deleted every override row and re-added replacements inside one
+    /// SaveChanges call. EF Core resolves an override instance that already carries a permanent
+    /// key against the tracked parent as an existing row, so each replacement was emitted as an
+    /// UPDATE keyed on a row that had just been deleted - or on a row that never existed at all.
+    /// That statement affected zero rows, so EF Core threw DbUpdateConcurrencyException, the
+    /// transaction rolled back, and every role change or permission revocation carrying an
+    /// override returned 500 without revoking anything. Revocation therefore could never be
+    /// proven before the next mutation, because it never reached the database.
+    /// </summary>
+    private void ReconcileOverrides(MovieTeamMember member, IReadOnlyCollection<string> permissions, IReadOnlyCollection<MoviePermissionOverrideRequest> overrides)
+    {
+        var desired = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
+        foreach (var permission in permissions)
+            desired[permission.Trim()] = true;
+        foreach (var item in overrides)
+            desired[item.Permission.Trim()] = item.Granted;
+
+        var reused = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var existing in member.PermissionOverrides.ToList())
+        {
+            if (desired.TryGetValue(existing.Permission, out var granted) && reused.Add(existing.Permission))
+            {
+                existing.Granted = granted;
+                continue;
+            }
+            db.MovieTeamMemberPermissions.Remove(existing);
+        }
+
+        foreach (var (permission, granted) in desired)
+        {
+            if (reused.Contains(permission)) continue;
+            db.MovieTeamMemberPermissions.Add(new MovieTeamMemberPermission { Id = Guid.NewGuid(), MovieTeamMemberId = member.Id, Permission = permission, Granted = granted });
+        }
     }
 
     private static void ValidateAssignment(string title, string? description, string status)
