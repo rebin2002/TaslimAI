@@ -1,14 +1,17 @@
 using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
+using Taslim.Api.Assets;
 using Taslim.Api.Controllers;
 using Taslim.Api.Contracts;
 using Taslim.Api.Domain;
 using Taslim.Api.Files;
+using Taslim.Api.Generation;
 using Taslim.Api.Persistence;
 using Xunit;
 
@@ -116,6 +119,67 @@ public sealed class ResearchPrivateSourceTests : IClassFixture<ResearchApiFactor
             using var forbidden = await member.GetAsync($"/api/files/{fileId}");
             Assert.Equal(HttpStatusCode.Forbidden, forbidden.StatusCode);
         }
+    }
+
+    [Fact]
+    public async Task Research_publication_only_reuses_a_personal_file_owned_by_the_job_creator()
+    {
+        using var ownerClient = factory.CreateClient();
+        var owner = await Register(ownerClient, $"research-reuse-{Guid.NewGuid():N}@example.com");
+        var workspaceId = owner.PersonalWorkspace.Id;
+        var project = await SendWithCsrf<ProjectDto>(ownerClient, HttpMethod.Post, $"/api/workspaces/{workspaceId}/projects",
+            new { name = "Research output reuse", type = "Business" });
+        using var colleagueClient = factory.CreateClient();
+        var colleague = await Register(colleagueClient, $"research-reuse-colleague-{Guid.NewGuid():N}@example.com");
+
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        var publisher = scope.ServiceProvider.GetRequiredService<IGeneratedAssetPublisher>();
+        db.WorkspaceMembers.Add(new WorkspaceMember
+        {
+            Id = Guid.NewGuid(), WorkspaceId = workspaceId, UserId = colleague.User.Id,
+            Role = WorkspaceRole.Member, JoinedAt = DateTime.UtcNow,
+        });
+        var job = new GenerationJob
+        {
+            Id = Guid.NewGuid(), WorkspaceId = workspaceId, ProjectId = project.Id,
+            CreatedByUserId = owner.User.Id, JobType = GenerationJobTypes.ResearchGenerate,
+        };
+        StoredFile AddReadyFile(Guid userId, Guid? projectId)
+        {
+            var id = Guid.NewGuid();
+            var file = new StoredFile
+            {
+                Id = id, WorkspaceId = workspaceId, ProjectId = projectId, UserId = userId,
+                OriginalFileName = "report.pdf", StoredFileName = $"{id:N}.pdf", Extension = ".pdf",
+                ContentType = "application/pdf", StorageKey = $"research-fixture/{id:N}", Status = StoredFileStatus.Ready,
+                CreatedAt = DateTime.UtcNow,
+            };
+            db.StoredFiles.Add(file);
+            return file;
+        }
+        var personal = AddReadyFile(owner.User.Id, null);
+        var shared = AddReadyFile(owner.User.Id, project.Id);
+        var otherPersonal = AddReadyFile(colleague.User.Id, null);
+        var reportBytes = Encoding.ASCII.GetBytes("%PDF-1.4\nSynthetic report fixture\n%%EOF");
+        otherPersonal.ContentHashSha256 = Convert.ToHexString(SHA256.HashData(reportBytes));
+        await db.SaveChangesAsync();
+
+        Task<PreparedGenerationOutput> Prepare(StoredFile file) => publisher.PrepareAsync(job,
+            new GenerationHandlerOutput(GenerationJobOutputTypes.StoredFile, file.Id, null));
+        Assert.Equal(personal.Id, (await Prepare(personal)).Output.StoredFileId);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => Prepare(shared));
+        await Assert.ThrowsAsync<InvalidOperationException>(() => Prepare(otherPersonal));
+
+        var generated = new GenerationHandlerOutput(GenerationJobOutputTypes.StoredFile, null, null,
+            new GeneratedFileArtifact("report.pdf", "application/pdf", reportBytes));
+        var refusedDuplicate = await Assert.ThrowsAsync<InvalidOperationException>(() => publisher.PrepareAsync(job, generated));
+        Assert.Equal("Generated output file is not available in the job scope.", refusedDuplicate.Message);
+        Assert.True(await db.StoredFiles.AsNoTracking().AnyAsync(file =>
+            file.Id == otherPersonal.Id && file.UserId == colleague.User.Id && file.Status == StoredFileStatus.Ready));
+
+        job.JobType = GenerationJobTypes.SystemTest;
+        Assert.Equal(shared.Id, (await Prepare(shared)).Output.StoredFileId);
     }
 
     private static async Task<AuthResponse> Register(HttpClient client, string email)

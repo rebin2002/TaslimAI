@@ -5,6 +5,7 @@ using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
 using Taslim.Api.Contracts;
 using Taslim.Api.Domain;
+using Taslim.Api.Files;
 using Taslim.Api.Infrastructure;
 using Taslim.Api.Persistence;
 
@@ -30,7 +31,7 @@ public sealed class GlobalSearchController(TaslimDbContext db) : ControllerBase
     {
         var normalized = (query ?? string.Empty).Trim();
         if (normalized.Length > MaxQueryLength)
-            normalized = normalized[..MaxQueryLength];
+            normalized = CapQueryLength(normalized);
 
         var currentPage = Math.Clamp(page, 1, MaxPage);
         var perType = Math.Clamp(limit, 1, MaxLimitPerType);
@@ -98,16 +99,20 @@ public sealed class GlobalSearchController(TaslimDbContext db) : ControllerBase
         AddGroup(groups, GlobalSearchResultTypes.Conversation, conversations, currentPage, perType);
 
         // Keep asset search aligned with the asset-library privacy boundary:
-        // Research assets remain creator-private even when a project is
-        // attached; other project assets are shared only when their backing
-        // file is also workspace-shareable.
+        // project assets are shared only when their backing file is also
+        // workspace-shareable; personal and conversation-backed assets remain
+        // visible only to their creator. Generated Research report assets with a
+        // ResearchGenerate source job are creator-private; mirror that provenance check
+        // here so search cannot disclose report metadata to co-members (#1042). Other
+        // Research-typed project assets retain their existing sharing behavior.
         var assetQuery = db.Assets.AsNoTracking()
             .Where(asset => workspaceIds.Contains(asset.WorkspaceId)
+                && (asset.AssetType != AssetTypes.Research
+                    || asset.SourceGenerationJobId == null
+                    || asset.SourceGenerationJob!.JobType != GenerationJobTypes.ResearchGenerate
+                    || asset.CreatedByUserId == userId)
                 && (asset.CreatedByUserId == userId
-                    || (asset.AssetType != AssetTypes.Research
-                        && asset.ProjectId.HasValue
-                        && asset.Project != null
-                        && asset.Project.WorkspaceId == asset.WorkspaceId))
+                    || (asset.ProjectId.HasValue && asset.Project != null && asset.Project.WorkspaceId == asset.WorkspaceId))
                 && (asset.CreatedByUserId == userId
                     || !asset.StoredFileId.HasValue
                     || (asset.StoredFile!.WorkspaceId == asset.WorkspaceId
@@ -136,19 +141,15 @@ public sealed class GlobalSearchController(TaslimDbContext db) : ControllerBase
         var assets = await LoadPageAsync(assetQuery, currentPage, perType, cancellationToken);
         AddGroup(groups, GlobalSearchResultTypes.Asset, assets, currentPage, perType);
 
-        // Project files are workspace-shared; personal and conversation-scoped
-        // files remain private to their uploader, even when a conversation also
-        // belongs to a project.
+        // Apply the same file visibility boundary as list/detail, including
+        // creator-private Research report backing files.
         var fileQuery = db.StoredFiles.AsNoTracking()
             .Where(file => workspaceIds.Contains(file.WorkspaceId)
                 && file.Status != StoredFileStatus.Deleted
-                && (file.UserId == userId
-                    || (file.ProjectId != null
-                        && file.ConversationId == null
-                        && file.Project != null
-                        && file.Project.WorkspaceId == file.WorkspaceId))
                 && (file.OriginalFileName.ToLower().Contains(search)
                     || (file.ExtractedText != null && file.ExtractedText.ToLower().Contains(search))))
+            .Where(StoredFileVisibility.ForWorkspaceMember(userId))
+            .Where(StoredFileVisibility.IsNotResearchReportOwnedByAnotherMember(userId))
             .OrderByDescending(file => file.CreatedAt)
             .ThenByDescending(file => file.Id)
             .Select(file => new GlobalSearchResultDto(
@@ -219,6 +220,22 @@ public sealed class GlobalSearchController(TaslimDbContext db) : ControllerBase
     }
 
     private Guid GetUserId() => Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier) ?? throw new InvalidOperationException("Authenticated user identifier is missing."));
+
+    /// <summary>
+    /// Bounds the query to <see cref="MaxQueryLength"/> UTF-16 units without ever
+    /// cutting a surrogate pair in half. A severed high surrogate is not a
+    /// character: it is encoded as a replacement glyph on the way to the database,
+    /// so the search term stops being the caller's text and matches nothing — a
+    /// title containing an emoji could never be found by searching that exact
+    /// title. Dropping the split pair keeps the bound intact and the needle valid.
+    /// </summary>
+    private static string CapQueryLength(string value)
+    {
+        var length = MaxQueryLength;
+        if (char.IsHighSurrogate(value[length - 1]))
+            length--;
+        return value[..length];
+    }
 
     private static async Task<SearchPage<T>> LoadPageAsync<T>(IQueryable<T> query, int page, int pageSize, CancellationToken cancellationToken)
     {

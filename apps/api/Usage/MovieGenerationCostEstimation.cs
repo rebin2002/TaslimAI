@@ -21,6 +21,7 @@ public static class MovieGenerationCostEstimateReasons
     public const string PricingMissing = "pricing_missing";
     public const string CurrencyMismatch = "currency_mismatch";
     public const string EstimateCapExceeded = "estimate_cap_exceeded";
+    public const string ArithmeticOverflow = "movie_estimate_overflow";
 }
 
 public sealed record MovieGenerationCostComponent(
@@ -202,7 +203,7 @@ public sealed class MovieGenerationCostEstimator(
             }
             catch (OverflowException)
             {
-                return MovieGenerationCostEstimate.Unknown(MovieGenerationCostEstimateReasons.EstimateCapExceeded, NormalizeCurrency(candidate.Currency));
+                return MovieGenerationCostEstimate.Unknown(MovieGenerationCostEstimateReasons.ArithmeticOverflow, NormalizeCurrency(candidate.Currency));
             }
         }
 

@@ -1,10 +1,17 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { nextMovieMode } from "./MovieStudioView";
+import { locales, translate } from "@/lib/i18n";
+import { movieModeDurationLimit, nextMovieMode } from "./MovieStudioView";
 
 const source = readFileSync(new URL("./MovieStudioView.tsx", import.meta.url), "utf8");
 
 describe("Movie Studio mode switch accessibility", () => {
+  it("keeps Quick clips bounded while allowing Full projects up to 120 minutes", () => {
+    expect(movieModeDurationLimit("Quick")).toBe(3_600);
+    expect(movieModeDurationLimit("Full")).toBe(7_200);
+    expect(source).toContain("max={movieModeDurationLimit(mode)}");
+  });
+
   it("cycles modes with standard tab-list keys", () => {
     expect(nextMovieMode("Quick", "ArrowRight")).toBe("Full");
     expect(nextMovieMode("Full", "ArrowRight")).toBe("Quick");
@@ -30,5 +37,29 @@ describe("Movie Studio mode switch accessibility", () => {
     expect(source).toContain('onKeyDown={(event) => handleModeKeyDown(event, "Full")}');
     expect(source).toContain('id="movie-brief-panel" role="tabpanel"');
     expect(source).toContain('aria-labelledby={`movie-mode-tab-${mode.toLowerCase()}`}');
+  });
+
+  it("routes the quick-result status chip through translation keys instead of hardcoded English", () => {
+    const chipLine = source.split("\n").find((line) => line.includes("const label = outputAssetId"));
+    expect(chipLine, "quick-result status chip line").toBeDefined();
+    // Regression: the chip previously rendered raw "Ready to review"/"Brief saved",
+    // which bypassed key lookup so no locale or installable zh-CN pack could cover it.
+    expect(chipLine).not.toContain('"Ready to review"');
+    expect(chipLine).not.toContain('"Brief saved"');
+    expect(chipLine).toContain('t("movie.completed")');
+    expect(chipLine).toContain('t("movie.briefSaved")');
+  });
+
+  it("keeps every status chip value translated in every launch locale", () => {
+    for (const locale of locales) {
+      expect(translate(locale, "movie.briefSaved"), `${locale}: movie.briefSaved`).not.toBe("movie.briefSaved");
+      expect(translate(locale, "movie.briefSaved").trim(), `${locale}: movie.briefSaved`).not.toBe("");
+      expect(translate(locale, "movie.completed"), `${locale}: movie.completed`).not.toBe("movie.completed");
+      for (const status of ["preparing", "queued", "generating", "completed", "failed"]) {
+        expect(translate(locale, `movie.state.${status}`), `${locale}: movie.state.${status}`).not.toBe(`movie.state.${status}`);
+      }
+    }
+    expect(translate("en", "movie.briefSaved")).toBe("Brief saved");
+    expect(translate("en", "movie.completed")).toBe("Ready to review");
   });
 });

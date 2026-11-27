@@ -44,6 +44,9 @@ public sealed class AdminOperationsService(
         var providers = await providerHealth.GetAsync(range, cancellationToken);
         var movie = await BuildMovieAsync(range, providers, cancellationToken);
         var workers = await BuildWorkersAsync(cancellationToken);
+        // Live operational audit feed: the newest administrative actions are
+        // independent of the selected historical metrics range. The UI labels
+        // this panel "recent operational actions", not a date-filtered export.
         var recentAdminActions = await db.AdminOperationAuditEvents.AsNoTracking()
             .OrderByDescending(item => item.CreatedAt)
             .ThenByDescending(item => item.Id)
@@ -540,8 +543,14 @@ public sealed class AdminOperationsService(
         return normalized;
     }
 
-    private static string? NormalizeIdempotencyKey(string? idempotencyKey) =>
-        string.IsNullOrWhiteSpace(idempotencyKey) ? null : idempotencyKey.Trim()[..Math.Min(128, idempotencyKey.Trim().Length)];
+    private static string? NormalizeIdempotencyKey(string? idempotencyKey)
+    {
+        var normalized = idempotencyKey?.Trim();
+        if (string.IsNullOrEmpty(normalized)) return null;
+        if (normalized.Length > 128)
+            throw new AdminOperationConflictException("IDEMPOTENCY_KEY_TOO_LONG", "The idempotency key is too long.");
+        return normalized;
+    }
 
     private static string SanitizeCode(string? code)
     {
@@ -558,10 +567,24 @@ public sealed class AdminOperationsService(
     private static (DateTime FromUtc, DateTime ToUtc) NormalizeRange(DateTime? fromUtc, DateTime? toUtc)
     {
         var now = DateTime.UtcNow;
-        var to = toUtc.HasValue ? DateTime.SpecifyKind(toUtc.Value, DateTimeKind.Utc).Date.AddDays(1) : now;
-        var from = fromUtc.HasValue ? DateTime.SpecifyKind(fromUtc.Value, DateTimeKind.Utc).Date : to.Date.AddDays(-29);
+        var to = toUtc.HasValue ? ToUtcInstant(toUtc.Value).Date.AddDays(1) : now;
+        var from = fromUtc.HasValue ? ToUtcInstant(fromUtc.Value).Date : to.Date.AddDays(-29);
         if (to <= from) to = from.AddDays(1);
         if (to - from > TimeSpan.FromDays(366)) from = to.AddDays(-366);
         return (from, to);
     }
+
+    // Offset-bearing admin audit export bounds (a "toUtc"/"fromUtc" query value
+    // bound with local-kind metadata after offset parsing) must be converted to
+    // their exact UTC instants. The previous SpecifyKind call kept the wall
+    // clock and dropped the offset, shifting the whole window by the offset
+    // difference and ordering the exported audit rows against the wrong
+    // boundaries. Unspecified values (date-only bounds) keep their existing
+    // UTC-midnight semantics, matching the Z-suffixed bounds the console sends.
+    private static DateTime ToUtcInstant(DateTime value) => value.Kind switch
+    {
+        DateTimeKind.Utc => value,
+        DateTimeKind.Local => value.ToUniversalTime(),
+        _ => DateTime.SpecifyKind(value, DateTimeKind.Utc),
+    };
 }

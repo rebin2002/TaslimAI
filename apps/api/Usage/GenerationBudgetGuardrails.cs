@@ -44,6 +44,9 @@ public static class GenerationBudgetGuardrail
         GenerationBudgetSnapshot snapshot,
         GenerationBudgetOptions options)
     {
+        // An unrepresentable Movie price cannot be authorized by an optional budget policy.
+        if (estimate.UnknownReason == MovieGenerationCostEstimateReasons.ArithmeticOverflow)
+            return GenerationBudgetDecision.Reject("COST_ESTIMATE_UNKNOWN", "The provider cost could not be estimated safely.");
         if (!options.Enabled) return GenerationBudgetDecision.Allow();
         if (!estimate.IsKnown || !estimate.AmountUsd.HasValue)
         {
@@ -91,10 +94,7 @@ public sealed class GenerationBudgetService(
             priorAttempts.Count(item => item.Status != GenerationProviderAttemptStatus.Rejected),
             priorAttempts.Where(item => item.EstimatedProviderCostKnown).Sum(item => item.EstimatedProviderCostUsd ?? 0m),
             await EstimatedCostForWorkspaceAsync(job.WorkspaceId, cancellationToken),
-            await EstimatedCostForUserAsync(job.CreatedByUserId, cancellationToken),
-            job.ProjectId.HasValue
-                ? await EstimatedCostForProjectAsync(job.WorkspaceId, job.ProjectId.Value, cancellationToken)
-                : 0m);
+            await EstimatedCostForUserAsync(job.CreatedByUserId, cancellationToken));
         var decision = GenerationBudgetGuardrail.Evaluate(estimate, snapshot, settings);
         if (!decision.Allowed)
         {
@@ -156,14 +156,6 @@ public sealed class GenerationBudgetService(
     private async Task<decimal> EstimatedCostForUserAsync(Guid userId, CancellationToken cancellationToken) =>
         (decimal)await db.GenerationProviderAttempts
             .Where(item => item.GenerationJob.CreatedByUserId == userId && item.EstimatedProviderCostKnown)
-            .Select(item => (double?)(item.EstimatedProviderCostUsd ?? 0m))
-            .SumAsync(cancellationToken);
-
-    private async Task<decimal> EstimatedCostForProjectAsync(Guid workspaceId, Guid projectId, CancellationToken cancellationToken) =>
-        (decimal)await db.GenerationProviderAttempts
-            .Where(item => item.GenerationJob.WorkspaceId == workspaceId
-                && item.GenerationJob.ProjectId == projectId
-                && item.EstimatedProviderCostKnown)
             .Select(item => (double?)(item.EstimatedProviderCostUsd ?? 0m))
             .SumAsync(cancellationToken);
 }

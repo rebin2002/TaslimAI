@@ -20,6 +20,14 @@ public sealed class SocialGenerationJobHandler(
 {
     private readonly SocialGenerationOptions settings = socialOptions.Value;
 
+    /// <summary>
+    /// Canonical naming for every published Social representation. The provider
+    /// structured-output schema, the persisted draft artifact and the Social Studio
+    /// state machine all read camelCase members, so the CLR member names of
+    /// <see cref="Taslim.Api.Contracts.SocialDraft"/> must never reach a payload.
+    /// </summary>
+    private static readonly JsonSerializerOptions CanonicalJsonOptions = new() { PropertyNamingPolicy = JsonNamingPolicy.CamelCase };
+
     public bool CanHandle(string jobType) => string.Equals(jobType, GenerationJobTypes.SocialGenerate, StringComparison.OrdinalIgnoreCase);
 
     public async Task<GenerationHandlerResult> ExecuteAsync(GenerationJob job, IProgress<int> progress, CancellationToken cancellationToken)
@@ -52,7 +60,8 @@ public sealed class SocialGenerationJobHandler(
         }
 
         var sources = files.Select(file => new SocialSourceContext(file.OriginalFileName, "source file", Trim(file.ExtractedText, settings.MaxContextCharacters), null, file.ContentType))
-            .Concat(assets.Select(asset => new SocialSourceContext(asset.Name, "asset", Trim(asset.StoredFile?.ExtractedText, settings.MaxContextCharacters), asset.AssetType, asset.MimeType)))
+            // Assets are media references only; extracted text is supplied only by explicit attachments.
+            .Concat(assets.Select(asset => new SocialSourceContext(asset.Name, "asset", null, asset.AssetType, asset.MimeType)))
             .ToArray();
 
         SocialGenerationPrompt prompt;
@@ -84,7 +93,7 @@ public sealed class SocialGenerationJobHandler(
         if (generated.Draft.Posts.SelectMany(post => post.AssetRefs).Any(reference => !selectedAssetNames.Contains(reference)))
             throw new SocialGenerationStageException(SocialGenerationStages.DraftValidation, GenerationJobErrorCodes.SocialOutputInvalid, "The social result referenced an unselected Asset.", generated.Usage);
 
-        var language = SocialOutputLanguagePolicy.Normalize(generated.Draft.Language, input.Language);
+        var language = NormalizeOutputLanguage(generated.Draft.Language, input.Language);
         generated.Draft.Language = language;
         var metadata = JsonSerializer.Serialize(new
         {
@@ -97,10 +106,13 @@ public sealed class SocialGenerationJobHandler(
             selectedSourceCount = input.AttachmentIds.Count,
             generatedAt = DateTime.UtcNow,
         });
-        var draftJson = JsonSerializer.Serialize(generated.Draft, new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase, WriteIndented = true });
+        var draftJson = JsonSerializer.Serialize(generated.Draft, new JsonSerializerOptions(CanonicalJsonOptions) { WriteIndented = true });
         var safeName = BuildFileName(generated.Draft.Title);
         var artifact = new GeneratedFileArtifact(safeName, "application/json", Encoding.UTF8.GetBytes(draftJson), metadata);
         var asset = new GeneratedAssetDescriptor(generated.Draft.Title, generated.Draft.Posts.FirstOrDefault()?.Hook, AssetTypes.Social, metadata);
+        // The preview posts are serialized from SocialPost objects, so this payload has
+        // to opt into the canonical naming policy explicitly; the default options emit
+        // PascalCase members that the Studio preview cannot read.
         var result = JsonSerializer.Serialize(new
         {
             socialType = generated.Draft.SocialType,
@@ -109,7 +121,7 @@ public sealed class SocialGenerationJobHandler(
             language,
             postCount = generated.Draft.Posts.Count,
             posts = generated.Draft.Posts,
-        });
+        }, CanonicalJsonOptions);
         progress.Report(92);
         return new GenerationHandlerResult(result, [new GenerationHandlerOutput(GenerationJobOutputTypes.StoredFile, null, metadata, artifact, asset)], generated.Usage);
     }
@@ -131,24 +143,30 @@ public sealed class SocialGenerationJobHandler(
     private async Task<IReadOnlyList<Asset>> LoadAssetsAsync(SocialGenerationInput input, Guid workspaceId, Guid userId, CancellationToken cancellationToken)
     {
         if (input.AssetIds.Count == 0) return [];
-        var assets = await db.Assets.AsNoTracking().Include(asset => asset.StoredFile).Where(asset => asset.WorkspaceId == workspaceId && input.AssetIds.Contains(asset.Id)).ToListAsync(cancellationToken);
+        // Project IDs need not match: reassignment and same-workspace dedup can leave a
+        // visible asset backed by a file scoped to another project in the same workspace.
+        // Use the canonical asset and file policies instead of duplicating their rules.
+        var visibleFileIds = db.StoredFiles.AsNoTracking()
+            .Where(StoredFileVisibility.ForWorkspaceMember(userId))
+            .Where(file => file.WorkspaceId == workspaceId)
+            .Where(file => !file.ProjectId.HasValue || (file.Project != null && file.Project.WorkspaceId == workspaceId))
+            .Select(file => file.Id);
+        var assets = await db.Assets.AsNoTracking()
+            .Include(asset => asset.StoredFile)
+            .Where(asset => asset.WorkspaceId == workspaceId && input.AssetIds.Contains(asset.Id))
+            .Where(AssetVisibility.ForWorkspaceMember(userId))
+            .Where(asset => asset.StoredFileId.HasValue && visibleFileIds.Contains(asset.StoredFileId.Value))
+            .ToListAsync(cancellationToken);
         if (assets.Count != input.AssetIds.Count || assets.Any(asset =>
                 asset.Status != AssetStatus.Active
                 || !SocialGenerationDefaults.SelectableAssetTypes.Contains(asset.AssetType)
                 || asset.StoredFileId is null
-                || asset.StoredFile is not { Status: StoredFileStatus.Ready }
-                || asset.StoredFile.WorkspaceId != workspaceId
-                // Project assets may be shared only when their backing file is
-                // also project-scoped. Personal and conversation-backed assets
-                // remain private to their creator.
-                || (asset.CreatedByUserId != userId && !asset.ProjectId.HasValue)
-                || (asset.CreatedByUserId != userId
-                    && (asset.StoredFile!.UserId != userId
-                        && (!asset.StoredFile.ProjectId.HasValue || asset.StoredFile.ConversationId.HasValue)))))
+                || asset.StoredFile is not { Status: StoredFileStatus.Ready }))
             throw new SocialGenerationStageException(SocialGenerationStages.Context, GenerationJobErrorCodes.SocialContextUnavailable, "One or more selected assets are unavailable.");
         return input.AssetIds.Select(id => assets.First(asset => asset.Id == id)).ToArray();
     }
 
+    private static string NormalizeOutputLanguage(string draftLanguage, string requested) => draftLanguage is "en" or "ar" or "ku" ? draftLanguage : requested is "en" or "ar" or "ku" ? requested : "en";
     private static string? Trim(string? value, int max) => string.IsNullOrWhiteSpace(value) ? null : value.Length <= max ? value : value[..Math.Max(1, max - 3)].TrimEnd() + "...";
 
     private static string BuildFileName(string title)

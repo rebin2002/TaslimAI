@@ -8,8 +8,12 @@ namespace Taslim.Api.Tests;
 
 public sealed class MovieProductionQualityControlControllerPrincipalTests
 {
-    [Fact]
-    public async Task Malformed_authenticated_principal_is_rejected_before_quality_control_authorization()
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("not-a-guid")]
+    [InlineData("00000000-0000-0000-0000-000000000000")]
+    public async Task Malformed_authenticated_principal_is_rejected_before_quality_control_authorization(string? identifier)
     {
         var controller = new MovieProductionQualityControlController(null!, null!)
         {
@@ -18,7 +22,7 @@ public sealed class MovieProductionQualityControlControllerPrincipalTests
                 HttpContext = new DefaultHttpContext
                 {
                     User = new ClaimsPrincipal(new ClaimsIdentity(
-                        [new Claim(ClaimTypes.NameIdentifier, "not-a-guid")],
+                        identifier is null ? [] : [new Claim(ClaimTypes.NameIdentifier, identifier)],
                         authenticationType: "test")),
                 },
             },

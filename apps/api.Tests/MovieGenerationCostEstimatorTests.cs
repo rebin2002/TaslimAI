@@ -98,8 +98,10 @@ public sealed class MovieGenerationCostEstimatorTests
         Assert.Null(upscaleResult.MaximumAmountUsd);
     }
 
-    [Fact]
-    public async Task Extreme_pricing_math_returns_unknown_instead_of_throwing()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Overflow_in_movie_pricing_blocks_confirmed_generation_even_when_unknown_costs_are_allowed(bool budgetEnabled)
     {
         await using var connection = new SqliteConnection("DataSource=:memory:");
         await connection.OpenAsync();
@@ -119,8 +121,26 @@ public sealed class MovieGenerationCostEstimatorTests
         var result = await estimator.EstimateAsync(Request(duration: int.MaxValue), "test-provider");
 
         Assert.Equal(MovieGenerationCostEstimateStates.Unknown, result.State);
-        Assert.Equal(MovieGenerationCostEstimateReasons.EstimateCapExceeded, result.Reason);
+        Assert.Equal(MovieGenerationCostEstimateReasons.ArithmeticOverflow, result.Reason);
         Assert.Null(result.MaximumAmountUsd);
+
+        var guard = new GenerationCostGuardrailService(db, Options.Create(new GenerationBudgetOptions
+        {
+            Enabled = budgetEnabled,
+            RejectUnknownEstimates = false,
+            RequireConfirmationForUnknownEstimates = false,
+        }));
+        var userId = Guid.NewGuid();
+        var workspaceId = Guid.NewGuid();
+        var admission = await guard.EvaluateAsync(userId, workspaceId, null, result.ToGenerationCostEstimate(), confirmationAccepted: true);
+        Assert.False(admission.Allowed);
+        Assert.False(admission.CanProceed);
+        Assert.Equal("COST_ESTIMATE_UNKNOWN", admission.RejectionCode);
+
+        // A representable estimate over the configured estimator cap keeps its existing policy.
+        var ordinaryCap = MovieGenerationCostEstimate.Unknown(MovieGenerationCostEstimateReasons.EstimateCapExceeded);
+        var control = await guard.EvaluateAsync(userId, workspaceId, null, ordinaryCap.ToGenerationCostEstimate(), confirmationAccepted: true);
+        Assert.True(control.CanProceed);
     }
 
     [Fact]

@@ -19,15 +19,22 @@ namespace Taslim.Api.Tests;
 
 public sealed class ProviderHealthServiceTests
 {
-    [Fact]
-    public async Task Latest_failure_overrides_an_older_success_in_provider_status()
+    [Theory]
+    [InlineData(-1, null, "recent_operational_failure")]
+    [InlineData(-6, null, "operational")]
+    [InlineData(-4, null, "operational")]
+    [InlineData(-6, -1, "recent_operational_failure")]
+    [InlineData(-6, -5, "operational")]
+    public async Task Status_follows_the_latest_job_or_usage_event(
+        int jobFailureOffsetMinutes, int? usageFailureOffsetMinutes, string expectedStatus)
     {
         await using var connection = new SqliteConnection("Data Source=:memory:");
         await connection.OpenAsync();
         await using var db = new TaslimDbContext(new DbContextOptionsBuilder<TaslimDbContext>().UseSqlite(connection).Options);
         await db.Database.EnsureCreatedAsync();
 
-        var now = DateTime.UtcNow;
+        var now = new DateTime(2026, 11, 25, 12, 0, 0, DateTimeKind.Utc);
+        var jobFailedAt = now.AddMinutes(jobFailureOffsetMinutes);
         var workspaceId = Guid.NewGuid();
         var userId = Guid.NewGuid();
         db.Users.Add(new ApplicationUser
@@ -77,9 +84,28 @@ public sealed class ProviderHealthServiceTests
                 JobType = GenerationJobTypes.ImageGenerate,
                 Status = GenerationJobStatus.Failed,
                 ErrorCode = GenerationJobErrorCodes.ImageProviderUnavailable,
-                CreatedAt = now.AddMinutes(-2),
-                FailedAt = now.AddMinutes(-1),
+                CreatedAt = jobFailedAt.AddMinutes(-1),
+                FailedAt = jobFailedAt,
             });
+        if (usageFailureOffsetMinutes is int offset)
+        {
+            var usageFailedAt = now.AddMinutes(offset);
+            db.UsageTransactions.Add(new UsageTransaction
+            {
+                Id = Guid.NewGuid(),
+                WorkspaceId = workspaceId,
+                UserId = userId,
+                RequestId = $"provider-health-{Guid.NewGuid():N}",
+                Feature = UsageFeature.Image,
+                Provider = "test-provider",
+                Model = "test-model",
+                Status = UsageTransactionStatus.Failed,
+                FailureCode = "IMAGE_PROVIDER_TIMEOUT",
+                CreatedAt = usageFailedAt,
+                CompletedAt = usageFailedAt,
+                Currency = "USD",
+            });
+        }
         await db.SaveChangesAsync();
 
         var service = new ProviderHealthService(
@@ -102,7 +128,8 @@ public sealed class ProviderHealthServiceTests
         var health = await service.GetAsync((now.AddHours(-1), now.AddHours(1)), CancellationToken.None);
         var image = Assert.Single(health, item => item.Key == "openai-image");
 
-        Assert.Equal("recent_operational_failure", image.Status);
+        Assert.Equal(expectedStatus, image.Status);
+        Assert.Equal(jobFailedAt, image.LastFailureAt);
         Assert.Equal(1, image.RecentSuccessCount);
         Assert.Equal(1, image.RecentFailureCount);
         Assert.Equal(GenerationJobErrorCodes.ImageProviderUnavailable, image.LastFailureCode);
