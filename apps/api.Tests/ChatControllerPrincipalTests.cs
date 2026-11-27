@@ -281,6 +281,6 @@ public sealed class ChatControllerPrincipalTests
         public AiProviderSelection Select(AiChatRequest request)
             => throw new NotSupportedException("Provider selection must not be reached before the principal is accepted.");
 
-        public bool IsChatGenerationAvailable() => true;
+        public bool IsChatGenerationAvailable(bool hasImageAttachments) => true;
     }
 }
