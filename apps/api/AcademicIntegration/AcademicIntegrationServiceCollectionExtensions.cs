@@ -16,11 +16,9 @@ namespace Taslim.Api.AcademicIntegration;
 /// <c>AddAcademicEvidence()</c> and <c>AddAcademicEvidencePersistence()</c>, registers
 /// the durable-state store over the shared context, builds the Phase C orchestrator per
 /// scope over the <em>registered</em> stage handlers, and wires the projection bridge.
-/// Stage handlers themselves are NOT registered here — the discovery, screening,
-/// extraction, synthesis, drafting and verification handlers belong to the provider
-/// lanes, which plug in through <see cref="AddAcademicStageHandler{THandler}"/>. With no
-/// handler registered the run endpoint answers 501 with the exact missing stage, so the
-/// product never reports a stage as functional before its lane is connected.
+/// An explicit API opt-in registers the deterministic Plan stage. Discovery, screening, extraction,
+/// synthesis, drafting and verification remain unregistered and are reported as the exact
+/// missing stage; the Plan handler does not call an external service or create a charge.
 /// </summary>
 public static class AcademicIntegrationServiceCollectionExtensions
 {
@@ -35,6 +33,8 @@ public static class AcademicIntegrationServiceCollectionExtensions
 
         services.AddAcademicEvidence();
         services.AddAcademicEvidencePersistence();
+        if (string.Equals(configuration[AcademicWorkflowOptions.PlanEnabledKey], "true", StringComparison.OrdinalIgnoreCase))
+            services.AddAcademicStageHandler<AcademicPlanStageHandler>();
 
         services.Configure<AcademicWorkflowEngineOptions>(configuration.GetSection(AcademicWorkflowOptions.SectionName));
 
@@ -57,16 +57,14 @@ public static class AcademicIntegrationServiceCollectionExtensions
     }
 
     /// <summary>
-    /// The provider-lane seam: a stage implementation registers itself here and the
-    /// integration lane starts running that stage. One handler per stage; the composition
-    /// root is the only owner of this list, and CI asserts the production registration is
-    /// empty until a lane lands (see AcademicProjectsIntegrationTests).
+    /// Register one implementation for a stage. The Plan slice is local and deterministic;
+    /// the remaining stage handlers are added only with independently reviewed capabilities.
     /// </summary>
     public static IServiceCollection AddAcademicStageHandler<THandler>(this IServiceCollection services)
         where THandler : class, IAcademicStageHandler
     {
         ArgumentNullException.ThrowIfNull(services);
-        services.AddScoped<IAcademicStageHandler, THandler>();
+        services.TryAddEnumerable(ServiceDescriptor.Scoped<IAcademicStageHandler, THandler>());
         return services;
     }
 }
@@ -75,4 +73,5 @@ public static class AcademicIntegrationServiceCollectionExtensions
 public static class AcademicWorkflowOptions
 {
     public const string SectionName = "AcademicWorkflow";
+    public const string PlanEnabledKey = SectionName + ":PlanEnabled";
 }

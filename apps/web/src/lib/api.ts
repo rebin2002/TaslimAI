@@ -3,6 +3,7 @@ import { API_URL, assetFileUrl, assetRepresentationUrl } from "./apiBase";
 import { awaitWithChatStreamWatchdog, CHAT_STREAM_WATCHDOG_TIMEOUT_MS, ChatStreamTransportError } from "./chatStreamTransport";
 import { collectAllProjectPages } from "./projectListPagination";
 import { isAbortError } from "./requestLifecycle";
+import { getUserUploadSizeError } from "./fileUploadLimits";
 import {
   isIdempotentRead,
   isThrottleRetryStatus,
@@ -43,7 +44,6 @@ export type PasswordPolicy = {
   requireNonAlphanumeric: boolean;
   requiredUniqueChars: number;
 };
-
 export type Project = {
   id: string;
   workspaceId: string;
@@ -68,6 +68,8 @@ export type ProjectOverview = {
 
 export type RegisterInput = { displayName: string; email: string; password: string; preferredLanguage?: string };
 export type LoginInput = { email: string; password: string };
+export type PasswordResetRequestInput = { email: string };
+export type PasswordResetInput = { email: string; token: string; newPassword: string };
 export type OnboardingIntent = "project" | "chat" | "image" | "document" | "presentation" | "research";
 export type OnboardingInput = {
   displayName?: string;
@@ -775,6 +777,99 @@ export type AcademicSourceSearchParams = {
   dois?: string[];
   isbns?: string[];
 };
+export type AcademicProjectSummary = {
+  projectId: string;
+  workspaceId: string;
+  requestKey: string;
+  researchQuestion: string;
+  discipline: string;
+  level: string;
+  state: string;
+  stateCode: string | null;
+  revision: number;
+  createdAtUtc: string;
+  updatedAtUtc: string;
+};
+export type AcademicProjectStage = {
+  stage: string;
+  state: string;
+  attemptCount: number;
+  outputCheckpointRevision: number | null;
+  lastErrorCode: string | null;
+  lastErrorDetail: string | null;
+  startedAtUtc: string | null;
+  completedAtUtc: string | null;
+};
+export type AcademicProjectApproval = { kind: string; checkpointRevision: number; requestedAtUtc?: string; decision?: string; notes?: string | null; decidedAtUtc?: string };
+export type AcademicSearchSpecification = { collection: string; query: string; filters: string[] };
+export type AcademicResearchPlan = {
+  planVersion: number;
+  researchQuestion: string;
+  workingTitle: string | null;
+  level: string;
+  method: string;
+  methodologies: string[];
+  citationStyle: string;
+  objectives: string[];
+  inclusionCriteria: string[];
+  exclusionCriteria: string[];
+  searchStrategy: AcademicSearchSpecification[];
+  chapterOutline: string[];
+  geographicScope: string | null;
+  populationOrContext: string | null;
+  timePeriod: string | null;
+  subQuestions: string[];
+  keywords: string[];
+  minimumSources: number | null;
+  minimumPeerReviewed: number | null;
+  allowedSourceTypes: string[];
+  requireFullText: boolean;
+  programmeRequirements: string | null;
+};
+export type AcademicProjectDto = {
+  project: AcademicProjectSummary;
+  stages: AcademicProjectStage[];
+  activeAttemptId: string | null;
+  pendingApproval: { kind: string; approvalKey: string; checkpointRevision: number; requestedAtUtc: string; reviewerPrompts: string[] } | null;
+  approvals: AcademicProjectApproval[];
+  usage: { spentUsd: number; ceilingUsd: number; remainingUsd: number; callsUsed: number; callCeiling: number; callsRemaining: number };
+  connectedStages: string[];
+  missingStages: string[];
+  evidenceCurrent: boolean;
+  planVersion: number;
+  sourceCount: number;
+  includedCount: number;
+  excludedCount: number;
+  undeterminedCount: number;
+  evidenceCount: number;
+  themeCount: number;
+  chapterCount: number;
+  verification: unknown | null;
+  plan?: AcademicResearchPlan | null;
+  code: string | null;
+};
+export type AcademicProjectCreateInput = {
+  requestKey: string;
+  researchQuestion: string;
+  discipline: string;
+  level: "Masters" | "Doctoral";
+  method: string;
+  methodologies: string[];
+  citationStyle: string;
+  language: string;
+  targetChapterHeadings: string[];
+  workingTitle: string | null;
+  geographicScope: string | null;
+  populationOrContext: string | null;
+  timePeriod: string | null;
+  subQuestions: string[];
+  keywords: string[];
+  minimumSources: number | null;
+  minimumPeerReviewed: number | null;
+  allowedSourceTypes: string[];
+  requireFullText: boolean;
+  programmeRequirements: string | null;
+};
 export type AssetStatus = "Active" | "Archived";
 export type AssetType = "image" | "document" | "presentation" | "video" | "audio" | "music" | "research" | "social" | "file" | "other";
 export type Asset = {
@@ -1290,6 +1385,8 @@ export type MovieCollaboration = { movieProjectId: string; team: MovieTeamMember
 export const api = {
   me: () => request<AuthResponse>("/api/auth/me"),
   passwordPolicy: () => request<PasswordPolicy>("/api/auth/password-policy"),
+  requestPasswordReset: (input: PasswordResetRequestInput) => request<{ message: string }>("/api/auth/password/forgot", { method: "POST", body: JSON.stringify(input) }, true),
+  resetPassword: (input: PasswordResetInput) => request<{ success: boolean }>("/api/auth/password/reset", { method: "POST", body: JSON.stringify(input) }, true),
   register: async (input: RegisterInput) => { const result = await request<AuthResponse>("/api/auth/register", { method: "POST", body: JSON.stringify(input) }, true); csrfToken = null; clearMovieWorkspaceRequests(); await csrf(true); return result; },
   login: async (input: LoginInput) => { const result = await request<AuthResponse>("/api/auth/login", { method: "POST", body: JSON.stringify(input) }, true); csrfToken = null; await csrf(true); return result; },
   logout: async () => { const result = await request<{ success: boolean }>("/api/auth/logout", { method: "POST" }, true); csrfToken = null; await csrf(true); return result; },
@@ -1558,7 +1655,9 @@ export const api = {
     const query = params.toString();
     return request<StoredFile[]>(`/api/workspaces/${workspaceId}/files${query ? `?${query}` : ""}`);
   },
-  uploadFile: (workspaceId: string, file: File, scope: { projectId?: string; conversationId?: string } = {}) => {
+  uploadFile: async (workspaceId: string, file: File, scope: { projectId?: string; conversationId?: string } = {}) => {
+    const sizeError = getUserUploadSizeError(file.size);
+    if (sizeError) throw new ApiError(400, sizeError, undefined, "FILE_TOO_LARGE");
     const form = new FormData();
     form.append("file", file);
     if (scope.projectId) form.append("projectId", scope.projectId);
@@ -1630,4 +1729,24 @@ export const api = {
     for (const isbn of params.isbns ?? []) query.append("isbn", isbn);
     return request<AcademicSourceSearchResponse>(`/api/workspaces/${encodeURIComponent(workspaceId)}/academic-sources/search?${query.toString()}`, { signal });
   },
+  listAcademicProjects: (workspaceId: string, page = 1, pageSize = 100) => request<AcademicProjectSummary[]>(`/api/workspaces/${encodeURIComponent(workspaceId)}/academic-projects?page=${page}&pageSize=${pageSize}`),
+  createAcademicProject: (workspaceId: string, input: AcademicProjectCreateInput) => request<AcademicProjectDto>(
+    `/api/workspaces/${encodeURIComponent(workspaceId)}/academic-projects`,
+    generationInit({ method: "POST", body: JSON.stringify(input) }, input.requestKey),
+    true,
+  ),
+  getAcademicProject: (projectId: string) => request<AcademicProjectDto>(`/api/academic-projects/${encodeURIComponent(projectId)}`),
+  runAcademicProject: (projectId: string) => request<AcademicProjectDto>(`/api/academic-projects/${encodeURIComponent(projectId)}/run`, { method: "POST", body: "{}" }, true),
+  submitAcademicApproval: (
+    projectId: string,
+    kind: string,
+    approvalKey: string,
+    checkpointRevision: number,
+    decision: "Approved" | "RequestRevision" | "Rejected",
+    notes?: string | null,
+  ) => request<AcademicProjectDto>(
+    `/api/academic-projects/${encodeURIComponent(projectId)}/approvals/${encodeURIComponent(kind)}`,
+    { method: "POST", body: JSON.stringify({ approvalKey, checkpointRevision, decision, notes: notes ?? null }) },
+    true,
+  ),
 };

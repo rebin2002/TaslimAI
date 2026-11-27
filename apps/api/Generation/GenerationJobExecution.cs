@@ -6,6 +6,7 @@ using System.Text.Json.Nodes;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 using Taslim.Api.Ai;
+using Taslim.Api.Activity;
 using Taslim.Api.Assets;
 using Taslim.Api.Authorization;
 using Taslim.Api.Contracts;
@@ -359,6 +360,7 @@ public sealed class GenerationJobService(
     IGenerationCostGuardrailService costGuardrails,
     IHttpContextAccessor httpContextAccessor,
     IOptions<ImageGenerationOptions> imageOptions,
+    IOptions<DocumentGenerationOptions> documentOptions,
     MovieCollaborationAccess? movieCollaboration = null) : IGenerationJobService
 {
     public async Task<GenerationJob> CreateAsync(Guid userId, CreateGenerationJobRequest request, CancellationToken cancellationToken = default, string? idempotencyKey = null, string? requestId = null, Guid? retryOfJobId = null)
@@ -369,8 +371,13 @@ public sealed class GenerationJobService(
             throw new GenerationJobForbiddenException();
         if (request.ProjectId.HasValue && !await db.Projects.AnyAsync(project => project.Id == request.ProjectId && project.WorkspaceId == request.WorkspaceId, cancellationToken))
             throw new GenerationJobValidationException("PROJECT_NOT_IN_WORKSPACE", "The selected project is not in this workspace.");
+        var normalizedKey = NormalizeIdempotencyKey(idempotencyKey);
+        var existingJob = normalizedKey is null ? null : await db.GenerationJobs.AsNoTracking()
+            .FirstOrDefaultAsync(item => item.CreatedByUserId == userId && item.IdempotencyKey == normalizedKey, cancellationToken);
+        MovieAssembly? assembly = null;
         if (GenerationJobTypes.MovieTypes.Contains(request.JobType.Trim()))
-            await ValidateMovieJobTargetAsync(userId, request, cancellationToken, retryOfJobId);
+            assembly = await ValidateMovieJobTargetAsync(userId, request, cancellationToken, retryOfJobId,
+                string.Equals(request.JobType.Trim(), GenerationJobTypes.MovieAssembly, StringComparison.OrdinalIgnoreCase) ? existingJob?.Id : null);
         else if (GenerationJobTypes.MovieDialogueVoiceTypes.Contains(request.JobType.Trim()))
             await ValidateMovieDialogueVoiceJobTargetAsync(userId, request, cancellationToken);
         else if (GenerationJobTypes.MovieSoundTypes.Contains(request.JobType.Trim()))
@@ -385,7 +392,6 @@ public sealed class GenerationJobService(
             throw new GenerationJobValidationException("INVALID_INPUT_JSON", "The job input is not valid JSON.");
         }
 
-        var normalizedKey = NormalizeIdempotencyKey(idempotencyKey);
         var normalizedJobType = GenerationJobTypes.Supported.First(type => string.Equals(type, request.JobType.Trim(), StringComparison.OrdinalIgnoreCase));
         var normalizedTitle = string.IsNullOrWhiteSpace(request.Title) ? null : request.Title.Trim();
         GenerationJob? retryOf = null;
@@ -398,15 +404,11 @@ public sealed class GenerationJobService(
                 throw new GenerationJobValidationException("RETRY_SOURCE_NOT_TERMINAL", "Only failed or cancelled jobs can be retried.");
         }
         var requestFingerprint = ComputeRequestFingerprint(request.WorkspaceId, request.ProjectId, normalizedJobType, normalizedTitle, request.InputJson, request.EstimatedProviderCostUsd, retryOfJobId);
-        if (normalizedKey is not null)
+        if (existingJob is not null)
         {
-            var existing = await db.GenerationJobs.AsNoTracking().FirstOrDefaultAsync(item => item.CreatedByUserId == userId && item.IdempotencyKey == normalizedKey, cancellationToken);
-            if (existing is not null)
-            {
-                if (!string.Equals(existing.RequestFingerprint, requestFingerprint, StringComparison.Ordinal))
-                    throw new GenerationJobValidationException("IDEMPOTENCY_KEY_REUSED", "This idempotency key was already used for a different generation request.");
-                return existing;
-            }
+            if (!string.Equals(existingJob.RequestFingerprint, requestFingerprint, StringComparison.Ordinal))
+                throw new GenerationJobValidationException("IDEMPOTENCY_KEY_REUSED", "This idempotency key was already used for a different generation request.");
+            return existingJob;
         }
 
         var estimate = request.InternalCostEstimate
@@ -457,11 +459,17 @@ public sealed class GenerationJobService(
         try
         {
             await db.SaveChangesAsync(cancellationToken);
+            if (assembly is not null)
+                await LinkMovieAssemblyForPublicationAsync(assembly, job, cancellationToken);
             await usage.BeginAsync(job, request.EstimatedProviderCostUsd, cancellationToken);
             await queue.EnqueueAsync(job.Id, cancellationToken);
-            job.Status = GenerationJobStatus.Queued;
-            job.QueuedAt = DateTime.UtcNow;
+            var queuedAt = DateTime.UtcNow;
             await transaction.CommitAsync(cancellationToken);
+            // The queue wrote these columns in SQL. Returning an entity with a pending
+            // tracked update could re-queue a worker's already claimed assembly job.
+            if (assembly is not null) db.Entry(job).State = EntityState.Detached;
+            job.Status = GenerationJobStatus.Queued;
+            job.QueuedAt = queuedAt;
             return job;
         }
         catch (DbUpdateException) when (normalizedKey is not null)
@@ -486,6 +494,11 @@ public sealed class GenerationJobService(
             throw new GenerationJobValidationException("RETRY_IDEMPOTENCY_REQUIRED", "A retry idempotency key is required.");
         if (string.Equals(source.JobType, GenerationJobTypes.ImageGenerate, StringComparison.OrdinalIgnoreCase) && !imageOptions.Value.Enabled)
             throw new GenerationJobValidationException(GenerationJobErrorCodes.ImageStudioUnavailable, "Image generation is not available right now.");
+        // Same fail-closed boundary as the Image gate above. Every retry entry
+        // point inherits it, so a caller that bypasses the Document Studio route
+        // still cannot resume provider spend while the studio is disabled.
+        if (string.Equals(source.JobType, GenerationJobTypes.DocumentGenerate, StringComparison.OrdinalIgnoreCase) && !documentOptions.Value.Enabled)
+            throw new GenerationJobValidationException(DocumentStudioAvailability.UnavailableCode, DocumentStudioAvailability.UnavailableMessage);
 
         var retryInputJson = source.InputJson;
         MovieDialogueTake? pendingDialogueTake = null;
@@ -546,29 +559,7 @@ public sealed class GenerationJobService(
         if (GenerationJobTypes.MovieTypes.Contains(source.JobType))
         {
             if (string.Equals(source.JobType, GenerationJobTypes.MovieAssembly, StringComparison.OrdinalIgnoreCase))
-            {
-                MovieFinalAssemblyInput? assemblyInput;
-                try { assemblyInput = JsonSerializer.Deserialize<MovieFinalAssemblyInput>(source.InputJson); }
-                catch (JsonException) { assemblyInput = null; }
-                if (assemblyInput is not null)
-                {
-                    var assembly = await db.MovieAssemblies.FirstOrDefaultAsync(item => item.Id == assemblyInput.AssemblyId && item.MovieProjectId == assemblyInput.MovieProjectId, cancellationToken);
-                    if (assembly is not null)
-                    {
-                        assembly.GenerationJobId = retry.Id;
-                        assembly.AssetId = null;
-                        assembly.Status = MovieAssemblyStatuses.Queued;
-                        assembly.QcStatus = MovieFinalAssemblyQcStatuses.NotRun;
-                        assembly.QcResultJson = null;
-                        assembly.LastErrorCode = null;
-                        assembly.ProgressPercent = 0;
-                        assembly.CheckpointJson = JsonSerializer.Serialize(new { phase = "retry_resume", progressPercent = 0 });
-                        assembly.UpdatedAt = DateTime.UtcNow;
-                        await db.SaveChangesAsync(cancellationToken);
-                    }
-                }
                 return retry;
-            }
             MovieGenerationInput? input;
             try { input = JsonSerializer.Deserialize<MovieGenerationInput>(source.InputJson); }
             catch (JsonException) { input = null; }
@@ -640,7 +631,35 @@ public sealed class GenerationJobService(
         catch (JsonException) { return null; }
     }
 
-    private async Task ValidateMovieJobTargetAsync(
+    private async Task LinkMovieAssemblyForPublicationAsync(MovieAssembly assembly, GenerationJob job, CancellationToken cancellationToken)
+    {
+        // Only the original planned target or the terminal job being retried can transfer
+        // ownership. The queue row and usage reservation become visible in this same commit.
+        var target = db.MovieAssemblies.Where(item => item.Id == assembly.Id
+            && item.MovieProjectId == assembly.MovieProjectId
+            && item.RequestFingerprint == assembly.RequestFingerprint
+            && item.GenerationJobId == job.RetryOfJobId);
+        if (!job.RetryOfJobId.HasValue)
+            target = target.Where(item => item.Status == MovieAssemblyStatuses.Planned);
+        else
+            target = target.Where(item => item.GenerationJob != null
+                && (item.GenerationJob.Status == GenerationJobStatus.Failed || item.GenerationJob.Status == GenerationJobStatus.Cancelled));
+        var checkpoint = JsonSerializer.Serialize(new { phase = job.RetryOfJobId.HasValue ? "retry_resume" : "queued", progressPercent = 0 });
+        var updated = await target.ExecuteUpdateAsync(setters => setters
+            .SetProperty(item => item.GenerationJobId, job.Id)
+            .SetProperty(item => item.Status, MovieAssemblyStatuses.Queued)
+            .SetProperty(item => item.AssetId, (Guid?)null)
+            .SetProperty(item => item.QcStatus, MovieFinalAssemblyQcStatuses.NotRun)
+            .SetProperty(item => item.QcResultJson, (string?)null)
+            .SetProperty(item => item.LastErrorCode, (string?)null)
+            .SetProperty(item => item.ProgressPercent, 0)
+            .SetProperty(item => item.CheckpointJson, checkpoint)
+            .SetProperty(item => item.UpdatedAt, job.CreatedAt), cancellationToken);
+        if (updated != 1)
+            throw new GenerationJobValidationException("MOVIE_ASSEMBLY_TARGET_INVALID", "The final assembly target is invalid or already claimed.");
+    }
+
+    private async Task<MovieAssembly?> ValidateMovieJobTargetAsync(
         Guid userId,
         CreateGenerationJobRequest request,
         CancellationToken cancellationToken,
@@ -656,17 +675,18 @@ public sealed class GenerationJobService(
             catch (JsonException) { assemblyInput = null; }
             var assembly = assemblyInput is null
                 ? null
-                : await db.MovieAssemblies.Include(item => item.MovieProject).FirstOrDefaultAsync(item => item.Id == assemblyInput.AssemblyId, cancellationToken);
+                : await db.MovieAssemblies.AsNoTracking().Include(item => item.MovieProject).FirstOrDefaultAsync(item => item.Id == assemblyInput.AssemblyId, cancellationToken);
             if (assemblyInput is null || assemblyInput.MovieProjectId == Guid.Empty || assemblyInput.AssemblyId == Guid.Empty || assembly is null
                 || assembly.MovieProjectId != assemblyInput.MovieProjectId
                 || assembly.MovieProject.WorkspaceId != request.WorkspaceId
                 || request.ProjectId != assembly.MovieProject.ProjectId
-                || (assembly.GenerationJobId is not null && !retryOfJobId.HasValue)
+                || (assembly.GenerationJobId != retryOfJobId && assembly.GenerationJobId != allowedLinkedGenerationJobId)
+                || !string.Equals(assembly.RequestFingerprint, assemblyInput.RequestFingerprint, StringComparison.Ordinal)
                 || !string.Equals(assembly.IdempotencyKey, assemblyInput.IdempotencyKey, StringComparison.Ordinal))
                 throw new GenerationJobValidationException("MOVIE_ASSEMBLY_TARGET_INVALID", "The final assembly target is invalid or already claimed.");
             if (assembly.MovieProject.CreatedByUserId != userId && (movieCollaboration is null || !await movieCollaboration.HasPermissionAsync(userId, assembly.MovieProjectId, MoviePermissions.FinalApproval, cancellationToken)))
                 throw new GenerationJobForbiddenException();
-            return;
+            return assembly;
         }
         if (!isQuickMovie && !string.Equals(request.JobType.Trim(), GenerationJobTypes.MovieClipGenerate, StringComparison.OrdinalIgnoreCase))
             throw new GenerationJobValidationException("MOVIE_JOB_TARGET_INVALID", "Movie jobs must be created through a validated movie clip target.");
@@ -688,6 +708,7 @@ public sealed class GenerationJobService(
             throw new GenerationJobValidationException("MOVIE_JOB_TARGET_INVALID", "The movie job target does not belong to the selected project or is no longer available.");
         if (clip.MovieProject.CreatedByUserId != userId && (movieCollaboration is null || !await movieCollaboration.HasPermissionAsync(userId, clip.MovieProjectId, MoviePermissions.Generate, cancellationToken)))
             throw new GenerationJobForbiddenException();
+        return null;
     }
 
     private async Task ValidateMovieDialogueVoiceJobTargetAsync(Guid userId, CreateGenerationJobRequest request, CancellationToken cancellationToken)
@@ -850,14 +871,12 @@ public sealed class GenerationJobService(
         if (!await access.IsMemberAsync(userId, filter.WorkspaceId, cancellationToken)) return null;
         var page = ApiPagination.NormalizePage(filter.Page);
         var pageSize = ApiPagination.NormalizePageSize(filter.PageSize);
-        // Mirrors IsPrivateExecutionRecord: research records and unscoped presentation export
-        // records stay with their creator because their result JSON references assets that other
-        // workspace members cannot read. Expressed as a translatable predicate so paging and the
-        // total count stay consistent with the hidden records.
-        var query = db.GenerationJobs.AsNoTracking().Where(job => job.WorkspaceId == filter.WorkspaceId &&
-            (job.CreatedByUserId == userId
-                || (job.JobType != GenerationJobTypes.ResearchGenerate
-                    && (job.JobType != GenerationJobTypes.PresentationGenerate || job.ProjectId != null))));
+        // Keep list visibility on the same SQL-translatable policy as the Activity Center and
+        // project overview, including provider-specific deterministic JobType folding.
+        var query = CreatorPrivacyFence.VisibleToMember(
+            db.GenerationJobs.AsNoTracking().Where(job => job.WorkspaceId == filter.WorkspaceId),
+            userId,
+            db.Database.ProviderName);
         if (filter.Status.HasValue) query = query.Where(job => job.Status == filter.Status.Value);
         if (filter.ProjectId.HasValue) query = query.Where(job => job.ProjectId == filter.ProjectId.Value);
         if (!string.IsNullOrWhiteSpace(filter.JobType)) query = query.Where(job => job.JobType == filter.JobType);
@@ -913,18 +932,21 @@ public sealed class GenerationJobService(
     }
 
     // Execution records that describe creator-private output must not disclose the output's
-    // identifiers. Research records embed report text derived from private uploads, and a
-    // presentation job without a project publishes an asset that AssetVisibility keeps private
-    // to its creator, so the asset id, representation ids and exported file name carried in the
-    // presentation result JSON are private to that creator as well. Project-scoped jobs keep the
-    // intentional workspace sharing surface for both the record and the asset.
+    // identifiers. Research records embed report text derived from private uploads; unscoped
+    // Presentation exports and Social posts also carry creator-private result data. Project-scoped
+    // Presentation and Social jobs keep the intentional workspace-sharing surface.
     private static bool IsPrivateExecutionRecord(GenerationJob job, Guid userId) =>
         job.CreatedByUserId != userId
         && (string.Equals(job.JobType, GenerationJobTypes.ResearchGenerate, StringComparison.OrdinalIgnoreCase)
-            || IsUnscopedPresentationExportRecord(job));
+            || IsUnscopedPresentationExportRecord(job)
+            || IsUnscopedSocialRecord(job));
 
     private static bool IsUnscopedPresentationExportRecord(GenerationJob job) =>
         string.Equals(job.JobType, GenerationJobTypes.PresentationGenerate, StringComparison.OrdinalIgnoreCase)
+        && job.ProjectId is null;
+
+    private static bool IsUnscopedSocialRecord(GenerationJob job) =>
+        string.Equals(job.JobType, GenerationJobTypes.SocialGenerate, StringComparison.OrdinalIgnoreCase)
         && job.ProjectId is null;
 
     private async Task CancelUsageAsync(GenerationJob job, string code, CancellationToken cancellationToken)
@@ -1441,7 +1463,7 @@ public sealed class GenerationJobWorker(
         }
     }
 
-    private async Task<GenerationJob?> ClaimAsync(TaslimDbContext db, CancellationToken cancellationToken)
+    internal async Task<GenerationJob?> ClaimAsync(TaslimDbContext db, CancellationToken cancellationToken)
     {
         var isSqlite = db.Database.ProviderName?.Contains("Sqlite", StringComparison.OrdinalIgnoreCase) == true;
         if (isSqlite)
