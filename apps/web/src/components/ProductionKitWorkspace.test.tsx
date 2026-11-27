@@ -6,6 +6,7 @@ import type { MovieCast, MovieCharacter, MovieWorldWorkspace } from "@/lib/api";
 
 const harness = vi.hoisted(() => ({
   api: {
+    getAsset: vi.fn(),
     getMovieCast: vi.fn(),
     getMovieWorld: vi.fn(),
     getMovieCharacterDetail: vi.fn(),
@@ -198,6 +199,7 @@ beforeEach(() => {
   vi.stubGlobal("navigator", { userAgent: "test" });
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
   Object.values(harness.api).forEach((mock) => mock.mockReset());
+  harness.api.getAsset.mockImplementation(async (id: string) => ({ id, hasFile: false, canPreview: false }));
   harness.api.getMovieCast.mockResolvedValue(workspaceCast("default"));
   harness.api.getMovieWorld.mockResolvedValue(workspaceWorld("default"));
   harness.api.getMovieCharacterDetail.mockImplementation((id: string) => Promise.resolve({ character: workspaceDetail(id.replace(/-character$/, "")) }));

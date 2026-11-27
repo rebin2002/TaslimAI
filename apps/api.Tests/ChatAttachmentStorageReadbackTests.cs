@@ -327,6 +327,9 @@ public sealed class ChatAttachmentStorageReadbackTests
             {
                 // Synthetic, structurally shaped values only. Nothing here is a
                 // real endpoint, account, bucket, credential, or key.
+                // The recording chat service accepts the image read back by this fixture.
+                ["Ai:Models:mock:ProviderKey"] = "mock",
+                ["Ai:Models:mock:SupportsVision"] = "true",
                 ["Files:StorageProvider"] = "S3Compatible",
                 ["Files:S3Endpoint"] = "https://synthetic-account.r2.invalid",
                 ["Files:S3Region"] = "auto",

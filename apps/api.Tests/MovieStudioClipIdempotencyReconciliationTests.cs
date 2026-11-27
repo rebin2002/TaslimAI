@@ -351,6 +351,17 @@ public sealed class MovieStudioClipIdempotencyRuleTests
         retimed.Shot.DurationSeconds = 45;
         Assert.False(MovieStudioClipIdempotency.MatchesRequest(priced, retimed.Movie, retimed.Scene, retimed.Shot, "Clip title", SceneJson, ShotJson));
 
+        // The former clamp made a 7,200-second edit look identical to a previously priced
+        // 3,600-second clip. Replay identity now uses the raw duration and rejects that match.
+        var longEdited = Target();
+        longEdited.Shot.DurationSeconds = MovieDurationBudgetPolicy.MaxShotDurationSeconds;
+        var pricedAtClipCeiling = Job(Input(longEdited.Movie, longEdited.Scene, longEdited.Shot, Guid.NewGuid()));
+        longEdited.Shot.DurationSeconds = MovieDurationBudgetPolicy.MaxMovieDurationSeconds;
+        Assert.Equal(MovieDurationBudgetPolicy.MaxMovieDurationSeconds,
+            MovieStudioClipIdempotency.ResolveDurationSeconds(longEdited.Movie, longEdited.Scene, longEdited.Shot));
+        Assert.False(MovieStudioClipIdempotency.MatchesRequest(
+            pricedAtClipCeiling, longEdited.Movie, longEdited.Scene, longEdited.Shot, "Clip title", SceneJson, ShotJson));
+
         var rewritten = Target();
         rewritten.Shot.Description = "The courier waits in the rain.";
         Assert.False(MovieStudioClipIdempotency.MatchesRequest(priced, rewritten.Movie, rewritten.Scene, rewritten.Shot, "Clip title", SceneJson, ShotJson));
