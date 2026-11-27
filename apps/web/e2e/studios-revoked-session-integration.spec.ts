@@ -31,6 +31,7 @@ type StudioCase = {
 
 type TestAccount = "A" | "B";
 type AccountState = TestAccount | "loggedOut";
+type ResponseCaptureOutcome = "complete-body" | "browser-cancelled-no-response" | "incomplete";
 
 const studios: StudioCase[] = [
   {
@@ -78,6 +79,7 @@ type RequestRow = {
   navigation: boolean;
   accountAtRequest?: AccountState;
   status?: number;
+  responseSource?: "test-fixture" | "loopback-upstream";
   responseUrl?: string;
   responseTime?: number;
   settledAt?: number;
@@ -146,6 +148,14 @@ function responseCrossedBoundary(row: RequestRow, signalAt: number) {
   return row.time >= signalAt
     || (row.responseTime !== undefined && row.responseTime >= signalAt)
     || (row.settledAt !== undefined && row.settledAt >= signalAt);
+}
+
+function responseCaptureOutcome(row: RequestRow): ResponseCaptureOutcome {
+  if (row.bodyReadStatus === "read") return "complete-body";
+  if (row.failure?.includes("ERR_ABORTED") && row.status === undefined && row.responseTime === undefined) {
+    return "browser-cancelled-no-response";
+  }
+  return "incomplete";
 }
 
 function findObservedRequest(monitor: Monitor, request: Request) {
@@ -237,6 +247,7 @@ async function continueWithCapturedResponse(route: Route, monitor: Monitor) {
     return;
   }
 
+  row.responseSource = "loopback-upstream";
   let response: Awaited<ReturnType<Route["fetch"]>>;
   try {
     response = await route.fetch({ timeout: responseBodyReadTimeoutMs });
@@ -311,6 +322,7 @@ function observePage(page: Page, monitor: Monitor, accountAtRequest?: () => Acco
   const captureResponse = (request: Request, response: import("@playwright/test").Response) => {
     const row = findObservedRequest(monitor, request);
     if (!row) return;
+    row.responseSource ??= "loopback-upstream";
     row.status = response.status();
     row.responseUrl = response.url();
     row.responseTime = performance.now();
@@ -567,9 +579,11 @@ function privateAccountMessages(account: TestAccount) {
   }];
 }
 
-function jsonResponse(route: Route, body: unknown) {
+function jsonResponse(route: Route, monitor: Monitor, body: unknown, status = 200) {
+  const row = findObservedRequestWithSettlement(monitor, route.request(), true);
+  if (row) row.responseSource = "test-fixture";
   return route.fulfill({
-    status: 200,
+    status,
     contentType: "application/json; charset=utf-8",
     headers: { "cache-control": "no-store, private" },
     body: JSON.stringify(body),
@@ -601,10 +615,10 @@ async function installLocalOnlyRoutes(context: BrowserContext, monitor: Monitor,
     }
 
     const conversation = privateConversation(workspaceId);
-    if (url.pathname === `/api/workspaces/${workspaceId}/conversations`) return jsonResponse(route, [conversation]);
-    if (url.pathname === `/api/conversations/${conversationId}`) return jsonResponse(route, conversation);
+    if (url.pathname === `/api/workspaces/${workspaceId}/conversations`) return jsonResponse(route, monitor, [conversation]);
+    if (url.pathname === `/api/conversations/${conversationId}`) return jsonResponse(route, monitor, conversation);
     if (url.pathname === `/api/conversations/${conversationId}/messages`) {
-      return jsonResponse(route, [{
+      return jsonResponse(route, monitor, [{
         id: "message-private-revocation-fixture",
         conversationId,
         role: "Assistant",
@@ -615,12 +629,12 @@ async function installLocalOnlyRoutes(context: BrowserContext, monitor: Monitor,
       }]);
     }
     if (url.pathname === `/api/workspaces/${workspaceId}/projects`) {
-      return jsonResponse(route, url.searchParams.get("status") === "Archived" ? [] : [privateProject(workspaceId)]);
+      return jsonResponse(route, monitor, url.searchParams.get("status") === "Archived" ? [] : [privateProject(workspaceId)]);
     }
-    if (url.pathname === `/api/workspaces/${workspaceId}/files`) return jsonResponse(route, [privateFile(workspaceId)]);
+    if (url.pathname === `/api/workspaces/${workspaceId}/files`) return jsonResponse(route, monitor, [privateFile(workspaceId)]);
     if (url.pathname === `/api/workspaces/${workspaceId}/assets` || url.pathname === "/api/assets") {
       const asset = privateAsset(workspaceId, studio.assetType);
-      return jsonResponse(route, { items: [asset], page: 1, pageSize: 6, totalCount: 1, totalPages: 1 });
+      return jsonResponse(route, monitor, { items: [asset], page: 1, pageSize: 6, totalCount: 1, totalPages: 1 });
     }
     await route.continue();
   });
@@ -680,15 +694,21 @@ async function installAccountSwitchNetworkGuard(
     }
     const project = privateAccountProject(workspaceId, account);
     const conversation = privateAccountConversation(workspaceId, account);
-    if (url.pathname === `/api/workspaces/${workspaceId}/conversations`) return jsonResponse(route, [conversation]);
-    if (url.pathname === `/api/conversations/${conversation.id}`) return jsonResponse(route, conversation);
-    if (url.pathname === `/api/conversations/${conversation.id}/messages`) return jsonResponse(route, privateAccountMessages(account));
-    if (url.pathname === `/api/workspaces/${workspaceId}/projects`) {
-      return jsonResponse(route, url.searchParams.get("status") === "Archived" ? [] : [project]);
+    if (url.pathname === "/api/assets") {
+      const requestedWorkspaceId = url.searchParams.get("workspaceId");
+      if (requestedWorkspaceId && requestedWorkspaceId !== workspaceId) {
+        return jsonResponse(route, monitor, { error: { code: "WORKSPACE_ACCESS_DENIED" } }, 403);
+      }
     }
-    if (url.pathname === `/api/projects/${project.id}`) return jsonResponse(route, project);
+    if (url.pathname === `/api/workspaces/${workspaceId}/conversations`) return jsonResponse(route, monitor, [conversation]);
+    if (url.pathname === `/api/conversations/${conversation.id}`) return jsonResponse(route, monitor, conversation);
+    if (url.pathname === `/api/conversations/${conversation.id}/messages`) return jsonResponse(route, monitor, privateAccountMessages(account));
+    if (url.pathname === `/api/workspaces/${workspaceId}/projects`) {
+      return jsonResponse(route, monitor, url.searchParams.get("status") === "Archived" ? [] : [project]);
+    }
+    if (url.pathname === `/api/projects/${project.id}`) return jsonResponse(route, monitor, project);
     if (url.pathname === `/api/projects/${project.id}/overview`) {
-      return jsonResponse(route, {
+      return jsonResponse(route, monitor, {
         project,
         workspace: { id: workspaceId, name: `Account ${account} synthetic workspace`, slug: workspaceId, type: "Personal", role: "Owner" },
         counts: { files: 1, assets: 1, conversations: 1, activity: 0 },
@@ -696,10 +716,10 @@ async function installAccountSwitchNetworkGuard(
         recentActivity: [],
       });
     }
-    if (url.pathname === `/api/workspaces/${workspaceId}/files`) return jsonResponse(route, [privateAccountFile(workspaceId, account)]);
+    if (url.pathname === `/api/workspaces/${workspaceId}/files`) return jsonResponse(route, monitor, [privateAccountFile(workspaceId, account)]);
     if (url.pathname === `/api/workspaces/${workspaceId}/assets` || url.pathname === "/api/assets") {
       const asset = privateAccountAsset(workspaceId, studio.assetType, account);
-      return jsonResponse(route, { items: [asset], page: 1, pageSize: 6, totalCount: 1, totalPages: 1 });
+      return jsonResponse(route, monitor, { items: [asset], page: 1, pageSize: 6, totalCount: 1, totalPages: 1 });
     }
     await route.continue();
   });
@@ -955,20 +975,22 @@ for (const studio of studios) {
         : [];
       const protectedGetResponses = afterRevokeResponseRows.filter(row => isProtectedRead(row.method, row.path));
       const nonDeniedProtectedGetResponses = protectedGetResponses.filter(row => row.status !== undefined && row.status !== 401 && row.status !== 403);
-      const unresolvedProtectedGetResponses = protectedGetResponses.filter(row => row.status === undefined);
+      const unresolvedProtectedGetResponses = protectedGetResponses.filter(row => row.status === undefined && responseCaptureOutcome(row) !== "browser-cancelled-no-response");
       const targetPrefetchResponses = studio.navKind === "link"
         ? afterRevokeResponseRows.filter(row => row.path === studio.path && row.rsc && row.prefetch)
         : [];
       const capturedResponseBodies = await collectResponseBodies(afterRevokeResponseRows);
       const privateResponseBodies = capturedResponseBodies.flatMap(({ row, body }) => {
         const markers = privateMarkers.filter(marker => body.includes(marker));
-        return markers.length > 0 ? [{ path: row.path, responseUrl: row.responseUrl, status: row.status, markers }] : [];
+        return markers.length > 0 ? [{ path: row.path, responseUrl: row.responseUrl, status: row.status, responseSource: row.responseSource, captureOutcome: responseCaptureOutcome(row), markers }] : [];
       });
       const responseBodyCaptureAudit = capturedResponseBodies.map(({ row, body }) => ({
         requestUrl: row.url,
         responseUrl: row.responseUrl,
         method: row.method,
         status: row.status,
+        responseSource: row.responseSource,
+        captureOutcome: responseCaptureOutcome(row),
         responseTime: row.responseTime,
         settledAt: row.settledAt,
         contentType: row.contentType,
@@ -980,10 +1002,17 @@ for (const studio of studios) {
       }));
       const responseBodyReadFailures = capturedResponseBodies
         .filter(({ row }) => row.bodyReadStatus !== "read")
-        .map(({ row }) => ({ path: row.path, requestUrl: row.url, responseUrl: row.responseUrl, status: row.status, contentType: row.contentType, bodyReadStatus: row.bodyReadStatus, bodyCaptureSource: row.bodyCaptureSource, bodyBytes: row.bodyBytes, error: row.bodyReadError, failure: row.failure }));
+        .map(({ row }) => ({ path: row.path, requestUrl: row.url, responseUrl: row.responseUrl, status: row.status, responseSource: row.responseSource, captureOutcome: responseCaptureOutcome(row), contentType: row.contentType, bodyReadStatus: row.bodyReadStatus, bodyCaptureSource: row.bodyCaptureSource, bodyBytes: row.bodyBytes, error: row.bodyReadError, failure: row.failure }));
+      const incompleteResponseCaptures = capturedResponseBodies
+        .filter(({ row }) => responseCaptureOutcome(row) === "incomplete")
+        .map(({ row }) => ({ path: row.path, requestUrl: row.url, status: row.status, responseSource: row.responseSource, bodyReadStatus: row.bodyReadStatus, error: row.bodyReadError, failure: row.failure }));
+      const browserCancelledWithoutResponse = capturedResponseBodies
+        .filter(({ row }) => responseCaptureOutcome(row) === "browser-cancelled-no-response")
+        .map(({ row }) => ({ path: row.path, requestUrl: row.url, responseSource: row.responseSource, failure: row.failure, noResponseReceived: row.status === undefined && row.responseTime === undefined && row.bodyBytes === undefined }));
+      const malformedBrowserCancellations = browserCancelledWithoutResponse.filter(row => !row.noResponseReceived || !row.failure?.includes("ERR_ABORTED"));
       const rscResponseAudit = capturedResponseBodies
         .filter(({ row }) => row.rsc)
-        .map(({ row, body }) => ({ path: row.path, requestUrl: row.url, responseUrl: row.responseUrl, status: row.status, responseTime: row.responseTime, settledAt: row.settledAt, prefetch: row.prefetch, bodyReadStatus: row.bodyReadStatus, bodyCaptureSource: row.bodyCaptureSource, bodyBytes: row.bodyBytes, privateMarker: row.bodyReadStatus === "read" ? privateMarkers.some(marker => body.includes(marker)) : null }));
+        .map(({ row, body }) => ({ path: row.path, requestUrl: row.url, responseUrl: row.responseUrl, status: row.status, responseSource: row.responseSource, captureOutcome: responseCaptureOutcome(row), responseTime: row.responseTime, settledAt: row.settledAt, prefetch: row.prefetch, bodyReadStatus: row.bodyReadStatus, bodyCaptureSource: row.bodyCaptureSource, bodyBytes: row.bodyBytes, privateMarker: row.bodyReadStatus === "read" ? privateMarkers.some(marker => body.includes(marker)) : null }));
       if (syntheticSessionMode) {
         const summary = await request.get(`${E2E_API_URL}/__test__/summary`);
         expect(summary.status()).toBe(200);
@@ -1001,18 +1030,21 @@ for (const studio of studios) {
         explicitRevokedApiControlStatus: deniedControl.status(),
         postRevocationProtectedGetAttempts: protectedGets.length,
         correctlyDeniedProtectedGetResponses: correctlyDenied.length,
-        postRevocationProtectedGetResponses: completedProtectedGets.map(row => ({ path: row.path, status: row.status })),
-        nonDeniedProtectedGetResponses: nonDenied.map(row => ({ path: row.path, status: row.status })),
-        postSignalProtectedGetResponses: protectedGetResponses.map(row => ({ path: row.path, responseUrl: row.responseUrl, status: row.status, responseTime: row.responseTime, settledAt: row.settledAt })),
-        nonDeniedProtectedGetResponsesAfterSignal: nonDeniedProtectedGetResponses.map(row => ({ path: row.path, responseUrl: row.responseUrl, status: row.status })),
+        postRevocationProtectedGetResponses: completedProtectedGets.map(row => ({ path: row.path, status: row.status, responseSource: row.responseSource })),
+        nonDeniedProtectedGetResponses: nonDenied.map(row => ({ path: row.path, status: row.status, responseSource: row.responseSource })),
+        postSignalProtectedGetResponses: protectedGetResponses.map(row => ({ path: row.path, responseUrl: row.responseUrl, status: row.status, responseSource: row.responseSource, captureOutcome: responseCaptureOutcome(row), responseTime: row.responseTime, settledAt: row.settledAt })),
+        nonDeniedProtectedGetResponsesAfterSignal: nonDeniedProtectedGetResponses.map(row => ({ path: row.path, responseUrl: row.responseUrl, status: row.status, responseSource: row.responseSource })),
         unresolvedProtectedGetResponsesAfterSignal: unresolvedProtectedGetResponses.map(row => ({ path: row.path, url: row.url, responseUrl: row.responseUrl, failure: row.failure })),
-        postRevocationTargetPrefetches: targetPrefetches.map(row => ({ path: row.path, status: row.status })),
-        postRevocationTargetPrefetchResponses: targetPrefetchResponses.map(row => ({ path: row.path, responseUrl: row.responseUrl, status: row.status, responseTime: row.responseTime, settledAt: row.settledAt })),
+        postRevocationTargetPrefetches: targetPrefetches.map(row => ({ path: row.path, status: row.status, responseSource: row.responseSource })),
+        postRevocationTargetPrefetchResponses: targetPrefetchResponses.map(row => ({ path: row.path, responseUrl: row.responseUrl, status: row.status, responseSource: row.responseSource, captureOutcome: responseCaptureOutcome(row), responseTime: row.responseTime, settledAt: row.settledAt })),
         postRevocationRscResponses: rscResponseAudit,
         privateResponseBodies,
         responseBodyCaptureAudit,
         routeFetchCapturedResponseBodies: responseBodyCaptureAudit.filter(row => row.bodyCaptureSource === "route-fetch").length,
         responseBodyReadFailures,
+        incompleteResponseCaptures,
+        browserCancelledWithoutResponse,
+        malformedBrowserCancellations,
         exactChargeableChatPaths: chargeableChatPostPaths,
         generationPosts: monitor.generationPosts,
         blockedGenerationPosts: monitor.blockedGenerationPosts,
@@ -1025,7 +1057,8 @@ for (const studio of studios) {
       // HTTP authorization is a separate invariant from avoiding stale calls.
       expect.soft(nonDenied.map(row => ({ path: row.path, status: row.status })), "Any post-revocation protected GET that reaches the local API must be denied with 401/403.").toEqual([]);
       expect.soft(privateResponseBodies, "No private marker may be served in a post-revocation API or Flight response.").toEqual([]);
-      expect.soft(responseBodyReadFailures, "Every post-revocation API/Flight response body must be captured; unreadable bodies cannot support a privacy PASS.").toEqual([]);
+      expect.soft(incompleteResponseCaptures, "Every response crossing revocation must be fully captured; timeout and unreadable non-cancelled responses fail closed.").toEqual([]);
+      expect.soft(malformedBrowserCancellations, "A browser cancellation is distinct only when ERR_ABORTED happened before any HTTP response/body; DOM privacy assertions still apply.").toEqual([]);
       expect.soft(nonDeniedProtectedGetResponses.map(row => ({ path: row.path, responseUrl: row.responseUrl, status: row.status })), "Every protected GET response crossing the revocation boundary must be denied with 401/403.").toEqual([]);
       expect.soft(unresolvedProtectedGetResponses.map(row => ({ path: row.path, url: row.url, failure: row.failure })), "Every protected GET response crossing the revocation boundary must have an observable status.").toEqual([]);
       expect.soft(monitor.generationPosts, "No generation/provider POST is allowed in this auth regression.").toEqual([]);
@@ -1165,17 +1198,12 @@ for (const studio of studios) {
           const request = route.request();
           if (request.method() !== "GET") return route.continue();
           if (activeAccount !== "A" || !workspaceIds.A) {
-            return route.fulfill({
-              status: 403,
-              contentType: "application/json; charset=utf-8",
-              headers: { "cache-control": "no-store, private" },
-              body: JSON.stringify({ error: { code: "PROJECT_ACCESS_REVOKED" } }),
-            });
+            return jsonResponse(route, monitor, { error: { code: "PROJECT_ACCESS_REVOKED" } }, 403);
           }
           const project = privateAccountProject(workspaceIds.A, "A");
           const url = new URL(request.url());
           if (url.pathname.endsWith("/overview")) {
-            return jsonResponse(route, {
+            return jsonResponse(route, monitor, {
               project,
               workspace: { id: workspaceIds.A, name: "Synthetic Account A Workspace", slug: workspaceIds.A, type: "Personal", role: "Owner" },
               counts: { files: 1, assets: 1, conversations: 1, activity: 0 },
@@ -1183,7 +1211,7 @@ for (const studio of studios) {
               recentActivity: [],
             });
           }
-          return jsonResponse(route, project);
+          return jsonResponse(route, monitor, project);
         });
       }
       const pageA = await context.newPage();
@@ -1344,7 +1372,7 @@ for (const studio of studios) {
       const deniedAProtectedGets = aProtectedGetResponses.filter(row => row.status === 401 || row.status === 403);
       const nonDeniedAProtectedGets = aProtectedGetResponses.filter(row => row.status !== undefined && row.status !== 401 && row.status !== 403);
       const unresolvedAProtectedGets = aProtectedGetAttempts.filter(row => row.status === undefined);
-      const unresolvedAProtectedGetResponses = aProtectedGetResponses.filter(row => row.status === undefined);
+      const unresolvedAProtectedGetResponses = aProtectedGetResponses.filter(row => row.status === undefined && responseCaptureOutcome(row) !== "browser-cancelled-no-response");
       const aFlightPrefetches = afterLogoutRows.filter(row => row.rsc && row.prefetch && (
         targetsAccountA(row)
         || (row.accountAtRequest === "loggedOut" && row.path === pathA)
@@ -1356,13 +1384,15 @@ for (const studio of studios) {
       const capturedResponseBodies = await collectResponseBodies(afterLogoutResponseRows);
       const privateResponseLeaks = capturedResponseBodies.flatMap(({ row, body }) => {
         const markers = aMarkers.filter(marker => body.includes(marker));
-        return markers.length > 0 ? [{ path: row.path, responseUrl: row.responseUrl, status: row.status, responseTime: row.responseTime, settledAt: row.settledAt, markers }] : [];
+        return markers.length > 0 ? [{ path: row.path, responseUrl: row.responseUrl, status: row.status, responseSource: row.responseSource, captureOutcome: responseCaptureOutcome(row), responseTime: row.responseTime, settledAt: row.settledAt, markers }] : [];
       });
       const responseBodyCaptureAudit = capturedResponseBodies.map(({ row, body }) => ({
         requestUrl: row.url,
         responseUrl: row.responseUrl,
         method: row.method,
         status: row.status,
+        responseSource: row.responseSource,
+        captureOutcome: responseCaptureOutcome(row),
         responseTime: row.responseTime,
         settledAt: row.settledAt,
         contentType: row.contentType,
@@ -1375,7 +1405,14 @@ for (const studio of studios) {
       }));
       const privateResponseBodyReadFailures = capturedResponseBodies
         .filter(({ row }) => row.bodyReadStatus !== "read")
-        .map(({ row }) => ({ path: row.path, requestUrl: row.url, responseUrl: row.responseUrl, status: row.status, responseTime: row.responseTime, settledAt: row.settledAt, contentType: row.contentType, bodyBytes: row.bodyBytes, bodyReadStatus: row.bodyReadStatus, bodyCaptureSource: row.bodyCaptureSource, error: row.bodyReadError, failure: row.failure }));
+        .map(({ row }) => ({ path: row.path, requestUrl: row.url, responseUrl: row.responseUrl, status: row.status, responseSource: row.responseSource, captureOutcome: responseCaptureOutcome(row), responseTime: row.responseTime, settledAt: row.settledAt, contentType: row.contentType, bodyBytes: row.bodyBytes, bodyReadStatus: row.bodyReadStatus, bodyCaptureSource: row.bodyCaptureSource, error: row.bodyReadError, failure: row.failure }));
+      const incompleteResponseCaptures = capturedResponseBodies
+        .filter(({ row }) => responseCaptureOutcome(row) === "incomplete")
+        .map(({ row }) => ({ path: row.path, requestUrl: row.url, status: row.status, responseSource: row.responseSource, bodyReadStatus: row.bodyReadStatus, error: row.bodyReadError, failure: row.failure }));
+      const browserCancelledWithoutResponse = capturedResponseBodies
+        .filter(({ row }) => responseCaptureOutcome(row) === "browser-cancelled-no-response")
+        .map(({ row }) => ({ path: row.path, requestUrl: row.url, responseSource: row.responseSource, failure: row.failure, noResponseReceived: row.status === undefined && row.responseTime === undefined && row.bodyBytes === undefined }));
+      const malformedBrowserCancellations = browserCancelledWithoutResponse.filter(row => !row.noResponseReceived || !row.failure?.includes("ERR_ABORTED"));
       const chargeablePostsAfterLogout = afterLogoutResponseRows.filter(row => isGenerationPost(row.method, row.path)).map(row => ({ path: row.path, requestUrl: row.url, responseUrl: row.responseUrl, accountAtRequest: row.accountAtRequest, status: row.status, time: row.time, responseTime: row.responseTime, settledAt: row.settledAt }));
       let providerPostsAfter: number | undefined;
       if (syntheticSessionMode) {
@@ -1403,18 +1440,21 @@ for (const studio of studios) {
         accountBMarkerVisible: { tabA: (await markerText(pageA)).includes(bMarker), tabB: (await markerText(pageB)).includes(bMarker) },
         historyLeakAudit,
         historyNavigationAudit,
-        aProtectedGetAttemptsAfterLogout: aProtectedGetAttempts.map(row => ({ path: row.path, status: row.status, accountAtRequest: row.accountAtRequest, failure: row.failure })),
+        aProtectedGetAttemptsAfterLogout: aProtectedGetAttempts.map(row => ({ path: row.path, status: row.status, responseSource: row.responseSource, accountAtRequest: row.accountAtRequest, failure: row.failure })),
         correctlyDeniedAProtectedGetResponses: deniedAProtectedGets.length,
-        aProtectedGetResponsesCrossingLogout: aProtectedGetResponses.map(row => ({ path: row.path, requestUrl: row.url, responseUrl: row.responseUrl, status: row.status, accountAtRequest: row.accountAtRequest, responseTime: row.responseTime, settledAt: row.settledAt })),
-        nonDeniedAProtectedGetResponses: nonDeniedAProtectedGets.map(row => ({ path: row.path, responseUrl: row.responseUrl, status: row.status })),
+        aProtectedGetResponsesCrossingLogout: aProtectedGetResponses.map(row => ({ path: row.path, requestUrl: row.url, responseUrl: row.responseUrl, status: row.status, responseSource: row.responseSource, captureOutcome: responseCaptureOutcome(row), accountAtRequest: row.accountAtRequest, responseTime: row.responseTime, settledAt: row.settledAt })),
+        nonDeniedAProtectedGetResponses: nonDeniedAProtectedGets.map(row => ({ path: row.path, responseUrl: row.responseUrl, status: row.status, responseSource: row.responseSource })),
         unresolvedAProtectedGetAttempts: unresolvedAProtectedGets.map(row => ({ path: row.path, failure: row.failure })),
         unresolvedAProtectedGetResponsesAfterLogout: unresolvedAProtectedGetResponses.map(row => ({ path: row.path, url: row.url, responseUrl: row.responseUrl, failure: row.failure })),
-        strictAFlightPrefetchAttemptsAfterLogout: aFlightPrefetches.map(row => ({ path: row.path, status: row.status, accountAtRequest: row.accountAtRequest })),
-        aFlightPrefetchResponsesDeliveredAfterLogout: aFlightPrefetchResponses.map(row => ({ path: row.path, responseUrl: row.responseUrl, status: row.status, accountAtRequest: row.accountAtRequest, responseTime: row.responseTime, settledAt: row.settledAt })),
+        strictAFlightPrefetchAttemptsAfterLogout: aFlightPrefetches.map(row => ({ path: row.path, status: row.status, responseSource: row.responseSource, accountAtRequest: row.accountAtRequest })),
+        aFlightPrefetchResponsesDeliveredAfterLogout: aFlightPrefetchResponses.map(row => ({ path: row.path, responseUrl: row.responseUrl, status: row.status, responseSource: row.responseSource, captureOutcome: responseCaptureOutcome(row), accountAtRequest: row.accountAtRequest, responseTime: row.responseTime, settledAt: row.settledAt })),
         privateAResponseLeaks: privateResponseLeaks,
         responseBodyCaptureAudit,
         routeFetchCapturedResponseBodies: responseBodyCaptureAudit.filter(row => row.bodyCaptureSource === "route-fetch").length,
         privateResponseBodyReadFailures,
+        incompleteResponseCaptures,
+        browserCancelledWithoutResponse,
+        malformedBrowserCancellations,
         responseBodyCandidateCount: capturedResponseBodies.length,
         readableResponseBodyCount: capturedResponseBodies.filter(({ row }) => row.bodyReadStatus === "read").length,
         exactChargeableChatPaths: chargeableChatPostPaths,
@@ -1428,7 +1468,8 @@ for (const studio of studios) {
       console.log(`STUDIOS_ACCOUNT_SWITCH_EVIDENCE ${JSON.stringify(evidence)}`);
 
       expect.soft(privateResponseLeaks, "Account A private content must not appear in any API or Flight response after logout").toEqual([]);
-      expect.soft(privateResponseBodyReadFailures, "Every post-logout API/Flight response body must be fully readable before claiming no private marker leak").toEqual([]);
+      expect.soft(incompleteResponseCaptures, "Every response crossing logout must be fully readable; timeouts and unreadable non-cancelled responses fail closed").toEqual([]);
+      expect.soft(malformedBrowserCancellations, "A browser cancellation is separate only when ERR_ABORTED occurred before any HTTP response/body; DOM privacy assertions still apply").toEqual([]);
       expect.soft(unresolvedAProtectedGetResponses.map(row => ({ path: row.path, url: row.url, failure: row.failure })), "Every Account A protected GET response crossing logout must have an observable status").toEqual([]);
       expect.soft(nonDeniedAProtectedGets.map(row => ({ path: row.path, status: row.status })), "Any post-logout Account A protected GET reaching the API must be denied with 401/403").toEqual([]);
       expect.soft(unresolvedAProtectedGets.map(row => row.path), "Every observed Account A protected GET attempt must have an observable response").toEqual([]);
@@ -1487,22 +1528,45 @@ for (const studio of studios) {
       const signalAt = logoutSignalAt;
       expect(signalAt).toBeGreaterThan(0);
       await page.waitForTimeout(500);
-      const afterSignalRows = monitor.rows.filter(row => row.time >= signalAt);
-      const postSignalProtectedGets = afterSignalRows.filter(row => isProtectedRead(row.method, row.path));
-      const postSignalTargetPrefetches = afterSignalRows.filter(row => row.path === studio.path && row.rsc && row.prefetch);
-      const privateResponseBodies: Array<{ path: string; status?: number }> = [];
-      for (const row of afterSignalRows) {
-        if (!row.body) continue;
-        const body = await row.body;
-        if (privateMarkers.some(marker => body.includes(marker))) privateResponseBodies.push({ path: row.path, status: row.status });
-      }
+      const afterSignalRequestRows = monitor.rows.filter(row => row.time >= signalAt);
+      const afterSignalResponseRows = monitor.rows.filter(row => responseCrossedBoundary(row, signalAt));
+      const postSignalProtectedGets = afterSignalRequestRows.filter(row => isProtectedRead(row.method, row.path));
+      const postSignalTargetPrefetches = afterSignalRequestRows.filter(row => row.path === studio.path && row.rsc && row.prefetch);
+      const capturedResponseBodies = await collectResponseBodies(afterSignalResponseRows);
+      const privateResponseBodies = capturedResponseBodies.flatMap(({ row, body }) => {
+        const markers = privateMarkers.filter(marker => body.includes(marker));
+        return markers.length > 0 ? [{ path: row.path, status: row.status, responseSource: row.responseSource, captureOutcome: responseCaptureOutcome(row), markers }] : [];
+      });
+      const responseBodyCaptureAudit = capturedResponseBodies.map(({ row, body }) => ({
+        path: row.path,
+        requestUrl: row.url,
+        responseUrl: row.responseUrl,
+        status: row.status,
+        responseSource: row.responseSource,
+        captureOutcome: responseCaptureOutcome(row),
+        requestTime: row.time,
+        responseTime: row.responseTime,
+        settledAt: row.settledAt,
+        bodyReadStatus: row.bodyReadStatus,
+        bodyCaptureSource: row.bodyCaptureSource,
+        bodyBytes: row.bodyBytes,
+        privateMarker: row.bodyReadStatus === "read" ? privateMarkers.some(marker => body.includes(marker)) : null,
+        networkFailure: row.failure,
+      }));
+      const incompleteResponseCaptures = capturedResponseBodies.filter(({ row }) => responseCaptureOutcome(row) === "incomplete")
+        .map(({ row }) => ({ path: row.path, status: row.status, responseSource: row.responseSource, bodyReadStatus: row.bodyReadStatus, error: row.bodyReadError, failure: row.failure }));
+      const browserCancelledWithoutResponse = capturedResponseBodies.filter(({ row }) => responseCaptureOutcome(row) === "browser-cancelled-no-response")
+        .map(({ row }) => ({ path: row.path, responseSource: row.responseSource, failure: row.failure, noResponseReceived: row.status === undefined && row.responseTime === undefined && row.bodyBytes === undefined }));
+      const malformedBrowserCancellations = browserCancelledWithoutResponse.filter(row => !row.noResponseReceived || !row.failure?.includes("ERR_ABORTED"));
       const visibleMarkers = await noPrivateMarkerVisible(page, studio);
-      console.log(`STUDIOS_EXPLICIT_LOGOUT_EVIDENCE ${JSON.stringify({ studio: studio.name, syntheticLocalAuth: syntheticSessionMode, logoutStatus: logoutResponse.status(), postSignalProtectedGets: postSignalProtectedGets.map(row => ({ path: row.path, status: row.status })), postSignalTargetPrefetches: postSignalTargetPrefetches.map(row => ({ path: row.path, status: row.status })), privateResponseBodies, visibleMarkers, generationPosts: monitor.generationPosts, blockedExternalAttempts: monitor.externalAttempts })}`);
+      console.log(`STUDIOS_EXPLICIT_LOGOUT_EVIDENCE ${JSON.stringify({ studio: studio.name, syntheticLocalAuth: syntheticSessionMode, logoutStatus: logoutResponse.status(), postSignalProtectedGets: postSignalProtectedGets.map(row => ({ path: row.path, status: row.status, responseSource: row.responseSource })), postSignalTargetPrefetches: postSignalTargetPrefetches.map(row => ({ path: row.path, status: row.status, responseSource: row.responseSource })), privateResponseBodies, responseBodyCaptureAudit, incompleteResponseCaptures, browserCancelledWithoutResponse, malformedBrowserCancellations, visibleMarkers, generationPosts: monitor.generationPosts, blockedExternalAttempts: monitor.externalAttempts })}`);
 
       expect(visibleMarkers, `${studio.name} private marker remained visible after explicit same-tab logout completed`).toEqual([]);
       expect(postSignalProtectedGets.map(row => ({ path: row.path, status: row.status })), `${studio.name} issued a protected GET after the explicit logout signal`).toEqual([]);
       expect(postSignalTargetPrefetches.map(row => ({ path: row.path, status: row.status })), `${studio.name} prefetched its private route after the explicit logout signal`).toEqual([]);
       expect(privateResponseBodies, `${studio.name} served private data in a response after the explicit logout signal`).toEqual([]);
+      expect(incompleteResponseCaptures, `${studio.name} had an unreadable/timed-out API or Flight response crossing logout; fail closed`).toEqual([]);
+      expect(malformedBrowserCancellations, `${studio.name} cancellation lacked proof of ERR_ABORTED before any HTTP response/body`).toEqual([]);
       expect(monitor.generationPosts, "No generation/provider POST is allowed in this auth regression.").toEqual([]);
       expect(monitor.externalAttempts, "All browser egress outside loopback is blocked and should remain unused.").toEqual([]);
       expect(token).toBeTruthy();
@@ -1511,3 +1575,148 @@ for (const studio of studios) {
     }
   });
 }
+
+test("response-capture controls detect late private bytes and fail closed on unavailable bodies", async ({ browser }) => {
+  test.setTimeout(45_000);
+  assertLoopback(webUrl, "E2E_WEB_URL");
+  const context = await browser.newContext({ baseURL: webUrl, viewport: { width: 1365, height: 900 } });
+  const monitor = makeMonitor();
+  const latePath = "/api/projects/capture-control/overview";
+  const cancelledPath = "/api/projects/capture-control-cancel/overview";
+  const controlWorkspaceIds = { A: "capture-control-workspace-a", B: "capture-control-workspace-b" };
+  let fixtureWorkspaceMismatchStatus: number | undefined;
+  let fixtureWorkspaceMismatchSource: string | undefined;
+  const latePrivateMarker = `PRIVATE_CAPTURE_CONTROL_${stamp}`;
+  let signalLateRouteStarted!: () => void;
+  let releaseLateRoute!: () => void;
+  const lateRouteStarted = new Promise<void>(resolve => { signalLateRouteStarted = resolve; });
+  const lateRouteGate = new Promise<void>(resolve => { releaseLateRoute = resolve; });
+  let signalCancelledRouteStarted!: () => void;
+  let releaseCancelledRoute!: () => void;
+  const cancelledRouteStarted = new Promise<void>(resolve => { signalCancelledRouteStarted = resolve; });
+  const cancelledRouteGate = new Promise<void>(resolve => { releaseCancelledRoute = resolve; });
+
+  try {
+    await addExternalEgressBlock(context, monitor);
+    if (!syntheticSessionMode) {
+      await installAccountSwitchNetworkGuard(context, monitor, studios[1], () => "B", controlWorkspaceIds);
+    }
+    await context.route(`**${latePath}`, async route => {
+      const row = findObservedRequestWithSettlement(monitor, route.request(), true);
+      if (row) row.responseSource = "test-fixture";
+      signalLateRouteStarted();
+      await lateRouteGate;
+      await jsonResponse(route, monitor, { privateSentinel: latePrivateMarker });
+    });
+    await context.route(`**${cancelledPath}`, async route => {
+      const row = findObservedRequestWithSettlement(monitor, route.request(), true);
+      if (row) row.responseSource = "test-fixture";
+      signalCancelledRouteStarted();
+      await cancelledRouteGate;
+      await route.abort("aborted");
+    });
+    const page = await context.newPage();
+    await page.goto("/");
+    observePage(page, monitor);
+    if (!syntheticSessionMode) {
+      const mismatchResponse = await page.evaluate(async workspaceId => {
+        const response = await fetch(`/api/assets?workspaceId=${encodeURIComponent(workspaceId)}`, { credentials: "same-origin" });
+        return { status: response.status, body: await response.text() };
+      }, controlWorkspaceIds.A);
+      const mismatchRow = monitor.rows.find(row => row.path === "/api/assets" && new URL(row.url).searchParams.get("workspaceId") === controlWorkspaceIds.A);
+      if (!mismatchRow) throw new Error("The cross-workspace fixture mismatch request was not observed.");
+      fixtureWorkspaceMismatchStatus = mismatchResponse.status;
+      fixtureWorkspaceMismatchSource = mismatchRow.responseSource;
+      expect(mismatchResponse.status).toBe(403);
+      expect(mismatchResponse.body).not.toContain("PRIVATE_");
+      expect(mismatchRow.responseSource).toBe("test-fixture");
+    }
+
+    const lateFetch = page.evaluate(async path => {
+      const response = await fetch(path, { credentials: "same-origin" });
+      return { status: response.status, body: await response.text() };
+    }, latePath);
+    await lateRouteStarted;
+    const lateBoundaryAt = performance.now();
+    releaseLateRoute();
+    const lateResult = await lateFetch;
+    const lateRow = monitor.rows.find(row => row.path === latePath);
+    if (!lateRow) throw new Error("The deferred protected GET was not observed by the request monitor.");
+    const lateCapture = await collectResponseBodies(monitor.rows.filter(row => row.path === latePath && responseCrossedBoundary(row, lateBoundaryAt)));
+    expect(lateResult.status).toBe(200);
+    expect(lateResult.body).toContain(latePrivateMarker);
+    expect(lateRow.time).toBeLessThan(lateBoundaryAt);
+    expect(lateRow.responseTime).toBeGreaterThanOrEqual(lateBoundaryAt);
+    expect(responseCaptureOutcome(lateRow)).toBe("complete-body");
+    expect(lateRow.responseSource).toBe("test-fixture");
+    const detectedLatePrivateBytes = lateCapture.flatMap(({ row, body }) => {
+      const markers = [latePrivateMarker].filter(marker => body.includes(marker));
+      return markers.length > 0 ? [{ path: row.path, status: row.status, responseSource: row.responseSource, markers }] : [];
+    });
+    expect(detectedLatePrivateBytes, "The capture negative control must expose private bytes from a pre-boundary GET that completes afterward.").toEqual([
+      { path: latePath, status: 200, responseSource: "test-fixture", markers: [latePrivateMarker] },
+    ]);
+
+    const cancellationDomMarker = `${latePrivateMarker}_DOM`;
+    await page.evaluate(marker => {
+      const element = document.createElement("span");
+      element.id = "capture-cancellation-dom-control";
+      element.textContent = marker;
+      document.body.append(element);
+    }, cancellationDomMarker);
+    const cancelledFetch = page.evaluate(async path => {
+      try {
+        const response = await fetch(path, { credentials: "same-origin" });
+        return `unexpected-response:${response.status}`;
+      } catch {
+        return "browser-cancelled-before-response";
+      }
+    }, cancelledPath);
+    await cancelledRouteStarted;
+    const cancellationBoundaryAt = performance.now();
+    await page.locator("#capture-cancellation-dom-control").evaluate(element => element.remove());
+    releaseCancelledRoute();
+    expect(await cancelledFetch).toBe("browser-cancelled-before-response");
+    const cancelledRow = monitor.rows.find(row => row.path === cancelledPath);
+    if (!cancelledRow) throw new Error("The controlled cancelled protected GET was not observed by the request monitor.");
+    await cancelledRow.requestCompletion;
+    const cancelledCapture = await collectResponseBodies([cancelledRow]);
+    expect(cancelledRow.time).toBeLessThan(cancellationBoundaryAt);
+    expect(cancelledRow.settledAt).toBeGreaterThanOrEqual(cancellationBoundaryAt);
+    expect(responseCaptureOutcome(cancelledRow)).toBe("browser-cancelled-no-response");
+    expect(cancelledRow.status).toBeUndefined();
+    expect(cancelledRow.responseTime).toBeUndefined();
+    expect(cancelledRow.bodyBytes).toBeUndefined();
+    expect(await markerText(page)).not.toContain(cancellationDomMarker);
+    expect(cancelledCapture).toHaveLength(1);
+
+    const timeoutRow: RequestRow = {
+      request: undefined as unknown as Request,
+      url: `${webUrl}${latePath}`,
+      path: latePath,
+      method: "GET",
+      time: lateBoundaryAt - 1,
+      rsc: false,
+      prefetch: false,
+      navigation: false,
+      status: 200,
+      responseUrl: `${webUrl}${latePath}`,
+      responseTime: lateBoundaryAt + 1,
+      settledAt: lateBoundaryAt + 2,
+      responseSource: "test-fixture",
+      body: Promise.resolve(responseBodyReadTimeoutMarker),
+      bodyReadStatus: "timeout",
+      bodyReadError: "deterministic timeout negative control",
+    };
+    const timedOutCapture = await collectResponseBodies([timeoutRow]);
+    const failClosedTimeouts = timedOutCapture.filter(({ row }) => responseCaptureOutcome(row) === "incomplete");
+    expect(responseCaptureOutcome(timeoutRow)).toBe("incomplete");
+    expect(failClosedTimeouts.map(({ row }) => ({ path: row.path, status: row.status, bodyReadStatus: row.bodyReadStatus }))).toEqual([
+      { path: latePath, status: 200, bodyReadStatus: "timeout" },
+    ]);
+    expect(monitor.externalAttempts).toEqual([]);
+    console.log(`STUDIOS_RESPONSE_CAPTURE_CONTROL ${JSON.stringify({ fixtureWorkspaceMismatchStatus, fixtureWorkspaceMismatchSource, lateResponseCrossedBoundary: responseCrossedBoundary(lateRow, lateBoundaryAt), detectedLatePrivateBytes, explicitCancellationOutcome: responseCaptureOutcome(cancelledRow), cancellationHadNoHttpResponse: cancelledRow.status === undefined && cancelledRow.responseTime === undefined && cancelledRow.bodyBytes === undefined, timeoutOutcome: responseCaptureOutcome(timeoutRow), blockedExternalAttempts: monitor.externalAttempts })}`);
+  } finally {
+    await context.close();
+  }
+});
