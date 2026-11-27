@@ -28,7 +28,7 @@ public sealed class WorkspacesController(TaslimDbContext db, WorkspaceAccessServ
         page = Math.Clamp(page, 1, MaxPage);
         pageSize = Math.Clamp(pageSize, 1, MaxPageSize);
         var query = db.WorkspaceMembers.AsNoTracking()
-            .Where(member => member.UserId == userId)
+            .Where(member => member.UserId == userId && !member.Workspace.IsArchived)
             .Include(member => member.Workspace);
         var totalCount = await query.CountAsync(cancellationToken);
         var memberships = await query

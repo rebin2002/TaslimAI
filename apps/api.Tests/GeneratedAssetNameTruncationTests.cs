@@ -1,4 +1,6 @@
 using System.Buffers.Binary;
+using System.IO.Compression;
+using System.Text;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
@@ -275,13 +277,54 @@ public sealed class GeneratedAssetNameTruncationTests : IAsyncLifetime
 
     private static byte[] Png(int width, int height)
     {
-        var bytes = new byte[40];
-        new byte[] { 137, 80, 78, 71, 13, 10, 26, 10 }.CopyTo(bytes, 0);
-        BinaryPrimitives.WriteUInt32BigEndian(bytes.AsSpan(8, 4), 13);
-        "IHDR"u8.CopyTo(bytes.AsSpan(12, 4));
-        BinaryPrimitives.WriteInt32BigEndian(bytes.AsSpan(16, 4), width);
-        BinaryPrimitives.WriteInt32BigEndian(bytes.AsSpan(20, 4), height);
-        "IEND"u8.CopyTo(bytes.AsSpan(32, 4));
-        return bytes;
+        var header = new byte[13];
+        BinaryPrimitives.WriteUInt32BigEndian(header.AsSpan(0, 4), (uint)width);
+        BinaryPrimitives.WriteUInt32BigEndian(header.AsSpan(4, 4), (uint)height);
+        header[8] = 8;
+        header[9] = 2; // 8-bit truecolor RGB.
+
+        // Filter type 0 followed by a solid black RGB row for every scanline. ZLibStream supplies
+        // the complete image-data stream, making this a standards-valid fixture rather than a
+        // signature/header stub that the generated-media boundary must reject.
+        var scanlines = new byte[checked(height * (1 + width * 3))];
+        using var compressed = new MemoryStream();
+        using (var zlib = new ZLibStream(compressed, CompressionLevel.SmallestSize, leaveOpen: true))
+            zlib.Write(scanlines);
+
+        using var png = new MemoryStream();
+        png.Write(new byte[] { 137, 80, 78, 71, 13, 10, 26, 10 });
+        WriteChunk(png, "IHDR", header);
+        WriteChunk(png, "IDAT", compressed.ToArray());
+        WriteChunk(png, "IEND", ReadOnlySpan<byte>.Empty);
+        return png.ToArray();
+    }
+
+    private static void WriteChunk(Stream output, string type, ReadOnlySpan<byte> payload)
+    {
+        var typeBytes = Encoding.ASCII.GetBytes(type);
+        Span<byte> length = stackalloc byte[4];
+        BinaryPrimitives.WriteUInt32BigEndian(length, (uint)payload.Length);
+        output.Write(length);
+        output.Write(typeBytes);
+        output.Write(payload);
+
+        var checksumInput = new byte[typeBytes.Length + payload.Length];
+        typeBytes.CopyTo(checksumInput, 0);
+        payload.CopyTo(checksumInput.AsSpan(typeBytes.Length));
+        Span<byte> checksum = stackalloc byte[4];
+        BinaryPrimitives.WriteUInt32BigEndian(checksum, Crc32(checksumInput));
+        output.Write(checksum);
+    }
+
+    private static uint Crc32(ReadOnlySpan<byte> content)
+    {
+        var crc = 0xFFFFFFFFu;
+        foreach (var value in content)
+        {
+            crc ^= value;
+            for (var bit = 0; bit < 8; bit++)
+                crc = (crc & 1) == 0 ? crc >> 1 : (crc >> 1) ^ 0xEDB88320u;
+        }
+        return ~crc;
     }
 }
