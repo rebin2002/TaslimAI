@@ -11,31 +11,7 @@ using Taslim.Api.Movies;
 using Taslim.Api.Persistence;
 using Xunit;
 
-// Apply-seam regression tests for the fail-closed PER-SCENE admission ceiling in the Director
-// scene-plan ACTION EXECUTOR (#685, #1088 guard lane).
-//
-// Coverage owned by the sibling lanes is deliberately NOT repeated here:
-// - #1088 (MovieDirectorScenePlanPerSceneRenderableCeilingTests) proves the ceiling in-process at
-//   the validator seam: Math.Min(targetDuration, MovieDurationBudgetPolicy.MaxShotDurationSeconds).
-// - #1078 (MovieDirectorScenePlanValidationTests additions) owns the separate context/target seam.
-// - #1083 (MovieDirectorScenePlanPerSceneCeilingTests) is the QA characterisation harness.
-// - #1057 (MovieProjectDurationCeilingCompatibilityTests) pins the provider-clip and cost seams.
-//
-// What is unique here is the one claim the render/billing story actually turns on: rejection must
-// happen INSIDE MovieDirectorScenePlanActionExecutor BEFORE it persists any MovieScene row. The
-// executor is the only writer of production scenes on this path (MovieDirectorScenePlanExecutor.cs
-// returns DIRECTOR_SCENE_PLAN_INVALID at lines 29-31, strictly before db.MovieScenes.Add at line 63
-// and SaveChangesAsync at line 76). Shots, queue jobs, preflight reservations, and billed usage are
-// all derived downstream from persisted MovieScene rows, so zero scene rows on rejection means
-// nothing to queue and nothing billed. No lane today proves that ordering; the only existing
-// fail-before-persistence apply test covers the STALE hash path, not an over-length duration.
-//
-// The discriminating case needs a movie target ABOVE the renderable unit ceiling (7,200 s here,
-// the #685 120-minute shape), which is unreachable through the HTTP create-project endpoint while
-// the #269 create cap stands. So the project duration is raised directly in the test database,
-// and the executor is driven with a hand-admitted payload through the same in-app validator and
-// assembler the production execute path resolves from DI. No provider call, no media, no HTTP to
-// any external service, no billable usage, no migrations, no user data.
+// Exercise the production executor through DI with a disposable API and synthetic two-hour project.
 namespace Taslim.Api.Tests;
 
 public sealed class MovieDirectorScenePlanPerSceneCeilingApplyTests : IClassFixture<ScenePlanCeilingApplyFactory>
@@ -57,11 +33,6 @@ public sealed class MovieDirectorScenePlanPerSceneCeilingApplyTests : IClassFixt
     [Fact]
     public async Task Single_scene_spanning_the_whole_two_hour_target_is_rejected_at_apply_without_creating_scenes()
     {
-        // Pre-guard shape (main): target 7,200 s, one scene of 7,200 s passes the old bound
-        // scene <= target, is persisted verbatim, and is only then silently clamped to a 3,600 s
-        // billable shot at preflight (MovieProductionPreflight.cs Math.Clamp(..., 1, 3_600)) - half
-        // the promised runtime rendered and underbilled. Post-guard the apply must fail closed and
-        // persist nothing.
         var (projectId, workspaceId, userId) = await SeedTwoHourProjectAsync("Whole-Film Scene Apply Owner");
         var action = await BuildActionAsync(projectId, workspaceId, [DawnScene(1, TwoHourTargetSeconds)]);
 
@@ -182,13 +153,7 @@ public sealed class MovieDirectorScenePlanPerSceneCeilingApplyTests : IClassFixt
         await CreateCharacter(client, movie.Project.Id);
         await CreateStory(client, movie.Project.Id);
         await LockGuide(client, movie.Project.Id);
-        // The #269 project-create cap still refuses a 7,200 s create request; this lane is about the
-        // scene-plan apply seam, so the raised duration is seeded directly in the test database.
-        using var scope = factory.Services.CreateScope();
-        var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
-        var project = await db.MovieProjects.SingleAsync(item => item.Id == movie.Project.Id);
-        project.DurationSeconds = TwoHourTargetSeconds;
-        await db.SaveChangesAsync();
+        Assert.Equal(TwoHourTargetSeconds, movie.Project.DurationSeconds);
         return (movie.Project.Id, auth.PersonalWorkspace.Id, auth.User.Id);
     }
 
@@ -224,7 +189,7 @@ public sealed class MovieDirectorScenePlanPerSceneCeilingApplyTests : IClassFixt
         mode = MovieProjectModes.Full,
         title = $"Last Seed Apply {Guid.NewGuid():N}",
         description = "Mara protects the last seed at the dry riverbed.",
-        durationSeconds = 30,
+        durationSeconds = TwoHourTargetSeconds,
         aspectRatio = "16:9",
         style = "cinematic",
         language = "en",
