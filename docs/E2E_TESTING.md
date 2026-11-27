@@ -23,6 +23,7 @@ export ConnectionStrings__Postgres='Host=localhost;Port=5432;Database=taslim_e2e
 export Database__ApplyMigrations=true
 export AllowedOrigins__0=http://127.0.0.1:3000
 export Ai__OpenAI__Enabled=false
+export AcademicWorkflow__PlanEnabled=true # Synthetic Plan acceptance only.
 export Files__StorageProvider=Local
 export Files__LocalRootPath="$PWD/.e2e-files"
 dotnet run --project apps/api --urls http://127.0.0.1:5000
@@ -32,8 +33,14 @@ In another terminal, start the frontend with the API URL embedded in the browser
 
 ```bash
 export NEXT_PUBLIC_API_URL=http://127.0.0.1:5000
+export NEXT_PUBLIC_ACADEMIC_RESEARCH_ENABLED=true # Synthetic E2E only; leave unset/false in normal and production environments.
 npm run dev --workspace @taslim/web -- --hostname 127.0.0.1
 ```
+
+The Academic Plan browser test needs both the API handler and the Web entry enabled.
+CI sets these flags only in the disposable Browser E2E job. Do not copy the opt-in into a production build
+without independent review and a separately authorized cutover; when unset or false, Academic
+Research is hidden and its direct pages return not found after authentication.
 
 The Playwright config starts the web server automatically when `E2E_WEB_URL` is not set. The API remains an explicit prerequisite because database and API lifecycle must be controlled by the local developer or CI job.
 
@@ -76,6 +83,8 @@ dotnet test apps/api.Tests/Taslim.Api.Tests.csproj
 | `E2E_API_URL` | `NEXT_PUBLIC_API_URL` or `http://127.0.0.1:5000` | API origin used by the CSRF-aware fixture helpers. |
 | `E2E_TEST_PASSWORD` | `E2eStrongPassword!123` | Password for unique disposable users. Override in CI if the Identity policy changes; do not use a production password. |
 | `NEXT_PUBLIC_API_URL` | `http://127.0.0.1:5000` for the auto-started web server | API origin compiled into the local Next.js browser bundle. |
+| `NEXT_PUBLIC_ACADEMIC_RESEARCH_ENABLED` | `false` when unset | Set to exact `true` only for synthetic Academic Browser E2E; it controls visibility, not authentication, provider/search, or charging. |
+| `AcademicWorkflow__PlanEnabled` | `false` when unset | Enables the deterministic API Plan handler in the disposable E2E host. With it off, an authenticated run reports Plan disconnected, preserves the checkpoint and makes no calls. |
 | `ConnectionStrings__Postgres` | none | Disposable API database connection string. |
 | `Database__ApplyMigrations` | `false` | Set to `true` only for the disposable E2E database. |
 | `Ai__OpenAI__Enabled` | application default | Keep `false` for E2E. The suite uses the provider-independent `system.test` generation job and intercepts only one browser error scenario. |

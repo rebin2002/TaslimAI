@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
-import { GET, POST } from "./route";
+import { GET, PATCH, POST } from "./route";
+import { MAX_USER_UPLOAD_FILE_BYTES, MAX_USER_UPLOAD_REQUEST_BODY_BYTES } from "../../../lib/fileUploadLimits";
 
 function context(path: string[]) {
   return { params: Promise.resolve({ path }) };
@@ -155,7 +156,7 @@ describe("same-origin API proxy", () => {
     vi.stubGlobal("fetch", fetchMock);
     const response = await POST(new Request("http://localhost:3000/api/files", {
       method: "POST",
-      headers: { "content-length": String(25 * 1024 * 1024 + 1) },
+      headers: { "content-length": String(MAX_USER_UPLOAD_FILE_BYTES + 1) },
       body: "small-body",
     }), context(["files"]));
 
@@ -165,12 +166,90 @@ describe("same-origin API proxy", () => {
     vi.unstubAllGlobals();
   });
 
+  it("forwards a maximum-size ordinary file with multipart framing", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response("{}", { status: 201 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const form = new FormData();
+    const fileBytes = new Uint8Array(MAX_USER_UPLOAD_FILE_BYTES).fill("a".charCodeAt(0));
+    form.append("file", new File([fileBytes], "brief.txt", { type: "text/plain" }));
+    const request = new Request("http://localhost:3000/api/workspaces/workspace-1/files", {
+      method: "POST",
+      body: form,
+    });
+
+    const response = await POST(request, context(["workspaces", "workspace-1", "files"]));
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    const forwardedBody = await new Response(init.body).arrayBuffer();
+
+    expect(response.status).toBe(201);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(forwardedBody.byteLength).toBeGreaterThan(MAX_USER_UPLOAD_FILE_BYTES);
+    expect(forwardedBody.byteLength).toBeLessThanOrEqual(MAX_USER_UPLOAD_REQUEST_BODY_BYTES);
+    vi.unstubAllGlobals();
+  });
+
   it("returns a safe timeout response for an aborted upstream request", async () => {
     vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new DOMException("private upstream detail", "AbortError")));
     const response = await GET(new Request("http://localhost:3000/api/auth/me"), context(["auth", "me"]));
 
     expect(response.status).toBe(504);
     await expect(response.json()).resolves.toEqual({ error: { code: "API_TIMEOUT", message: "The service took too long to respond. Please try again." } });
+    vi.unstubAllGlobals();
+  });
+
+  // The project revision fence depends on this route: the browser calls the API
+  // same-origin in production, so a conditional PATCH has to reach the API with
+  // its If-Match intact and the API's answer has to reach the browser with the
+  // ETag it published. Anything dropped here turns every fenced save into an
+  // unfenced last-write-wins one, or leaves the conflict prompt without the
+  // revision it needs to offer.
+  it("forwards a fenced PATCH's If-Match upstream and returns the committed ETag", async () => {
+    const held = '"2026-11-16T09:00:00.0000123Z"';
+    const committed = '"2026-11-16T09:00:00.0000456Z"';
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ id: "project-1", name: "Renamed" }), { status: 200, headers: { ETag: committed } }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const request = new Request("http://localhost:3000/api/projects/project-1", {
+      method: "PATCH",
+      headers: { "if-match": held, "content-type": "application/json", cookie: "taslim.auth=session" },
+      body: JSON.stringify({ name: "Renamed" }),
+    });
+    const response = await PATCH(request, context(["projects", "project-1"]));
+    const [target, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+
+    expect(target).toBe("http://localhost:5000/api/projects/project-1");
+    expect(init.method).toBe("PATCH");
+    expect(new Headers(init.headers).get("If-Match")).toBe(held);
+    expect(response.status).toBe(200);
+    expect(response.headers.get("etag")).toBe(committed);
+    await expect(response.json()).resolves.toMatchObject({ id: "project-1" });
+    vi.unstubAllGlobals();
+  });
+
+  it("passes a revision refusal through with the live ETag intact", async () => {
+    const live = '"2026-11-16T09:00:00.0000789Z"';
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ error: { code: "PROJECT_REVISION_CONFLICT", message: "This project was changed by someone else." } }), {
+        status: 409,
+        headers: { ETag: live },
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const request = new Request("http://localhost:3000/api/projects/project-1", {
+      method: "PATCH",
+      headers: { "if-match": '"2026-11-16T09:00:00.0000123Z"', "content-type": "application/json", cookie: "taslim.auth=session" },
+      body: JSON.stringify({ name: "Stale" }),
+    });
+    const response = await PATCH(request, context(["projects", "project-1"]));
+
+    // Not flattened into a generic failure: the client branches on the status and
+    // the code, then reads the revision that actually holds the row.
+    expect(response.status).toBe(409);
+    expect(response.headers.get("etag")).toBe(live);
+    await expect(response.json()).resolves.toMatchObject({ error: { code: "PROJECT_REVISION_CONFLICT" } });
     vi.unstubAllGlobals();
   });
 });
