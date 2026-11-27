@@ -1782,7 +1782,7 @@ public sealed class GenerationJobWorker(
                 await dialogueExecutions.MarkCancelledAsync(claimedJob.Id, CancellationToken.None);
             await CancelRunningAsync(db, usage, claimedJob, claimedJob.ConcurrencyToken, stoppingToken);
         }
-        catch (OperationCanceledException) when (cancellation.IsCancellationRequested)
+        catch (OperationCanceledException exception) when (cancellation.IsCancellationRequested)
         {
             if (!publicationCommitted)
                 foreach (var publication in publications) await publisher.DiscardAsync(publication, CancellationToken.None);
@@ -1796,7 +1796,10 @@ public sealed class GenerationJobWorker(
             if (GenerationJobTypes.MovieDialogueVoiceTypes.Contains(claimedJob.JobType))
                 await dialogueExecutions.MarkCancelledAsync(claimedJob.Id, CancellationToken.None);
             if (providerAttempt is not null)
-                await budget.CompleteAttemptAsync(providerAttempt, null, false, GenerationProviderAttemptStatus.Cancelled, GenerationJobErrorCodes.Cancelled, CancellationToken.None);
+            {
+                var reportedCostUsd = (exception as PresentationCancellationException)?.ReportedCostUsd;
+                await budget.CompleteAttemptAsync(providerAttempt, reportedCostUsd, reportedCostUsd.HasValue, GenerationProviderAttemptStatus.Cancelled, GenerationJobErrorCodes.Cancelled, CancellationToken.None);
+            }
             // Host shutdown cancels stoppingToken before this handler exits. Durable
             // cancellation must still commit so the job does not remain Running until
             // lease recovery on the next process.

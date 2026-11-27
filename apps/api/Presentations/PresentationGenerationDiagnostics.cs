@@ -23,6 +23,25 @@ public sealed class PresentationGenerationStageException(string stage, string co
     public AiUsageMetadata? Usage { get; } = usage;
 }
 
+internal sealed class PresentationCancellationException(CancellationToken cancellationToken, decimal? reportedCostUsd)
+    : OperationCanceledException(cancellationToken)
+{
+    public decimal? ReportedCostUsd { get; } = reportedCostUsd;
+
+    public static void ThrowIfCancelled(CancellationToken cancellationToken, AiUsageMetadata? usage)
+    {
+        if (!cancellationToken.IsCancellationRequested) return;
+
+        // Only a reported USD actual belongs on the provider attempt. An estimate,
+        // missing cost or a value in another currency must remain unknown here.
+        decimal? cost = usage?.ActualCost is decimal actual && actual >= 0m
+            && (string.IsNullOrEmpty(usage.Currency) || string.Equals(usage.Currency, UsageCurrencies.Usd, StringComparison.OrdinalIgnoreCase))
+            ? actual
+            : null;
+        throw new PresentationCancellationException(cancellationToken, cost);
+    }
+}
+
 public static class PresentationGenerationFailureCodes
 {
     public static string ForProvider(AiProviderException exception) => exception.FailureCategory switch

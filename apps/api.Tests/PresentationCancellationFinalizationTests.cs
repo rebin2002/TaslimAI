@@ -155,8 +155,29 @@ public sealed class PresentationCancellationFinalizationTests
     // the attempt as Failed.
     private static void AssertCancellationWins(Exception exception)
     {
-        Assert.False(exception is PresentationGenerationStageException);
-        Assert.Null((exception as PresentationGenerationStageException)?.Usage);
+        var cancelled = Assert.IsType<PresentationCancellationException>(exception);
+        Assert.Equal(LateCompletionUsage.ActualCost, cancelled.ReportedCostUsd);
+    }
+
+    [Theory]
+    [InlineData(null, "USD", null)]
+    [InlineData("0", "USD", "0")]
+    [InlineData("0.002", "EUR", null)]
+    [InlineData("-0.002", "USD", null)]
+    public async Task Cancelled_stage_records_only_an_explicit_nonnegative_USD_actual(string? reported, string currency, string? expected)
+    {
+        await using var database = await TestDatabase.OpenAsync();
+        using var cancellation = new CancellationTokenSource();
+        var usage = LateCompletionUsage with { ActualCost = ParseCost(reported), Currency = currency };
+        var handler = CreateHandler(database.Context, new StageThrowingProvider(cancellation, usage), new PassThroughRenderer());
+
+        var exception = await Assert.ThrowsAsync<PresentationCancellationException>(() =>
+            handler.ExecuteAsync(PresentationJob(), new NullProgress(), cancellation.Token));
+        Assert.Equal(ParseCost(expected), exception.ReportedCostUsd);
+        Assert.Equal(cancellation.Token, exception.CancellationToken);
+
+        static decimal? ParseCost(string? value) =>
+            value is null ? null : decimal.Parse(value, System.Globalization.CultureInfo.InvariantCulture);
     }
 
     private static PresentationGenerationJobHandler CreateHandler(TaslimDbContext db, IPresentationGenerationProvider provider, IPresentationRenderer renderer) => new(
@@ -222,12 +243,12 @@ public sealed class PresentationCancellationFinalizationTests
     /// cancellation guard but before its parse/validate throw site - the window the
     /// provider-side guard cannot cover.
     /// </summary>
-    private sealed class StageThrowingProvider(CancellationTokenSource? cancellationCallerOnCall) : IPresentationGenerationProvider
+    private sealed class StageThrowingProvider(CancellationTokenSource? cancellationCallerOnCall, AiUsageMetadata? usage = null) : IPresentationGenerationProvider
     {
         public Task<PresentationProviderResult> GenerateAsync(PresentationGenerationPrompt prompt, PresentationGenerationOptions options, CancellationToken cancellationToken = default)
         {
             cancellationCallerOnCall?.Cancel();
-            throw new PresentationGenerationStageException(PresentationGenerationStages.DraftParse, GenerationJobErrorCodes.PresentationOutputInvalid, "The presentation response could not be parsed.", LateCompletionUsage);
+            throw new PresentationGenerationStageException(PresentationGenerationStages.DraftParse, GenerationJobErrorCodes.PresentationOutputInvalid, "The presentation response could not be parsed.", usage ?? LateCompletionUsage);
         }
     }
 

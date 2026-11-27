@@ -203,6 +203,10 @@ public sealed class PresentationCancellationLedgerApiTests : IClassFixture<Prese
         // Usage ledger terminal state: the reservation was finalized as Cancelled with a
         // zero customer charge, never Completed.
         var usage = await db.UsageTransactions.AsNoTracking().SingleAsync(item => item.GenerationJobId == jobId);
+        var attempt = await db.GenerationProviderAttempts.AsNoTracking().SingleAsync(item => item.GenerationJobId == jobId);
+        Assert.Equal(GenerationProviderAttemptStatus.Cancelled, attempt.Status);
+        Assert.True(attempt.ActualProviderCostKnown);
+        Assert.Equal(0.002m, attempt.ActualProviderCostUsd);
         Assert.Equal(UsageTransactionStatus.Cancelled, usage.Status);
         Assert.Equal(0m, usage.ChargedAmount);
         Assert.Equal(0m, usage.ProviderCostUsd);
