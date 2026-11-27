@@ -74,15 +74,27 @@ test.describe("Health Care route", () => {
     await page.keyboard.press("Enter");
     await expect(page).toHaveURL(/\/create$/);
 
+    // A completed onboarding saves an account-scoped English choice. A device-level
+    // taslim-locale override cannot supersede it (see account locale precedence #992).
+    // Exercise the real authenticated language selector instead of writing an
+    // anonymous storage key that the application must now ignore.
+    await page.goto("/account");
+    await expect(page.locator(".account-control-grid select").first()).toHaveValue("en");
+    await page.locator(".account-control-grid select").first().selectOption("ar");
+    await page.locator("form.account-profile-card button.primary-button").click();
+    await expect(page.locator("html")).toHaveAttribute("lang", "ar");
     await page.goto("/create/health");
-    await page.evaluate(() => localStorage.setItem("taslim-locale", "ar"));
     await page.reload();
     await expect(page.locator("html")).toHaveAttribute("lang", "ar");
     await expect(page.locator("html")).toHaveAttribute("dir", "rtl");
     await expect(page.getByRole("heading", { name: "الرعاية الصحية", level: 1 })).toBeVisible();
     await capture(page, testInfo, "04-ar-rtl-desktop");
 
-    await page.evaluate(() => localStorage.setItem("taslim-locale", "ku"));
+    await page.goto("/account");
+    await page.locator(".account-control-grid select").first().selectOption("ku");
+    await page.locator("form.account-profile-card button.primary-button").click();
+    await expect(page.locator("html")).toHaveAttribute("lang", "ckb");
+    await page.goto("/create/health");
     await page.reload();
     await expect(page.locator("html")).toHaveAttribute("lang", "ckb");
     await expect(page.locator("html")).toHaveAttribute("dir", "rtl");

@@ -172,6 +172,95 @@ public sealed class ChatProviderReadinessTests : IClassFixture<ChatProviderUnava
         Assert.Equal(0m, persisted.ChargedAmount);
     }
 
+
+    [Fact]
+    public async Task Completed_request_replays_on_both_endpoints_even_if_provider_is_unavailable()
+    {
+        using var client = unavailableFactory.CreateClient();
+        var auth = await Register(client, "Readiness Replay Owner");
+        var conversation = await CreateConversation(client, auth.PersonalWorkspace.Id);
+        var assistantId = await SeedCompletedExchangeAsync(conversation);
+        string requestId;
+        using (var scope = unavailableFactory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            requestId = (await db.ChatMessages.AsNoTracking()
+                .SingleAsync(message => message.ConversationId == conversation.Id && message.Role == ChatMessageRole.User)).RequestId!;
+        }
+
+        var payload = new { content = "Hello Taslim", requestId };
+        var normal = await SendWithCsrf(client, HttpMethod.Post, $"/api/conversations/{conversation.Id}/messages", payload);
+        Assert.Equal(HttpStatusCode.OK, normal.StatusCode);
+        var replay = await normal.Content.ReadFromJsonAsync<SendMessageResponse>();
+        Assert.Equal(assistantId, replay!.AssistantMessage.Id);
+
+        var streamed = await SendWithCsrf(client, HttpMethod.Post, $"/api/conversations/{conversation.Id}/messages/stream", payload);
+        var events = await streamed.Content.ReadAsStringAsync();
+        Assert.Contains("event: message.completed", events);
+        Assert.DoesNotContain("event: message.failed", events);
+
+        var persisted = await PersistedState(unavailableFactory, auth.PersonalWorkspace.Id, conversation.Id);
+        Assert.Equal(2, persisted.MessageCount);
+        Assert.Equal(0, persisted.ReservationCount);
+        Assert.Equal(0m, persisted.ChargedAmount);
+    }
+
+    [Fact]
+    public async Task Missing_conversation_is_reported_before_provider_readiness_on_both_endpoints()
+    {
+        using var client = unavailableFactory.CreateClient();
+        await Register(client, "Readiness Missing Conversation Owner");
+        var missingConversationId = Guid.NewGuid();
+        var payload = new { content = "Hello Taslim", requestId = Guid.NewGuid().ToString("N") };
+
+        var normal = await SendWithCsrf(client, HttpMethod.Post, $"/api/conversations/{missingConversationId}/messages", payload);
+        Assert.Equal(HttpStatusCode.NotFound, normal.StatusCode);
+        var body = await normal.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal("CONVERSATION_NOT_FOUND", body.GetProperty("error").GetProperty("code").GetString());
+
+        var streamed = await SendWithCsrf(client, HttpMethod.Post, $"/api/conversations/{missingConversationId}/messages/stream", payload);
+        var events = await streamed.Content.ReadAsStringAsync();
+        var failed = ExtractEventData(events, "message.failed");
+        Assert.Equal("CONVERSATION_NOT_FOUND", failed.RootElement.GetProperty("code").GetString());
+        Assert.DoesNotContain("event: message.started", events);
+    }
+
+    [Fact]
+    public async Task Completed_regeneration_request_replays_without_a_ready_provider()
+    {
+        using var client = unavailableFactory.CreateClient();
+        var auth = await Register(client, "Regeneration Replay Owner");
+        var conversation = await CreateConversation(client, auth.PersonalWorkspace.Id);
+        var originalAssistantId = await SeedCompletedExchangeAsync(conversation);
+        var requestId = Guid.NewGuid().ToString("N");
+        using (var scope = unavailableFactory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            var tracked = await db.Conversations.SingleAsync(item => item.Id == conversation.Id);
+            tracked.NextMessageSequence = 3;
+            db.ChatMessages.Add(new ChatMessage
+            {
+                Id = Guid.NewGuid(),
+                ConversationId = conversation.Id,
+                RequestId = requestId,
+                Role = ChatMessageRole.Assistant,
+                Content = "Completed regeneration",
+                Status = ChatMessageStatus.Completed,
+                CreatedAt = DateTime.UtcNow,
+                Sequence = 3,
+            });
+            await db.SaveChangesAsync();
+        }
+
+        var response = await SendWithCsrf(client, HttpMethod.Post, $"/api/conversations/{conversation.Id}/messages/{originalAssistantId}/regenerate", new { requestId });
+        var events = await response.Content.ReadAsStringAsync();
+        Assert.Contains("event: message.completed", events);
+        Assert.DoesNotContain("event: message.failed", events);
+        var persisted = await PersistedState(unavailableFactory, auth.PersonalWorkspace.Id, conversation.Id);
+        Assert.Equal(3, persisted.MessageCount);
+        Assert.Equal(0, persisted.ReservationCount);
+    }
+
     [Fact]
     public async Task Conversation_creation_still_works_while_no_provider_is_ready()
     {

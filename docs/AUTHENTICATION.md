@@ -133,3 +133,5 @@ Controlled errors use this shape:
 ```
 
 Production exceptions return a generic `INTERNAL_ERROR` response. Stack traces, SQL, connection details, and secrets are not returned to clients.
+
+The middleware names those anonymous authentication endpoints by exact path, while MVC routing also accepts trailing-separator and case-insensitive spellings of the same endpoints, for example `POST /api/auth/login/`. A rejection raised by the controller filter on such a spelling is normalized by `AntiforgeryFailureEnvelopeFilter` into the identical `CSRF_VALIDATION_FAILED` envelope, so an antiforgery rejection is never returned as a generic Problem Details document that lacks `error.code`. The web API client depends on that code to recognize a stale token, refresh once, and retry the same request.

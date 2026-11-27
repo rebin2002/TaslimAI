@@ -1,4 +1,11 @@
 #!/usr/bin/env bash
+# Validate the production web root document and its security headers.
+#
+# This gate verifies the same revision as the API container smoke, so both halves
+# of the release evidence must judge one identical standard: the terminal HTTP
+# response. A redirect hop that carries X-Content-Type-Options or X-Frame-Options
+# does not vouch for the HTML document that was finally served, so those headers
+# must be present on the terminal response block.
 set -euo pipefail
 
 image="${1:?usage: $0 IMAGE [PORT] [TIMEOUT_SECONDS]}"
@@ -46,23 +53,49 @@ import sys
 from pathlib import Path
 
 headers_path, body_path = map(Path, sys.argv[1:])
-headers = {}
+# curl --dump-header appends every response block of a redirect chain to the same
+# file. The header map must therefore be built from the terminal block alone: a
+# policy header carried only by an earlier 3xx hop must never satisfy the contract
+# for the document the browser actually receives.
+blocks: list[list[str]] = []
 for line in headers_path.read_text(errors="replace").splitlines():
+    if line.lower().startswith("http/"):
+        blocks.append([])
+    if blocks:
+        blocks[-1].append(line)
+
+if not blocks:
+    raise SystemExit(
+        "web root: no HTTP response block was captured; refusing to infer a safe response"
+    )
+
+headers = {}
+terminal_status = None
+for position, line in enumerate(blocks[-1]):
+    if position == 0:
+        fields = line.split()
+        if len(fields) < 2 or not fields[1].isdigit():
+            raise SystemExit(f"web root: terminal HTTP status line is not parseable: {line!r}")
+        terminal_status = int(fields[1])
+        continue
     if ":" not in line:
         continue
     name, value = line.split(":", 1)
     headers[name.lower()] = value.strip().lower()
 
+if terminal_status != 200:
+    raise SystemExit(f"web root: terminal HTTP response status is {terminal_status}, not 200")
+
 content_type = headers.get("content-type", "")
 if "text/html" not in content_type:
-    raise SystemExit("web root did not return an HTML content type")
+    raise SystemExit("web root terminal response did not return an HTML content type")
 if headers.get("x-content-type-options") != "nosniff":
-    raise SystemExit("web root is missing X-Content-Type-Options: nosniff")
+    raise SystemExit("web root terminal response is missing X-Content-Type-Options: nosniff")
 if headers.get("x-frame-options") != "deny":
-    raise SystemExit("web root is missing X-Frame-Options: DENY")
+    raise SystemExit("web root terminal response is missing X-Frame-Options: DENY")
 body = body_path.read_text(errors="replace")
 if not body.strip() or "<html" not in body.lower():
-    raise SystemExit("web root did not return a non-empty HTML document")
+    raise SystemExit("web root terminal response did not return a non-empty HTML document")
 PY
 }
 
