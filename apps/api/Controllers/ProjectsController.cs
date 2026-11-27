@@ -5,6 +5,7 @@ using Taslim.Api.Activity;
 using Taslim.Api.Authorization;
 using Taslim.Api.Contracts;
 using Taslim.Api.Domain;
+using Taslim.Api.Files;
 using Taslim.Api.Infrastructure;
 using Taslim.Api.Persistence;
 using Taslim.Api.Projects;
@@ -89,8 +90,10 @@ public sealed class ProjectsController(TaslimDbContext db, WorkspaceAccessServic
         if (workspace is null) return ApiResults.Error(this, 404, "WORKSPACE_NOT_FOUND", "Workspace not found.");
 
         var files = db.StoredFiles.AsNoTracking()
-            .Where(file => file.ProjectId == projectId && file.WorkspaceId == project.WorkspaceId && file.Status != StoredFileStatus.Deleted)
-            .Where(file => file.ConversationId == null || file.UserId == userId);
+            .Where(file => file.WorkspaceId == project.WorkspaceId && file.Status != StoredFileStatus.Deleted)
+            .Where(StoredFileVisibility.InProjectView(projectId, userId))
+            .Where(StoredFileVisibility.ForWorkspaceMember(userId))
+            .Where(StoredFileVisibility.IsNotResearchReportOwnedByAnotherMember(userId));
         var assets = db.Assets.AsNoTracking()
             .Where(asset => asset.ProjectId == projectId && asset.WorkspaceId == project.WorkspaceId && asset.Status == AssetStatus.Active)
             // Match AssetVisibility (#936): generated Research reports are private to

@@ -5,6 +5,7 @@ using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
 using Taslim.Api.Contracts;
 using Taslim.Api.Domain;
+using Taslim.Api.Files;
 using Taslim.Api.Infrastructure;
 using Taslim.Api.Persistence;
 
@@ -140,19 +141,15 @@ public sealed class GlobalSearchController(TaslimDbContext db) : ControllerBase
         var assets = await LoadPageAsync(assetQuery, currentPage, perType, cancellationToken);
         AddGroup(groups, GlobalSearchResultTypes.Asset, assets, currentPage, perType);
 
-        // Project files are workspace-shared; personal and conversation-scoped
-        // files remain private to their uploader, even when a conversation also
-        // belongs to a project.
+        // Apply the same file visibility boundary as list/detail, including
+        // creator-private Research report backing files.
         var fileQuery = db.StoredFiles.AsNoTracking()
             .Where(file => workspaceIds.Contains(file.WorkspaceId)
                 && file.Status != StoredFileStatus.Deleted
-                && (file.UserId == userId
-                    || (file.ProjectId != null
-                        && file.ConversationId == null
-                        && file.Project != null
-                        && file.Project.WorkspaceId == file.WorkspaceId))
                 && (file.OriginalFileName.ToLower().Contains(search)
                     || (file.ExtractedText != null && file.ExtractedText.ToLower().Contains(search))))
+            .Where(StoredFileVisibility.ForWorkspaceMember(userId))
+            .Where(StoredFileVisibility.IsNotResearchReportOwnedByAnotherMember(userId))
             .OrderByDescending(file => file.CreatedAt)
             .ThenByDescending(file => file.Id)
             .Select(file => new GlobalSearchResultDto(
