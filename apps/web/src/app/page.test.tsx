@@ -127,7 +127,7 @@ function deferred<T>(): Deferred<T> {
 // rebuild the component's useCallback and re-run the loader indefinitely.
 const harness = vi.hoisted(() => ({
   locale: { t: (key: string) => key, locale: "en" },
-  auth: { workspace: null as unknown },
+  auth: { workspace: null as unknown, userId: "user-personal" },
   router: { push: vi.fn(), replace: vi.fn(), prefetch: vi.fn() },
   api: {
     listProjects: vi.fn(),
@@ -141,7 +141,7 @@ const harness = vi.hoisted(() => ({
 }));
 
 vi.mock("@/components/AuthProvider", () => ({
-  useAuth: () => ({ user: { id: "user-personal", displayName: "Rebin" }, workspace: harness.auth.workspace, loading: false }),
+  useAuth: () => ({ user: { id: harness.auth.userId, displayName: "Rebin" }, workspace: harness.auth.workspace, loading: false }),
 }));
 vi.mock("@/components/LocaleProvider", () => ({ useLocale: () => harness.locale }));
 vi.mock("@/lib/api", () => ({ api: harness.api }));
@@ -255,6 +255,7 @@ beforeEach(() => {
   vi.stubGlobal("navigator", { userAgent: "test" });
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
   harness.auth.workspace = PERSONAL;
+  harness.auth.userId = "user-personal";
   harness.locale = { t: (key: string) => key, locale: "en" };
   for (const fn of Object.values(harness.api)) fn.mockReset();
   harness.api.listProjects.mockResolvedValue([]);
@@ -289,6 +290,11 @@ function mount() {
 
 function switchWorkspace(next: WorkspaceFixture) {
   harness.auth.workspace = next;
+  act(() => { root.render(<HomePage />); });
+}
+
+function switchUser(userId: string) {
+  harness.auth.userId = userId;
   act(() => { root.render(<HomePage />); });
 }
 
@@ -383,6 +389,23 @@ describe("Home creation API flow with local fixtures", () => {
     expect(harness.api.sendMessage).toHaveBeenCalledTimes(1);
     expect(harness.api.sendMessage).toHaveBeenCalledWith("conversation-fixture", "Please review the attached files.", undefined, ["uploaded-project-business-private.pdf"]);
     expect(harness.router.push).toHaveBeenCalledWith("/chat/conversation-fixture");
+  });
+
+  it("drops unsent local attachment state when the authenticated user changes in the same mounted workspace", async () => {
+    mockResolvedDashboardForWorkspaces();
+    mount();
+    await flush();
+    expect(clickTestId("attach-fixture")).toBe(true);
+    expect(text()).toContain("home-fixture.pdf");
+
+    switchUser("user-next");
+    expect(harness.auth.workspace).toBe(PERSONAL);
+    expect(text()).not.toContain("home-fixture.pdf");
+    expect(findByTestId(container, "home-create")?.getAttribute("disabled")).not.toBeNull();
+    expect(harness.api.createConversation).not.toHaveBeenCalled();
+    expect(harness.api.uploadFile).not.toHaveBeenCalled();
+    expect(harness.api.sendMessage).not.toHaveBeenCalled();
+    await flush();
   });
 });
 
