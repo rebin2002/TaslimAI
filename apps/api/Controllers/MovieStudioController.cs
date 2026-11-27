@@ -72,6 +72,12 @@ public sealed class MovieStudioController(IMovieStudioService movies, IMovieProd
             var result = await transitionEdits.ApplyAsync(GetUserId(), id, request, cancellationToken);
             return result is null ? ApiResults.Error(this, 404, "MOVIE_TIMELINE_NOT_FOUND", "Movie timeline not found.") : Ok(result);
         }
+        // The transition-edit service enforces the project-scoped Movie Edit authority with
+        // the fail-closed collaboration guard, which throws on denial. Map that authorization
+        // outcome to a 403 with the established MOVIE_PERMISSION_DENIED code, matching
+        // MovieFinalAssembly, MovieStudioV2 and the caption-cue boundary, instead of letting a
+        // permission decision surface as an unhandled 500.
+        catch (MovieCollaborationForbiddenException exception) { return ApiResults.Error(this, 403, "MOVIE_PERMISSION_DENIED", exception.Message); }
         catch (MovieTimelineValidationException exception)
         {
             return ApiResults.Error(this, exception.Code == MovieTimelineValidationCodes.TimelineVersionConflict ? 409 : 400, exception.Code, exception.Message);
