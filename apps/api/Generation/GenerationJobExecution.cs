@@ -2623,8 +2623,7 @@ var qualityFailure = exception as GenerationQualityControlException ?? exception
             && attempt.Status == GenerationProviderAttemptStatus.Started
             && db.GenerationJobs.Any(job =>
                 job.Id == attempt.GenerationJobId
-                && job.ConcurrencyToken == claimToken
-                && job.Status == GenerationJobStatus.Running
+                && job.Status == GenerationJobStatus.Running && job.ConcurrencyToken == claimToken
                 && !job.CancellationRequested
                 && job.ClaimExpiresAt > DateTime.UtcNow));
 

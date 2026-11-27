@@ -218,7 +218,12 @@ public sealed class ProviderGenerationE2ETests : IClassFixture<ProviderGeneratio
             language = "auto",
         });
         var music = await WaitForTerminal(client, musicResponse.Job.Id);
-        await AssertFailedLifecycle(music, auth.PersonalWorkspace.Id, GenerationJobErrorCodes.MusicGenerationFailed);
+        // The legacy fake reports its failure after dispatch without a receipt or a no-charge guarantee.
+        await AssertFailedLifecycle(music, auth.PersonalWorkspace.Id, GenerationJobErrorCodes.MusicProviderSubmissionUnconfirmed);
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        var attempt = await db.GenerationProviderAttempts.AsNoTracking().SingleAsync(row => row.GenerationJobId == music.Id);
+        Assert.Equal("taslim:dispatch-pending", attempt.ProviderExecutionId);
     }
 
     [Fact]
