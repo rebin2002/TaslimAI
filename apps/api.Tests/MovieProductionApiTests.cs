@@ -604,12 +604,20 @@ public sealed class MovieProductionApiTests : IClassFixture<GenerationJobsNoWork
         Assert.NotNull(confirmed.Job);
         Assert.NotNull(confirmed.ProductionVersion);
         Assert.NotNull(confirmed.Take);
+        Assert.False(confirmed.Request.CostPreview.ConfirmationRequired);
+        var completedReplay = await SendWithCsrf<MovieSelectiveRegenerationResponse>(client, HttpMethod.Post, previewPath, payload, previewKey);
+        Assert.Equal(preview.Request.Id, completedReplay.Request.Id);
+        Assert.Equal(MovieRegenerationStatuses.Confirmed, completedReplay.Request.Status);
+        Assert.False(completedReplay.Request.CostPreview.ConfirmationRequired);
+        Assert.Equal(confirmed.Job!.Id, completedReplay.Job!.Id);
+        Assert.Equal(confirmed.ProductionVersion!.Id, completedReplay.ProductionVersion!.Id);
+        Assert.Equal(confirmed.Take!.Id, completedReplay.Take!.Id);
         Assert.Equal(GenerationJobStatus.Queued.ToString(), confirmed.Job!.Status);
         Assert.Equal(MovieTakeStatuses.Generating, confirmed.Take!.Status);
 
         using var scope = factory.Services.CreateScope();
         var dbAfter = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
-        Assert.Equal(1, await dbAfter.GenerationJobs.CountAsync(item => item.Id == confirmed.Job.Id));
+        Assert.Equal(1, await dbAfter.GenerationJobs.CountAsync(item => item.WorkspaceId == auth.PersonalWorkspace.Id));
         Assert.Equal(3, await dbAfter.MovieProductionVersions.CountAsync(item => item.MovieShotId == shot.Id));
         Assert.Equal(MovieProductionVersionStatuses.ReviewRequired, await dbAfter.MovieProductionVersions.Where(item => item.Id == downstream.Id).Select(item => item.Status).SingleAsync());
         Assert.Contains(await dbAfter.MovieProductionStageTransitions.Where(item => item.MovieShotId == shot.Id).ToListAsync(), item => item.EventType == "invalidated" && item.MovieProductionVersionId == downstream.Id);
