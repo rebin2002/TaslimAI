@@ -12,6 +12,17 @@ import { test, expect, apiJson, registerInUi, logoutInUi, E2E_PASSWORD, type Tes
 const ALPHA_MARKER = `ALPHA-SESSION-PRIVATE-${Date.now()}`;
 const BETA_MARKER = `BETA-SESSION-PRIVATE-${Date.now()}`;
 
+function expectPrivateNoStoreResponse(headers: Record<string, string>, path: string): void {
+  const cacheControl = (headers["cache-control"] ?? "").toLowerCase();
+  const directives = cacheControl.split(",").map((directive) => directive.trim());
+
+  expect(directives, `${path}: Cache-Control`).toContain("no-store");
+  expect(directives.some((directive) => directive.startsWith("public")), `${path}: public directive`).toBe(false);
+  expect(directives.some((directive) => directive.startsWith("s-maxage")), `${path}: s-maxage directive`).toBe(false);
+  expect(directives.some((directive) => directive.startsWith("max-age=") && directive !== "max-age=0"), `${path}: max-age`).toBe(false);
+  expect(headers["x-robots-tag"] ?? "", `${path}: X-Robots-Tag`).toMatch(/\bnoindex\b/i);
+}
+
 function makeUser(marker: string): TestUser {
   return {
     displayName: `E2E ${marker}`,
@@ -29,22 +40,26 @@ test.describe("authenticated SSR route cache isolation", () => {
   test("workspace home document is never shared-cacheable", async ({ page }) => {
     const response = await page.goto("/chat");
     expect(response).not.toBeNull();
-    const headers = response!.headers();
     // Fail closed: no shared-cache lifetime may survive on a private route,
     // and the document must be marked private and unindexable.
     // `next dev` collapses every document to bare `no-store`, so the portable
     // contract is: never shared-cacheable, always no-store, always noindex.
     // A production `next start` answers with the full private directive list.
-    expect(headers["cache-control"] ?? "").not.toMatch(/s-maxage|max-age=(?!0[,\s]|0$)/);
-    expect(headers["cache-control"] ?? "").toMatch(/no-store/);
-    expect(headers["x-robots-tag"] ?? "").toMatch(/noindex/);
+    expectPrivateNoStoreResponse(response!.headers(), "/chat");
   });
 
   test("route documents for other private surfaces carry the same policy", async ({ page }) => {
     for (const path of ["/", "/projects", "/activity"]) {
-      const response = await page.goto(path);
-      expect(response, path).not.toBeNull();
-      expect(response!.headers()["x-robots-tag"] ?? "", path).toMatch(/noindex/);
+      // Capture the route's own response: page.goto resolves to the final
+      // redirect target, which may be the explicitly public /login form and
+      // therefore correctly has no X-Robots-Tag.
+      const routeResponsePromise = page.waitForResponse((response) =>
+        response.request().isNavigationRequest()
+        && new URL(response.url()).pathname === path,
+      );
+      await page.goto(path);
+      const routeResponse = await routeResponsePromise;
+      expectPrivateNoStoreResponse(routeResponse.headers(), path);
     }
   });
 
