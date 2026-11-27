@@ -1,6 +1,12 @@
+using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
+using Taslim.Api.Ai;
+using Taslim.Api.Domain;
+using Taslim.Api.Persistence;
 using Taslim.Api.Resilience;
+using Taslim.Api.Usage;
 using Xunit;
 
 namespace Taslim.Api.Tests;
@@ -492,6 +498,82 @@ public sealed class ProviderResilienceTests
         Assert.Equal(ProviderAttemptResultCategory.TimedOut, result.Category);
         Assert.Equal(3, provider.Calls);
         Assert.Equal(3, store.Attempts.Count);
+    }
+
+    [Theory]
+    [InlineData(2, true, true)]
+    [InlineData(1, true, false)]
+    [InlineData(2, false, false)]
+    public async Task Uncertain_primary_submission_uses_a_distinct_fallback_only_within_the_job_budget(
+        int ceiling, bool allowFallback, bool expectFallback)
+    {
+        using var factory = new TaslimApiFactory();
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        await db.Database.EnsureCreatedAsync();
+        var workspaceId = Guid.NewGuid();
+        var userId = Guid.NewGuid();
+        var jobId = Guid.NewGuid();
+        var token = Guid.NewGuid();
+        var now = DateTime.UtcNow;
+        db.Users.Add(new ApplicationUser { Id = userId, UserName = "resilience@example.test", CreatedAt = now, UpdatedAt = now });
+        db.Workspaces.Add(new Workspace { Id = workspaceId, Name = "Fallback fixture", Slug = $"fixture-{jobId:N}", CreatedAt = now, UpdatedAt = now });
+        db.GenerationJobs.Add(new GenerationJob
+        {
+            Id = jobId, WorkspaceId = workspaceId, CreatedByUserId = userId,
+            JobType = GenerationJobTypes.SystemTest, Status = GenerationJobStatus.Running,
+            ConcurrencyToken = token, InputJson = "{}", CreatedAt = now,
+        });
+        await db.SaveChangesAsync();
+
+        var key = $"generation:{jobId}";
+        var ledger = scope.ServiceProvider.GetRequiredService<IUsageLedgerService>();
+        var transaction = await ledger.GetOrCreatePendingAsync(workspaceId, userId, null, null, key, UsageFeature.Generation, generationJobId: jobId);
+        var orchestrator = scope.ServiceProvider.GetRequiredService<IProviderResilienceOrchestrator>();
+        var requirements = new ProviderRouteRequirements("movie.generate", MaxEstimatedCostUsd: ceiling, RequireIdempotency: false, AllowFallback: allowFallback);
+        var primary = new TestProvider("primary", _ => throw new TimeoutException(),
+            new ProviderRoutingProfile(EstimatedCostUsd: 1m, SupportsIdempotency: false));
+        var alias = new TestProvider("PRIMARY", _ => throw new InvalidOperationException("Same provider was resubmitted."),
+            new ProviderRoutingProfile(EstimatedCostUsd: 1m, SupportsIdempotency: false));
+        var secondary = new TestProvider("secondary", _ => Task.FromResult("output"),
+            new ProviderRoutingProfile(EstimatedCostUsd: 1m));
+        IResilientProvider<string, string>[] providers = [primary, alias, secondary];
+        var result = await orchestrator.ExecuteAsync(jobId, token, requirements, key, "synthetic", providers);
+
+        Assert.Equal(1, primary.Calls);
+        Assert.Equal(0, alias.Calls);
+        Assert.Equal(expectFallback ? 1 : 0, secondary.Calls);
+        Assert.Equal(expectFallback, result.Succeeded);
+        var attempts = await db.GenerationProviderAttempts.AsNoTracking().Where(a => a.GenerationJobId == jobId).OrderBy(a => a.AttemptNumber).ToListAsync();
+        Assert.Equal(expectFallback ? 2 : 1, attempts.Count);
+        Assert.Equal(ProviderAttemptResultCategory.TimedOut.ToString(), attempts[0].ResultClassification);
+        Assert.Equal(1m, attempts[0].EstimatedProviderCostUsd);
+        Assert.True(attempts[0].EstimatedProviderCostKnown);
+        Assert.False(attempts[0].IsFallback);
+        if (expectFallback)
+        {
+            Assert.Equal("secondary", result.ProviderKey);
+            Assert.True(attempts[1].IsFallback);
+            Assert.Equal(1m, attempts[1].EstimatedProviderCostUsd);
+            var usage = new AiUsageMetadata("secondary", "fixture", null, null, null, 1m, null, 1, "completed", true);
+            await ledger.CompleteAsync(transaction, usage);
+            var replay = await orchestrator.ExecuteAsync(jobId, token, requirements, key, "synthetic", providers);
+            Assert.True(replay.IsReplay);
+            Assert.Equal(1, primary.Calls);
+            Assert.Equal(1, secondary.Calls);
+            var replayedTransaction = await ledger.GetOrCreatePendingAsync(workspaceId, userId, null, null, key, UsageFeature.Generation, generationJobId: jobId);
+            Assert.Equal(transaction.Id, replayedTransaction.Id);
+            await ledger.CompleteAsync(replayedTransaction, usage);
+            Assert.Equal(UsageTransactionStatus.Completed, replayedTransaction.Status);
+        }
+        else
+        {
+            Assert.Equal(allowFallback ? ProviderAttemptResultCategory.CostGuardRejected : ProviderAttemptResultCategory.TimedOut, result.Category);
+            await ledger.FailAsync(transaction, result.ErrorCode!);
+        }
+        Assert.Single(await db.ProviderExecutionFinalizations.AsNoTracking().Where(f => f.GenerationJobId == jobId).ToListAsync());
+        var finalTransaction = Assert.Single(await db.UsageTransactions.AsNoTracking().Where(t => t.GenerationJobId == jobId).ToListAsync());
+        Assert.Equal(0m, finalTransaction.ChargedAmount);
     }
 
     private static ProviderResilienceOrchestrator Create(FakeResilienceStore store, int retries = 0, decimal maxCostUsd = 5m) =>

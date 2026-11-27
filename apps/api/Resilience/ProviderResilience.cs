@@ -353,6 +353,7 @@ public sealed class ProviderResilienceOrchestrator(
         }
 
         var boundedProviders = providers.Take(Math.Max(1, settings.MaxProviders)).ToArray();
+        var ambiguousNonIdempotentProviders = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var attemptCount = 0;
         var hasSelectedProvider = false;
         ProviderAttemptResultCategory? lastCategory = null;
@@ -363,6 +364,9 @@ public sealed class ProviderResilienceOrchestrator(
         {
             foreach (var provider in boundedProviders)
             {
+                // An alias/duplicate route entry must not submit to the same provider again.
+                if (ambiguousNonIdempotentProviders.Contains(provider.Key)) continue;
+
                 if (!provider.CanHandle(requirements.Capability, input))
                 {
                     lastCategory = ProviderAttemptResultCategory.UnsupportedCapability;
@@ -454,6 +458,8 @@ public sealed class ProviderResilienceOrchestrator(
                         Math.Max(1, settings.CircuitFailureThreshold),
                         TimeSpan.FromSeconds(Math.Clamp(settings.CircuitOpenSeconds, 1, 3_600)),
                         cancellationToken);
+                if (!profile.SupportsIdempotency && ProviderRetryPolicy.IsResubmissionAmbiguous(providerResult.Category))
+                    ambiguousNonIdempotentProviders.Add(provider.Key);
                 lastCategory = providerResult.Category;
                 lastCode = providerResult.ErrorCode;
                 lastProvider = providerResult.ProviderKey;
@@ -539,7 +545,7 @@ public sealed class ProviderResilienceOrchestrator(
             ProviderAttemptResultCategory category;
             string? code = null;
             TOutput? value = default;
-            decimal? actualCost = null;
+            decimal? attemptCost = null;
             try
             {
                 using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
@@ -556,8 +562,8 @@ public sealed class ProviderResilienceOrchestrator(
                         profile.EstimatedCostUsd),
                     input,
                     timeout.Token);
-                actualCost = success.EstimatedCostUsd ?? profile.EstimatedCostUsd;
-                if (ExceedsCostLimit(cumulativeCost, actualCost, maxCost))
+                attemptCost = success.EstimatedCostUsd ?? profile.EstimatedCostUsd;
+                if (ExceedsCostLimit(cumulativeCost, attemptCost, maxCost))
                 {
                     category = ProviderAttemptResultCategory.CostGuardRejected;
                     code = "COST_LIMIT_EXCEEDED";
@@ -587,12 +593,16 @@ public sealed class ProviderResilienceOrchestrator(
                     category);
             }
             stopwatch.Stop();
+            // A non-idempotent provider may already have accepted the job. Keep its known
+            // estimate in the attempt ledger so a different provider still fits the job ceiling.
+            if (!profile.SupportsIdempotency && ProviderRetryPolicy.IsResubmissionAmbiguous(category))
+                attemptCost = profile.EstimatedCostUsd;
             await store.CompleteAttemptAsync(
                 attempt,
                 category,
                 code,
                 stopwatch.ElapsedMilliseconds,
-                actualCost,
+                attemptCost,
                 timeProvider.GetUtcNow().UtcDateTime,
                 cancellationToken);
             if (category == ProviderAttemptResultCategory.Success)
