@@ -26,6 +26,10 @@ public sealed class AcademicHttpGateway(HttpClient httpClient, AcademicSourceDis
 {
     private readonly IReadOnlyCollection<string> allowedHosts = options.AllowedEndpointHosts();
     private readonly IReadOnlyCollection<string> hostExceptions = options.EndpointHostExceptions;
+    /// <summary>Whether plaintext reads are refused. True for every runtime that was configured by
+    /// a deployment; false only where a test injected its own transport, because that switch has no
+    /// public setter and the options binder cannot reach it.</summary>
+    private readonly bool requireSecureTransport = !options.AllowInsecureProviderEndpoints;
 
     /// <summary>Query keys that carry provider credentials and must never cross an authority.</summary>
     private static readonly string[] CredentialQueryKeys =
@@ -64,27 +68,51 @@ public sealed class AcademicHttpGateway(HttpClient httpClient, AcademicSourceDis
                 if ((int)response.StatusCode is >= 301 and <= 308)
                 {
                     var location = response.Headers.Location;
-                    var target = location is null ? null : location.IsAbsoluteUri ? location : new Uri(current, location);
+                    var redirectStatus = (int)response.StatusCode;
+                    // A redirect's body is never read, and every decision below can throw or restart
+                    // the loop: take the two values the decision needs, then release the response and
+                    // its connection before any of them runs. Each individual throw path used to
+                    // dispose, which is how `RequireSecureTransport` below came to be the one call
+                    // that could leave a ResponseHeadersRead response — body stream and pooled
+                    // connection alike — alive until the finalizer.
+                    response.Dispose();
+                    response = null;
                     if (++redirects > options.MaxRedirectHops)
-                    {
-                        response.Dispose();
-                        throw Reject(current, "too_many_redirects", (int)response.StatusCode);
-                    }
+                        throw Reject(current, "too_many_redirects", redirectStatus);
+                    // Resolving the hop now happens after the release, for the reason above plus one
+                    // the release-after-decision ordering missed: `Location: //` and `Location:
+                    // //:80/x` parse as *relative* URIs, and turning either into an absolute address
+                    // against the request URL throws. That throw used to sit a line above the
+                    // dispose, so an unparseable header both kept the payload stream alive and
+                    // escaped the gateway as a bare UriFormatException — which the reader experienced
+                    // as an unlabelled HTTP 500 instead of a refusal the orchestrator can categorize.
+                    var target = ResolveRedirectTarget(current, location, redirectStatus);
                     if (!AcademicSourceUrlGuard.IsAllowedEndpoint(target, allowedHosts, hostExceptions))
-                    {
-                        response.Dispose();
-                        throw Reject(current, AcademicSourceFailureCategories.BlockedEndpoint, (int)response.StatusCode);
-                    }
+                        throw Reject(current, AcademicSourceFailureCategories.BlockedEndpoint, redirectStatus);
+                    // Same host is not the same place. `Authority` is host and port only and says
+                    // nothing about TLS, so an https → http hop on an allow-listed host read as
+                    // "same authority" and was followed with the query string intact — the reader's
+                    // search term, and for Google Books the configured key, in clear text. The hop's
+                    // transport is therefore judged before anything is sent to it: the general rule
+                    // first (plaintext is for an injected test transport only), then the one case
+                    // that no transport may perform, which is stepping DOWN from TLS on a host the
+                    // request was already talking to over TLS.
+                    RequireSecureTransport(target!);
+                    var sameAuthority = string.Equals(target!.Authority, current.Authority, StringComparison.OrdinalIgnoreCase);
+                    var sameScheme = string.Equals(target.Scheme, current.Scheme, StringComparison.OrdinalIgnoreCase);
+                    if (!sameScheme && sameAuthority && IsSecureScheme(current.Scheme))
+                        throw Reject(current, AcademicSourceFailureCategories.InsecureTransport, redirectStatus);
                     // A hop that leaves the original authority could carry the request's
                     // credentials — including a Google Books key that rides the query string — to a
                     // host the operator never associated with them. Same-authority hops are the
                     // normal provider behaviour and stay untouched; a cross-authority hop is
                     // refused unless explicitly configured, and when allowed it is rebuilt without
-                    // any credential parameter.
-                    if (!string.Equals(target!.Authority, current.Authority, StringComparison.OrdinalIgnoreCase))
+                    // any credential parameter. A scheme change on the SAME host is not a new
+                    // authority: the only one left after the rule above is an upgrade into TLS,
+                    // which keeps its query, because moving a credential onto a better transport is
+                    // not the leak this branch is guarding.
+                    if (!sameAuthority)
                     {
-                        response.Dispose();
-                        response = null;
                         // HttpClient merges the client's default request headers into every send,
                         // so a credential configured on the client cannot be stripped for one hop.
                         // Refusing that hop is the only honest guarantee, and it is why the default
@@ -94,20 +122,40 @@ public sealed class AcademicHttpGateway(HttpClient httpClient, AcademicSourceDis
                         current = ScrubCredentials(target);
                         continue;
                     }
-                    response.Dispose();
-                    response = null;
                     current = target!;
                     continue;
                 }
 
                 if (passThroughStatusCodes is not null && passThroughStatusCodes.Contains((int)response.StatusCode))
-                    return new AcademicJsonResponse((int)response.StatusCode, default, false);
+                {
+                    // The adapter asked to see this status itself — a DOI 404 is an answer, not an
+                    // outage — but the body was never going to be parsed here. With
+                    // ResponseHeadersRead the payload stream and the pooled connection stay live
+                    // until something disposes the response, so releasing them is part of returning
+                    // the status: a ten-identifier DOI batch that all miss used to hand back up to
+                    // ten undisposed responses per request. Status semantics are unchanged; only the
+                    // lifetime is.
+                    var passThroughStatus = (int)response.StatusCode;
+                    response.Dispose();
+                    response = null;
+                    return new AcademicJsonResponse(passThroughStatus, default, false);
+                }
 
                 if (IsRetryableStatus(response.StatusCode) && attempt < options.MaxAttempts)
                 {
-                    await DelayBeforeRetryAsync(RetryDelaySeconds(attempt, response), operationTimeout.Token, cancellationToken);
+                    // Read the wait, release the response, then sleep — in that order. This delay is
+                    // the one await in the loop that the *caller* is allowed to cut short (a tab
+                    // closed, a newer search, the student navigating away), and a cancellation that
+                    // arrives inside it leaves this method through the caller's own
+                    // OperationCanceledException, which no catch below turns into a disposal: the
+                    // catch that does is filtered to "the caller did not cancel". Sleeping on a
+                    // response that is still held therefore used to keep a provider's 429 payload
+                    // stream and pooled connection alive for the rest of a `Retry-After` window on a
+                    // page nobody is waiting for any more.
+                    var retryDelaySeconds = RetryDelaySeconds(attempt, response);
                     response.Dispose();
                     response = null;
+                    await DelayBeforeRetryAsync(retryDelaySeconds, operationTimeout.Token, cancellationToken);
                     continue;
                 }
 
@@ -153,6 +201,37 @@ public sealed class AcademicHttpGateway(HttpClient httpClient, AcademicSourceDis
                 response?.Dispose();
                 throw new AcademicSourceUnavailableException(new AcademicProviderErrorDetails(null, AcademicSourceFailureCategories.Transient), exception);
             }
+            finally
+            {
+                // The releases above are placed where they are because their timing matters; this one
+                // is here so the next branch added to this loop cannot silently reintroduce the leak
+                // class they were fixing. Every path out of the try — return, throw, continue — runs
+                // it, and a response that was already released is a no-op the second time.
+                response?.Dispose();
+            }
+        }
+    }
+
+    /// <summary>
+    /// Turns a provider's <c>Location</c> header into the address a hop would use, or refuses the
+    /// header. Absent header stays null and is refused by the allow list as it always was; a header
+    /// that parses as a relative URI with no resolvable form — the network-path reference <c>//</c>,
+    /// or <c>//:80/x</c> — is refused here with a category of its own instead of throwing a bare
+    /// <see cref="UriFormatException"/> out of the transport. Only the status the redirect arrived
+    /// with is carried, never the header's text: a provider-issued address is not something to echo.
+    /// </summary>
+    private static Uri? ResolveRedirectTarget(Uri current, Uri? location, int redirectStatus)
+    {
+        if (location is null) return null;
+        if (location.IsAbsoluteUri) return location;
+        try
+        {
+            return new Uri(current, location);
+        }
+        catch (UriFormatException exception)
+        {
+            throw new AcademicSourceRejectedException(
+                Details(redirectStatus, AcademicSourceFailureCategories.MalformedRedirect), exception);
         }
     }
 
@@ -160,6 +239,38 @@ public sealed class AcademicHttpGateway(HttpClient httpClient, AcademicSourceDis
     {
         if (!AcademicSourceUrlGuard.IsAllowedEndpoint(endpoint, allowedHosts, hostExceptions))
             throw new AcademicSourceRejectedException(Details(endpoint, AcademicSourceFailureCategories.BlockedEndpoint, null));
+        RequireSecureTransport(endpoint);
+    }
+
+    /// <summary>
+    /// The transport rule, applied to the first request and to every hop: a scholarly read goes out
+    /// over TLS. The host allow list is not enough on its own — <c>www.googleapis.com</c> is
+    /// allow-listed whether the scheme is <c>https</c> or <c>http</c>, and the query string of every
+    /// one of these requests carries the reader's search term, with the Google Books read carrying
+    /// the deployment's configured key as well. So the scheme is decided here, before anything is
+    /// sent, rather than left to whatever the provider's <c>Location</c> header suggested.
+    /// <para>
+    /// A test transport that switched plaintext on may still not carry a credential in the clear:
+    /// that combination has no legitimate use and is refused the same way, so the escape hatch
+    /// cannot become the shape that leaks a key.
+    /// </para>
+    /// </summary>
+    private void RequireSecureTransport(Uri endpoint)
+    {
+        if (IsSecureScheme(endpoint.Scheme)) return;
+        if (requireSecureTransport || CarriesCredentialQuery(endpoint))
+            throw new AcademicSourceRejectedException(Details(endpoint, AcademicSourceFailureCategories.InsecureTransport, null));
+    }
+
+    private static bool IsSecureScheme(string scheme) =>
+        string.Equals(scheme, Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>True when the query string carries a parameter named like a provider credential.
+    /// Uses the same key list as the cross-authority scrub so the two cannot drift.</summary>
+    private static bool CarriesCredentialQuery(Uri endpoint)
+    {
+        var pairs = endpoint.Query.TrimStart('?').Split('&', StringSplitOptions.RemoveEmptyEntries);
+        return pairs.Any(pair => IsCredentialParameter(pair));
     }
 
     /// <summary>

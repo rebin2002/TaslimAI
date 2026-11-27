@@ -88,6 +88,11 @@ public sealed class MovieDirectorStoryActionExecutor(
         {
             return new(false, "DIRECTOR_STORY_APPLY_INVALID", exception.Message, null);
         }
+        catch (MovieStoryRevisionConflictException)
+        {
+            // Same bounded outcome as the pre-apply base check: the Story moved under this proposal.
+            return new(false, "DIRECTOR_STORY_BASE_CHANGED", "The Story changed after this proposal was created. Create a fresh proposal before applying it.", null);
+        }
     }
 
     private static MovieStorySceneRequest ToRequest(MovieScreenplayScene scene) => new()

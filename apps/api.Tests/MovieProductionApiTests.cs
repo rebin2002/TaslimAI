@@ -11,8 +11,8 @@ using Xunit;
 
 namespace Taslim.Api.Tests;
 
-// Keep the production-render creation test fully provider-free while exercising
-// the same admission path that rejects an unconfigured production provider.
+// Use a deterministic provider-enabled Movie host without a background worker
+// so render admission can be exercised without external or asynchronous work.
 public sealed class MovieProductionRenderNoWorkerFactory : MovieOperationalApiFactory
 {
     protected override bool WorkerEnabled => false;
@@ -317,7 +317,95 @@ public sealed class MovieProductionApiTests : IClassFixture<GenerationJobsNoWork
         Assert.Equal(HttpStatusCode.Forbidden, forbiddenReview.StatusCode);
     }
     [Fact]
-    public async Task Production_render_requires_a_renderable_approved_keyframe_and_does_not_create_a_movie_take()
+    public async Task Production_render_is_explicit_and_does_not_collapse_into_a_movie_take()
+    {
+        using var renderFactory = new MovieProductionRenderNoWorkerFactory();
+        using var client = renderFactory.CreateClient();
+        var auth = await Register(client);
+        var project = await SendWithCsrf<MovieStudioProjectResponse>(client, HttpMethod.Post, "/api/movie-studio/projects", new
+        {
+            workspaceId = auth.PersonalWorkspace.Id,
+            mode = MovieProjectModes.Quick,
+            title = "Explicit production",
+            description = "A render should require a deliberate action.",
+            durationSeconds = 24,
+            aspectRatio = "16:9",
+            style = "cinematic",
+            language = "en",
+        });
+        var scene = await SendWithCsrf<MovieSceneDto>(client, HttpMethod.Post,
+            $"/api/movie-studio/projects/{project.Project.Id}/scenes", new { title = "Dawn", summary = "A quiet opening beat." });
+        var shot = await SendWithCsrf<MovieShotDto>(client, HttpMethod.Post,
+            $"/api/movie-studio/scenes/{scene.Id}/shots", new { description = "A locked-off street wide shot." });
+        var storyboard = await SendWithCsrf<MovieProductionVersionDto>(client, HttpMethod.Post,
+            $"/api/movie-studio/shots/{shot.Id}/production/versions", new { stage = MovieProductionStages.StoryboardCandidate, compositionJson = "{\"frame\":\"wide\"}" });
+        var approvedStoryboard = await SendWithCsrf<MovieProductionVersionDto>(client, HttpMethod.Post,
+            $"/api/movie-studio/production/versions/{storyboard.Id}/review", new { approve = true });
+
+        var referenceFileId = Guid.NewGuid();
+        var keyframeAssetId = Guid.NewGuid();
+        using (var seedScope = renderFactory.Services.CreateScope())
+        {
+            var seedDb = seedScope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            var now = DateTime.UtcNow;
+            seedDb.StoredFiles.Add(new StoredFile
+            {
+                Id = referenceFileId,
+                WorkspaceId = auth.PersonalWorkspace.Id,
+                UserId = auth.User.Id,
+                OriginalFileName = "keyframe-reference.png",
+                StoredFileName = "keyframe-reference.png",
+                ContentType = "image/png",
+                Extension = ".png",
+                SizeBytes = 128,
+                StorageProvider = FileStorageProviders.Local,
+                StorageKey = $"test/{referenceFileId:N}",
+                Status = StoredFileStatus.Ready,
+                CreatedAt = now,
+                ProcessedAt = now,
+                TextExtractionStatus = FileExtractionStatus.NotApplicable,
+            });
+            seedDb.Assets.Add(new Asset
+            {
+                Id = keyframeAssetId,
+                WorkspaceId = auth.PersonalWorkspace.Id,
+                CreatedByUserId = auth.User.Id,
+                StoredFileId = referenceFileId,
+                Name = "Keyframe reference",
+                AssetType = AssetTypes.Image,
+                MimeType = "image/png",
+                Status = AssetStatus.Active,
+                CreatedAt = now,
+                UpdatedAt = now,
+            });
+            await seedDb.SaveChangesAsync();
+        }
+
+        var keyframe = await SendWithCsrf<MovieProductionVersionDto>(client, HttpMethod.Post,
+            $"/api/movie-studio/shots/{shot.Id}/production/versions",
+            new { stage = MovieProductionStages.ProductionKeyframe, sourceVersionId = approvedStoryboard.Id, compositionJson = "{\"frame\":\"keyframe\"}", assetId = keyframeAssetId });
+        var approvedKeyframe = await SendWithCsrf<MovieProductionVersionDto>(client, HttpMethod.Post,
+            $"/api/movie-studio/production/versions/{keyframe.Id}/review", new { approve = true });
+        var motion = await SendWithCsrf<MovieProductionVersionDto>(client, HttpMethod.Post,
+            $"/api/movie-studio/shots/{shot.Id}/production/motion-preview", new { sourceVersionId = approvedKeyframe.Id });
+        var approvedMotion = await SendWithCsrf<MovieProductionVersionDto>(client, HttpMethod.Post,
+            $"/api/movie-studio/production/versions/{motion.Id}/review", new { approve = true });
+
+        var render = await SendWithCsrf<MovieProductionRenderResponse>(client, HttpMethod.Post,
+            $"/api/movie-studio/shots/{shot.Id}/production/render", new { sourceVersionId = approvedMotion.Id, label = "Explicit render" });
+        Assert.Equal(render.Job.Id, render.Version.GenerationJobId);
+        Assert.NotEqual(Guid.Empty, render.ClipId);
+        var production = await client.GetFromJsonAsync<MovieShotProductionDto>($"/api/movie-studio/shots/{shot.Id}/production");
+        Assert.NotNull(production);
+        Assert.Contains(production!.Versions, item => item.Stage == MovieProductionStages.ProductionRender && item.GenerationJobId == render.Job.Id);
+        Assert.Empty(production.Takes);
+        using var scope = renderFactory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        Assert.Equal(0, await db.MovieTakes.CountAsync(item => item.MovieShotId == shot.Id));
+    }
+
+    [Fact]
+    public async Task Production_render_without_keyframe_asset_fails_closed_and_does_not_create_a_movie_take()
     {
         using var renderFactory = new MovieProductionRenderNoWorkerFactory();
         using var client = renderFactory.CreateClient();

@@ -67,6 +67,54 @@ public sealed class MovieScenesTests
     }
 
     [Fact]
+    public async Task Multiple_distinct_screenplay_links_remain_linked_in_workspace()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var db = CreateDb(connection);
+        var (userId, movieId, revisionId, firstScreenplaySceneId) = await SeedApprovedScreenplayAsync(db);
+        var now = DateTime.UtcNow;
+        var actId = Guid.NewGuid();
+        var sequenceId = Guid.NewGuid();
+        var firstProductionSceneId = Guid.NewGuid();
+        var secondProductionSceneId = Guid.NewGuid();
+        db.MovieActs.Add(new MovieAct { Id = actId, MovieProjectId = movieId, Sequence = 1, Title = "Act 1", Status = MovieHierarchyStatuses.Planned, CreatedAt = now, UpdatedAt = now });
+        db.MovieSequences.Add(new MovieSequence { Id = sequenceId, MovieActId = actId, Sequence = 1, Title = "Sequence 1", Status = MovieHierarchyStatuses.Planned, CreatedAt = now, UpdatedAt = now });
+        db.MovieScenes.AddRange(
+            new MovieScene { Id = firstProductionSceneId, MovieProjectId = movieId, MovieSequenceId = sequenceId, Sequence = 1, Title = "Production scene 1", Summary = "First linked scene.", Status = MovieHierarchyStatuses.Planned, CreatedAt = now, UpdatedAt = now },
+            new MovieScene { Id = secondProductionSceneId, MovieProjectId = movieId, MovieSequenceId = sequenceId, Sequence = 2, Title = "Production scene 2", Summary = "Second linked scene.", Status = MovieHierarchyStatuses.Planned, CreatedAt = now, UpdatedAt = now });
+        var firstScreenplayScene = await db.MovieScreenplayScenes.SingleAsync(item => item.Id == firstScreenplaySceneId);
+        firstScreenplayScene.MovieSceneId = firstProductionSceneId;
+        var secondScreenplaySceneId = Guid.NewGuid();
+        db.MovieScreenplayScenes.Add(new MovieScreenplayScene
+        {
+            Id = secondScreenplaySceneId, MovieStoryRevisionId = revisionId, MovieSceneId = secondProductionSceneId, Ordinal = 2,
+            SceneIdentifier = "2", ActNumber = 1, SequenceNumber = 2, Slugline = "EXT. WORKSHOP - DAY", Synopsis = "A second distinct screenplay scene.", CreatedAt = now,
+        });
+        await db.SaveChangesAsync();
+
+        var workspace = await CreateService(db).GetWorkspaceAsync(userId, movieId, CancellationToken.None);
+
+        Assert.NotNull(workspace);
+        var scenes = workspace!.Acts.SelectMany(act => act.Sequences).SelectMany(sequence => sequence.Scenes).OrderBy(scene => scene.Sequence).ToArray();
+        Assert.Equal(2, workspace.SceneCount);
+        Assert.Equal(2, workspace.LinkedSceneCount);
+        Assert.Collection(scenes,
+            scene =>
+            {
+                Assert.Equal(firstProductionSceneId, scene.Id);
+                Assert.Equal(firstScreenplaySceneId, scene.ScreenplaySceneId);
+                Assert.Equal("Linked", scene.ApprovalState);
+            },
+            scene =>
+            {
+                Assert.Equal(secondProductionSceneId, scene.Id);
+                Assert.Equal(secondScreenplaySceneId, scene.ScreenplaySceneId);
+                Assert.Equal("Linked", scene.ApprovalState);
+            });
+    }
+
+    [Fact]
     public async Task Scenes_workspace_hides_cross_workspace_projects()
     {
         await using var connection = new SqliteConnection("Data Source=:memory:");

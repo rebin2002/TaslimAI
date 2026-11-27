@@ -213,7 +213,10 @@ public sealed class MovieCharacterProductionSheetService(TaslimDbContext db, Mov
                 // sheet and its versions before allocating the next number.
                 db.ChangeTracker.Clear();
                 character = await db.MovieCharacters.Include(item => item.MovieProject).Include(item => item.ProductionSheet).ThenInclude(item => item!.Versions).ThenInclude(item => item.Looks).FirstOrDefaultAsync(item => item.Id == characterId, cancellationToken);
-                if (character is null || character.ProductionSheet?.Status == MovieCharacterProductionSheetStatuses.Locked) return null;
+                if (character is null || !await collaboration.HasPermissionAsync(userId, character.MovieProjectId, MoviePermissions.Edit, cancellationToken)) return null;
+                if (character.ProductionSheet?.Status == MovieCharacterProductionSheetStatuses.Locked) throw new MovieCharacterProductionSheetLockedException();
+                // The project's workspace (and therefore valid asset scope) may have changed while this allocation was contended.
+                await ValidateAssetsAsync(character.MovieProject.WorkspaceId, normalized.AssetIds, cancellationToken);
             }
 
             var now = DateTime.UtcNow;
@@ -295,21 +298,31 @@ public sealed class MovieCharacterProductionSheetService(TaslimDbContext db, Mov
                 await transaction.CommitAsync(cancellationToken);
                 return MovieCharacterProductionSheetMapper.ToDto(await Query().FirstAsync(item => item.Id == sheet.Id, cancellationToken));
             }
-            catch (DbUpdateConcurrencyException) when (attempt + 1 < MaximumVersionAllocationAttempts)
+            catch (DbUpdateConcurrencyException)
             {
                 // Concurrent draft saves can lose the shared sheet-row update even
                 // when the provider does not surface the version unique conflict.
+                if (attempt + 1 >= MaximumVersionAllocationAttempts)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    break;
+                }
                 await Task.Delay(TimeSpan.FromMilliseconds(25 * (attempt + 1)), cancellationToken);
                 db.ChangeTracker.Clear();
             }
-            catch (DbUpdateException exception) when (attempt + 1 < MaximumVersionAllocationAttempts && IsVersionAllocationUniqueViolation(exception))
+            catch (DbUpdateException exception) when (IsVersionAllocationUniqueViolation(exception))
             {
+                if (attempt + 1 >= MaximumVersionAllocationAttempts)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    break;
+                }
                 await Task.Delay(TimeSpan.FromMilliseconds(25 * (attempt + 1)), cancellationToken);
                 db.ChangeTracker.Clear();
             }
         }
 
-        throw new InvalidOperationException("Movie character production-sheet version allocation did not converge after concurrent retries.");
+        throw new MovieCharacterProductionSheetValidationException("SHEET_STATE_CHANGED", "The production sheet changed while this draft version was being allocated. Retry the save.");
     }
 
     internal static bool IsVersionAllocationUniqueViolation(DbUpdateException exception)

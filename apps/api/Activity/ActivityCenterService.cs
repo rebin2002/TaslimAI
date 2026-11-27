@@ -157,28 +157,7 @@ public sealed class ActivityCenterService(TaslimDbContext db, WorkspaceAccessSer
         return true;
     }
 
-    // Research generation records are creator-private everywhere else in the product: the job read
-    // model (GenerationJobExecution.ListAsync / IsPrivateExecutionRecord) and the research report
-    // surface both keep them with their creator, because the record carries a report title and a
-    // linked asset derived from the creator's private uploads that other workspace members cannot
-    // read. The activity feed queried workspace GenerationJobs directly, so a co-member received
-    // that title, progress, job id and asset id through the list, the counts, the unread badge and
-    // the mark-read endpoints. Expressed as one translatable predicate so paging, the totals and
-    // the unread counts all stay consistent with the hidden records, and so a noncreator cannot
-    // even acknowledge a job they are not allowed to see. Intentionally shared non-Research
-    // activity keeps its existing workspace visibility.
-    // Batch 3 reconciliation (#1129 x #1130, GATE-PRIV-01): #1130 generalises creator privacy
-    // beyond Research - an unscoped Presentation export record and an unscoped Social record are
-    // private to their creator as well (GenerationJobService.IsPrivateExecutionRecord), and after
-    // the jobType bucket expansion on main those records do reach this feed. The Research-only
-    // predicate above therefore disagreed with the job read model: a co-member could list, count
-    // and try to acknowledge another member's unscoped Social/Presentation jobs. This predicate is
-    // the translatable mirror of IsPrivateExecutionRecord. GATE-PRIV-04: the predicate itself now
-    // lives once in CreatorPrivacyFence, because the project overview renders the same rows through
-    // the same mapper and had kept its own unfenced copy of the query; CreatorPrivateFenceEquivalenceTests
-    // guards the two fences against drifting apart again and
-    // ActivityUnscopedCreatorPrivacyHttpTests pins the observable HTTP behaviour. Project-scoped
-    // jobs keep the intentional workspace sharing surface for both the record and the asset.
-    private static IQueryable<GenerationJob> VisibleToMember(IQueryable<GenerationJob> jobs, Guid userId) =>
-        CreatorPrivacyFence.VisibleToMember(jobs, userId);
+    // Apply the same item-level policy before filtering, counting, paging or acknowledging rows.
+    private IQueryable<GenerationJob> VisibleToMember(IQueryable<GenerationJob> jobs, Guid userId) =>
+        CreatorPrivacyFence.VisibleToMember(jobs, userId, db.Database.ProviderName);
 }

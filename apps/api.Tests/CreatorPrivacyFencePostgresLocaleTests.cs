@@ -8,16 +8,12 @@ using Xunit;
 namespace Taslim.Api.Tests;
 
 /// <summary>
-/// GATE-PRIV-05 PostgreSQL locale proof (independent re-review of head 5df3254f): the fence folds
-/// the stored JobType with SQL <c>lower()</c> so mixed-case rows behave like the canonical
-/// <c>OrdinalIgnoreCase</c> in-memory rule. <c>lower()</c> is locale-sensitive - under a Turkish
-/// collation ASCII <c>I</c> folds to dotless <c>ı</c> and the fold would stop matching the pinned
-/// lowercase constants, silently reopening the fail-open window. These cases run on the same
-/// PostgreSQL engine CI provisions (postgres:15 image, <c>taslim_tests</c>): the locale arm pins
-/// the server collation to the ASCII-sane set and verifies the fold end-to-end, so a future
-/// provider or image change to a locale like <c>tr_TR.UTF-8</c> fails here loudly instead of
-/// leaking private rows; the fence arm seeds the mixed-case rows a case-sensitive database would
-/// have kept visible and asserts the co-member projection hides them.
+/// GATE-PRIV-05 PostgreSQL collation proof: the shared SQL fence must classify the three ASCII
+/// private-job identifiers deterministically even when the persisted JobType column has a locale
+/// collation that differs from the database default. The Turkish ICU fixture makes an implicit
+/// LOWER(JobType) turn the ASCII I in SOCIAL/PRESENTATION into dotless ı; the fence must override
+/// that column collation with PostgreSQL's built-in C collation. Tests use only synthetic rows in
+/// the disposable PostgreSQL schema provisioned by API CI.
 /// </summary>
 public sealed class CreatorPrivacyFencePostgresLocaleTests : IAsyncLifetime
 {
@@ -61,73 +57,81 @@ public sealed class CreatorPrivacyFencePostgresLocaleTests : IAsyncLifetime
 
     private TaslimDbContext NewContext() => new(options);
 
-    /// <summary>
-    /// The collations this proof is valid under: ASCII case folding in <c>lower()</c> matches the
-    /// pinned lowercase job-type constants. Any other server locale (for example tr_TR.UTF-8, where
-    /// <c>lower('I')</c> is dotless ı and the fold stops matching) fails the allowlist AND the
-    /// functional fold assertions below, so the equivalence claim can never outlive the locale.
-    /// Names are compared after normalization (lowercase, hyphens stripped) because PostgreSQL
-    /// reports initdb locale names in its own canonical spelling: the hosted CI postgres:15
-    /// service (runs 45445603482 / 45448739618, jobs 138628387109 / 138639644516) reports
-    /// datcollate 'en_US.utf8' — the same
-    /// glibc en_US.UTF-8 locale, ASCII-sane — while a local initdb under C.UTF-8 reports
-    /// 'C.UTF-8'. Normalization (lowercase; '-' and '_' dropped) only folds spellings of the
-    /// same locale identity; a genuinely
-    /// different locale (tr_TR.utf8, de_DE.utf8, SQL_ASCII…) is still rejected by name AND
-    /// by the functional fold assertions below, which is the decisive gate.
-    /// </summary>
-    private static readonly string[] AsciiSaneCollations = ["c", "posix", "c.utf8", "enus.utf8"];
-
-    private static string NormalizeCollationName(string name) =>
-        name.Trim().ToLowerInvariant()
-            .Replace("-", string.Empty, StringComparison.Ordinal)
-            .Replace("_", string.Empty, StringComparison.Ordinal);
-
     [DisposablePostgresFact]
-    public async Task Postgres_locale_folds_ascii_job_types_like_the_canonical_rule()
+    public async Task Postgres_shared_fence_overrides_a_Turkish_JobType_column_collation()
     {
         Assert.True(ready);
         await using var db = NewContext();
         var connection = db.Database.GetDbConnection();
         await connection.OpenAsync();
 
-        string collate = string.Empty;
-        string ctype = string.Empty;
-        string encoding = string.Empty;
-        string version = string.Empty;
+        // Some PostgreSQL builds do not ship ICU collations. The ordinary PostgreSQL privacy
+        // cases still run there; when Turkish ICU is available, put it on the JobType column and
+        // verify the shared query overrides the column-level locale.
+        bool hasTurkishIcu;
         await using (var probe = connection.CreateCommand())
         {
-            probe.CommandText = "SELECT datcollate, datctype, pg_encoding_to_char(encoding), current_setting('server_version') FROM pg_database WHERE datname = current_database()";
-            await using var reader = await probe.ExecuteReaderAsync();
-            Assert.True(await reader.ReadAsync());
-            collate = reader.GetString(0);
-            ctype = reader.GetString(1);
-            encoding = reader.GetString(2);
-            version = reader.GetString(3);
+            probe.CommandText = "SELECT EXISTS (SELECT 1 FROM pg_collation WHERE collname = 'tr-x-icu' AND collprovider = 'i')";
+            hasTurkishIcu = Convert.ToBoolean(await probe.ExecuteScalarAsync());
         }
+        if (!hasTurkishIcu) return;
 
-        Assert.Contains(NormalizeCollationName(collate), AsciiSaneCollations);
-        Assert.Contains(NormalizeCollationName(ctype), AsciiSaneCollations);
-        Assert.Equal("UTF8", encoding);
-
-        await using (var fold = connection.CreateCommand())
+        await using (var alterColumn = connection.CreateCommand())
         {
-            fold.CommandText = """
-                SELECT lower('I'),
-                       lower('PRESENTATION.GENERATE') = 'presentation.generate',
-                       lower('RESEARCH.GENERATE') = 'research.generate',
-                       lower('SOCIAL.GENERATE') = 'social.generate',
-                       lower('Image.Generate') = 'image.generate'
-                """;
-            await using var reader = await fold.ExecuteReaderAsync();
-            Assert.True(await reader.ReadAsync());
-            // The dotless-i canary: in a Turkish locale lower('I') is 'ı', which is NOT 'i'.
-            Assert.Equal("i", reader.GetString(0));
-            Assert.True(reader.GetBoolean(1));
-            Assert.True(reader.GetBoolean(2));
-            Assert.True(reader.GetBoolean(3));
-            Assert.True(reader.GetBoolean(4));
+            alterColumn.CommandText = "ALTER TABLE \"GenerationJobs\" ALTER COLUMN \"JobType\" TYPE character varying(100) COLLATE \"tr-x-icu\" USING \"JobType\"::character varying(100)";
+            await alterColumn.ExecuteNonQueryAsync();
         }
+        await using (var columnCollation = connection.CreateCommand())
+        {
+            columnCollation.CommandText = "SELECT collation_name FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = 'GenerationJobs' AND column_name = 'JobType'";
+            Assert.Equal("tr-x-icu", Convert.ToString(await columnCollation.ExecuteScalarAsync()));
+        }
+        await using (var implicitFold = connection.CreateCommand())
+        {
+            implicitFold.CommandText = "SELECT lower('SOCIAL.GENERATE'::text COLLATE \"tr-x-icu\")";
+            Assert.Equal("socıal.generate", Convert.ToString(await implicitFold.ExecuteScalarAsync()));
+        }
+
+        var viewerId = Guid.NewGuid();
+        var creatorId = Guid.NewGuid();
+        var workspaceId = Guid.NewGuid();
+        var projectId = Guid.NewGuid();
+        var now = DateTime.UtcNow;
+        await using (var setup = NewContext())
+        {
+            setup.Users.Add(new ApplicationUser { Id = viewerId, UserName = "turkish-viewer", NormalizedUserName = "TURKISH-VIEWER", DisplayName = "Turkish Viewer", CreatedAt = now, UpdatedAt = now });
+            setup.Users.Add(new ApplicationUser { Id = creatorId, UserName = "turkish-creator", NormalizedUserName = "TURKISH-CREATOR", DisplayName = "Turkish Creator", CreatedAt = now, UpdatedAt = now });
+            setup.Workspaces.Add(new Workspace { Id = workspaceId, Name = "Turkish Fence Workspace", Slug = $"fence-turkish-{Guid.NewGuid():N}", Type = WorkspaceType.Personal, CreatedAt = now });
+            setup.WorkspaceMembers.Add(new WorkspaceMember { Id = Guid.NewGuid(), WorkspaceId = workspaceId, UserId = viewerId, Role = WorkspaceRole.Member, JoinedAt = now });
+            setup.WorkspaceMembers.Add(new WorkspaceMember { Id = Guid.NewGuid(), WorkspaceId = workspaceId, UserId = creatorId, Role = WorkspaceRole.Member, JoinedAt = now });
+            setup.Projects.Add(new Project { Id = projectId, WorkspaceId = workspaceId, Name = "Turkish fence project", CreatedAt = now, UpdatedAt = now });
+            setup.GenerationJobs.AddRange(
+                FenceJob(creatorId, workspaceId, "RESEARCH.GENERATE", projectId: null, now),
+                FenceJob(creatorId, workspaceId, "PRESENTATION.GENERATE", projectId: null, now),
+                FenceJob(creatorId, workspaceId, "SOCIAL.GENERATE", projectId: null, now),
+                FenceJob(creatorId, workspaceId, "IMAGE.GENERATE", projectId: null, now),
+                FenceJob(creatorId, workspaceId, "RESEARCH.GENERATE", projectId, now),
+                FenceJob(creatorId, workspaceId, "PRESENTATION.GENERATE", projectId, now),
+                FenceJob(creatorId, workspaceId, "SOCIAL.GENERATE", projectId, now));
+            await setup.SaveChangesAsync();
+        }
+
+        var visibleToViewer = await CreatorPrivacyFence.VisibleToMember(
+                db.GenerationJobs.AsNoTracking(), viewerId, db.Database.ProviderName)
+            .Select(item => new { item.JobType, item.ProjectId })
+            .ToListAsync();
+        Assert.Equal(3, visibleToViewer.Count);
+        Assert.Contains(visibleToViewer, item => item.JobType == "IMAGE.GENERATE" && item.ProjectId is null);
+        Assert.Contains(visibleToViewer, item => item.JobType == "PRESENTATION.GENERATE" && item.ProjectId == projectId);
+        Assert.Contains(visibleToViewer, item => item.JobType == "SOCIAL.GENERATE" && item.ProjectId == projectId);
+        Assert.DoesNotContain(visibleToViewer, item => item.JobType == "RESEARCH.GENERATE");
+        Assert.DoesNotContain(visibleToViewer, item => item.JobType == "PRESENTATION.GENERATE" && item.ProjectId is null);
+        Assert.DoesNotContain(visibleToViewer, item => item.JobType == "SOCIAL.GENERATE" && item.ProjectId is null);
+
+        var visibleToCreator = await CreatorPrivacyFence.VisibleToMember(
+                db.GenerationJobs.AsNoTracking(), creatorId, db.Database.ProviderName)
+            .CountAsync();
+        Assert.Equal(7, visibleToCreator);
     }
 
     [DisposablePostgresFact]
@@ -159,7 +163,7 @@ public sealed class CreatorPrivacyFencePostgresLocaleTests : IAsyncLifetime
         }
 
         await using var db = NewContext();
-        var visibleToViewer = await CreatorPrivacyFence.VisibleToMember(db.GenerationJobs.AsNoTracking(), viewerId)
+        var visibleToViewer = await CreatorPrivacyFence.VisibleToMember(db.GenerationJobs.AsNoTracking(), viewerId, db.Database.ProviderName)
             .Select(item => item.JobType)
             .ToListAsync();
 
@@ -167,7 +171,7 @@ public sealed class CreatorPrivacyFencePostgresLocaleTests : IAsyncLifetime
         // the unrelated job type stays visible to the co-member (no over-hide).
         Assert.Equal(["IMAGE.GENERATE"], visibleToViewer);
 
-        var visibleToCreator = await CreatorPrivacyFence.VisibleToMember(db.GenerationJobs.AsNoTracking(), creatorId)
+        var visibleToCreator = await CreatorPrivacyFence.VisibleToMember(db.GenerationJobs.AsNoTracking(), creatorId, db.Database.ProviderName)
             .Select(item => item.JobType)
             .ToListAsync();
         Assert.Equal(4, visibleToCreator.Count);
@@ -203,7 +207,7 @@ public sealed class CreatorPrivacyFencePostgresLocaleTests : IAsyncLifetime
         }
 
         await using var db = NewContext();
-        var visibleToViewer = await CreatorPrivacyFence.VisibleToMember(db.GenerationJobs.AsNoTracking(), viewerId)
+        var visibleToViewer = await CreatorPrivacyFence.VisibleToMember(db.GenerationJobs.AsNoTracking(), viewerId, db.Database.ProviderName)
             .Select(item => item.JobType)
             .ToListAsync();
 
