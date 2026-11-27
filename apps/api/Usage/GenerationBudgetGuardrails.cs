@@ -1,4 +1,5 @@
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Storage;
 using Microsoft.Extensions.Options;
 using Taslim.Api.Domain;
 using Taslim.Api.Persistence;
@@ -14,6 +15,8 @@ public sealed class GenerationBudgetOptions
     public decimal? WorkspaceInternalSafetyCeilingUsd { get; set; }
     public decimal? UserInternalSafetyCeilingUsd { get; set; }
     public decimal? UserEstimatedCostCeilingUsd { get; set; }
+    // Admission exposure: active attempts reserve estimates; settled attempts use known actuals.
+    // This cannot guarantee a provider will not bill more than an estimate before that actual is reported.
     public decimal? ProjectEstimatedCostCeilingUsd { get; set; }
     public decimal? ExpensiveGenerationWarningThresholdUsd { get; set; }
     public bool RequireConfirmationForExpensiveGeneration { get; set; } = true;
@@ -26,6 +29,7 @@ public sealed record GenerationBudgetSnapshot(
     decimal CumulativeEstimatedCostUsd,
     decimal WorkspaceEstimatedCostUsd,
     decimal UserEstimatedCostUsd,
+    // For admission, known actual cost replaces the estimate; otherwise the estimate remains reserved.
     decimal ProjectEstimatedCostUsd = 0m);
 
 public sealed record GenerationBudgetDecision(
@@ -89,12 +93,41 @@ public sealed class GenerationBudgetService(
 
     public async Task<GenerationProviderAttempt> BeginAttemptAsync(GenerationJob job, string provider, string? model, GenerationCostEstimate estimate, CancellationToken cancellationToken = default)
     {
-        var priorAttempts = await db.GenerationProviderAttempts.AsNoTracking().Where(item => item.GenerationJobId == job.Id).ToListAsync(cancellationToken);
+        // The project row is the per-project admission mutex. Lock it before reading exposure,
+        // then commit the attempt reservation in the same transaction. This works across API
+        // processes and avoids relying on an in-process semaphore or a race-prone aggregate read.
+        await using var projectAdmissionTransaction = await BeginProjectAdmissionTransactionAsync(
+            job.ProjectId,
+            job.WorkspaceId,
+            cancellationToken);
+
+        var priorAttempts = await db.GenerationProviderAttempts.AsNoTracking()
+            .Where(item => item.GenerationJobId == job.Id)
+            .ToListAsync(cancellationToken);
+        var billablePriorAttempts = priorAttempts
+            .Where(item => item.Status != GenerationProviderAttemptStatus.Rejected)
+            .ToList();
+
+        var workspaceCost = await ProviderCostExposureAsync(
+            db.GenerationProviderAttempts.Where(item => item.GenerationJob.WorkspaceId == job.WorkspaceId),
+            cancellationToken);
+        var userCost = await ProviderCostExposureAsync(
+            db.GenerationProviderAttempts.Where(item => item.GenerationJob.CreatedByUserId == job.CreatedByUserId),
+            cancellationToken);
+        var projectCost = settings.Enabled && settings.ProjectEstimatedCostCeilingUsd.HasValue && job.ProjectId.HasValue
+            ? await ProviderCostExposureAsync(
+                db.GenerationProviderAttempts.Where(item =>
+                    item.GenerationJob.WorkspaceId == job.WorkspaceId
+                    && item.GenerationJob.ProjectId == job.ProjectId),
+                cancellationToken)
+            : 0m;
+
         var snapshot = new GenerationBudgetSnapshot(
-            priorAttempts.Count(item => item.Status != GenerationProviderAttemptStatus.Rejected),
-            priorAttempts.Where(item => item.EstimatedProviderCostKnown).Sum(item => item.EstimatedProviderCostUsd ?? 0m),
-            await EstimatedCostForWorkspaceAsync(job.WorkspaceId, cancellationToken),
-            await EstimatedCostForUserAsync(job.CreatedByUserId, cancellationToken));
+            billablePriorAttempts.Count,
+            billablePriorAttempts.Sum(ProviderCostExposure),
+            workspaceCost,
+            userCost,
+            projectCost);
         var decision = GenerationBudgetGuardrail.Evaluate(estimate, snapshot, settings);
         if (!decision.Allowed)
         {
@@ -124,40 +157,111 @@ public sealed class GenerationBudgetService(
         };
         db.GenerationProviderAttempts.Add(attempt);
         await db.SaveChangesAsync(cancellationToken);
+        if (projectAdmissionTransaction is not null)
+            await projectAdmissionTransaction.CommitAsync(cancellationToken);
         return attempt;
     }
 
     public async Task CompleteAttemptAsync(GenerationProviderAttempt attempt, decimal? actualProviderCostUsd, bool actualCostKnown, GenerationProviderAttemptStatus status, string? failureCode = null, CancellationToken cancellationToken = default)
     {
         if (attempt.Status is GenerationProviderAttemptStatus.Succeeded or GenerationProviderAttemptStatus.Failed or GenerationProviderAttemptStatus.Cancelled) return;
-        attempt.Status = status;
-        attempt.ActualProviderCostUsd = actualCostKnown ? actualProviderCostUsd : null;
-        attempt.ActualProviderCostKnown = actualCostKnown && actualProviderCostUsd.HasValue;
-        attempt.FailureCode = failureCode;
-        attempt.ResultClassification = status.ToString();
-        attempt.RateLimited = HasFailureToken(failureCode, "RATE_LIMIT");
-        attempt.TimedOut = HasFailureToken(failureCode, "TIMEOUT") || HasFailureToken(failureCode, "TIMED_OUT");
-        attempt.QualityControlRejected = HasFailureToken(failureCode, "QUALITY")
-            || HasFailureToken(failureCode, "OUTPUT_INVALID")
-            || HasFailureToken(failureCode, "CITATION_VALIDATION");
-        attempt.CompletedAt = DateTime.UtcNow;
-        await db.SaveChangesAsync(cancellationToken);
+
+        // Serialize settlement with project admissions so an already-known actual cost is
+        // visible to the next admission instead of racing its exposure snapshot.
+        IDbContextTransaction? projectAdmissionTransaction = null;
+        if (settings.Enabled && settings.ProjectEstimatedCostCeilingUsd.HasValue)
+        {
+            var scope = await db.GenerationJobs.AsNoTracking()
+                .Where(job => job.Id == attempt.GenerationJobId)
+                .Select(job => new { job.ProjectId, job.WorkspaceId })
+                .SingleOrDefaultAsync(cancellationToken);
+            if (scope is not null)
+                projectAdmissionTransaction = await BeginProjectAdmissionTransactionAsync(
+                    scope.ProjectId,
+                    scope.WorkspaceId,
+                    cancellationToken);
+        }
+
+        await using (projectAdmissionTransaction)
+        {
+            attempt.Status = status;
+            attempt.ActualProviderCostUsd = actualCostKnown ? actualProviderCostUsd : null;
+            attempt.ActualProviderCostKnown = actualCostKnown && actualProviderCostUsd.HasValue;
+            attempt.FailureCode = failureCode;
+            attempt.ResultClassification = status.ToString();
+            attempt.RateLimited = HasFailureToken(failureCode, "RATE_LIMIT");
+            attempt.TimedOut = HasFailureToken(failureCode, "TIMEOUT") || HasFailureToken(failureCode, "TIMED_OUT");
+            attempt.QualityControlRejected = HasFailureToken(failureCode, "QUALITY")
+                || HasFailureToken(failureCode, "OUTPUT_INVALID")
+                || HasFailureToken(failureCode, "CITATION_VALIDATION");
+            attempt.CompletedAt = DateTime.UtcNow;
+            await db.SaveChangesAsync(cancellationToken);
+            if (projectAdmissionTransaction is not null)
+                await projectAdmissionTransaction.CommitAsync(cancellationToken);
+        }
+    }
+
+    private async Task<IDbContextTransaction?> BeginProjectAdmissionTransactionAsync(
+        Guid? projectId,
+        Guid workspaceId,
+        CancellationToken cancellationToken)
+    {
+        if (!settings.Enabled || !settings.ProjectEstimatedCostCeilingUsd.HasValue || !projectId.HasValue)
+            return null;
+
+        var transaction = await db.Database.BeginTransactionAsync(cancellationToken);
+        try
+        {
+            var lockedRows = await db.Projects
+                .Where(project => project.Id == projectId.Value && project.WorkspaceId == workspaceId)
+                .ExecuteUpdateAsync(update => update.SetProperty(project => project.UpdatedAt, project => project.UpdatedAt), cancellationToken);
+            if (lockedRows != 1)
+                throw new InvalidOperationException("A generation project budget lock could not be acquired for the requested project.");
+            return transaction;
+        }
+        catch
+        {
+            await transaction.DisposeAsync();
+            throw;
+        }
+    }
+
+    private async Task<decimal> ProviderCostExposureAsync(
+        IQueryable<GenerationProviderAttempt> attempts,
+        CancellationToken cancellationToken)
+    {
+        var costs = attempts.AsNoTracking()
+            .Where(item => item.Status != GenerationProviderAttemptStatus.Rejected)
+            .Select(item => item.ActualProviderCostKnown && item.ActualProviderCostUsd.HasValue
+                ? item.ActualProviderCostUsd.Value
+                : item.EstimatedProviderCostKnown ? item.EstimatedProviderCostUsd ?? 0m : 0m)
+            .Select(cost => cost < 0m ? 0m : cost);
+        if (string.Equals(db.Database.ProviderName, "Microsoft.EntityFrameworkCore.Sqlite", StringComparison.Ordinal))
+            return (await costs.ToListAsync(cancellationToken)).Sum();
+        return await costs.SumAsync(cancellationToken);
+    }
+
+    private static decimal ProviderCostExposure(GenerationProviderAttempt attempt) => ProviderCostExposure(
+        attempt.ActualProviderCostUsd,
+        attempt.ActualProviderCostKnown,
+        attempt.EstimatedProviderCostUsd,
+        attempt.EstimatedProviderCostKnown);
+
+    private static decimal ProviderCostExposure(
+        decimal? actualProviderCostUsd,
+        bool actualProviderCostKnown,
+        decimal? estimatedProviderCostUsd,
+        bool estimatedProviderCostKnown)
+    {
+        if (actualProviderCostKnown && actualProviderCostUsd.HasValue)
+            return Math.Max(0m, actualProviderCostUsd.Value);
+        return estimatedProviderCostKnown
+            ? Math.Max(0m, estimatedProviderCostUsd ?? 0m)
+            : 0m;
     }
 
     private static bool HasFailureToken(string? value, string token) =>
         value?.Contains(token, StringComparison.OrdinalIgnoreCase) == true;
-
-    private async Task<decimal> EstimatedCostForWorkspaceAsync(Guid workspaceId, CancellationToken cancellationToken) =>
-        (decimal)await db.GenerationProviderAttempts
-            .Where(item => item.GenerationJob.WorkspaceId == workspaceId && item.EstimatedProviderCostKnown)
-            .Select(item => (double?)(item.EstimatedProviderCostUsd ?? 0m))
-            .SumAsync(cancellationToken);
-
-    private async Task<decimal> EstimatedCostForUserAsync(Guid userId, CancellationToken cancellationToken) =>
-        (decimal)await db.GenerationProviderAttempts
-            .Where(item => item.GenerationJob.CreatedByUserId == userId && item.EstimatedProviderCostKnown)
-            .Select(item => (double?)(item.EstimatedProviderCostUsd ?? 0m))
-            .SumAsync(cancellationToken);
 }
 
 public sealed class GenerationBudgetRejectedException(string code, string message) : Exception(message)
