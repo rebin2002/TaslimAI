@@ -5,7 +5,12 @@ namespace Taslim.Api.Files;
 
 public sealed class FileOptions
 {
-    public long MaxFileSizeBytes { get; set; } = 25 * 1024 * 1024;
+    public const long MaxUserUploadFileSizeBytes = 25 * 1024 * 1024;
+    public const long MultipartFormOverheadBytes = 1 * 1024 * 1024;
+
+    public static bool IsValidMaxFileSizeBytes(long value) => value is > 0 and <= MaxUserUploadFileSizeBytes;
+
+    public long MaxFileSizeBytes { get; set; } = MaxUserUploadFileSizeBytes;
     public long MaxGeneratedVideoBytes { get; set; } = 250 * 1024 * 1024;
     public int MaxAttachmentsPerMessage { get; set; } = 5;
     public int StorageOperationTimeoutSeconds { get; set; } = 120;

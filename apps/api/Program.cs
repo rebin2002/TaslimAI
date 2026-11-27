@@ -6,6 +6,7 @@ using Microsoft.AspNetCore.HttpOverrides;
 using Microsoft.AspNetCore.Http.Features;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.Mvc.Controllers;
 using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
@@ -60,12 +61,13 @@ builder.Services.AddOptions<HealthOptions>()
     .Validate(options => options.ProbeTimeoutSeconds is >= 1 and <= 60, "Health:ProbeTimeoutSeconds must be between 1 and 60 seconds.")
     .ValidateOnStart();
 builder.Services.AddScoped<OperationalHealthService>();
-builder.Services.AddOptions<FileSettings>().Bind(builder.Configuration.GetSection("Files"));
-builder.Services.Configure<FormOptions>(options =>
-{
-    var maxFileSize = builder.Configuration.GetValue<long>("Files:MaxFileSizeBytes", 25 * 1024 * 1024);
-    options.MultipartBodyLengthLimit = maxFileSize + (1024 * 1024);
-});
+builder.Services.AddOptions<FileSettings>()
+    .Bind(builder.Configuration.GetSection("Files"))
+    .Validate(options => FileSettings.IsValidMaxFileSizeBytes(options.MaxFileSizeBytes), $"Files:MaxFileSizeBytes must be between 1 and {FileSettings.MaxUserUploadFileSizeBytes} bytes.")
+    .ValidateOnStart();
+var maxUploadRequestBodyBytes = builder.Configuration.GetValue<long>("Files:MaxFileSizeBytes", FileSettings.MaxUserUploadFileSizeBytes)
+    + FileSettings.MultipartFormOverheadBytes;
+builder.Services.Configure<FormOptions>(options => options.MultipartBodyLengthLimit = maxUploadRequestBodyBytes);
 
 builder.Services.Configure<ForwardedHeadersOptions>(options =>
 {
@@ -577,6 +579,26 @@ if (app.Environment.IsDevelopment())
 
 app.UseCors("Frontend");
 app.UseRouting();
+app.Use(async (context, next) =>
+{
+    if (HttpMethods.IsPost(context.Request.Method)
+        && context.GetEndpoint()?.Metadata.GetMetadata<ControllerActionDescriptor>() is { ControllerName: "Files", ActionName: "Upload" })
+    {
+        var requestBodySizeFeature = context.Features.Get<IHttpMaxRequestBodySizeFeature>();
+        if (requestBodySizeFeature is { IsReadOnly: false })
+        {
+            requestBodySizeFeature.MaxRequestBodySize = maxUploadRequestBodyBytes;
+        }
+
+        if (context.Request.ContentLength is long contentLength && contentLength > maxUploadRequestBodyBytes)
+        {
+            context.Response.StatusCode = StatusCodes.Status413PayloadTooLarge;
+            return;
+        }
+    }
+
+    await next();
+});
 app.UseAuthentication();
 app.UseRateLimiter();
 app.UseMiddleware<AntiforgeryValidationMiddleware>();
