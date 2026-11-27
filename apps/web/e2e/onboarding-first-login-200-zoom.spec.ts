@@ -62,6 +62,7 @@
 //   cannot influence the result and no dev artifact has to be hidden or patched.
 import { test, expect, type TestUser } from "./fixtures";
 import type { Browser, Page } from "@playwright/test";
+import { translate } from "../src/lib/i18n";
 
 const APP_ORIGIN = new URL(process.env.E2E_WEB_URL ?? "http://localhost:3000").origin;
 const CONFIGURED_API_ORIGIN = new URL(process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:5000").origin;
@@ -259,6 +260,65 @@ async function openFirstLogin(
   await expect(page.getByRole("dialog")).toBeVisible();
   return { page, traffic };
 }
+
+test("first-login keyboard navigation announces each step and offers all six translated workflows", async ({ browser, testUser }) => {
+  test.setTimeout(120_000);
+  for (const locale of LOCALES) {
+    for (const viewport of [{ width: 1440, height: 900 }, { width: 375, height: 812 }]) {
+      const user = scopedTestUser(testUser, `keyboard-${locale.code}-${viewport.width}`);
+      const { page, traffic } = await openFirstLogin(browser, locale, viewport, user);
+      try {
+        const guidedStart = traffic.apiCalls.length;
+        const dialog = page.getByRole("dialog");
+        const progress = dialog.getByRole("progressbar");
+        const heading = dialog.getByRole("heading", { level: 1 });
+        const next = dialog.locator(".onboarding-actions .primary-button");
+        const back = dialog.locator(".onboarding-back");
+        const skip = dialog.locator(".onboarding-skip");
+        const assertProgress = async (step: number) => {
+          await expect(progress).toHaveAttribute("aria-valuenow", String(step));
+          await expect(progress).toHaveAccessibleName(translate(locale.code, "onboarding.progress", { current: String(step), total: "3" }));
+        };
+
+        await expect(dialog.locator("[data-dialog-autofocus]")).toBeFocused();
+        await expect(page.locator("html")).toHaveAttribute("dir", locale.dir);
+        await expect(page.locator("html")).toHaveAttribute("lang", locale.code === "ku" ? "ckb" : locale.code);
+        await expect(progress).toHaveAttribute("aria-valuemin", "1");
+        await expect(progress).toHaveAttribute("aria-valuemax", "3");
+        await assertProgress(1);
+
+        await skip.focus();
+        await page.keyboard.press("Shift+Tab");
+        await expect(next).toBeFocused();
+        await page.keyboard.press("Tab");
+        await expect(skip).toBeFocused();
+        await page.keyboard.press("Escape");
+        await expect(dialog).toBeVisible();
+        await expect(skip).toBeFocused();
+
+        for (const step of [2, 3]) {
+          await next.press("Enter");
+          await assertProgress(step);
+          await expect(heading).toBeFocused();
+        }
+        const titles = ["project", "chat", "image", "document", "presentation", "research"]
+          .map((name) => translate(locale.code, `onboarding.workflow.${name}.title`));
+        await expect(dialog.locator(".onboarding-workflow strong")).toHaveText(titles);
+        await expect(dialog.locator("a[href^='/create/']")).toHaveCount(0);
+        for (const step of [2, 1]) {
+          await back.press("Enter");
+          await assertProgress(step);
+          await expect(heading).toBeFocused();
+        }
+        expect(traffic.apiCalls.slice(guidedStart).filter((call) => call.method !== "GET")).toEqual([]);
+        expect(traffic.externalRequests).toEqual([]);
+        expect(traffic.nativeDialogs).toEqual([]);
+      } finally {
+        await page.close();
+      }
+    }
+  }
+});
 
 test.describe("issue #700 section A: first-login onboarding at 200% browser zoom", () => {
   test.setTimeout(120_000);
