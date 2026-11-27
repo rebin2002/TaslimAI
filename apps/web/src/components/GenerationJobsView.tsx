@@ -116,7 +116,13 @@ export function GenerationJobsView() {
   // Derive busy synchronously: the old workspace must not keep new controls disabled
   // while a superseded create/cancel promise is still settling.
   const working = isCurrentGenerationJobsWork(workingRequest, workspaceId, liveRequestGeneration);
+  const lastWorkspaceId = useRef(workspaceId);
   const loadRecent = useCallback(async () => {
+    if (lastWorkspaceId.current !== workspaceId) {
+      lastWorkspaceId.current = workspaceId;
+      setSelection(null);
+      setPollRetryGeneration(0);
+    }
     if (!workspaceId) {
       // No workspace to read: retire the held read and everything built from it.
       requestGeneration.current += 1;

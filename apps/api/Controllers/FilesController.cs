@@ -26,8 +26,8 @@ public sealed class FilesController(
     [EnableRateLimiting(RateLimiting.Upload)]
     public async Task<IActionResult> Upload(Guid workspaceId, [FromForm] IFormFile? file, [FromForm] Guid? projectId, [FromForm] Guid? conversationId, CancellationToken cancellationToken)
     {
+        if (!TryGetUserId(out var userId)) return Unauthorized();
         if (file is null) return ApiResults.Validation(this, "Choose a file to upload.");
-        var userId = GetUserId();
         if (!await access.IsMemberAsync(userId, workspaceId, cancellationToken)) return Forbid();
         if (!await ValidateScopeAsync(workspaceId, userId, projectId, conversationId, cancellationToken)) return ApiResults.Error(this, StatusCodes.Status404NotFound, "FILE_SCOPE_NOT_FOUND", "The selected project or conversation was not found.");
 
@@ -61,15 +61,17 @@ public sealed class FilesController(
         [FromQuery] int pageSize = ApiPagination.MaxPageSize,
         CancellationToken cancellationToken = default)
     {
-        var userId = GetUserId();
+        if (!TryGetUserId(out var userId)) return Unauthorized();
         if (!await access.IsMemberAsync(userId, workspaceId, cancellationToken)) return Forbid();
         page = ApiPagination.NormalizePage(page);
         pageSize = ApiPagination.NormalizePageSize(pageSize);
-        var files = await db.StoredFiles.AsNoTracking()
-            .Where(file => file.WorkspaceId == workspaceId && file.Status != StoredFileStatus.Deleted && (!projectId.HasValue || file.ProjectId == projectId) && (!conversationId.HasValue || file.ConversationId == conversationId))
-            // Project-scoped files are shared with workspace members. Personal and
-            // conversation-scoped files remain private to their creating user.
-            .Where(file => file.UserId == userId || (file.ProjectId != null && file.ConversationId == null))
+        var fileQuery = db.StoredFiles.AsNoTracking()
+            .Where(file => file.WorkspaceId == workspaceId && file.Status != StoredFileStatus.Deleted && (!conversationId.HasValue || file.ConversationId == conversationId))
+            .Where(StoredFileVisibility.ForWorkspaceMember(userId))
+            .Where(StoredFileVisibility.IsNotResearchReportOwnedByAnotherMember(userId));
+        if (projectId.HasValue)
+            fileQuery = fileQuery.Where(StoredFileVisibility.InProjectView(projectId.Value, userId));
+        var files = await fileQuery
             .OrderByDescending(file => file.CreatedAt)
             .ThenByDescending(file => file.Id)
             .Skip(ApiPagination.GetOffset(page, pageSize))
@@ -82,9 +84,10 @@ public sealed class FilesController(
     [HttpGet("files/{fileId:guid}")]
     public async Task<IActionResult> Get(Guid fileId, CancellationToken cancellationToken)
     {
+        if (!TryGetUserId(out var userId)) return Unauthorized();
         var file = await db.StoredFiles.AsNoTracking().FirstOrDefaultAsync(item => item.Id == fileId && item.Status != StoredFileStatus.Deleted, cancellationToken);
         if (file is null) return ApiResults.Error(this, StatusCodes.Status404NotFound, "FILE_NOT_FOUND", "File not found.");
-        if (!await CanAccessAsync(file, cancellationToken)) return Forbid();
+        if (!await CanAccessAsync(file, userId, cancellationToken)) return Forbid();
         return Ok(FileDtoMapper.ToStoredFileDto(file));
     }
 
@@ -92,9 +95,10 @@ public sealed class FilesController(
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> Delete(Guid fileId, CancellationToken cancellationToken)
     {
+        if (!TryGetUserId(out var userId)) return Unauthorized();
         var file = await db.StoredFiles.FirstOrDefaultAsync(item => item.Id == fileId && item.Status != StoredFileStatus.Deleted, cancellationToken);
         if (file is null) return ApiResults.Error(this, StatusCodes.Status404NotFound, "FILE_NOT_FOUND", "File not found.");
-        if (!await CanAccessAsync(file, cancellationToken)) return Forbid();
+        if (!await CanAccessAsync(file, userId, cancellationToken)) return Forbid();
         try
         {
             await processing.DeleteAsync(file, cancellationToken);
@@ -120,13 +124,17 @@ public sealed class FilesController(
         return true;
     }
 
-    private async Task<bool> CanAccessAsync(StoredFile file, CancellationToken cancellationToken)
+    private async Task<bool> CanAccessAsync(StoredFile file, Guid userId, CancellationToken cancellationToken)
     {
-        var userId = GetUserId();
         if (!await access.IsMemberAsync(userId, file.WorkspaceId, cancellationToken)) return false;
-        if (file.ConversationId is not null || file.ProjectId is null) return file.UserId == userId;
-        return true;
+        return await db.StoredFiles.AsNoTracking()
+            .Where(item => item.Id == file.Id)
+            .Where(StoredFileVisibility.ForWorkspaceMember(userId))
+            .Where(StoredFileVisibility.IsNotResearchReportOwnedByAnotherMember(userId))
+            .AnyAsync(cancellationToken);
     }
 
-    private Guid GetUserId() => Guid.Parse(User.FindFirst(ClaimTypes.NameIdentifier)?.Value ?? throw new InvalidOperationException("Authenticated user identifier is missing."));
+    private bool TryGetUserId(out Guid userId) =>
+        Guid.TryParse(User.FindFirst(ClaimTypes.NameIdentifier)?.Value, out userId)
+        && userId != Guid.Empty;
 }

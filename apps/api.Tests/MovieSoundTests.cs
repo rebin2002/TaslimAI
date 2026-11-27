@@ -198,6 +198,18 @@ public sealed class MovieSoundTests : IClassFixture<GenerationJobsNoWorkerFactor
         Assert.Single(approved.Approvals);
         Assert.Equal(MovieSoundStatuses.Approved, approved.Approvals[0].Decision);
 
+        using var repeatedReview = await PostRaw(client, $"/api/movie-sound/tracks/{track.Id}/review", new
+        {
+            approve = true,
+            comment = "A repeated review must not create a second approval.",
+        });
+        Assert.Equal(HttpStatusCode.BadRequest, repeatedReview.StatusCode);
+        Assert.Contains("MOVIE_SOUND_REVIEW_NOT_PENDING", await repeatedReview.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+        var reloaded = await client.GetFromJsonAsync<MovieSoundTrackDto>($"/api/movie-sound/tracks/{track.Id}");
+        Assert.NotNull(reloaded);
+        Assert.Equal(MovieSoundStatuses.Approved, reloaded!.Status);
+        Assert.Single(reloaded.Approvals);
+
         var library = await client.GetFromJsonAsync<MovieSoundLibraryDto>($"/api/movie-sound/projects/{project.Project.Id}/library");
         Assert.NotNull(library);
         Assert.Contains(library!.References, item => item.Id == reference.Id && item.AssetId == assetId);

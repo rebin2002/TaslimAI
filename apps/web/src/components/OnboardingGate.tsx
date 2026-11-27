@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState, type RefObject } from "react";
 import { useRouter } from "next/navigation";
 import {
   ArrowLeft,
@@ -23,6 +23,7 @@ import { languagePackDirection } from "@/lib/languagePackRegistry";
 import type { User } from "@/lib/api";
 import { onboardingFormDefaults, onboardingWorkflowDefinitions, shouldShowOnboarding, type OnboardingIntent } from "@/lib/onboarding";
 import type { Locale } from "@/lib/i18n";
+import { useDialogAccessibility } from "@/lib/useDialogAccessibility";
 
 const workflowIcons: Record<OnboardingIntent, LucideIcon> = {
   project: FolderKanban,
@@ -38,11 +39,24 @@ type OnboardingStep = "preferences" | "tour" | "workflow";
 export function OnboardingGate() {
   const { user } = useAuth();
 
-  if (!user || !shouldShowOnboarding(user)) return null;
-  return <OnboardingFlow key={user.id} user={user} />;
+  const isOpen = Boolean(user && shouldShowOnboarding(user));
+  const openerRef = useRef<HTMLElement | null>(null);
+  useEffect(() => {
+    if (isOpen) return;
+    const rememberOpener = (event: FocusEvent) => {
+      const target = event.target;
+      if (target instanceof HTMLElement && target !== document.body && !target.closest('[role="dialog"]')) {
+        openerRef.current = target;
+      }
+    };
+    document.addEventListener("focusin", rememberOpener, true);
+    return () => document.removeEventListener("focusin", rememberOpener, true);
+  }, [isOpen]);
+  if (!user || !isOpen) return null;
+  return <OnboardingFlow key={user.id} user={user} openerRef={openerRef} />;
 }
 
-function OnboardingFlow({ user }: Readonly<{ user: User }>) {
+function OnboardingFlow({ user, openerRef }: Readonly<{ user: User; openerRef: RefObject<HTMLElement | null> }>) {
   const { completeOnboarding } = useAuth();
   const { locale, languagePackId, setLanguagePack, t } = useLocale();
   const router = useRouter();
@@ -53,6 +67,9 @@ function OnboardingFlow({ user }: Readonly<{ user: User }>) {
   const [defaultGenerationLanguage, setDefaultGenerationLanguage] = useState<Locale>(defaults.defaultGenerationLanguage);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
+  const showOnboarding = shouldShowOnboarding(user);
+  const dialogRef = useDialogAccessibility(showOnboarding, () => undefined, openerRef);
+  if (!showOnboarding) return null;
 
   const steps: OnboardingStep[] = ["preferences", "tour", "workflow"];
   const currentStep = steps.indexOf(step) + 1;
@@ -79,7 +96,7 @@ function OnboardingFlow({ user }: Readonly<{ user: User }>) {
 
   return (
     <div className="modal-backdrop onboarding-backdrop" role="presentation">
-      <section className="onboarding-card" role="dialog" aria-modal="true" aria-labelledby="onboarding-title">
+      <section ref={dialogRef} className="onboarding-card" role="dialog" aria-modal="true" aria-labelledby="onboarding-title" tabIndex={-1}>
         <header className="onboarding-header">
           <div className="onboarding-brand"><span className="onboarding-brand-mark"><Sparkles size={16} /></span><span>Taslim.ai</span></div>
           <button type="button" className="onboarding-skip" onClick={() => void finish()} disabled={saving}>{t("onboarding.skip")}</button>
@@ -94,7 +111,7 @@ function OnboardingFlow({ user }: Readonly<{ user: User }>) {
           <h1 id="onboarding-title">{t("onboarding.preferencesTitle")}</h1>
           <p className="onboarding-description">{t("onboarding.preferencesDescription")}</p>
           <div className="onboarding-fields">
-            <label><span>{t("onboarding.displayName")}</span><input value={displayName} maxLength={120} onChange={(event) => setDisplayName(event.target.value)} placeholder={t("onboarding.displayNamePlaceholder")} autoComplete="name" /></label>
+            <label><span>{t("onboarding.displayName")}</span><input data-dialog-autofocus value={displayName} maxLength={120} onChange={(event) => setDisplayName(event.target.value)} placeholder={t("onboarding.displayNamePlaceholder")} autoComplete="name" /></label>
             <label><span><Globe2 size={15} /> {t("onboarding.interfaceLanguage")}</span><select value={preferredLanguage} onChange={(event) => { const next = event.target.value; setPreferredLanguage(next); setLanguagePack(next, { persist: false, source: "user" }); }}>{languagePackIds.map((item) => <option key={item} value={item}>{languagePackNames[item]}</option>)}</select></label>
             <label><span><Languages size={15} /> {t("onboarding.generationLanguage")}</span><select value={defaultGenerationLanguage} onChange={(event) => setDefaultGenerationLanguage(event.target.value as Locale)}>{locales.map((item) => <option key={item} value={item}>{localeNames[item]}</option>)}</select></label>
           </div>
