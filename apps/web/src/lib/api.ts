@@ -1600,6 +1600,11 @@ export const api = {
   rejectMovieDirectorProposal: (proposalId: string) => request<DirectorProposal>(`/api/movie-director/proposals/${proposalId}/reject`, { method: "POST", body: JSON.stringify({}) }, true),
   executeMovieDirectorAction: (actionId: string) => request<DirectorActionExecutionResponse>(`/api/movie-director/actions/${actionId}/execute`, { method: "POST", body: JSON.stringify({}) }, true),
   createMusicGenerationJob: (input: MusicGenerationInput, idempotencyKey = requestId()) => request<{ job: GenerationJob }>("/api/music-generation/jobs", generationInit({ method: "POST", body: JSON.stringify(input) }, idempotencyKey), true).then((response) => response.job),
+  retryMusicGenerationJob: (jobId: string) => request<GenerationJob>(
+    `/api/generation/jobs/${jobId}/retry`,
+    generationInit({ method: "POST" }, `music-studio-retry-${jobId}`),
+    true,
+  ),
   getGenerationJob: (jobId: string) => request<GenerationJob>(`/api/generation/jobs/${jobId}`),
   getResearchSources: (jobId: string) => request<{ jobId: string; sources: ResearchSource[] }>(`/api/research-generation/jobs/${jobId}/sources`),
   downloadResearchSourcesExport: async (jobId: string) => {

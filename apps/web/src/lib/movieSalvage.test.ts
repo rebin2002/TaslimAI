@@ -95,4 +95,49 @@ describe("movie salvage model", () => {
     expect(revision.tracks?.[0].items[0]).toMatchObject({ kind: "VisualTake", sourceTakeId: "take-1", timelineOutMilliseconds: 6600 });
     expect(revision.tracks?.[0].items[0].metadataJson).toContain("salvage-director");
   });
+
+  it("does not widen an explicitly invalid usable range to the full take", () => {
+    const project = projectWithTake();
+    project.scenes[0].shots[0].clips[0].metadataJson = JSON.stringify({
+      durationMilliseconds: 12000,
+      usableRanges: [{ startMilliseconds: 9000, endMilliseconds: 2000 }],
+    });
+
+    expect(buildMovieSubclips(project)).toHaveLength(0);
+  });
+  it.each([
+    { usableRanges: [] }, { usableRanges: null }, { usableRanges: "unknown" }, { usableRanges: [{}] },
+    { usableRanges: [null] }, { usableRanges: [[]] }, { usableRanges: [{ startMilliseconds: -1 }] },
+    { usableRanges: [{ startMilliseconds: null, endMilliseconds: 5000 }] },
+    { usableRanges: [{ sourceOutMilliseconds: 0 }] }, { usableRanges: [{ endMilliseconds: "5000" }] },
+    { trimOutMilliseconds: 0 }, { trimOutMilliseconds: -1 }, { trimInMilliseconds: false },
+    { trimInMilliseconds: 12000 }, { trimInMilliseconds: 4500, trimOutMilliseconds: 4500 },
+  ])("omits unusable explicit trim metadata %j from subclips and recommendations", (metadata) => {
+    const project = projectWithTake();
+    project.scenes[0].shots[0].clips[0].metadataJson = JSON.stringify({ durationMilliseconds: 12000, ...metadata });
+    expect(buildMovieSubclips(project)).toEqual([]);
+    expect(buildSalvageRecommendations(project)).toEqual([]);
+  });
+
+  it.each([
+    [null, 0, 12000],
+    [JSON.stringify({ durationMilliseconds: 12000 }), 0, 12000],
+    [JSON.stringify({ usableRanges: [{ startMilliseconds: 0, endMilliseconds: 2400 }] }), 0, 2400],
+    [JSON.stringify({ usableRanges: [{ sourceInMilliseconds: 2400 }] }), 2400, 12000],
+    [JSON.stringify({ usableRanges: [{ sourceOutMilliseconds: 3200 }] }), 0, 3200],
+    [JSON.stringify({ trimInMilliseconds: 1000 }), 1000, 12000],
+    [JSON.stringify({ trimOutMilliseconds: 3200 }), 0, 3200],
+    [JSON.stringify({ trimInMilliseconds: 1300, usableRanges: [{ endMilliseconds: 14000 }] }), 1300, 12000],
+  ] as const)("retains valid full and partial source bounds for %s", (json, start, end) => {
+    const project = projectWithTake();
+    project.scenes[0].shots[0].clips[0].metadataJson = json;
+    expect(buildMovieSubclips(project)).toMatchObject([{ sourceInMilliseconds: start, sourceOutMilliseconds: end }]);
+  });
+
+  it("omits unreadable clip metadata without widening it to a full take", () => {
+    const project = projectWithTake();
+    project.scenes[0].shots[0].clips[0].metadataJson = '{"usableRanges":';
+    expect(buildMovieSubclips(project)).toEqual([]);
+  });
+
 });

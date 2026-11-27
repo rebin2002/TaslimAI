@@ -701,6 +701,50 @@ public sealed class MusicAcceptedCancellationLeaseRecoveryTests : IClassFixture<
         Assert.Equal(submissionsBefore + 1, provider.SubmittedGenerations);
     }
 
+    [Theory]
+    [InlineData("reclaimed", false)]
+    [InlineData("expired", false)]
+    [InlineData("cancelled", false)]
+    [InlineData("terminal", false)]
+    [InlineData("reclaimed", true)]
+    [InlineData("expired", true)]
+    [InlineData("cancelled", true)]
+    [InlineData("terminal", true)]
+    public async Task Music_callbacks_require_a_live_parent_even_when_the_attempt_token_still_matches(string change, bool afterDispatch)
+    {
+        var provider = Provider();
+        provider.Reset(AcceptedCancellationMode.ReportThenHang);
+        var submissionsBefore = provider.SubmittedGenerations;
+        async Task ChangeParent(Guid jobId)
+        {
+            // Use a second connection at the fake transport boundary. The attempt row is left untouched.
+            using var scope = factory.Services.CreateScope();
+            var jobs = scope.ServiceProvider.GetRequiredService<TaslimDbContext>().GenerationJobs.Where(job => job.Id == jobId);
+            var nextToken = Guid.NewGuid();
+            var updated = change switch
+            {
+                "reclaimed" => await jobs.ExecuteUpdateAsync(s => s.SetProperty(job => job.ConcurrencyToken, nextToken)),
+                "expired" => await jobs.ExecuteUpdateAsync(s => s.SetProperty(job => job.ClaimExpiresAt, DateTime.UtcNow.AddMinutes(-1))),
+                "cancelled" => await jobs.ExecuteUpdateAsync(s => s.SetProperty(job => job.CancellationRequested, true)),
+                "terminal" => await jobs.ExecuteUpdateAsync(s => s.SetProperty(job => job.Status, GenerationJobStatus.Failed)),
+                _ => throw new ArgumentOutOfRangeException(nameof(change)),
+            };
+            Assert.Equal(1, updated);
+        }
+
+        using var claim = await StartClaimThatWillBeLostAsync(provider, "music-claim-" + change, waitAccepted: false,
+            beforeDispatch: afterDispatch ? null : ChangeParent, beforeAcceptance: afterDispatch ? ChangeParent : null);
+        for (var wait = 0; wait < 400 && provider.DispatchSinkFaults + provider.AcceptanceSinkFaults == 0; wait++)
+            await Task.Delay(25);
+
+        Assert.Equal(afterDispatch ? 0 : 1, provider.DispatchSinkFaults);
+        Assert.Equal(afterDispatch ? 1 : 0, provider.AcceptanceSinkFaults);
+        Assert.Equal(submissionsBefore + (afterDispatch ? 1 : 0), provider.SubmittedGenerations);
+        Assert.Equal(0, provider.ReportedAcceptances);
+        var (_, marker, _) = await AttemptEvidenceAsync(claim.JobId);
+        Assert.Equal(afterDispatch ? "taslim:dispatch-pending" : null, marker);
+    }
+
     [Fact]
     public async Task Marker_that_cannot_be_recorded_stops_the_paid_request_and_keeps_the_pre_dispatch_posture()
     {
@@ -1023,7 +1067,9 @@ public sealed class MusicAcceptedCancellationLeaseRecoveryTests : IClassFixture<
         AcceptedCancellationMusicProvider provider,
         string label,
         bool supersedeClaim = false,
-        bool waitAccepted = true)
+        bool waitAccepted = true,
+        Func<Guid, Task>? beforeDispatch = null,
+        Func<Guid, Task>? beforeAcceptance = null)
     {
         var client = factory.CreateClient();
         var auth = await Register(client, $"{label}-{Guid.NewGuid():N}@example.com");
@@ -1031,6 +1077,8 @@ public sealed class MusicAcceptedCancellationLeaseRecoveryTests : IClassFixture<
         Assert.Equal(HttpStatusCode.Accepted, created.StatusCode);
         var job = (await created.Content.ReadFromJsonAsync<CreateMusicGenerationResponse>(Json))!.Job;
         if (supersedeClaim) provider.BeforeMarkerStampAsync = SupersedeAttemptClaim(job.Id);
+        if (beforeDispatch is not null) provider.BeforeMarkerStampAsync = () => beforeDispatch(job.Id);
+        if (beforeAcceptance is not null) provider.BeforeAcceptanceStampAsync = () => beforeAcceptance(job.Id);
         var acceptances = provider.ReportedAcceptances;
         var process = new CancellationTokenSource();
         var worker = CreateWorker(cancellationPollMilliseconds: 60_000);
@@ -1253,6 +1301,7 @@ internal sealed class AcceptedCancellationMusicProvider : IMusicGenerationProvid
     private int reportedAcceptances;
     private int dispatchSinkCalls;
     private int dispatchSinkFaults;
+    private int acceptanceSinkFaults;
     private int reconciliationCalls;
     private string? reconciledOperationId;
 
@@ -1263,12 +1312,14 @@ internal sealed class AcceptedCancellationMusicProvider : IMusicGenerationProvid
     public int ReportedAcceptances => Volatile.Read(ref reportedAcceptances);
     public int DispatchSinkCalls => Volatile.Read(ref dispatchSinkCalls);
     public int DispatchSinkFaults => Volatile.Read(ref dispatchSinkFaults);
+    public int AcceptanceSinkFaults => Volatile.Read(ref acceptanceSinkFaults);
     public int ReconciliationCalls => Volatile.Read(ref reconciliationCalls);
     public string? ReconciledOperationId => Volatile.Read(ref reconciledOperationId);
 
     /// Runs immediately before the worker's pre-dispatch stamp, so a test can make that stamp fail for
     /// a reason the production code cannot see coming (a claim that was superseded underneath it).
     public Func<Task>? BeforeMarkerStampAsync { get; set; }
+    public Func<Task>? BeforeAcceptanceStampAsync { get; set; }
 
     /// The answer recovery's provider-status lookup gets back, i.e. the test-side stand-in for what the
     /// vendor's own status endpoint says about the durable operation id.
@@ -1281,6 +1332,8 @@ internal sealed class AcceptedCancellationMusicProvider : IMusicGenerationProvid
     {
         Mode = mode;
         BeforeMarkerStampAsync = null;
+        BeforeAcceptanceStampAsync = null;
+        Interlocked.Exchange(ref acceptanceSinkFaults, 0);
         ReconciliationResult = null;
         ThrowOnReconcile = false;
         Interlocked.Exchange(ref dispatchSinkCalls, 0);
@@ -1354,7 +1407,16 @@ internal sealed class AcceptedCancellationMusicProvider : IMusicGenerationProvid
         {
             // Mirrors Mubert and Stable Audio: the create call was answered with the provider's own
             // operation id, and the evidence is handed to the sink before any polling happens.
-            if (onSubmissionAccepted is not null) await onSubmissionAccepted(AcceptedOperationId);
+            if (BeforeAcceptanceStampAsync is not null) await BeforeAcceptanceStampAsync();
+            try
+            {
+                if (onSubmissionAccepted is not null) await onSubmissionAccepted(AcceptedOperationId);
+            }
+            catch (MusicProviderSubmissionUnconfirmedException)
+            {
+                Interlocked.Increment(ref acceptanceSinkFaults);
+                throw;
+            }
             Interlocked.Increment(ref reportedAcceptances);
         }
 

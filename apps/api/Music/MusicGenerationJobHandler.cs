@@ -20,16 +20,20 @@ public interface IMusicGenerationProvider
 
     /// <summary>
     /// F-36.1: the same submission with a durable acceptance sink, invoked with the provider's own
-    /// operation id the moment the paid create call is answered. The default implementation forwards
-    /// to the sinkless overload, so a provider that has not adopted the evidence - including every
-    /// existing test double - behaves exactly as it did before this member existed.
+    /// operation id the moment the paid create call is answered. A legacy provider cannot expose
+    /// that id, but must record dispatch before it starts. Until its outcome is known, the durable
+    /// marker prevents a second submission.
     /// </summary>
-    Task<MusicProviderResult> GenerateAsync(
+    async Task<MusicProviderResult> GenerateAsync(
         MusicGenerationInput request,
         CancellationToken cancellationToken,
         Func<string, Task>? onSubmissionAccepted,
         Func<Task>? onDispatchSubmitting = null)
-        => GenerateAsync(request, cancellationToken);
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        if (onDispatchSubmitting is not null) await onDispatchSubmitting();
+        return await GenerateAsync(request, cancellationToken);
+    }
 
     /// <summary>
     /// F-36.1b: asks the provider, by the operation id recorded at acceptance, what actually happened

@@ -35,11 +35,16 @@ describe("music studio state", () => {
     expect(isMusicOutcomeUnconfirmed(job({ status: "Succeeded" }))).toBe(false);
   });
 
-  it("gives every music failure its own copy and only the unconfirmed one loses the retry action", () => {
+  it("keeps ordinary failures retryable and separates known delivery failures from uncertain outcomes", () => {
     const copy = (code: string | null, status: GenerationJob["status"] = "Failed") => musicStudioFailureCopy(job({ status, errorCode: code }), (key) => key);
     expect(copy("MUSIC_PROVIDER_SUBMISSION_UNCONFIRMED")).toEqual({ title: "music.unconfirmedTitle", text: "music.unconfirmedText", allowRetry: false });
-    expect(copy("MUSIC_SUBMISSION_RETRY_BLOCKED").allowRetry).toBe(false);
-    expect(copy("MUSIC_PROVIDER_UNAVAILABLE")).toEqual({ title: "music.providerUnavailableTitle", text: "music.providerUnavailableText", allowRetry: true });
+    expect(copy("MUSIC_SUBMISSION_RETRY_BLOCKED")).toEqual({ title: "music.unconfirmedTitle", text: "music.retryUnconfirmedText", allowRetry: false });
+    expect(copy("MUSIC_SUBMISSION_RETRY_BLOCKED", "Cancelled").allowRetry).toBe(false);
+    for (const code of ["MUSIC_OUTPUT_RETRIEVAL_FAILED", "MUSIC_RETRIEVAL_RETRY_BLOCKED"]) {
+      expect(copy(code)).toEqual({ title: "music.deliveryFailedTitle", text: "music.deliveryFailedText", allowRetry: false });
+      for (const locale of locales) expect(translations[locale]["music.deliveryFailedText"]).toBeTruthy();
+    }
+    expect(copy("MUSIC_PROVIDER_UNAVAILABLE")).toEqual({ title: "music.providerUnavailableTitle", text: "music.failedServiceUnavailableText", allowRetry: true });
     expect(copy("MUSIC_GENERATION_FAILED")).toEqual({ title: "music.failureTitle", text: "music.failureText", allowRetry: true });
     expect(copy(null, "Cancelled")).toEqual({ title: "music.cancelledTitle", text: "music.cancelledText", allowRetry: true });
     // The unconfirmed text is the one that must not assert an outcome either way.

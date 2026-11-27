@@ -5,7 +5,7 @@ import { createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
-import type { GenerationJob } from "@/lib/api";
+import { ApiError, type GenerationJob } from "@/lib/api";
 import { translate } from "../lib/i18n";
 import { locales, type Locale } from "../lib/i18n";
 import {
@@ -169,6 +169,7 @@ const h = vi.hoisted(() => ({
   listAssets: vi.fn(),
   getGenerationJob: vi.fn(),
   createMusicGenerationJob: vi.fn(),
+  retryMusicGenerationJob: vi.fn(),
   cancelGenerationJob: vi.fn(),
   assetFileUrl: vi.fn((id: string) => `/api/assets/${id}/download`),
 }));
@@ -180,6 +181,7 @@ vi.mock("@/lib/api", () => ({
     listAssets: (workspaceId: string, filters?: unknown) => h.listAssets(workspaceId, filters),
     getGenerationJob: (jobId: string) => h.getGenerationJob(jobId),
     createMusicGenerationJob: (input: unknown) => h.createMusicGenerationJob(input),
+    retryMusicGenerationJob: (id: string) => h.retryMusicGenerationJob(id),
     cancelGenerationJob: (jobId: string) => h.cancelGenerationJob(jobId),
     assetFileUrl: (id: string) => h.assetFileUrl(id),
   },
@@ -362,6 +364,40 @@ function panel(): TestNode {
 const rawProviderMessage = "Something went wrong.";
 
 describe("Music Studio in-flight status poll failure", () => {
+  it("keeps a known paid delivery failure attached to its job and offers no new generation", async () => {
+    const failed = inFlightJob({ status: "Failed", errorCode: "MUSIC_OUTPUT_RETRIEVAL_FAILED" });
+    h.getGenerationJob.mockResolvedValueOnce(failed);
+    await mountWithInFlightJob();
+    await runQueuedTimers();
+
+    expect(panel().textContent).toContain(translate("en", "music.deliveryFailedTitle"));
+    expect(panel().textContent).toContain(failed.id);
+    expect(findByClass(panel(), "music-action-button")).toHaveLength(0);
+    expect(h.createMusicGenerationJob).toHaveBeenCalledTimes(1);
+    expect(h.retryMusicGenerationJob).not.toHaveBeenCalled();
+  });
+
+  it("uses the original job's retry admission and stops on ambiguous dispatch evidence", async () => {
+    const failed = inFlightJob({ status: "Failed", errorCode: "MUSIC_PROVIDER_UNAVAILABLE" });
+    h.getGenerationJob.mockResolvedValueOnce(failed);
+    const refusal = Object.assign(new ApiError(400, "synthetic"), { code: "MUSIC_SUBMISSION_RETRY_BLOCKED" });
+    h.retryMusicGenerationJob.mockRejectedValueOnce(refusal);
+    await mountWithInFlightJob();
+    await runQueuedTimers();
+    const retry = findByClass(panel(), "music-action-button").find((node) => node.nodeName === "BUTTON");
+    if (!retry) throw new Error("Expected the retry action for the initial outage.");
+    await act(async () => {
+      retry.dispatchEvent({ type: "click", bubbles: true });
+      retry.dispatchEvent({ type: "click", bubbles: true });
+      await drain();
+    });
+
+    expect(h.retryMusicGenerationJob).toHaveBeenCalledExactlyOnceWith(failed.id);
+    expect(h.createMusicGenerationJob).toHaveBeenCalledTimes(1);
+    expect(panel().textContent).toContain(translate("en", "music.unconfirmedTitle"));
+    expect(findByClass(panel(), "music-action-button")).toHaveLength(0);
+  });
+
   it("gives a failed read its own retry dependency", () => {
     // On main the effect closed over [current, t] only, so a rejected read
     // changed nothing the effect depends on and polling never resumed.

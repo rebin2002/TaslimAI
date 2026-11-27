@@ -102,3 +102,8 @@ Provider-specific lyric moderation, waveform generation, loudness normalization,
 [1]: ./GENERATION_JOBS_ARCHITECTURE.md "Generation Jobs Architecture"
 [2]: ./ASSET_ARCHITECTURE.md "Asset Architecture"
 [3]: ./USAGE_ACCOUNTING_ARCHITECTURE.md "Usage Accounting Architecture"
+
+
+## Recovering a generated track that could not be delivered
+
+A failed delivery after confirmed generation keeps the original job ID visible in Music Studio. The member can give that ID to their workspace administrator, who can escalate it to the deployment operator. The operator should confirm the requester owns the job, match its retained provider attempt to the existing operation, and check that operation’s result using a read-only provider lookup. Record whether that same track can still be retrieved and delivered through the authorized private asset path. If the operation cannot be identified or the result has expired, report that outcome to the workspace administrator and keep a fresh generation blocked. Any new spend or credit adjustment requires its own authorization.

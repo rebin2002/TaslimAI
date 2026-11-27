@@ -2605,6 +2605,21 @@ var qualityFailure = exception as GenerationQualityControlException ?? exception
         }
     }
 
+    // Keep the parent checks inside the statement that writes the attempt. The token
+    // on an old attempt remains valid for that row after its parent job is reclaimed.
+    private static IQueryable<GenerationProviderAttempt> LiveMusicAttempt(
+        TaslimDbContext db, Guid attemptId, Guid claimToken) =>
+        db.GenerationProviderAttempts.Where(attempt =>
+            attempt.Id == attemptId
+            && attempt.JobConcurrencyToken == claimToken
+            && attempt.Status == GenerationProviderAttemptStatus.Started
+            && db.GenerationJobs.Any(job =>
+                job.Id == attempt.GenerationJobId
+                && job.ConcurrencyToken == claimToken
+                && job.Status == GenerationJobStatus.Running
+                && !job.CancellationRequested
+                && job.ClaimExpiresAt > DateTime.UtcNow));
+
     /// <summary>
     /// F-36.1b: writes the pre-dispatch marker onto the attempt row before the paid request is handed
     /// to the transport, and refuses to dispatch when it cannot. Never overwrites an accepted operation
@@ -2630,10 +2645,8 @@ var qualityFailure = exception as GenerationQualityControlException ?? exception
         int stamped;
         try
         {
-            stamped = await db.GenerationProviderAttempts
-                .Where(item => item.Id == attemptId
-                    && item.JobConcurrencyToken == jobConcurrencyToken
-                    && (item.ProviderExecutionId == null || item.ProviderExecutionId == ""))
+            stamped = await LiveMusicAttempt(db, attemptId, jobConcurrencyToken)
+                .Where(item => item.ProviderExecutionId == null || item.ProviderExecutionId == "")
                 .ExecuteUpdateAsync(setters => setters
                     .SetProperty(item => item.ProviderExecutionId, MusicDispatchMarker),
                     cancellationToken);
@@ -2694,8 +2707,8 @@ var qualityFailure = exception as GenerationQualityControlException ?? exception
 
         try
         {
-            var stamped = await db.GenerationProviderAttempts
-                .Where(item => item.Id == attemptId && item.JobConcurrencyToken == jobConcurrencyToken)
+            var stamped = await LiveMusicAttempt(db, attemptId, jobConcurrencyToken)
+                .Where(item => item.ProviderExecutionId == MusicDispatchMarker || item.ProviderExecutionId == operationId)
                 .ExecuteUpdateAsync(setters => setters
                     .SetProperty(item => item.ProviderExecutionId, operationId),
                     cancellationToken);

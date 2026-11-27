@@ -48,9 +48,8 @@ public sealed class GeneratedAssetPublisher(
         StoredFile? storedFile = null;
         var storedFileId = output.StoredFileId;
         var storageResult = (GeneratedFileStorageResult?)null;
-        var fileProjectId = string.Equals(job.JobType, GenerationJobTypes.ResearchGenerate, StringComparison.OrdinalIgnoreCase)
-            ? null
-            : job.ProjectId;
+        var isResearchReport = string.Equals(job.JobType, GenerationJobTypes.ResearchGenerate, StringComparison.OrdinalIgnoreCase);
+        var fileProjectId = isResearchReport ? null : job.ProjectId;
         if (output.FileArtifact is not null)
         {
             storageResult = await files.StoreGeneratedWithResultAsync(
@@ -93,6 +92,10 @@ public sealed class GeneratedAssetPublisher(
                     && (!file.ProjectId.HasValue || file.ProjectId == job.ProjectId),
                 cancellationToken) ?? throw new InvalidOperationException("Generated output file is not available in the job scope.");
         }
+        // Storage may return an older row after workspace-wide content deduplication.
+        if (isResearchReport && storedFile is not null &&
+            (storedFile.UserId != job.CreatedByUserId || storedFile.ProjectId.HasValue || storedFile.ConversationId.HasValue))
+            throw new InvalidOperationException("Generated output file is not available in the job scope.");
         if (output.Asset is not null && (storedFile is null || storedFile.Status != StoredFileStatus.Ready))
             throw new InvalidOperationException("Generated assets require a completed private stored file.");
 
