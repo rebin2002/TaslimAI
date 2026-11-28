@@ -324,7 +324,7 @@ internal static class ReadbackCancellationFixtures
     {
         var csrf = await client.GetFromJsonAsync<JsonElement>("/api/auth/csrf");
         using var form = new MultipartFormDataContent();
-        var content = new ByteArrayContent(PngFixture(128));
+        var content = new ByteArrayContent(PngFixture());
         content.Headers.ContentType = new MediaTypeHeaderValue("image/png");
         form.Add(content, "file", fileName);
         using var request = new HttpRequestMessage(HttpMethod.Post, $"/api/workspaces/{auth.PersonalWorkspace.Id}/files")
@@ -352,11 +352,7 @@ internal static class ReadbackCancellationFixtures
         return (await response.Content.ReadFromJsonAsync<ConversationDto>())!;
     }
 
-    private static byte[] PngFixture(int length)
-    {
-        var payload = new byte[Math.Max(length, 16)];
-        new byte[] { 0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A }.CopyTo(payload, 0);
-        for (var index = 8; index < payload.Length; index++) payload[index] = (byte)(index % 251);
-        return payload;
-    }
+    // Valid 128-byte 1x1 RGB PNG; preserve the streamed cancellation fixture length.
+    private static byte[] PngFixture() => Convert.FromBase64String(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAAL3RFWHRGaXh0dXJlAHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eNxAqDMAAAAMSURBVHicY/jPwAAAAwEBAMn+ku8AAAAASUVORK5CYII=");
 }
