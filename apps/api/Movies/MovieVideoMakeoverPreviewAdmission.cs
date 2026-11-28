@@ -1,0 +1,250 @@
+using Microsoft.EntityFrameworkCore;
+using Taslim.Api.Authorization;
+using Taslim.Api.Domain;
+using Taslim.Api.Files;
+using Taslim.Api.Persistence;
+
+namespace Taslim.Api.Movies;
+
+/// <summary>
+/// Stable, machine-readable admission codes for the AI Video Makeover result-preview
+/// gate (#698 server-side slice). These names are the contract; UI code must match on
+/// <see cref="Code"/> rather than on the human-readable message.
+/// </summary>
+public static class MovieVideoMakeoverPreviewAdmissionCodes
+{
+    public const string Admitted = "admitted";
+    public const string ProjectNotFound = "project_not_found";
+    public const string PrincipalNotWorkspaceMember = "principal_not_workspace_member";
+    public const string PrincipalNotProjectViewer = "principal_not_project_viewer";
+    public const string SourceNotOwned = "source_not_owned";
+    public const string PreviewFileNotVisible = "preview_file_not_visible";
+    public const string SourceAssetMissing = "source_asset_missing";
+    public const string ResultAssetMissing = "result_asset_missing";
+    public const string AssetCrossWorkspace = "asset_cross_workspace";
+    public const string AssetCrossProject = "asset_cross_project";
+    public const string AssetNotVideo = "asset_not_video";
+    public const string PreviewAssetUnavailable = "preview_asset_unavailable";
+    public const string ResultBindsSourceToItself = "result_binds_source_to_itself";
+    public const string ResultNotBoundToGeneration = "result_not_bound_to_generation";
+    public const string ResultJobCrossWorkspace = "result_job_cross_workspace";
+    public const string ResultJobCrossProject = "result_job_cross_project";
+    public const string ResultJobNotMovie = "result_job_not_movie";
+    public const string PreviewNotFinished = "preview_not_finished";
+}
+
+/// <summary>
+/// Outcome of one admission evaluation. The decision is read-only visibility evidence:
+/// it exposes only identifiers of already-persisted records and never a rendered
+/// media URL, a transformation, or any provider reference. Presenting the before/after
+/// comparison remains the responsibility of the result-preview UI slice (#801).
+/// </summary>
+public sealed record MovieVideoMakeoverPreviewAdmissionDecision(
+    bool Admitted,
+    string Code,
+    string Message,
+    Guid? MovieProjectId,
+    Guid? SourceAssetId,
+    Guid? ResultAssetId);
+
+/// <summary>
+/// Deterministic, provider-free evaluation of a Video Makeover result-preview request.
+/// A request binds an authorized principal to exactly one Movie project, one existing
+/// owned source video asset, and one existing authorized result video asset. Admission
+/// is fail-closed: an unknown project, a non-member, a missing/archived asset, an
+/// identity that crosses the project's workspace or project scope, a result not backed
+/// by a completed generation job, or a self-bound pair (source presented as its own
+/// "makeover") is always denied. This evaluator reads no database, calls no provider,
+/// queues no job, and cannot render a transformation.
+/// </summary>
+public static class MovieVideoMakeoverPreviewAdmissionEvaluator
+{
+    public static MovieVideoMakeoverPreviewAdmissionDecision Evaluate(
+        MovieProject? project,
+        bool isWorkspaceMember,
+        Asset? sourceAsset,
+        Asset? resultAsset,
+        GenerationJob? resultJob)
+    {
+        if (!isWorkspaceMember)
+            return Denied(MovieVideoMakeoverPreviewAdmissionCodes.PrincipalNotWorkspaceMember,
+                "Only a member of the owning workspace may open this preview.", project, sourceAsset, resultAsset);
+        if (project is null)
+            return Denied(MovieVideoMakeoverPreviewAdmissionCodes.ProjectNotFound,
+                "The Movie project for this preview no longer exists.", null, sourceAsset, resultAsset);
+        if (sourceAsset is null)
+            return Denied(MovieVideoMakeoverPreviewAdmissionCodes.SourceAssetMissing,
+                "The source video for this makeover is no longer available.", project, null, resultAsset);
+        if (resultAsset is null)
+            return Denied(MovieVideoMakeoverPreviewAdmissionCodes.ResultAssetMissing,
+                "The makeover result preview has not been produced yet.", project, sourceAsset, null);
+        if (sourceAsset.Id == resultAsset.Id)
+            return Denied(MovieVideoMakeoverPreviewAdmissionCodes.ResultBindsSourceToItself,
+                "A result preview must bind a distinct produced asset; the unmodified source cannot stand in for itself.",
+                project, sourceAsset, resultAsset);
+
+        foreach (var asset in new[] { sourceAsset, resultAsset })
+        {
+            if (asset.WorkspaceId != project.WorkspaceId)
+                return Denied(MovieVideoMakeoverPreviewAdmissionCodes.AssetCrossWorkspace,
+                    "The preview references an asset from a different workspace.", project, sourceAsset, resultAsset);
+            if (!string.Equals(asset.AssetType, AssetTypes.Video, StringComparison.OrdinalIgnoreCase))
+                return Denied(MovieVideoMakeoverPreviewAdmissionCodes.AssetNotVideo,
+                    "Video Makeover previews bind video assets only.", project, sourceAsset, resultAsset);
+            if (asset.Status != AssetStatus.Active || asset.ArchivedAt is not null || asset.StoredFileId is null)
+                return Denied(MovieVideoMakeoverPreviewAdmissionCodes.PreviewAssetUnavailable,
+                    "A preview asset must be active, unarchived, and backed by a stored file.", project, sourceAsset, resultAsset);
+            if (asset.ProjectId.HasValue && asset.ProjectId != project.ProjectId)
+                return Denied(MovieVideoMakeoverPreviewAdmissionCodes.AssetCrossProject,
+                    "The preview references an asset bound to a different project.", project, sourceAsset, resultAsset);
+        }
+
+        if (resultAsset.SourceGenerationJobId is null)
+            return Denied(MovieVideoMakeoverPreviewAdmissionCodes.ResultNotBoundToGeneration,
+                "The result asset must come from an existing makeover generation; a result cannot be claimed without one.",
+                project, sourceAsset, resultAsset);
+        if (resultJob is null || resultJob.Id != resultAsset.SourceGenerationJobId)
+            return Denied(MovieVideoMakeoverPreviewAdmissionCodes.ResultNotBoundToGeneration,
+                "The makeover generation linked to this result asset cannot be verified.",
+                project, sourceAsset, resultAsset);
+        if (resultJob.WorkspaceId != project.WorkspaceId)
+            return Denied(MovieVideoMakeoverPreviewAdmissionCodes.ResultJobCrossWorkspace,
+                    "The makeover generation belongs to a different workspace.", project, sourceAsset, resultAsset);
+        // Some Movie projects have no general ProjectId. Even for those, a job
+        // explicitly bound to another general project must never be reused.
+        if (resultJob.ProjectId.HasValue && resultJob.ProjectId != project.ProjectId)
+            return Denied(MovieVideoMakeoverPreviewAdmissionCodes.ResultJobCrossProject,
+                "The result generation belongs to a different project.", project, sourceAsset, resultAsset);
+        // A successful Image/Document/etc. job cannot certify a Movie preview.
+        // This is Movie provenance only: no Makeover-specific provider is enabled here.
+        if (!GenerationJobTypes.MovieTypes.Contains(resultJob.JobType))
+            return Denied(MovieVideoMakeoverPreviewAdmissionCodes.ResultJobNotMovie,
+                "The result was not produced by a Movie generation job.", project, sourceAsset, resultAsset);
+        if (resultJob.Status != GenerationJobStatus.Succeeded)
+            return Denied(MovieVideoMakeoverPreviewAdmissionCodes.PreviewNotFinished,
+                "The makeover generation has not completed successfully, so there is nothing to preview yet.",
+                project, sourceAsset, resultAsset);
+
+        return new MovieVideoMakeoverPreviewAdmissionDecision(
+            true,
+            MovieVideoMakeoverPreviewAdmissionCodes.Admitted,
+            "Admitted: view the existing result asset beside the existing source asset. Nothing here renders a transformation.",
+            project.Id,
+            sourceAsset.Id,
+            resultAsset.Id);
+    }
+
+    private static MovieVideoMakeoverPreviewAdmissionDecision Denied(
+        string code,
+        string message,
+        MovieProject? project,
+        Asset? sourceAsset,
+        Asset? resultAsset) => new(
+            false,
+            code,
+            message,
+            project?.Id,
+            sourceAsset?.Id,
+            resultAsset?.Id);
+}
+
+public interface IMovieVideoMakeoverPreviewAdmissionService
+{
+    /// <summary>
+    /// Read-only admission check for opening a Video Makeover result preview.
+    /// Loads persisted records, evaluates <see cref="MovieVideoMakeoverPreviewAdmissionEvaluator"/>,
+    /// and never creates jobs, calls providers, touches object storage, or mints URLs.
+    /// </summary>
+    Task<MovieVideoMakeoverPreviewAdmissionDecision> EvaluateAsync(
+        Guid userId,
+        Guid movieProjectId,
+        Guid sourceAssetId,
+        Guid resultAssetId,
+        CancellationToken cancellationToken);
+}
+
+public sealed class MovieVideoMakeoverPreviewAdmissionService(
+    TaslimDbContext db,
+    WorkspaceAccessService access,
+    MovieCollaborationAccess collaboration) : IMovieVideoMakeoverPreviewAdmissionService
+{
+    public async Task<MovieVideoMakeoverPreviewAdmissionDecision> EvaluateAsync(
+        Guid userId,
+        Guid movieProjectId,
+        Guid sourceAssetId,
+        Guid resultAssetId,
+        CancellationToken cancellationToken)
+    {
+        var project = await db.MovieProjects.AsNoTracking()
+            .FirstOrDefaultAsync(item => item.Id == movieProjectId, cancellationToken);
+        if (project is null)
+            return new MovieVideoMakeoverPreviewAdmissionDecision(
+                false,
+                MovieVideoMakeoverPreviewAdmissionCodes.ProjectNotFound,
+                "The Movie project for this preview no longer exists.",
+                null,
+                null,
+                null);
+
+        // Deny without querying either asset when the caller lacks workspace and
+        // Movie-project View access; workspace membership alone is not sufficient.
+        var isMember = await access.IsMemberAsync(userId, project.WorkspaceId, cancellationToken);
+        if (!isMember)
+            return MovieVideoMakeoverPreviewAdmissionEvaluator.Evaluate(project, false, null, null, null);
+        if (!await collaboration.HasPermissionAsync(userId, movieProjectId, MoviePermissions.View, cancellationToken))
+            return new MovieVideoMakeoverPreviewAdmissionDecision(
+                false,
+                MovieVideoMakeoverPreviewAdmissionCodes.PrincipalNotProjectViewer,
+                "Movie project View permission is required to open this preview.",
+                project.Id, null, null);
+
+        var sourceAsset = await db.Assets.AsNoTracking()
+            .FirstOrDefaultAsync(item => item.Id == sourceAssetId, cancellationToken);
+        // The source-catalogue attach contract requires ownership by the caller.
+        // Movie-project View access alone cannot authorize a colleague's private
+        // source asset, even when both users belong to the same workspace.
+        if (sourceAsset is not null && sourceAsset.WorkspaceId == project.WorkspaceId
+            && sourceAsset.CreatedByUserId != userId)
+            return new MovieVideoMakeoverPreviewAdmissionDecision(false,
+                MovieVideoMakeoverPreviewAdmissionCodes.SourceNotOwned,
+                "The caller does not own this source video.", project.Id, null, null);
+        // Do not query or disclose result identifiers until the requested source
+        // passes its actual StoredFile visibility and owner checks.
+        if (sourceAsset is not null && sourceAsset.WorkspaceId == project.WorkspaceId
+            && !await HasVisiblePreviewFileAsync(sourceAsset, project, userId, requireUploader: true, cancellationToken))
+            return new MovieVideoMakeoverPreviewAdmissionDecision(false,
+                MovieVideoMakeoverPreviewAdmissionCodes.PreviewFileNotVisible,
+                "The source video file is unavailable to the caller.", project.Id, null, null);
+        var resultAsset = await db.Assets.AsNoTracking()
+            .FirstOrDefaultAsync(item => item.Id == resultAssetId, cancellationToken);
+        if (resultAsset is not null && resultAsset.WorkspaceId == project.WorkspaceId
+            && !await HasVisiblePreviewFileAsync(resultAsset, project, userId, requireUploader: false, cancellationToken))
+            return new MovieVideoMakeoverPreviewAdmissionDecision(false,
+                MovieVideoMakeoverPreviewAdmissionCodes.PreviewFileNotVisible,
+                "The result video file is unavailable to the caller.", project.Id, null, null);
+        GenerationJob? resultJob = null;
+        if (resultAsset?.SourceGenerationJobId is Guid resultJobId)
+            resultJob = await db.GenerationJobs.AsNoTracking()
+                .FirstOrDefaultAsync(item => item.Id == resultJobId, cancellationToken);
+
+        return MovieVideoMakeoverPreviewAdmissionEvaluator.Evaluate(project, isMember, sourceAsset, resultAsset, resultJob);
+    }
+
+    private async Task<bool> HasVisiblePreviewFileAsync(
+        Asset asset,
+        MovieProject project,
+        Guid userId,
+        bool requireUploader,
+        CancellationToken cancellationToken)
+    {
+        if (asset.StoredFileId is not Guid fileId) return false;
+        var file = await db.StoredFiles.AsNoTracking()
+            .FirstOrDefaultAsync(item => item.Id == fileId, cancellationToken);
+        if (file is null || file.WorkspaceId != project.WorkspaceId
+            || file.Status != StoredFileStatus.Ready || file.DeletedAt is not null
+            || (file.ProjectId.HasValue && file.ProjectId != project.ProjectId)
+            || (requireUploader && file.UserId != userId))
+            return false;
+        return StoredFileVisibility.ForWorkspaceMember(userId).Compile()(file);
+    }
+}
