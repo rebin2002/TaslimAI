@@ -255,7 +255,7 @@ public sealed class MovieStoryRevisionAllocationConflictTests
         var userId = Guid.NewGuid();
         var controller = new MovieStudioController(
             null!, null!, null!, null!, new ConflictThrowingStoryService(), null!, null!, null!, null!, null!, null!,
-            null!, null!, null!, null!, null!, null!, null!, null!, null!, null!, null!, null!)
+            null!, null!, null!, null!, null!, null!, null!, null!, null!, null!, null!, null!, insertDecisions: null!)
         {
             ControllerContext = new ControllerContext
             {
