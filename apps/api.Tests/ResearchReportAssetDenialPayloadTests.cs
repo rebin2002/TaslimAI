@@ -27,10 +27,11 @@ namespace Taslim.Api.Tests;
 /// metadata (asset name, file name, MIME type, byte size, representation listing) -
 /// only the repository's generic <c>ASSET_NOT_FOUND</c> error envelope.
 ///
-/// This fact pins exactly that contract for the two subjects that must NEVER read
-/// the report asset over the normal API:
-///   1. a revoked workspace member (the #934 revoke axis on the research lane), and
-///   2. a cross-workspace stranger who was never a member of the asset workspace.
+/// This fact pins exactly that contract for three subjects that must NEVER read
+/// the creator-private report asset over the normal API:
+///   1. a non-creator workspace owner while the creator is still a member,
+///   2. a revoked workspace member (the #934 revoke axis on the research lane), and
+///   3. a cross-workspace stranger who was never a member of the asset workspace.
 /// Across all four asset read channels - metadata, DOCX download, inline read and
 /// PDF representation download - every response must be the 404 JSON error envelope
 /// with no URL-like content and none of the live asset's metadata values.
@@ -146,7 +147,7 @@ public sealed class ResearchReportAssetDenialPayloadTests : IClassFixture<Resear
     }
 
     [Fact]
-    public async Task Revoked_member_and_cross_workspace_stranger_receive_no_url_or_metadata_on_research_report_asset_reads()
+    public async Task Non_creator_owner_revoked_member_and_cross_workspace_stranger_receive_no_url_or_metadata_on_research_report_asset_reads()
     {
         // Observe the first HTTP response: a redirect to a generic 404 must never mask
         // a leaked Location header or an unexpected 3xx status on any denied route.
@@ -199,7 +200,15 @@ public sealed class ResearchReportAssetDenialPayloadTests : IClassFixture<Resear
             ("pdf representation download", $"/api/assets/{assetId}/representations/{probe.PdfRepresentationId}/download"),
         };
 
-        // Subject 1: cross-workspace stranger - its own workspace, never a member of A.
+        // Subject 1: the workspace owner is not the creator of this private report.
+        // Probe before revocation to isolate creator privacy from membership loss.
+        Assert.NotEqual(ownerAuth.User.Id, researcherAuth.User.Id);
+        foreach (var (name, path) in channels)
+        {
+            AssertMinimalDenial(await CaptureAsync(await owner.GetAsync(path)), name, "non-creator workspace owner", probe);
+        }
+
+        // Subject 2: cross-workspace stranger - its own workspace, never a member of A.
         using var stranger = factory.CreateClient(new WebApplicationFactoryClientOptions { AllowAutoRedirect = false });
         var strangerAuth = await Register(stranger, "Denial Payload Foreign Workspace User");
         Assert.NotEqual(strangerAuth.PersonalWorkspace.Id, ownerAuth.PersonalWorkspace.Id);
@@ -208,7 +217,7 @@ public sealed class ResearchReportAssetDenialPayloadTests : IClassFixture<Resear
             AssertMinimalDenial(await CaptureAsync(await stranger.GetAsync(path)), name, "cross-workspace stranger", probe);
         }
 
-        // Subject 2: the researcher after membership revoke (#934 axis on the research lane).
+        // Subject 3: the researcher after membership revoke (#934 axis on the research lane).
         await SetMembership(ownerAuth.PersonalWorkspace.Id, researcherAuth.User.Id, attach: false);
         foreach (var (name, path) in channels)
         {
