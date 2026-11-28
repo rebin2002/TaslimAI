@@ -231,20 +231,67 @@ public sealed class ProviderBenchmarkService(TaslimDbContext db, TimeProvider ti
         if (completion.Status == ProviderBenchmarkRunStatus.Running)
             throw new ArgumentException("A run completion status must be terminal.", nameof(completion));
 
-        var run = await db.ProviderBenchmarkRuns.SingleOrDefaultAsync(item => item.Id == runId, cancellationToken)
+        var initial = await db.ProviderBenchmarkRuns.AsNoTracking()
+            .SingleOrDefaultAsync(item => item.Id == runId, cancellationToken)
             ?? throw new KeyNotFoundException("The benchmark run was not found.");
-        if (run.Status != ProviderBenchmarkRunStatus.Running)
+        var run = SynchronizeTrackedRun(initial);
+        if (initial.Status != ProviderBenchmarkRunStatus.Running)
         {
-            if (run.Status != completion.Status)
+            if (initial.Status != completion.Status)
                 throw new InvalidOperationException("The benchmark run has already reached a different terminal state.");
             return run;
         }
 
-        run.Status = completion.Status;
-        run.CompletionCode = ProviderBenchmarkValidation.Optional(completion.CompletionCode, nameof(completion.CompletionCode), 100);
-        run.CompletedAt = Utc(completion.CompletedAt) ?? UtcNow();
-        await db.SaveChangesAsync(cancellationToken);
-        return run;
+        var completionCode = ProviderBenchmarkValidation.Optional(completion.CompletionCode, nameof(completion.CompletionCode), 100);
+        var completedAt = Utc(completion.CompletedAt) ?? UtcNow();
+        var updated = await db.ProviderBenchmarkRuns
+            .Where(item => item.Id == runId && item.Status == ProviderBenchmarkRunStatus.Running)
+            .ExecuteUpdateAsync(setters => setters
+                .SetProperty(item => item.Status, completion.Status)
+                .SetProperty(item => item.CompletionCode, completionCode)
+                .SetProperty(item => item.CompletedAt, completedAt), cancellationToken);
+        if (updated == 1)
+        {
+            var persisted = await db.ProviderBenchmarkRuns.AsNoTracking()
+                .SingleOrDefaultAsync(item => item.Id == runId, cancellationToken)
+                ?? throw new KeyNotFoundException("The benchmark run was not found.");
+            return SynchronizeTrackedRun(persisted);
+        }
+
+        var existing = await db.ProviderBenchmarkRuns.AsNoTracking()
+            .SingleOrDefaultAsync(item => item.Id == runId, cancellationToken)
+            ?? throw new KeyNotFoundException("The benchmark run was not found.");
+        var synchronized = SynchronizeTrackedRun(existing);
+        if (existing.Status != completion.Status)
+            throw new InvalidOperationException("The benchmark run has already reached a different terminal state.");
+        return synchronized;
+    }
+
+    private ProviderBenchmarkRun SynchronizeTrackedRun(ProviderBenchmarkRun persisted)
+    {
+        var tracked = db.ProviderBenchmarkRuns.Local.SingleOrDefault(item => item.Id == persisted.Id);
+        if (tracked is null)
+        {
+            db.ProviderBenchmarkRuns.Attach(persisted);
+            return persisted;
+        }
+
+        var entry = db.Entry(tracked);
+        var status = entry.Property(item => item.Status);
+        status.CurrentValue = persisted.Status;
+        status.OriginalValue = persisted.Status;
+        status.IsModified = false;
+
+        var completionCode = entry.Property(item => item.CompletionCode);
+        completionCode.CurrentValue = persisted.CompletionCode;
+        completionCode.OriginalValue = persisted.CompletionCode;
+        completionCode.IsModified = false;
+
+        var completedAt = entry.Property(item => item.CompletedAt);
+        completedAt.CurrentValue = persisted.CompletedAt;
+        completedAt.OriginalValue = persisted.CompletedAt;
+        completedAt.IsModified = false;
+        return tracked;
     }
 
     public Task<ProviderBenchmarkRun?> GetRunAsync(Guid runId, CancellationToken cancellationToken = default) =>

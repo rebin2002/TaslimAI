@@ -129,7 +129,12 @@ public sealed class MovieProductionGenerationOrchestrator(
         if (shot is null || !await collaboration.HasPermissionAsync(userId, shot.Scene.MovieProjectId, MoviePermissions.Generate, cancellationToken))
             return null;
 
-        var existing = await FindExistingAsync(userId, request, normalizedKey, cancellationToken);
+        // Resolve and validate the raw single-clip duration before either preflight or
+        // idempotency replay. A two-hour project is legal, but one oversized shot is not
+        // a shorter priced clip and cannot replay a previously queued short render.
+        var durationSeconds = ResolveSingleClipDuration(
+            shot.DurationSeconds, shot.Scene.DurationSeconds, shot.Scene.MovieProject.DurationSeconds);
+        var existing = await FindExistingAsync(userId, request, normalizedKey, durationSeconds, cancellationToken);
         if (existing is not null)
             return existing;
 
@@ -165,7 +170,6 @@ public sealed class MovieProductionGenerationOrchestrator(
             cancellationToken);
 
         var plan = BuildPlan(shot, request);
-        var durationSeconds = Math.Clamp(shot.DurationSeconds ?? shot.Scene.DurationSeconds ?? Math.Min(shot.Scene.MovieProject.DurationSeconds, 60), 1, 3600);
         var estimate = await costEstimator.EstimateAsync(
             new MovieGenerationCostRequest(
                 durationSeconds,
@@ -280,7 +284,7 @@ public sealed class MovieProductionGenerationOrchestrator(
         {
             db.MovieClips.Remove(clip);
             await db.SaveChangesAsync(CancellationToken.None);
-            return await FindExistingAfterConcurrentCreateAsync(userId, request, normalizedKey, cancellationToken);
+            return await FindExistingAfterConcurrentCreateAsync(userId, request, normalizedKey, durationSeconds, cancellationToken);
         }
 
         clip.GenerationJobId = job.Id;
@@ -332,7 +336,7 @@ public sealed class MovieProductionGenerationOrchestrator(
             MetadataJson = version.StageProvenanceJson,
         });
         shot.UpdatedAt = now;
-        await db.SaveChangesAsync(cancellationToken);
+        await PersistProductionVersionWithRetryAsync(db, version, cancellationToken);
 
         // A worker may complete between CreateAsync and the relationship update. Re-read
         // the canonical job state and reconcile the clip so a fast disabled/fake adapter
@@ -354,6 +358,7 @@ public sealed class MovieProductionGenerationOrchestrator(
         Guid userId,
         MovieProductionGenerationRequest request,
         string? idempotencyKey,
+        int requestedClipDurationSeconds,
         CancellationToken cancellationToken)
     {
         if (idempotencyKey is null) return null;
@@ -368,6 +373,7 @@ public sealed class MovieProductionGenerationOrchestrator(
         var requestedTitle = string.IsNullOrWhiteSpace(request.Title) ? null : request.Title.Trim();
         if (input is null
             || input.MovieShotId != request.MovieShotId
+            || input.DurationSeconds != requestedClipDurationSeconds
             || input.SourceProductionVersionId != request.ApprovedSourceVersionId
             || !string.Equals(input.TargetResolution, requestedTarget, StringComparison.OrdinalIgnoreCase)
             || !string.Equals(input.QualityTier, requestedQuality, StringComparison.OrdinalIgnoreCase)
@@ -390,6 +396,7 @@ public sealed class MovieProductionGenerationOrchestrator(
         Guid userId,
         MovieProductionGenerationRequest request,
         string idempotencyKey,
+        int requestedClipDurationSeconds,
         CancellationToken cancellationToken)
     {
         const int maxAttempts = 20;
@@ -397,7 +404,7 @@ public sealed class MovieProductionGenerationOrchestrator(
         {
             try
             {
-                return await FindExistingAsync(userId, request, idempotencyKey, cancellationToken);
+                return await FindExistingAsync(userId, request, idempotencyKey, requestedClipDurationSeconds, cancellationToken);
             }
             catch (MovieProductionValidationException exception)
                 when (exception.Code == "IDEMPOTENCY_INCOMPLETE" && attempt + 1 < maxAttempts)
@@ -409,7 +416,7 @@ public sealed class MovieProductionGenerationOrchestrator(
             }
         }
 
-        return await FindExistingAsync(userId, request, idempotencyKey, cancellationToken);
+        return await FindExistingAsync(userId, request, idempotencyKey, requestedClipDurationSeconds, cancellationToken);
     }
 
     internal static bool JobTargetsClip(GenerationJob job, Guid clipId)
@@ -423,6 +430,57 @@ public sealed class MovieProductionGenerationOrchestrator(
         {
             return false;
         }
+    }
+
+    internal static async Task PersistProductionVersionWithRetryAsync(
+        TaslimDbContext db,
+        MovieProductionVersion version,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            await db.SaveChangesAsync(cancellationToken);
+        }
+        catch (DbUpdateException exception) when (IsVersionNumberUniqueViolation(exception))
+        {
+            // VersionNumber is allocated from a read of the shot graph. The unique
+            // database index is the authoritative concurrency boundary when another
+            // render commits between that read and this insert.
+            version.VersionNumber = (await db.MovieProductionVersions.AsNoTracking()
+                .Where(item => item.MovieShotId == version.MovieShotId)
+                .MaxAsync(item => (int?)item.VersionNumber, cancellationToken) ?? 0) + 1;
+            await db.SaveChangesAsync(cancellationToken);
+        }
+    }
+
+    internal static bool IsVersionNumberUniqueViolation(DbUpdateException exception)
+    {
+        for (var current = exception.InnerException; current is not null; current = current.InnerException)
+        {
+            if (current is Npgsql.PostgresException postgres
+                && postgres.SqlState == "23505"
+                && (string.Equals(postgres.ConstraintName, "IX_MovieProductionVersions_MovieShotId_VersionNumber", StringComparison.Ordinal)
+                    || string.Equals(postgres.ConstraintName, "IX_MovieProductionVersions_MovieShotId_VersionNumber~", StringComparison.Ordinal)))
+                return true;
+
+            if (current.Message.Contains("UNIQUE constraint failed", StringComparison.OrdinalIgnoreCase)
+                && current.Message.Contains("MovieProductionVersions", StringComparison.Ordinal)
+                && current.Message.Contains("MovieShotId", StringComparison.Ordinal)
+                && current.Message.Contains("VersionNumber", StringComparison.Ordinal))
+                return true;
+        }
+
+        return false;
+    }
+
+    internal static int ResolveSingleClipDuration(int? shotSeconds, int? sceneSeconds, int movieSeconds)
+    {
+        var durationSeconds = shotSeconds ?? sceneSeconds ?? Math.Min(movieSeconds, 60);
+        if (!MovieDurationBudgetPolicy.IsSupportedSingleClipDuration(durationSeconds))
+            throw new MovieProductionValidationException(
+                MovieDurationBudgetPolicy.SingleClipDurationUnsupportedCode,
+                MovieDurationBudgetPolicy.SingleClipDurationUnsupportedMessage);
+        return durationSeconds;
     }
 
     private static ProductionPlan BuildPlan(MovieShot shot, MovieProductionGenerationRequest request)

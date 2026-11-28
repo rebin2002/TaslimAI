@@ -5,7 +5,7 @@ import { localeTag } from "@/lib/i18n";
 /* eslint-disable @next/next/no-img-element */
 
 import Link from "next/link";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { type KeyboardEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowUpRight,
   Check,
@@ -27,7 +27,8 @@ import { useLocale } from "@/components/LocaleProvider";
 import { useSearchParams } from "next/navigation";
 import { ApiError, api, type Asset, type GenerationJob, type ImageGenerationInput, type Project } from "@/lib/api";
 import { localizedImageErrorMessage } from "@/lib/imageStudioErrors";
-import { canCancelImageJob, clearImageActiveJobId, isRestorableImageJob, nextImagePollDelay, parseImageJobResult, persistImageActiveJobId, readImageActiveJobId, shouldClearImageJobAfterPollError, shouldPollImageJob, shouldResetImageWorkspaceState } from "@/lib/imageStudioState";
+import { nextStudioChoiceIndex } from "@/lib/studioChoiceNavigation";
+import { canCancelImageJob, clearImageActiveJobId, isRestorableImageJob, mergeImageJobUpdate, nextImagePollDelay, nextImageRestoreDelay, parseImageJobResult, persistImageActiveJobId, readImageActiveJobId, shouldClearImageJobAfterPollError, shouldPollImageJob, shouldResetImageWorkspaceState, shouldRetryImageRestore, subscribeImageActiveJobChanges } from "@/lib/imageStudioState";
 
 const styles = ["auto", "photorealistic", "product", "illustration", "3d", "minimal", "poster", "social_media"] as const;
 const aspects = ["square", "portrait", "landscape"] as const;
@@ -77,6 +78,55 @@ export function ImageFailureCanvas({ labels, working, onRetry }: Readonly<{ labe
   </div>;
 }
 
+export type ImageGeneratingCanvasLabels = Readonly<{
+  eyebrow: string;
+  title: string;
+  message: string;
+  progress: string;
+  cancel: string;
+}>;
+
+/**
+ * In-flight Image Studio state and its cancellation control.
+ *
+ * The cancel control follows the same busy-state contract as the failure canvas retry: it stays
+ * focusable and reports `aria-busy` while the request is in flight, because the `disabled`
+ * attribute removes the focused button from the accessibility tree and leaves a keyboard or screen
+ * reader user at the top of the document with no idea what happened to the control they pressed.
+ * The control keeps its name, since a cancellation that is being sent is never a new start.
+ * Activation is made idempotent by {@link ImageStudioContent.cancel}, which refuses a second
+ * request for a job that has already been asked to stop.
+ */
+export function ImageGeneratingCanvas({ labels, percent, canCancel, working, onCancel }: Readonly<{ labels: ImageGeneratingCanvasLabels; percent: number | null; canCancel: boolean; working: boolean; onCancel: () => void }>) {
+  return <div className="image-generating-canvas">
+    <div className="image-generating-spinner"><LoaderCircle size={26} aria-hidden="true" /></div>
+    <p className="image-canvas-eyebrow">{labels.eyebrow}</p>
+    <h2>{labels.title}</h2>
+    <p>{labels.message}</p>
+    <div className="image-progress-meta"><span>{labels.progress}</span><strong>{percent ?? 0}%</strong></div>
+    <AccessibleProgressBar className="image-progress-track" label={labels.progress} value={percent} />
+    {canCancel && <button className="image-cancel-button" type="button" onClick={onCancel} aria-disabled={working || undefined} aria-busy={working}>
+      <XCircle size={15} /> {labels.cancel}
+    </button>}
+  </div>;
+}
+
+/**
+ * Arrow-key model for a prompt preset choice group. In a radiogroup the axis keys move the
+ * selection itself: one key press changes the preset, moves focus to the newly selected radio,
+ * and (for the purpose group) keeps the preset's style side effect wired through
+ * {@link ImageStudioContent.choosePurpose}. The group's accessible name and hint come from the
+ * localized label elements referenced by `aria-labelledby` and `aria-describedby`, so the model
+ * is identical in English, Arabic, and Kurdish Sorani.
+ */
+function handleImageChoiceKeyDown<T extends string>(event: KeyboardEvent<HTMLButtonElement>, options: readonly T[], value: T, onChange: (next: T) => void) {
+  const nextIndex = nextStudioChoiceIndex(options.indexOf(value), event.key, options.length);
+  if (nextIndex === null) return;
+  event.preventDefault();
+  onChange(options[nextIndex]);
+  event.currentTarget.parentElement?.querySelectorAll<HTMLButtonElement>('[role="radio"]')[nextIndex]?.focus();
+}
+
 export function ImageStudioView() {
   const { user, workspace } = useAuth();
   // Clear all private component state and in-flight timers across identity boundaries.
@@ -102,6 +152,10 @@ function ImageStudioContent() {
   const [projectId, setProjectId] = useState(() => searchParams.get("projectId") ?? "");
   const [current, setCurrent] = useState<GenerationJob | null>(null);
   const [pollRetry, setPollRetry] = useState(0);
+  // The poll loop must keep running whether or not the last frame changed anything: a rejected
+  // stale frame leaves the stored job untouched, and a loop that is rescheduled by that state
+  // change alone would stop polling a generation that is still running.
+  const [pollTick, setPollTick] = useState(0);
   const [sessionDenied, setSessionDenied] = useState(false);
   const sessionDeniedRef = useRef(false);
   const restoreJobId = useRef<string | null>(null);
@@ -111,6 +165,21 @@ function ImageStudioContent() {
   const [loadingProjects, setLoadingProjects] = useState(true);
   const [loadingRecent, setLoadingRecent] = useState(true);
   const [error, setError] = useState("");
+  // Bumped whenever the active-job pointer for this identity changes, including when the write
+  // comes from a request that outlived the instance that issued it.
+  const [pointerRevision, setPointerRevision] = useState(0);
+
+  useEffect(() => {
+    const userId = user?.id;
+    const workspaceId = workspace?.id;
+    if (!userId || !workspaceId) return;
+    // Only the identity that owns the pointer may adopt it, so a write for a previous workspace
+    // or a previous account never starts a read here.
+    return subscribeImageActiveJobChanges((changedUserId, changedWorkspaceId) => {
+      if (changedUserId !== userId || changedWorkspaceId !== workspaceId) return;
+      setPointerRevision((revision) => revision + 1);
+    });
+  }, [user?.id, workspace?.id]);
 
   const loadProjects = useCallback(async () => {
     if (!user?.id || !workspace || sessionDeniedRef.current) return;
@@ -168,6 +237,7 @@ function ImageStudioContent() {
     setLoadingRecent(true);
     setProjectId("");
     setPollRetry(0);
+    setPollTick(0);
     setWorking(false);
     setError("");
   }, [current, workspace?.id]);
@@ -179,34 +249,53 @@ function ImageStudioContent() {
     restoreJobId.current = storedJobId;
     const workspaceVersion = workspaceGeneration.current;
     let active = true;
-    void api.getGenerationJob(storedJobId).then((job) => {
-      if (!active || workspaceGeneration.current !== workspaceVersion || restoreJobId.current !== storedJobId) return;
-      if (!isRestorableImageJob(job, workspace.id)) {
-        clearImageActiveJobId(user.id, workspace.id);
-        restoreJobId.current = null;
-        return;
-      }
-      setCurrent(job);
-      setPollRetry(0);
-    }).catch((cause) => {
-      if (!active || workspaceGeneration.current !== workspaceVersion || restoreJobId.current !== storedJobId) return;
-      if (cause instanceof ApiError && shouldClearImageJobAfterPollError(cause.status)) {
-        clearImageActiveJobId(user.id, workspace.id);
-        restoreJobId.current = null;
-        if (cause.status === 401) {
-          sessionDeniedRef.current = true;
-          setSessionDenied(true);
-          setProjects([]);
-          setRecentAssets([]);
-          setSelectedAsset(null);
-          setLoadingProjects(false);
-          setLoadingRecent(false);
-          setError(localizedImageErrorMessage(cause.code, t, "image.pollError"));
+    let retryTimer = 0;
+
+    // The pointer names a generation that is normally still running server-side, so a failed read
+    // is not evidence that the job disappeared. It is retried inside the polling budget, the
+    // pointer is kept, and only an exhausted budget reports the missing progress. A single
+    // unretried read used to strand the user on an empty canvas that announced nothing about a
+    // job the workspace is still paying for.
+    const readStoredJob = (attempt: number) => {
+      void api.getGenerationJob(storedJobId).then((job) => {
+        if (!active || workspaceGeneration.current !== workspaceVersion || restoreJobId.current !== storedJobId) return;
+        if (!isRestorableImageJob(job, workspace.id)) {
+          clearImageActiveJobId(user.id, workspace.id);
+          restoreJobId.current = null;
+          return;
         }
-      }
-    });
-    return () => { active = false; };
-  }, [user?.id, workspace, current, t]);
+        setCurrent((previous) => mergeImageJobUpdate(previous, job));
+        setPollRetry(0);
+        setError("");
+      }).catch((cause: unknown) => {
+        if (!active || workspaceGeneration.current !== workspaceVersion || restoreJobId.current !== storedJobId) return;
+        const status = cause instanceof ApiError ? cause.status : null;
+        const code = cause instanceof ApiError ? cause.code : null;
+        if (shouldClearImageJobAfterPollError(status)) {
+          clearImageActiveJobId(user.id, workspace.id);
+          restoreJobId.current = null;
+          if (status === 401) {
+            sessionDeniedRef.current = true;
+            setSessionDenied(true);
+            setProjects([]);
+            setRecentAssets([]);
+            setSelectedAsset(null);
+            setLoadingProjects(false);
+            setLoadingRecent(false);
+            setError(localizedImageErrorMessage(code, t, "image.pollError"));
+          }
+          return;
+        }
+        if (!shouldRetryImageRestore(status, attempt)) {
+          setError(localizedImageErrorMessage(code, t, "image.pollError"));
+          return;
+        }
+        retryTimer = window.setTimeout(() => readStoredJob(attempt + 1), nextImageRestoreDelay(attempt));
+      });
+    };
+    readStoredJob(0);
+    return () => { active = false; window.clearTimeout(retryTimer); };
+  }, [user?.id, workspace, current, pointerRevision, t]);
 
   useEffect(() => {
     const workspaceId = workspace?.id;
@@ -218,9 +307,10 @@ function ImageStudioContent() {
       try {
         const next = await api.getGenerationJob(jobId);
         if (active && workspaceGeneration.current === workspaceVersion && current.id === jobId) {
-          setCurrent(next);
+          setCurrent((previous) => mergeImageJobUpdate(previous, next));
           setPollRetry(0);
           setError("");
+          setPollTick((tick) => tick + 1);
         }
       } catch (caught) {
         if (active && workspaceGeneration.current === workspaceVersion && current.id === jobId) {
@@ -248,7 +338,7 @@ function ImageStudioContent() {
       }
     }, nextImagePollDelay(current, pollRetry) ?? 650);
     return () => { active = false; window.clearTimeout(timer); };
-  }, [current, pollRetry, t, user?.id, workspace?.id]);
+  }, [current, pollRetry, pollTick, t, user?.id, workspace?.id]);
 
   async function startGeneration() {
     // The retry control stays focusable while busy, so activation can arrive again before the
@@ -279,7 +369,7 @@ function ImageStudioContent() {
       const job = await api.createImageGenerationJob(input);
       if (workspaceGeneration.current === requestWorkspaceVersion) {
         persistImageActiveJobId(user.id, workspace.id, job.id);
-        setCurrent(job);
+        setCurrent((previous) => mergeImageJobUpdate(previous, job));
       }
     } catch (caught) {
       if (workspaceGeneration.current === requestWorkspaceVersion) setError(localizedImageErrorMessage(caught instanceof ApiError ? caught.code : null, t, "image.createError"));
@@ -289,8 +379,13 @@ function ImageStudioContent() {
   }
 
   async function cancel() {
-    if (!user?.id || sessionDeniedRef.current || !current) return;
+    // The cancel control stays focusable while a request is in flight, so activation can arrive
+    // again before the first one settles. The job's own state decides whether a request is still
+    // meaningful: a job that already asked to stop must not be asked twice, and a job the worker
+    // has settled can no longer be cancelled at all.
+    if (working) return;
     const job = current;
+    if (!user?.id || sessionDeniedRef.current || !job || !canCancelImageJob(job)) return;
     const requestWorkspaceVersion = workspaceGeneration.current;
     setWorking(true);
     setError("");
@@ -298,7 +393,7 @@ function ImageStudioContent() {
       await api.cancelGenerationJob(job.id);
       const next = await api.getGenerationJob(job.id);
       if (workspaceGeneration.current === requestWorkspaceVersion) {
-        setCurrent((previous) => previous?.id === job.id ? next : previous);
+        setCurrent((previous) => previous?.id === job.id ? mergeImageJobUpdate(previous, next) : previous);
       }
     } catch (caught) {
       if (workspaceGeneration.current === requestWorkspaceVersion) setError(localizedImageErrorMessage(caught instanceof ApiError ? caught.code : null, t, "image.cancelError"));
@@ -376,11 +471,25 @@ function ImageStudioContent() {
         <label className="image-prompt-field"><span className="sr-only">{t("image.promptLabel")}</span><textarea value={description} onChange={(event) => setDescription(event.target.value)} maxLength={4000} placeholder={t("image.promptPlaceholder")} aria-label={t("image.promptLabel")} required /><small>{description.length}/4000</small></label>
         <div className="image-panel-tools">
           <button className="image-attachment-button" type="button" disabled title={t("image.referenceUnavailable")}><Paperclip size={15} /> {t("image.attachReference")} <span>{t("image.unavailableTag")}</span></button>
-          <label className="image-project-select"><span>{t("image.project")}</span><select value={projectId} onChange={(event) => setProjectId(event.target.value)} disabled={loadingProjects}><option value="">{t("image.noProject")}</option>{projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}</select><ChevronDown size={13} /></label>
+          {/*
+           * The project selector is a choice control whose options are fetched from the workspace,
+           * so the studio's first render — and every render right after a workspace switch, which
+           * sets `loadingProjects` back to true — happens while the list is in flight. The browser's
+           * `disabled` attribute is therefore the wrong tool for that window, exactly as it is for
+           * the retry and cancel controls above: it takes the focused selector out of the
+           * accessibility tree and hands the caret back to the document, so a keyboard user either
+           * never reaches the control or loses their place inside it without any announcement.
+           * The selector instead stays tabbable and reports the transient state on itself through
+           * `aria-busy` and `aria-disabled`, and while loading it offers only an unselectable
+           * placeholder that says the list is loading: "No project" would assert an empty workspace
+           * the client has not observed. Activation is refused by the change handler while loading,
+           * the same idempotence contract {@link ImageStudioContent.cancel} uses.
+           */}
+          <label className="image-project-select"><span>{t("image.project")}</span><select value={projectId} onChange={(event) => { if (loadingProjects) return; setProjectId(event.target.value); }} aria-busy={loadingProjects} aria-disabled={loadingProjects || undefined}>{loadingProjects ? <option value="" disabled>{t("image.projectLoading")}</option> : <><option value="">{t("image.noProject")}</option>{projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}</>}</select><ChevronDown size={13} /></label>
         </div>
 
-        <div className="image-option-group"><div className="image-option-label"><span>{t("image.purpose")}</span><small>{t("image.autoHint")}</small></div><div className="image-purpose-grid">{purposes.map((value) => <button key={value} type="button" className={purpose === value ? "is-selected" : ""} aria-pressed={purpose === value} onClick={() => choosePurpose(value)}><span className={`image-purpose-dot is-${value}`} />{t(`image.purpose.${value}`)}</button>)}</div></div>
-        <div className="image-option-group"><div className="image-option-label"><span>{t("image.aspectRatio")}</span></div><div className="image-segmented-control">{aspects.map((value) => <button key={value} type="button" className={aspectRatio === value ? "is-selected" : ""} aria-pressed={aspectRatio === value} onClick={() => setAspectRatio(value)}><span className={`image-format-icon is-${value}`} />{t(`image.aspect.${value}`)}</button>)}</div></div>
+        <div className="image-option-group"><div className="image-option-label"><span id="image-purpose-label">{t("image.purpose")}</span><small id="image-purpose-hint">{t("image.autoHint")}</small></div><div className="image-purpose-grid" role="radiogroup" aria-labelledby="image-purpose-label" aria-describedby="image-purpose-hint">{purposes.map((value) => <button key={value} type="button" role="radio" aria-checked={purpose === value} tabIndex={purpose === value ? 0 : -1} className={purpose === value ? "is-selected" : ""} onClick={() => choosePurpose(value)} onKeyDown={(event) => handleImageChoiceKeyDown(event, purposes, purpose, choosePurpose)}><span className={`image-purpose-dot is-${value}`} aria-hidden="true" />{t(`image.purpose.${value}`)}</button>)}</div></div>
+        <div className="image-option-group"><div className="image-option-label"><span id="image-aspect-label">{t("image.aspectRatio")}</span></div><div className="image-segmented-control" role="radiogroup" aria-labelledby="image-aspect-label">{aspects.map((value) => <button key={value} type="button" role="radio" aria-checked={aspectRatio === value} tabIndex={aspectRatio === value ? 0 : -1} className={aspectRatio === value ? "is-selected" : ""} onClick={() => setAspectRatio(value)} onKeyDown={(event) => handleImageChoiceKeyDown(event, aspects, aspectRatio, setAspectRatio)}><span className={`image-format-icon is-${value}`} aria-hidden="true" />{t(`image.aspect.${value}`)}</button>)}</div></div>
 
         <details className="image-advanced-options"><summary>{t("image.moreOptions")} <ChevronDown size={15} /></summary><div className="image-advanced-grid"><label className="image-field"><span>{t("image.style")}</span><select value={style} onChange={(event) => setStyle(event.target.value)}>{styles.map((value) => <option key={value} value={value}>{t(`image.style.${value}`)}</option>)}</select></label><label className="image-field"><span>{t("image.quality")}</span><select value={quality} onChange={(event) => setQuality(event.target.value)}>{qualities.map((value) => <option key={value} value={value}>{t(`image.quality.${value}`)}</option>)}</select></label><label className="image-field"><span>{t("image.titleLabel")}</span><input value={title} onChange={(event) => setTitle(event.target.value)} maxLength={120} placeholder={t("image.titlePlaceholder")} /></label><label className="image-field"><span>{t("image.mood")}</span><input value={mood} onChange={(event) => setMood(event.target.value)} maxLength={120} placeholder={t("image.moodPlaceholder")} /></label><label className="image-field image-field-wide"><span>{t("image.background")}</span><input value={background} onChange={(event) => setBackground(event.target.value)} maxLength={240} placeholder={t("image.backgroundPlaceholder")} /></label><label className="image-field image-field-wide"><span>{t("image.textInImage")}</span><input value={textInImage} onChange={(event) => setTextInImage(event.target.value)} maxLength={500} placeholder={t("image.textInImagePlaceholder")} /></label></div></details>
         {error && <div className="image-panel-error" role="alert"><XCircle size={15} /> {error}</div>}
@@ -390,7 +499,7 @@ function ImageStudioContent() {
 
       <main className="image-result-canvas" aria-live="polite">
         {!current && <div className="image-empty-canvas"><div className="image-canvas-orbit image-canvas-orbit-one" /><div className="image-canvas-orbit image-canvas-orbit-two" /><div className="image-canvas-core"><Sparkles size={25} /></div><p className="image-canvas-eyebrow">{t("image.canvasEmptyEyebrow")}</p><h2>{t("image.canvasEmptyTitle")}</h2><p>{t("image.canvasEmptyText")}</p><span className="image-canvas-hint">{t("image.canvasHint")}</span></div>}
-        {current && !isSuccess && !isFailure && <div className="image-generating-canvas"><div className="image-generating-spinner"><LoaderCircle size={26} aria-hidden="true" /></div><p className="image-canvas-eyebrow">{t("image.progressEyebrow")}</p><h2>{t(`jobs.status${current.status}`)}</h2><p>{t("image.progressText")}</p><div className="image-progress-meta"><span>{t("jobs.progress")}</span><strong>{current.progressPercent ?? 0}%</strong></div><AccessibleProgressBar className="image-progress-track" label={t("jobs.progress")} value={current.progressPercent} />{canCancelImageJob(current) && <button className="image-cancel-button" type="button" onClick={() => void cancel()} disabled={working}><XCircle size={15} /> {t("image.cancel")}</button>}</div>}
+        {current && !isSuccess && !isFailure && <ImageGeneratingCanvas labels={{ eyebrow: t("image.progressEyebrow"), title: t(`jobs.status${current.status}`), message: t("image.progressText"), progress: t("jobs.progress"), cancel: t("image.cancel") }} percent={current.progressPercent} canCancel={canCancelImageJob(current)} working={working} onCancel={() => void cancel()} />}
         {isFailure && <ImageFailureCanvas labels={{ eyebrow: t("image.failedEyebrow"), title: current?.status === "Cancelled" ? t("jobs.statusCancelled") : t("image.failedTitle"), message: failureMessage, retry: t("image.retry"), retrying: t("image.working") }} working={working} onRetry={() => void startGeneration()} />}
         {isSuccess && result && <div className="image-success-canvas"><div className="image-result-heading"><div><p className="image-canvas-eyebrow">{t("image.resultEyebrow")}</p><h2>{t("image.resultTitle")}</h2></div><span className="image-saved-badge"><Check size={14} /> {t("image.savedToAssets")}</span></div><div className={`image-result-frame is-${result.aspectRatio ?? "square"}`}><img crossOrigin="use-credentials" src={api.assetFileUrl(result.assetId!, true)} alt={description} /></div><div className="image-result-actions"><a className="image-result-action" href={api.assetFileUrl(result.assetId!)}><Download size={15} /> {t("image.download")}</a><Link className="image-result-action" href={`/assets?search=${encodeURIComponent(title || "Generated image")}`}><ImageIcon size={15} /> {t("image.openAssets")}</Link><button className="image-result-action is-primary" type="button" onClick={createAnother}><RefreshCw size={15} /> {t("image.createAnother")}</button></div></div>}
       </main>

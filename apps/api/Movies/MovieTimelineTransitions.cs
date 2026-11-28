@@ -141,6 +141,7 @@ public static class MovieTimelineValidationCodes
     public const string ClipShotIdRequired = "TIMELINE_CLIP_SHOT_ID_REQUIRED";
     public const string ClipSequenceInvalid = "TIMELINE_CLIP_SEQUENCE_INVALID";
     public const string ClipTimingInvalid = "TIMELINE_CLIP_TIMING_INVALID";
+    public const string ClipOverlapInvalid = "TIMELINE_CLIP_OVERLAP_INVALID";
     public const string ClipSequenceDuplicate = "TIMELINE_CLIP_SEQUENCE_DUPLICATE";
     public const string ClipIdDuplicate = "TIMELINE_CLIP_ID_DUPLICATE";
     public const string TransitionIdRequired = "TIMELINE_TRANSITION_ID_REQUIRED";
@@ -217,6 +218,23 @@ public static class MovieTimelineValidator
                 Add(errors, MovieTimelineValidationCodes.TransitionOverlap, pair.Second.Path, "Positive-duration transitions must not overlap.");
         }
 
+        for (var index = 1; index < timeline.Clips.Count; index++)
+        {
+            var previous = timeline.Clips[index - 1];
+            var current = timeline.Clips[index];
+            var overlap = previous.StartSeconds + previous.DurationSeconds - current.StartSeconds;
+            if (overlap <= 0m) continue;
+
+            var hasExactDissolve = timeline.Transitions.Any(item =>
+                Normalize(item.Type) == MovieTimelineTransitionTypes.Dissolve
+                && item.FromClipId == previous.ClipId
+                && item.ToClipId == current.ClipId
+                && item.StartSeconds == current.StartSeconds
+                && item.DurationSeconds == overlap);
+            if (!hasExactDissolve)
+                Add(errors, MovieTimelineValidationCodes.ClipOverlapInvalid, $"clips[{index}].timing", "Overlapping clips require an exact adjacent dissolve transition.");
+        }
+
         return Result(errors);
     }
 
@@ -224,7 +242,13 @@ public static class MovieTimelineValidator
         MovieCanonicalTimelineContract timeline,
         MovieTimelineEditDecisionContract decision)
     {
-        var result = Validate(timeline);
+        var action = decision is null ? string.Empty : Normalize(decision.Action);
+        var validationTimeline = action == MovieTimelineEditActions.Add
+            && decision?.ProposedTransition is not null
+            && timeline.Transitions is not null
+            ? timeline with { Transitions = timeline.Transitions.Append(decision.ProposedTransition).ToArray() }
+            : timeline;
+        var result = Validate(validationTimeline);
         var errors = result.Errors.ToList();
         if (decision is null)
         {
@@ -238,7 +262,6 @@ public static class MovieTimelineValidator
             Add(errors, MovieTimelineValidationCodes.TimelineVersionConflict, "timelineId", "The decision must target the supplied canonical timeline.");
         if (decision.BaseTimelineVersion != timeline.Version)
             Add(errors, MovieTimelineValidationCodes.TimelineVersionConflict, "baseTimelineVersion", "The decision was created against a stale canonical timeline version.");
-        var action = Normalize(decision.Action);
         if (!MovieTimelineEditActions.Supported.Contains(action))
             Add(errors, MovieTimelineValidationCodes.EditActionInvalid, "action", "Choose add, update, or remove.");
 
@@ -270,7 +293,7 @@ public static class MovieTimelineValidator
         {
             if (!decision.TransitionId.HasValue || decision.TransitionId == Guid.Empty)
                 Add(errors, MovieTimelineValidationCodes.EditTargetInvalid, "transitionId", "An update decision must target an existing transition.");
-            else if (!timeline.Transitions.Any(item => item.Id == decision.TransitionId))
+            else if (!timeline.Transitions!.Any(item => item.Id == decision.TransitionId))
                 Add(errors, MovieTimelineValidationCodes.EditTargetInvalid, "transitionId", "The update target must exist in the canonical timeline.");
             if (decision.ProposedTransition is null)
                 Add(errors, MovieTimelineValidationCodes.EditTargetInvalid, "proposedTransition", "An update decision requires a transition.");
@@ -279,7 +302,7 @@ public static class MovieTimelineValidator
         }
         else if (action == MovieTimelineEditActions.Remove)
         {
-            if (!decision.TransitionId.HasValue || decision.TransitionId == Guid.Empty || !timeline.Transitions.Any(item => item.Id == decision.TransitionId))
+            if (!decision.TransitionId.HasValue || decision.TransitionId == Guid.Empty || !timeline.Transitions!.Any(item => item.Id == decision.TransitionId))
                 Add(errors, MovieTimelineValidationCodes.EditTargetInvalid, "transitionId", "A remove decision must target an existing transition.");
             if (decision.ProposedTransition is not null)
                 Add(errors, MovieTimelineValidationCodes.EditTargetInvalid, "proposedTransition", "A remove decision cannot include a replacement transition.");

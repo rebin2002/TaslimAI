@@ -25,6 +25,7 @@ public sealed class ChatController(
     TaslimDbContext db,
     WorkspaceAccessService access,
     IChatCompletionService completion,
+    IAiModelRouter modelRouter,
     AiContextBuilder contextBuilder,
     IUsageLedgerService usageLedger,
     IOptions<Microsoft.AspNetCore.Mvc.JsonOptions> mvcJsonOptions,
@@ -36,14 +37,14 @@ public sealed class ChatController(
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> CreateConversation(Guid workspaceId, CreateConversationRequest request, CancellationToken cancellationToken)
     {
+        if (!TryGetUserId(out var userId)) return Unauthorized();
         if (!ModelState.IsValid) return ApiResults.Validation(this);
-        var userId = GetUserId();
         if (!await access.IsMemberAsync(userId, workspaceId, cancellationToken)) return Forbid();
 
         if (request.ProjectId is not null)
         {
-            var belongsToWorkspace = await db.Projects.AnyAsync(project => project.Id == request.ProjectId && project.WorkspaceId == workspaceId, cancellationToken);
-            if (!belongsToWorkspace) return ApiResults.Error(this, StatusCodes.Status404NotFound, "PROJECT_NOT_FOUND", "Project not found.");
+            var belongsToActiveProject = await db.Projects.AnyAsync(project => project.Id == request.ProjectId && project.WorkspaceId == workspaceId && project.Status == ProjectStatuses.Active, cancellationToken);
+            if (!belongsToActiveProject) return ApiResults.Error(this, StatusCodes.Status404NotFound, "PROJECT_NOT_FOUND", "Project not found.");
         }
 
         var now = DateTime.UtcNow;
@@ -66,7 +67,7 @@ public sealed class ChatController(
     [HttpGet("workspaces/{workspaceId:guid}/conversations")]
     public async Task<IActionResult> ListConversations(Guid workspaceId, [FromQuery] string? status, CancellationToken cancellationToken)
     {
-        var userId = GetUserId();
+        if (!TryGetUserId(out var userId)) return Unauthorized();
         if (!await access.IsMemberAsync(userId, workspaceId, cancellationToken)) return Forbid();
         var requestedStatus = string.Equals(status, ConversationStatus.Archived.ToString(), StringComparison.OrdinalIgnoreCase)
             ? ConversationStatus.Archived : ConversationStatus.Active;
@@ -81,6 +82,7 @@ public sealed class ChatController(
     [HttpGet("conversations/{conversationId:guid}")]
     public async Task<IActionResult> GetConversation(Guid conversationId, CancellationToken cancellationToken)
     {
+        if (!TryGetUserId(out _)) return Unauthorized();
         var conversation = await FindAuthorizedConversation(conversationId, cancellationToken);
         return conversation is null
             ? ApiResults.Error(this, StatusCodes.Status404NotFound, "CONVERSATION_NOT_FOUND", "Conversation not found.")
@@ -90,6 +92,7 @@ public sealed class ChatController(
     [HttpGet("conversations/{conversationId:guid}/messages")]
     public async Task<IActionResult> GetMessages(Guid conversationId, CancellationToken cancellationToken)
     {
+        if (!TryGetUserId(out _)) return Unauthorized();
         var conversation = await FindAuthorizedConversation(conversationId, cancellationToken);
         if (conversation is null) return ApiResults.Error(this, StatusCodes.Status404NotFound, "CONVERSATION_NOT_FOUND", "Conversation not found.");
         var messages = (await db.ChatMessages.AsNoTracking()
@@ -107,6 +110,7 @@ public sealed class ChatController(
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> RenameConversation(Guid conversationId, RenameConversationRequest request, CancellationToken cancellationToken)
     {
+        if (!TryGetUserId(out _)) return Unauthorized();
         if (!ModelState.IsValid) return ApiResults.Validation(this);
         var conversation = await FindAuthorizedConversation(conversationId, cancellationToken);
         if (conversation is null) return ApiResults.Error(this, StatusCodes.Status404NotFound, "CONVERSATION_NOT_FOUND", "Conversation not found.");
@@ -120,6 +124,7 @@ public sealed class ChatController(
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> ArchiveConversation(Guid conversationId, CancellationToken cancellationToken)
     {
+        if (!TryGetUserId(out _)) return Unauthorized();
         var conversation = await FindAuthorizedConversation(conversationId, cancellationToken);
         if (conversation is null) return ApiResults.Error(this, StatusCodes.Status404NotFound, "CONVERSATION_NOT_FOUND", "Conversation not found.");
         conversation.Status = ConversationStatus.Archived;
@@ -132,6 +137,7 @@ public sealed class ChatController(
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> DeleteConversation(Guid conversationId, CancellationToken cancellationToken)
     {
+        if (!TryGetUserId(out _)) return Unauthorized();
         var conversation = await FindAuthorizedConversation(conversationId, cancellationToken);
         if (conversation is null) return ApiResults.Error(this, StatusCodes.Status404NotFound, "CONVERSATION_NOT_FOUND", "Conversation not found.");
 
@@ -147,6 +153,14 @@ public sealed class ChatController(
     [EnableRateLimiting(RateLimiting.Chat)]
     public async Task RegenerateMessage(Guid conversationId, Guid messageId, RegenerateMessageRequest request, CancellationToken cancellationToken)
     {
+        // The principal is resolved before any streaming header is written: once the 200 and the
+        // event-stream content type are on the wire, the response can no longer carry a 401.
+        if (!TryGetUserId(out _))
+        {
+            Response.StatusCode = StatusCodes.Status401Unauthorized;
+            return;
+        }
+
         Response.StatusCode = StatusCodes.Status200OK;
         Response.ContentType = "text/event-stream; charset=utf-8";
         Response.Headers.CacheControl = "no-cache, no-transform";
@@ -183,7 +197,18 @@ public sealed class ChatController(
             return;
         }
 
-        var laterUserMessageExists = await db.ChatMessages.AnyAsync(message =>
+        var requestId = request.RequestId.Trim();
+        var existingRequest = await db.ChatMessages.AsNoTracking().FirstOrDefaultAsync(message =>
+            message.ConversationId == conversationId && message.RequestId == requestId,
+            cancellationToken);
+        var existingRequestBelongsToTurn = await RequestBelongsToRegenerationTurnAsync(conversationId, assistant.Id, assistant.Sequence, existingRequest, cancellationToken);
+        if (existingRequest is not null && !existingRequestBelongsToTurn)
+        {
+            await WriteEventAsync("message.failed", new { code = "REQUEST_ID_REUSED", message = "That regeneration request cannot be reused for a different response." }, cancellationToken);
+            return;
+        }
+
+        var laterUserMessageExists = !existingRequestBelongsToTurn && await db.ChatMessages.AnyAsync(message =>
             message.ConversationId == conversationId &&
             message.Role == ChatMessageRole.User &&
             message.Sequence > assistant.Sequence,
@@ -204,22 +229,27 @@ public sealed class ChatController(
             return;
         }
 
-        await StreamRegenerationAsync(conversation, sourceUser, request.RequestId.Trim(), cancellationToken);
+        await StreamRegenerationAsync(conversation, sourceUser, assistant.Id, assistant.Sequence, requestId, cancellationToken);
     }
 
-    private async Task StreamRegenerationAsync(Conversation conversation, ChatMessage sourceUser, string requestId, CancellationToken cancellationToken)
+    private async Task StreamRegenerationAsync(Conversation conversation, ChatMessage sourceUser, Guid replacedAssistantId, long replacedAssistantSequence, string requestId, CancellationToken cancellationToken)
     {
         ChatMessage? assistant = null;
         UsageTransaction? usageTransaction = null;
         var persisted = false;
+        var isNewAssistantRow = false;
         try
         {
             var existing = await db.ChatMessages.FirstOrDefaultAsync(message => message.ConversationId == conversation.Id && message.RequestId == requestId, cancellationToken);
             if (existing is not null)
             {
-                if (existing.Role != ChatMessageRole.Assistant)
+                // The controller's earlier lookup may have observed no row, then another request
+                // may have claimed this ID for a different turn before this second read. Reuse
+                // the same ownership fence as the unique-index collision path before inspecting
+                // or claiming the row's state.
+                if (!await RequestBelongsToRegenerationTurnAsync(conversation.Id, replacedAssistantId, replacedAssistantSequence, existing, cancellationToken))
                 {
-                    await WriteEventAsync("message.failed", new { code = "REQUEST_ID_REUSED", message = "That regeneration request cannot be reused." }, cancellationToken);
+                    await WriteEventAsync("message.failed", new { code = "REQUEST_ID_REUSED", message = "That regeneration request cannot be reused for a different response." }, cancellationToken);
                     return;
                 }
                 if (existing.Status == ChatMessageStatus.Completed)
@@ -236,11 +266,45 @@ public sealed class ChatController(
                     return;
                 }
 
+                if (!await CanGenerateForStoredTurnAsync(sourceUser.Id, cancellationToken))
+                {
+                    await WriteEventAsync("message.failed", new { code = ProviderUnavailableCode, message = ProviderUnavailableMessage }, cancellationToken);
+                    return;
+                }
+                var claimed = await TryClaimFailedAssistantAsync(existing.Id, cancellationToken);
+                if (!claimed)
+                {
+                    await WriteEventAsync("message.failed", new { code = "MESSAGE_IN_PROGRESS", message = "That regeneration is already in progress." }, cancellationToken);
+                    return;
+                }
+                await db.Entry(existing).ReloadAsync(cancellationToken);
                 assistant = existing;
                 ResetAssistantForRetry(assistant);
             }
             else
             {
+                // Ordinary sends reserve their pair atomically. Reserve the regeneration slot with
+                // the same compare-and-swap order, then recheck admission: a send that won after
+                // the initial check must not leave this older turn's answer after the newer turn.
+                if (!await CanGenerateForStoredTurnAsync(sourceUser.Id, cancellationToken))
+                {
+                    await WriteEventAsync("message.failed", new { code = ProviderUnavailableCode, message = ProviderUnavailableMessage }, cancellationToken);
+                    return;
+                }
+                var assistantSequence = await ReserveNextMessageSequenceAsync(conversation.Id, cancellationToken);
+                var laterUserMessageExists = await db.ChatMessages.AnyAsync(message =>
+                    message.ConversationId == conversation.Id &&
+                    message.Role == ChatMessageRole.User &&
+                    message.Sequence > replacedAssistantSequence,
+                    cancellationToken);
+                if (laterUserMessageExists)
+                {
+                    await WriteEventAsync("message.failed", new { code = "MESSAGE_NOT_REGENERABLE", message = "Regenerate the latest response before continuing the conversation." }, cancellationToken);
+                    return;
+                }
+
+                conversation.NextMessageSequence = assistantSequence;
+                db.Entry(conversation).Property(item => item.NextMessageSequence).IsModified = false;
                 assistant = new ChatMessage
                 {
                     Id = Guid.NewGuid(),
@@ -250,13 +314,29 @@ public sealed class ChatController(
                     Content = string.Empty,
                     Status = ChatMessageStatus.Pending,
                     CreatedAt = DateTime.UtcNow,
-                    Sequence = ++conversation.NextMessageSequence,
+                    Sequence = assistantSequence,
                 };
                 db.ChatMessages.Add(assistant);
+                isNewAssistantRow = true;
             }
 
             conversation.UpdatedAt = DateTime.UtcNow;
-            await db.SaveChangesAsync(cancellationToken);
+            try
+            {
+                await db.SaveChangesAsync(cancellationToken);
+            }
+            catch (DbUpdateException) when (isNewAssistantRow)
+            {
+                // The unique request-ID index is the cross-process claim fence. Another request
+                // may have inserted the same ID after our lookup; report that persisted row's state
+                // instead of failing it as a provider error or trying to persist our losing row.
+                var winner = await db.ChatMessages.AsNoTracking()
+                    .FirstOrDefaultAsync(message => message.ConversationId == conversation.Id && message.RequestId == requestId, CancellationToken.None);
+                if (winner is null) throw;
+                if (assistant is not null) db.Entry(assistant).State = EntityState.Detached;
+                await WriteExistingRegenerationStateAsync(conversation, sourceUser, replacedAssistantId, replacedAssistantSequence, winner, CancellationToken.None);
+                return;
+            }
             usageTransaction = await usageLedger.GetOrCreatePendingAsync(conversation.WorkspaceId, GetUserId(), conversation.ProjectId, conversation.Id, requestId, UsageFeature.Chat, cancellationToken);
             await WriteEventAsync("message.started", new { conversation = ToDto(conversation), userMessage = ToMessageDto(sourceUser), assistantMessage = ToMessageDto(assistant) }, cancellationToken);
 
@@ -280,6 +360,13 @@ public sealed class ChatController(
             if (usage is null) throw new AiGenerationException("AI response did not complete.");
             PersistRegenerationSuccess(conversation, assistant, new AiGenerationResult(content.ToString(), usage));
             await db.SaveChangesAsync(CancellationToken.None);
+            // This request loaded the conversation before generation began. Advance LastMessageAt
+            // with a database-side max so a later send committed during the stream cannot be
+            // overwritten by this stale tracked entity when regeneration completes.
+            await db.Conversations
+                .Where(item => item.Id == conversation.Id && (item.LastMessageAt == null || item.LastMessageAt < assistant.CreatedAt))
+                .ExecuteUpdateAsync(setters => setters.SetProperty(item => item.LastMessageAt, assistant.CreatedAt), CancellationToken.None);
+            await db.Entry(conversation).ReloadAsync(CancellationToken.None);
             await usageLedger.CompleteAsync(usageTransaction, usage, CancellationToken.None);
             persisted = true;
             await WriteEventAsync("message.completed", new SendMessageResponse(ToDto(conversation), ToMessageDto(sourceUser), ToMessageDto(assistant, usage.IsTestResponse)), cancellationToken);
@@ -298,11 +385,52 @@ public sealed class ChatController(
             if (!persisted && assistant is not null)
             {
                 await PersistRegenerationFailureAsync(conversation, assistant);
-                if (usageTransaction is not null) await usageLedger.FailAsync(usageTransaction, UsageFailureCodes.FromException(exception), cancellationToken: CancellationToken.None);
+                if (usageTransaction is not null) await usageLedger.FailAsync(usageTransaction, UsageFailureCodes.FromException(exception), usage: (exception as AiProviderException)?.Usage, cancellationToken: CancellationToken.None);
                 LogGenerationFailure(exception, conversation.Id);
             }
             try { await WriteEventAsync("message.failed", new { code = "AI_GENERATION_FAILED", message = "Taslim could not regenerate a response right now." }, CancellationToken.None); } catch { /* client disconnected */ }
         }
+    }
+
+    private async Task<bool> RequestBelongsToRegenerationTurnAsync(Guid conversationId, Guid replacedAssistantId, long replacedAssistantSequence, ChatMessage? requestRow, CancellationToken cancellationToken)
+    {
+        if (requestRow is null || requestRow.Role != ChatMessageRole.Assistant) return false;
+        // A completed request may be replayed against its own persisted winning assistant. Permit
+        // only that exact row identity at the replaced sequence; every different row must be later
+        // and remain in the same user turn.
+        if (requestRow.Id == replacedAssistantId) return true;
+        if (requestRow.Sequence <= replacedAssistantSequence) return false;
+        // A completed/failed retry may follow a later user turn, but no user row may separate the
+        // requested assistant from the claimed regeneration row.
+        return !await db.ChatMessages.AnyAsync(message =>
+            message.ConversationId == conversationId &&
+            message.Role == ChatMessageRole.User &&
+            message.Sequence > replacedAssistantSequence &&
+            message.Sequence < requestRow.Sequence,
+            cancellationToken);
+    }
+
+    private async Task WriteExistingRegenerationStateAsync(Conversation conversation, ChatMessage sourceUser, Guid replacedAssistantId, long replacedAssistantSequence, ChatMessage existing, CancellationToken cancellationToken)
+    {
+        if (!await RequestBelongsToRegenerationTurnAsync(conversation.Id, replacedAssistantId, replacedAssistantSequence, existing, cancellationToken))
+        {
+            await WriteEventAsync("message.failed", new { code = "REQUEST_ID_REUSED", message = "That regeneration request cannot be reused for a different response." }, cancellationToken);
+            return;
+        }
+        if (existing.Status == ChatMessageStatus.Completed)
+        {
+            var completed = new SendMessageResponse(ToDto(conversation), ToMessageDto(sourceUser), ToMessageDto(existing, string.Equals(existing.ProviderKey, "mock", StringComparison.OrdinalIgnoreCase)));
+            await WriteEventAsync("message.started", new { conversation = completed.Conversation, userMessage = completed.UserMessage, assistantMessage = completed.AssistantMessage }, cancellationToken);
+            await WriteEventAsync("message.delta", new { messageId = completed.AssistantMessage.Id, delta = completed.AssistantMessage.Content }, cancellationToken);
+            await WriteEventAsync("message.completed", completed, cancellationToken);
+            return;
+        }
+        if (existing.Status == ChatMessageStatus.Pending)
+        {
+            await WriteEventAsync("message.failed", new { code = "MESSAGE_IN_PROGRESS", message = "That regeneration is already in progress." }, cancellationToken);
+            return;
+        }
+        await WriteEventAsync("message.failed", new { code = "AI_GENERATION_FAILED", message = "The existing regeneration failed; retry it using the same request ID." }, cancellationToken);
     }
 
     [HttpPost("conversations/{conversationId:guid}/messages")]
@@ -310,6 +438,7 @@ public sealed class ChatController(
     [EnableRateLimiting(RateLimiting.Chat)]
     public async Task<IActionResult> SendMessage(Guid conversationId, SendMessageRequest request, CancellationToken cancellationToken)
     {
+        if (!TryGetUserId(out _)) return Unauthorized();
         if (!ModelState.IsValid) return ApiResults.Validation(this, "Please enter a message.");
         var prepared = await PrepareMessageAsync(conversationId, request, cancellationToken);
         if (prepared.Error is not null) return prepared.Error;
@@ -334,7 +463,7 @@ public sealed class ChatController(
         catch (Exception exception) when (exception is not OperationCanceledException)
         {
             await PersistFailureAsync(prepared, exception);
-            if (usage is not null) await usageLedger.FailAsync(usage, UsageFailureCodes.FromException(exception), cancellationToken: CancellationToken.None);
+            if (usage is not null) await usageLedger.FailAsync(usage, UsageFailureCodes.FromException(exception), usage: (exception as AiProviderException)?.Usage, cancellationToken: CancellationToken.None);
             LogGenerationFailure(exception, prepared.Conversation!.Id);
             return GenerationFailure();
         }
@@ -351,6 +480,14 @@ public sealed class ChatController(
     [EnableRateLimiting(RateLimiting.Chat)]
     public async Task StreamMessage(Guid conversationId, SendMessageRequest request, CancellationToken cancellationToken)
     {
+        // The principal is resolved before any streaming header is written: once the 200 and the
+        // event-stream content type are on the wire, the response can no longer carry a 401.
+        if (!TryGetUserId(out _))
+        {
+            Response.StatusCode = StatusCodes.Status401Unauthorized;
+            return;
+        }
+
         Response.StatusCode = StatusCodes.Status200OK;
         Response.ContentType = "text/event-stream; charset=utf-8";
         Response.Headers.CacheControl = "no-cache, no-transform";
@@ -450,7 +587,7 @@ public sealed class ChatController(
             if (!persisted && prepared is not null && prepared.ExistingResult is null)
             {
                 await PersistFailureAsync(prepared, exception);
-                if (usageTransaction is not null) await usageLedger.FailAsync(usageTransaction, UsageFailureCodes.FromException(exception), cancellationToken: CancellationToken.None);
+                if (usageTransaction is not null) await usageLedger.FailAsync(usageTransaction, UsageFailureCodes.FromException(exception), usage: (exception as AiProviderException)?.Usage, cancellationToken: CancellationToken.None);
                 LogGenerationFailure(exception, prepared.Conversation!.Id);
             }
             try { await WriteEventAsync("message.failed", new { code = "AI_GENERATION_FAILED", message = "Taslim could not generate a response right now. Your message was saved." }, CancellationToken.None); } catch { /* client disconnected */ }
@@ -476,27 +613,34 @@ public sealed class ChatController(
         {
             if (!string.Equals(existingUser.Content, content, StringComparison.Ordinal))
                 return PreparedChat.Failure(ApiResults.Error(this, StatusCodes.Status409Conflict, "REQUEST_ID_REUSED", "That message request cannot be reused with different content."));
-            var existingAssistant = await db.ChatMessages.FirstOrDefaultAsync(message => message.ConversationId == conversationId && message.Role == ChatMessageRole.Assistant && message.CreatedAt > existingUser.CreatedAt, cancellationToken);
-            if (existingAssistant is null) return PreparedChat.Failure(ApiResults.Error(this, StatusCodes.Status409Conflict, "MESSAGE_IN_PROGRESS", "That message is already being generated."));
+            // Pair the replayed user message with its own turn response through the deterministic
+            // Sequence key. CreatedAt cannot carry this boundary: PostgreSQL timestamptz stores
+            // microseconds, so the 0.1-microsecond offset the send path adds to the assistant row
+            // truncates onto the user row's stored timestamp. A strict `>` comparison then hides
+            // the paired response (a completed turn replays as a stuck in-progress conflict) and
+            // the unordered scan slides onto a later turn's answer, duplicating and skipping
+            // thread items at the equal-timestamp boundary. That turn's response is the first
+            // assistant at exactly the following Sequence; never consume a later turn's response.
+            var existingAssistant = await db.ChatMessages
+                .Where(message => message.ConversationId == conversationId && message.Role == ChatMessageRole.Assistant && message.Sequence == existingUser.Sequence + 1)
+                .FirstOrDefaultAsync(cancellationToken);
+            // A same-sequence assistant can already exist while the first request is still generating.
+            // Do not replay its empty Pending body as a successful completed response.
+            if (existingAssistant is null || existingAssistant.Status == ChatMessageStatus.Pending)
+                return PreparedChat.Failure(ApiResults.Error(this, StatusCodes.Status409Conflict, "MESSAGE_IN_PROGRESS", "That message is already being generated."));
             if (existingAssistant.Status == ChatMessageStatus.Failed)
             {
-                existingAssistant.Status = ChatMessageStatus.Pending;
-                existingAssistant.Content = string.Empty;
-                existingAssistant.ProviderKey = null;
-                existingAssistant.ModelKey = null;
-                await db.SaveChangesAsync(cancellationToken);
+                if (!await CanGenerateForStoredTurnAsync(existingUser.Id, cancellationToken)) return PreparedChat.Failure(ProviderUnavailable());
+                var claimed = await TryClaimFailedAssistantAsync(existingAssistant.Id, cancellationToken);
+                if (!claimed) return PreparedChat.Failure(ApiResults.Error(this, StatusCodes.Status409Conflict, "MESSAGE_IN_PROGRESS", "That message is already being generated."));
+                await db.Entry(existingAssistant).ReloadAsync(cancellationToken);
+                ResetAssistantForRetry(existingAssistant);
                 return PreparedChat.New(conversation, existingUser, existingAssistant);
             }
             return PreparedChat.FromExisting(new SendMessageResponse(ToDto(conversation), ToMessageDto(existingUser), ToMessageDto(existingAssistant, string.Equals(existingAssistant.ProviderKey, "mock", StringComparison.OrdinalIgnoreCase))));
         }
 
         var now = DateTime.UtcNow;
-        if (conversation.Title == "New chat") conversation.Title = BuildTitle(content);
-        conversation.UpdatedAt = now;
-        conversation.LastMessageAt = now;
-        var userSequence = conversation.NextMessageSequence + 1;
-        var assistantSequence = userSequence + 1;
-        conversation.NextMessageSequence = assistantSequence;
         var userMessage = new ChatMessage
         {
             Id = Guid.NewGuid(),
@@ -506,7 +650,7 @@ public sealed class ChatController(
             Content = content,
             Status = ChatMessageStatus.Completed,
             CreatedAt = now,
-            Sequence = userSequence,
+            Sequence = 0,
         };
         var assistantMessage = new ChatMessage
         {
@@ -516,17 +660,28 @@ public sealed class ChatController(
             Content = string.Empty,
             Status = ChatMessageStatus.Pending,
             CreatedAt = now.AddTicks(1),
-            Sequence = assistantSequence,
+            Sequence = 0,
         };
+        var admissionError = await PrepareAttachmentsForGenerationAsync(conversation, userMessage.Id, request.AttachmentIds, cancellationToken);
+        if (admissionError is not null) return PreparedChat.Failure(admissionError);
+        if (conversation.Title == "New chat") conversation.Title = BuildTitle(content);
+        conversation.UpdatedAt = now;
+        conversation.LastMessageAt = now;
         db.ChatMessages.AddRange(userMessage, assistantMessage);
-        var attachmentError = await AttachFilesAsync(conversation, userMessage, request.AttachmentIds, cancellationToken);
-        if (attachmentError is not null) return PreparedChat.Failure(attachmentError);
+        await using var sequenceTransaction = await db.Database.BeginTransactionAsync(cancellationToken);
+        var assistantSequence = await ReserveMessageSequencePairAsync(conversation.Id, cancellationToken);
+        userMessage.Sequence = assistantSequence - 1;
+        assistantMessage.Sequence = assistantSequence;
+        conversation.NextMessageSequence = assistantSequence;
+        db.Entry(conversation).Property(item => item.NextMessageSequence).IsModified = false;
         try
         {
             await db.SaveChangesAsync(cancellationToken);
+            await sequenceTransaction.CommitAsync(cancellationToken);
         }
         catch (DbUpdateException)
         {
+            await sequenceTransaction.RollbackAsync(CancellationToken.None);
             var duplicate = await db.ChatMessages.AsNoTracking().FirstOrDefaultAsync(message => message.ConversationId == conversationId && message.RequestId == requestId, cancellationToken);
             if (duplicate is not null) return PreparedChat.Failure(ApiResults.Error(this, StatusCodes.Status409Conflict, "MESSAGE_IN_PROGRESS", "That message is already being generated."));
             throw;
@@ -534,20 +689,61 @@ public sealed class ChatController(
         return PreparedChat.New(conversation, userMessage, assistantMessage);
     }
 
-    private async Task<AiChatRequest> BuildContextAsync(Conversation conversation, Guid currentMessageId, CancellationToken cancellationToken, long? excludedAssistantAfterSequence = null)
+    private async Task<AiChatRequest> BuildContextAsync(Conversation conversation, Guid currentMessageId, CancellationToken cancellationToken, long? includedThroughSequence = null)
     {
         var history = await db.ChatMessages.AsNoTracking()
             .Where(message => message.ConversationId == conversation.Id
                 && (message.Role == ChatMessageRole.User || message.Role == ChatMessageRole.Assistant)
                 && message.Status == ChatMessageStatus.Completed
-                && (excludedAssistantAfterSequence == null
-                    || message.Role != ChatMessageRole.Assistant
-                    || message.Sequence <= excludedAssistantAfterSequence.Value))
+                && (includedThroughSequence == null || message.Sequence <= includedThroughSequence.Value))
             .OrderBy(message => message.Sequence)
             .ThenBy(message => message.CreatedAt)
             .ThenBy(message => message.Id)
-            .Select(message => new AiChatMessage(message.Role.ToString().ToLowerInvariant(), message.Content))
+            .Select(message => new
+            {
+                Role = message.Role.ToString().ToLowerInvariant(),
+                message.Content,
+                message.CreatedAt,
+            })
             .ToListAsync(cancellationToken);
+        // New writes serialize send pairs and regeneration slots, so an assistant run normally
+        // means repeated answers to one user turn. The legacy ordering migration can place multiple
+        // same-timestamp users before later assistants without a turn link; preserve the next
+        // assistant run rather than guessing which legacy answer belongs to which user.
+        var usersByTimestampSinceAssistantRun = new Dictionary<DateTime, int>();
+        var ambiguousUsersPendingAssistantRun = false;
+        var retainedCount = 0;
+        for (var readIndex = 0; readIndex < history.Count;)
+        {
+            var message = history[readIndex];
+            if (message.Role == "user")
+            {
+                history[retainedCount++] = message;
+                var sameTimestampUserCount = usersByTimestampSinceAssistantRun.GetValueOrDefault(message.CreatedAt) + 1;
+                usersByTimestampSinceAssistantRun[message.CreatedAt] = sameTimestampUserCount;
+                if (sameTimestampUserCount > 1) ambiguousUsersPendingAssistantRun = true;
+                readIndex++;
+                continue;
+            }
+
+            var runEnd = readIndex + 1;
+            while (runEnd < history.Count && history[runEnd].Role == "assistant") runEnd++;
+            if (ambiguousUsersPendingAssistantRun)
+            {
+                for (var runIndex = readIndex; runIndex < runEnd; runIndex++) history[retainedCount++] = history[runIndex];
+            }
+            else
+            {
+                // Keep the newest answer in each unambiguous adjacent assistant run. Compaction
+                // overwrites in place and removes one tail range, so work is O(n), even for long
+                // regeneration chains.
+                history[retainedCount++] = history[runEnd - 1];
+            }
+            readIndex = runEnd;
+            ambiguousUsersPendingAssistantRun = false;
+            usersByTimestampSinceAssistantRun.Clear();
+        }
+        if (retainedCount < history.Count) history.RemoveRange(retainedCount, history.Count - retainedCount);
         var project = conversation.ProjectId is null
             ? null
             : await db.Projects.AsNoTracking()
@@ -571,6 +767,7 @@ public sealed class ChatController(
                 attachment.StoredFile.OriginalFileName,
                 attachment.StoredFile.ContentType,
                 attachment.StoredFile.Extension,
+                attachment.StoredFile.SizeBytes,
                 attachment.StoredFile.ExtractedText,
                 attachment.StoredFile.Status,
                 attachment.StoredFile.TextExtractionStatus,
@@ -588,19 +785,76 @@ public sealed class ChatController(
             string? dataUrl = null;
             if (FileContentTypes.IsImage(file.Extension))
             {
+                // A storage adapter can only wrap the exception raised by the
+                // object-open call. An R2 connection can also fail while the
+                // body is still streaming, and the resulting S3 or transport
+                // exception carries the endpoint account and object key inside
+                // its message. Bound the read to the configured storage
+                // operation timeout, compare the body with the size recorded at
+                // upload so a truncated object cannot reach the model, and log
+                // only the sanitized category. That keeps an attachment
+                // readback failure on the existing attachment-content contract
+                // instead of surfacing it as a generic generation failure with
+                // the wrong usage code.
+                using var readbackTimeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                readbackTimeout.CancelAfter(fileOptions.Value.StorageOperationTimeout);
+                var readbackToken = readbackTimeout.Token;
+                // Legacy objects stored under an earlier, larger limit stay
+                // readable at their recorded size, but the recorded size is
+                // data rather than authority, so the bound is additionally
+                // clamped to a concrete absolute ceiling.
+                var readbackBound = StorageReadbackFaults.ResolveReadbackBound(fileOptions.Value.MaxFileSizeBytes, file.SizeBytes);
                 try
                 {
-                    await using var stream = await fileStorage.OpenReadAsync(file.StorageKey, cancellationToken) ?? throw new FileContentUnavailableException();
-                    using var buffer = new MemoryStream();
-                    await stream.CopyToAsync(buffer, cancellationToken);
-                    dataUrl = $"data:{file.ContentType};base64,{Convert.ToBase64String(buffer.ToArray())}";
+                    await using var stream = await fileStorage.OpenReadAsync(file.StorageKey, readbackToken) ?? throw new FileContentUnavailableException();
+                    var bytes = await StorageReadbackFaults.ReadBoundedAsync(stream, readbackBound, readbackToken);
+                    if (bytes.LongLength != file.SizeBytes)
+                        throw new InvalidDataException("Stored attachment content did not match its recorded size.");
+                    dataUrl = $"data:{file.ContentType};base64,{Convert.ToBase64String(bytes)}";
                 }
-                catch (FileStorageUnavailableException)
+                catch (Exception exception) when (StorageReadbackFaults.Classify(exception) == StorageReadbackFaults.FailureCategory.Cancelled)
                 {
+                    // Cancellation must survive the readback as cancellation, even
+                    // when the SDK reports an aborted request through a client or
+                    // transport wrapper around the original cancellation.
+                    if (exception is OperationCanceledException)
+                    {
+                        // Raw cancellation: caller aborts and storage-side timeouts
+                        // are distinguished exactly as before.
+                        if (cancellationToken.IsCancellationRequested || !readbackTimeout.IsCancellationRequested)
+                            throw;
+                    }
+                    else if (cancellationToken.IsCancellationRequested)
+                    {
+                        // Wrapped caller cancellation: propagate the unwrapped
+                        // cancellation so request finalization records the user
+                        // cancel path, and the provider wrapper text required to
+                        // stay private by incident #459 never reaches logs.
+                        throw StorageReadbackFaults.FindCancellation(exception)!;
+                    }
+                    // Otherwise the linked timeout token alone was the source of the
+                    // cancellation (for example the SDK surfacing its own abort), which
+                    // is a readback fault and falls on the content contract below.
+                    logger.LogWarning(
+                        "Chat attachment readback failed. ConversationId={ConversationId}; MessageId={MessageId}; FileId={FileId}; StorageProvider={StorageProvider}; FailureClass={FailureClass}; TimeoutSeconds={TimeoutSeconds}",
+                        conversation.Id,
+                        currentMessageId,
+                        file.StoredFileId,
+                        fileStorage.ProviderKey,
+                        "timeout",
+                        fileOptions.Value.StorageOperationTimeout.TotalSeconds);
                     throw new FileContentUnavailableException();
                 }
-                catch (FileStorageOperationException)
+                catch (Exception exception) when (StorageReadbackFaults.IsReadbackFault(exception))
                 {
+                    logger.LogWarning(
+                        "Chat attachment readback failed. ConversationId={ConversationId}; MessageId={MessageId}; FileId={FileId}; StorageProvider={StorageProvider}; FailureClass={FailureClass}; TimeoutSeconds={TimeoutSeconds}",
+                        conversation.Id,
+                        currentMessageId,
+                        file.StoredFileId,
+                        fileStorage.ProviderKey,
+                        StorageReadbackFaults.Classify(exception).ToString("G").ToLowerInvariant(),
+                        fileOptions.Value.StorageOperationTimeout.TotalSeconds);
                     throw new FileContentUnavailableException();
                 }
             }
@@ -608,15 +862,24 @@ public sealed class ChatController(
         }
         var attachmentCharacters = fileContexts.Sum(file => file.ExtractedText?.Length ?? 0);
         logger.LogInformation("Chat attachment context prepared. ConversationId={ConversationId}; MessageId={MessageId}; AttachmentCount={AttachmentCount}; ContextIncluded={ContextIncluded}; AttachmentContextCharacterCount={AttachmentContextCharacterCount}; AttachmentContextTokenEstimate={AttachmentContextTokenEstimate}", conversation.Id, currentMessageId, files.Count, fileContexts.Count > 0, attachmentCharacters, (attachmentCharacters + 3) / 4);
-        return contextBuilder.Build(history, project?.Instructions, project?.ContextNotes, memories, fileContexts);
+        return contextBuilder.Build(history.Select(message => new AiChatMessage(message.Role, message.Content)).ToList(), project?.Instructions, project?.ContextNotes, memories, fileContexts);
     }
 
-    private async Task<IActionResult?> AttachFilesAsync(Conversation conversation, ChatMessage message, IReadOnlyCollection<Guid> requestedIds, CancellationToken cancellationToken)
+    private async Task<bool> CanGenerateForStoredTurnAsync(Guid userMessageId, CancellationToken cancellationToken)
     {
-        var ids = requestedIds.Distinct().ToList();
+        var extensions = await db.ChatMessageAttachments.AsNoTracking()
+            .Where(attachment => attachment.ChatMessageId == userMessageId)
+            .Select(attachment => attachment.StoredFile.Extension)
+            .ToListAsync(cancellationToken);
+        return modelRouter.IsChatGenerationAvailable(extensions.Any(FileContentTypes.IsImage));
+    }
+
+    private async Task<IActionResult?> PrepareAttachmentsForGenerationAsync(Conversation conversation, Guid messageId, IReadOnlyCollection<Guid>? requestedIds, CancellationToken cancellationToken)
+    {
+        var ids = requestedIds?.Distinct().ToList() ?? [];
         var maximumAttachments = Math.Clamp(fileOptions.Value.MaxAttachmentsPerMessage, 1, 20);
         if (ids.Count > maximumAttachments) return ApiResults.Validation(this, $"You can attach up to {maximumAttachments} files to one message.");
-        if (ids.Count == 0) return null;
+        if (ids.Count == 0) return modelRouter.IsChatGenerationAvailable(false) ? null : ProviderUnavailable();
         var userId = GetUserId();
         var files = await db.StoredFiles
             .Where(file => ids.Contains(file.Id)
@@ -628,9 +891,10 @@ public sealed class ChatController(
         if (files.Count != ids.Count) return ApiResults.Error(this, StatusCodes.Status400BadRequest, "ATTACHMENT_NOT_AVAILABLE", "One or more selected files are unavailable.");
         if (files.Any(file => file.Status != StoredFileStatus.Ready || (!FileContentTypes.IsImage(file.Extension) && (file.TextExtractionStatus != FileExtractionStatus.Ready || string.IsNullOrWhiteSpace(file.ExtractedText)))))
             return ApiResults.Error(this, StatusCodes.Status422UnprocessableEntity, "ATTACHMENT_CONTENT_UNAVAILABLE", AttachmentContentFailureMessage);
+        if (!modelRouter.IsChatGenerationAvailable(files.Any(file => FileContentTypes.IsImage(file.Extension)))) return ProviderUnavailable();
         for (var index = 0; index < ids.Count; index++)
         {
-            db.ChatMessageAttachments.Add(new ChatMessageAttachment { ChatMessageId = message.Id, StoredFileId = ids[index], SortOrder = index });
+            db.ChatMessageAttachments.Add(new ChatMessageAttachment { ChatMessageId = messageId, StoredFileId = ids[index], SortOrder = index });
         }
         return null;
     }
@@ -667,7 +931,6 @@ public sealed class ChatController(
         assistant.LatencyMs = result.Usage.LatencyMs;
         assistant.FinishReason = result.Usage.FinishReason;
         conversation.UpdatedAt = DateTime.UtcNow;
-        conversation.LastMessageAt = assistant.CreatedAt;
     }
 
     private static void ResetAssistantForRetry(ChatMessage assistant)
@@ -683,6 +946,64 @@ public sealed class ChatController(
         assistant.ActualCost = null;
         assistant.LatencyMs = null;
         assistant.FinishReason = null;
+    }
+    private async Task<bool> TryClaimFailedAssistantAsync(Guid assistantId, CancellationToken cancellationToken)
+    {
+        // The conditional update is the idempotency fence for retries from
+        // multiple tabs/devices. Only one caller may move a failed assistant
+        // back to Pending; every loser must observe MESSAGE_IN_PROGRESS.
+        var updated = await db.ChatMessages
+            .Where(message => message.Id == assistantId && message.Role == ChatMessageRole.Assistant && message.Status == ChatMessageStatus.Failed)
+            .ExecuteUpdateAsync(setters => setters.SetProperty(message => message.Status, ChatMessageStatus.Pending), cancellationToken);
+        return updated == 1;
+    }
+
+    private async Task<long> ReserveNextMessageSequenceAsync(Guid conversationId, CancellationToken cancellationToken)
+    {
+        // Serialize a single regeneration slot with ordinary two-row send reservations. Sequence
+        // gaps are harmless; the key is monotonic ordering, not a dense count of transcript rows.
+        const int maxAttempts = 64;
+        for (var attempt = 0; attempt < maxAttempts; attempt++)
+        {
+            var current = await db.Conversations.AsNoTracking()
+                .Where(item => item.Id == conversationId)
+                .Select(item => item.NextMessageSequence)
+                .SingleAsync(cancellationToken);
+            var nextSequence = current + 1;
+            var updated = await db.Conversations
+                .Where(item => item.Id == conversationId && item.NextMessageSequence == current)
+                .ExecuteUpdateAsync(setters => setters.SetProperty(item => item.NextMessageSequence, nextSequence), cancellationToken);
+            if (updated == 1) return nextSequence;
+
+            await Task.Delay(TimeSpan.FromMilliseconds(Math.Min(25, attempt + 1)), cancellationToken);
+        }
+
+        throw new InvalidOperationException($"Could not reserve conversation message sequence after {maxAttempts} attempts.");
+    }
+
+    private async Task<long> ReserveMessageSequencePairAsync(Guid conversationId, CancellationToken cancellationToken)
+    {
+        // Reserve both message slots with a compare-and-swap update. The
+        // transaction keeps the reservation and message inserts atomic while
+        // the conditional update serializes concurrent writers without
+        // provider-specific locking SQL.
+        const int maxAttempts = 64;
+        for (var attempt = 0; attempt < maxAttempts; attempt++)
+        {
+            var current = await db.Conversations.AsNoTracking()
+                .Where(item => item.Id == conversationId)
+                .Select(item => item.NextMessageSequence)
+                .SingleAsync(cancellationToken);
+            var assistantSequence = current + 2;
+            var updated = await db.Conversations
+                .Where(item => item.Id == conversationId && item.NextMessageSequence == current)
+                .ExecuteUpdateAsync(setters => setters.SetProperty(item => item.NextMessageSequence, assistantSequence), cancellationToken);
+            if (updated == 1) return assistantSequence;
+
+            await Task.Delay(TimeSpan.FromMilliseconds(Math.Min(25, attempt + 1)), cancellationToken);
+        }
+
+        throw new InvalidOperationException($"Could not reserve conversation message sequence after {maxAttempts} attempts.");
     }
 
     private Task<UsageTransaction> BeginUsageAsync(PreparedChat prepared, CancellationToken cancellationToken) => usageLedger.GetOrCreatePendingAsync(
@@ -734,17 +1055,39 @@ public sealed class ChatController(
         ? new { code = envelope.Error.Code, message = envelope.Error.Message }
         : new { code = "CHAT_REQUEST_FAILED", message = "Taslim could not process that chat request." };
 
+    private const string ProviderUnavailableCode = "AI_PROVIDER_UNAVAILABLE";
+
+    private const string ProviderUnavailableMessage = "Taslim Chat is not available right now. Please try again later.";
+
+    private IActionResult ProviderUnavailable() => ApiResults.Error(this, StatusCodes.Status503ServiceUnavailable, ProviderUnavailableCode, ProviderUnavailableMessage);
+
     private IActionResult GenerationFailure() => ApiResults.Error(this, StatusCodes.Status503ServiceUnavailable, "AI_GENERATION_FAILED", "Taslim could not generate a response right now. Your message was saved.");
 
     private async Task<Conversation?> FindAuthorizedConversation(Guid conversationId, CancellationToken cancellationToken)
     {
-        var userId = GetUserId();
+        if (!TryGetUserId(out var userId)) return null;
         var conversation = await db.Conversations.FirstOrDefaultAsync(item => item.Id == conversationId, cancellationToken);
         if (conversation is null || conversation.UserId != userId) return null;
         return await access.IsMemberAsync(userId, conversation.WorkspaceId, cancellationToken) ? conversation : null;
     }
 
-    private Guid GetUserId() => Guid.Parse(User.FindFirst(ClaimTypes.NameIdentifier)?.Value ?? throw new InvalidOperationException("Authenticated user identifier is missing."));
+    /// <summary>
+    /// Resolves the calling principal fail-closed. This identifier scopes workspace membership,
+    /// conversation ownership, attachment selection and usage attribution, so a claim that is
+    /// missing, malformed or the zero GUID is never treated as a caller identity:
+    /// <c>Guid.Parse</c> accepts <c>00000000-0000-0000-0000-000000000000</c>, which let a forged
+    /// claim act as that default identity, and it throws <see cref="FormatException"/> for any
+    /// other unusable value, which the global handler surfaces as a 500 instead of a 401.
+    /// </summary>
+    private bool TryGetUserId(out Guid userId)
+    {
+        var value = User.FindFirst(ClaimTypes.NameIdentifier)?.Value;
+        return Guid.TryParse(value, out userId) && userId != Guid.Empty;
+    }
+
+    private Guid GetUserId() => TryGetUserId(out var userId)
+        ? userId
+        : throw new InvalidOperationException("Authenticated user identifier is missing or malformed.");
 
     private async Task WriteEventAsync(string type, object data, CancellationToken cancellationToken)
     {

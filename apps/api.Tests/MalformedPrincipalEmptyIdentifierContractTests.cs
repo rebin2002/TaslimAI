@@ -15,12 +15,12 @@ using Xunit;
 namespace Taslim.Api.Tests;
 
 /// <summary>
-/// Review evidence for the consolidated server-side malformed-principal gates.
+/// Regression contract for the server-side principal gates.
 /// A parseable identifier is not automatically a usable one: every Guid.Empty textual
 /// form is the default value of an unset user identifier, so a principal gate that accepts
 /// it stays open until some downstream membership check happens to close it. Files and movie
-/// dialogue already reject Guid.Empty; these cases pin the same fail-closed contract for all
-/// eight reviewed areas and prove that a well-formed identifier is never locked out by it.
+/// dialogue already reject Guid.Empty; these cases pin the same fail-closed contract across all
+/// eight covered areas and prove that a well-formed identifier is not locked out by the guard.
 /// </summary>
 public sealed class MalformedPrincipalEmptyIdentifierContractTests
 {

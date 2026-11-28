@@ -1,0 +1,523 @@
+using Taslim.Api.AcademicWorkflow;
+using Xunit;
+
+namespace Taslim.Api.Tests;
+
+/// <summary>
+/// Resume-after-crash, replay, concurrency, and approval-revision semantics. These are
+/// the properties that let a long academic project survive worker restarts, duplicate
+/// intake, and parallel writers without redoing or double-paying finished work.
+/// </summary>
+public sealed class AcademicWorkflowResumabilityTests
+{
+    private sealed class BlockingStageHandler(AcademicStage stage) : IAcademicStageHandler
+    {
+        public AcademicStage Stage { get; } = stage;
+        public int EstimateCalls { get; private set; }
+        public int ExecuteCalls { get; private set; }
+        public TaskCompletionSource<bool> Started { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public AcademicStageEstimate Estimate(AcademicStageContext context)
+        {
+            EstimateCalls++;
+            return new AcademicStageEstimate { EstimatedCostUsd = 0.5m, EstimatedProviderCalls = 2 };
+        }
+
+        public async Task<AcademicStageOutcome> ExecuteAsync(AcademicStageContext context, CancellationToken cancellationToken)
+        {
+            ExecuteCalls++;
+            Started.TrySetResult(true);
+            await Task.Delay(Timeout.Infinite, cancellationToken);
+            throw new InvalidOperationException("The blocking test handler should only exit through cancellation.");
+        }
+    }
+
+    private sealed class ConcurrentApprovalStore(IAcademicWorkflowStateStore inner) : IAcademicWorkflowStateStore
+    {
+        private readonly TaskCompletionSource<bool> bothApprovalLoads = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly SemaphoreSlim commitGate = new(1, 1);
+        private int loadCount;
+
+        public async Task<AcademicWorkflowSnapshot?> LoadAsync(Guid projectId, CancellationToken cancellationToken)
+        {
+            var snapshot = await inner.LoadAsync(projectId, cancellationToken);
+            var arrival = Interlocked.Increment(ref loadCount);
+            if (arrival <= 2)
+            {
+                if (arrival == 2) bothApprovalLoads.TrySetResult(true);
+                await bothApprovalLoads.Task.WaitAsync(cancellationToken);
+            }
+            return snapshot;
+        }
+
+        public Task<AcademicWorkflowSnapshot?> FindByRequestKeyAsync(Guid workspaceId, string requestKey, CancellationToken cancellationToken) =>
+            inner.FindByRequestKeyAsync(workspaceId, requestKey, cancellationToken);
+
+        public Task<bool> TryCreateAsync(AcademicWorkflowSnapshot snapshot, CancellationToken cancellationToken) =>
+            inner.TryCreateAsync(snapshot, cancellationToken);
+
+        public async Task<AcademicCommitOutcome> TryCommitAsync(
+            AcademicWorkflowSnapshot snapshot,
+            long expectedRevision,
+            string checkpointKey,
+            CancellationToken cancellationToken)
+        {
+            await commitGate.WaitAsync(cancellationToken);
+            try
+            {
+                return await inner.TryCommitAsync(snapshot, expectedRevision, checkpointKey, cancellationToken);
+            }
+            finally
+            {
+                commitGate.Release();
+            }
+        }
+
+        public async Task<AcademicCommitOutcome> TryCommitAttemptAsync(
+            AcademicWorkflowSnapshot snapshot,
+            long expectedRevision,
+            string checkpointKey,
+            Guid expectedAttemptId,
+            CancellationToken cancellationToken)
+        {
+            await commitGate.WaitAsync(cancellationToken);
+            try
+            {
+                return await inner.TryCommitAttemptAsync(snapshot, expectedRevision, checkpointKey, expectedAttemptId, cancellationToken);
+            }
+            finally
+            {
+                commitGate.Release();
+            }
+        }
+
+        public async Task<AcademicCommitOutcome> TryRecoverAttemptAsync(
+            AcademicWorkflowSnapshot snapshot,
+            long expectedRevision,
+            string checkpointKey,
+            Guid? expectedAttemptId,
+            CancellationToken cancellationToken)
+        {
+            await commitGate.WaitAsync(cancellationToken);
+            try
+            {
+                return await inner.TryRecoverAttemptAsync(snapshot, expectedRevision, checkpointKey, expectedAttemptId, cancellationToken);
+            }
+            finally
+            {
+                commitGate.Release();
+            }
+        }
+    }
+
+    private sealed class DuplicatePlanCompletionStore(IAcademicWorkflowStateStore inner) : IAcademicWorkflowStateStore
+    {
+        public Task<AcademicWorkflowSnapshot?> LoadAsync(Guid projectId, CancellationToken cancellationToken) =>
+            inner.LoadAsync(projectId, cancellationToken);
+
+        public Task<AcademicWorkflowSnapshot?> FindByRequestKeyAsync(Guid workspaceId, string requestKey, CancellationToken cancellationToken) =>
+            inner.FindByRequestKeyAsync(workspaceId, requestKey, cancellationToken);
+
+        public Task<bool> TryCreateAsync(AcademicWorkflowSnapshot snapshot, CancellationToken cancellationToken) =>
+            inner.TryCreateAsync(snapshot, cancellationToken);
+
+        public async Task<AcademicCommitOutcome> TryCommitAsync(
+            AcademicWorkflowSnapshot snapshot,
+            long expectedRevision,
+            string checkpointKey,
+            CancellationToken cancellationToken)
+        {
+            var outcome = await inner.TryCommitAsync(snapshot, expectedRevision, checkpointKey, cancellationToken);
+            // Model a commit whose durable write won but whose caller observes the replay
+            // classification for the identical completion checkpoint.
+            return expectedRevision == 1
+                && snapshot.State == AcademicProjectState.AwaitingApproval
+                && outcome.Status == AcademicCommitStatus.Committed
+                    ? new AcademicCommitOutcome(AcademicCommitStatus.DuplicateCheckpoint)
+                    : outcome;
+        }
+
+        public async Task<AcademicCommitOutcome> TryCommitAttemptAsync(
+            AcademicWorkflowSnapshot snapshot,
+            long expectedRevision,
+            string checkpointKey,
+            Guid expectedAttemptId,
+            CancellationToken cancellationToken)
+        {
+            var outcome = await inner.TryCommitAttemptAsync(snapshot, expectedRevision, checkpointKey, expectedAttemptId, cancellationToken);
+            return expectedRevision == 1
+                && snapshot.State == AcademicProjectState.AwaitingApproval
+                && outcome.Status == AcademicCommitStatus.Committed
+                    ? new AcademicCommitOutcome(AcademicCommitStatus.DuplicateCheckpoint)
+                    : outcome;
+        }
+
+        public Task<AcademicCommitOutcome> TryRecoverAttemptAsync(
+            AcademicWorkflowSnapshot snapshot,
+            long expectedRevision,
+            string checkpointKey,
+            Guid? expectedAttemptId,
+            CancellationToken cancellationToken) =>
+            inner.TryRecoverAttemptAsync(snapshot, expectedRevision, checkpointKey, expectedAttemptId, cancellationToken);
+    }
+
+    [Fact]
+    public async Task Fresh_Worker_Resuming_The_Same_Store_Skips_Completed_Stages()
+    {
+        var harness = new AcademicWorkflowHarness();
+        await harness.StartAsync("restart"); // Plan stage completes and parks on its gate.
+        Assert.Equal(1, harness.Handlers[AcademicStage.Plan].Calls.Count);
+
+        // A new worker: same durable store, brand-new handler doubles.
+        var successor = new Dictionary<AcademicStage, ScriptedStageHandler>();
+        foreach (var stage in AcademicStageOrder.Stages)
+            successor[stage] = new ScriptedStageHandler(stage);
+        var secondWorker = new AcademicWorkflowOrchestrator(
+            harness.Store, successor.Values.Cast<IAcademicStageHandler>(), new SteadyTimeProvider());
+
+        var resumed = await secondWorker.ResumeAsync(harness.ProjectId, CancellationToken.None);
+
+        Assert.Equal(AcademicWorkflowRunStatus.AwaitingApproval, resumed.Status);
+        Assert.Equal(AcademicApprovalKind.Plan, resumed.Snapshot!.PendingApproval!.Kind);
+        Assert.Equal(0, successor[AcademicStage.Plan].Calls.Count);
+        Assert.Equal(0, successor[AcademicStage.Discover].Calls.Count);
+    }
+
+    [Fact]
+    public async Task Recovering_At_Maximum_Attempts_Fails_Without_Invoking_Another_Handler()
+    {
+        var request = AcademicWorkflowFixtures.Request("recovered-at-attempt-cap") with { MaxStageAttempts = 1 };
+        var store = new InMemoryAcademicWorkflowStateStore();
+        var handler = new BlockingStageHandler(AcademicStage.Plan);
+        var orchestrator = new AcademicWorkflowOrchestrator(store, [handler], new SteadyTimeProvider());
+        using var cancellation = new CancellationTokenSource();
+
+        var interruptedTask = orchestrator.StartAsync(request, cancellation.Token);
+        await handler.Started.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        cancellation.Cancel();
+        var interrupted = await interruptedTask;
+
+        Assert.Equal(AcademicWorkflowRunStatus.StageFailure, interrupted.Status);
+        Assert.Equal("STAGE_CANCELLED", interrupted.Code);
+        var running = (await store.LoadAsync(interrupted.Snapshot!.ProjectId, CancellationToken.None))!;
+        Assert.Equal(request.MaxStageAttempts, running.Stage(AcademicStage.Plan).AttemptCount);
+        var attemptId = Assert.IsType<AcademicLiveAttempt>(running.ActiveAttempt).AttemptId;
+
+        var recovered = await orchestrator.RecoverAbandonedAttemptAsync(
+            running.ProjectId,
+            running.Revision,
+            attemptId,
+            Guid.NewGuid(),
+            "Verified the cancelled test attempt is abandoned.",
+            CancellationToken.None);
+
+        Assert.Equal(AcademicWorkflowRunStatus.StageFailure, recovered.Status);
+        Assert.Equal(AcademicStageState.Failed, recovered.Snapshot!.Stage(AcademicStage.Plan).State);
+        Assert.Equal(request.MaxStageAttempts, recovered.Snapshot.Stage(AcademicStage.Plan).AttemptCount);
+        Assert.Equal(1, handler.EstimateCalls);
+        Assert.Equal(1, handler.ExecuteCalls);
+
+        var resumed = await orchestrator.ResumeAsync(running.ProjectId, CancellationToken.None);
+
+        Assert.Equal(AcademicWorkflowRunStatus.ProjectFailed, resumed.Status);
+        Assert.Equal("MAX_STAGE_ATTEMPTS_EXCEEDED", resumed.Code);
+        Assert.Equal(AcademicProjectState.Failed, resumed.Snapshot!.State);
+        Assert.Equal(AcademicStageState.Failed, resumed.Snapshot.Stage(AcademicStage.Plan).State);
+        Assert.Equal(request.MaxStageAttempts, resumed.Snapshot.Stage(AcademicStage.Plan).AttemptCount);
+        Assert.Equal(1, handler.EstimateCalls);
+        Assert.Equal(1, handler.ExecuteCalls);
+    }
+
+    [Fact]
+    public async Task Retryable_Failure_Reruns_The_Same_Stage_Under_The_Same_Key_Once()
+    {
+        var harness = new AcademicWorkflowHarness();
+        harness.Handlers[AcademicStage.Discover].QueueFailure(usage: new AcademicUsageRecord { CostUsd = 0.3m, ProviderCalls = 1 });
+
+        await harness.StartAsync("retry");
+        await harness.ApprovePendingAsync(); // releases the Plan gate
+        var failed = await harness.Orchestrator.ResumeAsync(harness.ProjectId, CancellationToken.None);
+
+        Assert.Equal(AcademicWorkflowRunStatus.StageFailure, failed.Status);
+        var stageRecord = failed.Snapshot!.Stage(AcademicStage.Discover);
+        Assert.Equal(AcademicStageState.Failed, stageRecord.State);
+        Assert.Equal(1, stageRecord.AttemptCount);
+        Assert.Equal(0, failed.Snapshot.Sources.Count);
+
+        var recovered = await harness.Orchestrator.ResumeAsync(harness.ProjectId, CancellationToken.None);
+        Assert.Equal(AcademicWorkflowRunStatus.AwaitingApproval, recovered.Status); // Discover+Screen then gate
+
+        var recoveredRecord = recovered.Snapshot!.Stage(AcademicStage.Discover);
+        Assert.Equal(2, harness.Handlers[AcademicStage.Discover].Calls.Count);
+        Assert.Equal(2, recoveredRecord.AttemptCount);
+        Assert.Equal(stageRecord.IdempotencyKey, recoveredRecord.IdempotencyKey);
+        Assert.Equal(stageRecord.InputFingerprint, recoveredRecord.InputFingerprint);
+
+        // Each attempt metered exactly once, first attempt's failure usage retained.
+        var discoverEntries = recovered.Snapshot.Budget.Where(entry => entry.Stage == AcademicStage.Discover).ToList();
+        Assert.Equal(2, discoverEntries.Count);
+        Assert.Equal(0.3m, discoverEntries[0].ChargedUsd);
+        Assert.Equal(0.5m, discoverEntries[1].ChargedUsd);
+    }
+
+    [Fact]
+    public async Task Throwing_Handler_Leaves_Reservation_Charged_And_Project_Resumable()
+    {
+        var harness = new AcademicWorkflowHarness();
+        harness.Handlers[AcademicStage.Discover].QueueException(new HttpRequestException("provider socket died"));
+
+        await harness.StartAsync("crash-attempt");
+        await harness.ApprovePendingAsync();
+        var crashed = await harness.Orchestrator.ResumeAsync(harness.ProjectId, CancellationToken.None);
+
+        Assert.Equal(AcademicWorkflowRunStatus.StageFailure, crashed.Status);
+        Assert.Equal("STAGE_EXCEPTION", crashed.Code);
+        var entry = Assert.Single(crashed.Snapshot!.Budget.Where(item => item.Stage == AcademicStage.Discover));
+        Assert.Null(entry.Committed);
+        Assert.Equal(entry.ReservedUsd, entry.ChargedUsd); // crash billing stays honest: reserved counts
+
+        var recovered = await harness.Orchestrator.ResumeAsync(harness.ProjectId, CancellationToken.None);
+        Assert.Equal(AcademicWorkflowRunStatus.AwaitingApproval, recovered.Status);
+        Assert.Equal(2, recovered.Snapshot!.Budget.Count(entry => entry.Stage == AcademicStage.Discover));
+    }
+
+    [Fact]
+    public async Task Generic_writer_cannot_advance_a_durably_claimed_live_attempt()
+    {
+        var harness = new AcademicWorkflowHarness();
+        var rogueWriterFired = false;
+        AcademicCommitStatus? rogueCommitStatus = null;
+        harness.Handlers[AcademicStage.Discover].OnCall = context =>
+        {
+            if (rogueWriterFired)
+                return;
+            rogueWriterFired = true;
+            // Generic commits cannot mutate a snapshot while a live attempt owns it.
+            var hijacked = context.Snapshot.Clone();
+            hijacked.Revision = context.Snapshot.Revision + 1;
+            hijacked.StateDetail = "rogue writer";
+            rogueCommitStatus = harness.Store.TryCommitAsync(
+                hijacked, context.Snapshot.Revision, "rogue|checkpoint", CancellationToken.None).Result.Status;
+        };
+
+        await harness.StartAsync("conflict");
+        await harness.ApprovePendingAsync();
+        var raced = await harness.Orchestrator.ResumeAsync(harness.ProjectId, CancellationToken.None);
+
+        Assert.Equal(AcademicCommitStatus.RevisionConflict, rogueCommitStatus);
+        Assert.Equal(AcademicWorkflowRunStatus.AwaitingApproval, raced.Status);
+
+        // The owning worker remains able to commit; no stale generic write interrupted it.
+        var after = await harness.DrainFromCurrentAsync();
+        Assert.Equal(AcademicWorkflowRunStatus.Completed, after.Status);
+        Assert.Equal(4, (await harness.Store.LoadAsync(harness.ProjectId, CancellationToken.None))!.Sources.Count);
+    }
+
+    [Fact]
+    public async Task Approval_Decision_Replay_Is_Applied_Exactly_Once()
+    {
+        var harness = new AcademicWorkflowHarness();
+        await harness.StartAsync("decision-replay");
+        var before = await harness.Store.LoadAsync(harness.ProjectId, CancellationToken.None);
+        var beforeRevision = before!.Revision;
+        var pending = before.PendingApproval!;
+
+        var first = await harness.Orchestrator.SubmitApprovalDecisionAsync(
+            harness.ProjectId, AcademicApprovalKind.Plan, pending.ApprovalKey, pending.CheckpointRevision,
+            AcademicApprovalDecision.Approved, "ok", Guid.NewGuid(), CancellationToken.None);
+        var replay = await harness.Orchestrator.SubmitApprovalDecisionAsync(
+            harness.ProjectId, AcademicApprovalKind.Plan, pending.ApprovalKey, pending.CheckpointRevision,
+            AcademicApprovalDecision.Approved, "ok", Guid.NewGuid(), CancellationToken.None);
+
+        Assert.Equal(AcademicApprovalSubmissionStatus.Applied, first.Status);
+        Assert.Equal(AcademicApprovalSubmissionStatus.AlreadyApplied, replay.Status);
+        Assert.Equal(beforeRevision + 1, first.Snapshot!.Revision);
+        Assert.Equal(1, replay.Snapshot!.Approvals.Count);
+    }
+
+    [Fact]
+    public async Task Concurrent_different_decisions_report_only_the_durable_winner_as_applied()
+    {
+        var harness = new AcademicWorkflowHarness();
+        await harness.StartAsync("concurrent-approval-decisions");
+        var pending = (await harness.Store.LoadAsync(harness.ProjectId, CancellationToken.None))!.PendingApproval!;
+        var racingStore = new ConcurrentApprovalStore(harness.Store);
+        var firstWorker = new AcademicWorkflowOrchestrator(racingStore, [], TimeProvider.System);
+        var secondWorker = new AcademicWorkflowOrchestrator(racingStore, [], TimeProvider.System);
+
+        var approvedTask = firstWorker.SubmitApprovalDecisionAsync(
+            harness.ProjectId, pending.Kind, pending.ApprovalKey, pending.CheckpointRevision,
+            AcademicApprovalDecision.Approved, "approve", Guid.NewGuid(), CancellationToken.None);
+        var rejectedTask = secondWorker.SubmitApprovalDecisionAsync(
+            harness.ProjectId, pending.Kind, pending.ApprovalKey, pending.CheckpointRevision,
+            AcademicApprovalDecision.Rejected, "reject", Guid.NewGuid(), CancellationToken.None);
+        var results = await Task.WhenAll(approvedTask, rejectedTask);
+
+        var applied = Assert.Single(results.Where(result => result.Status == AcademicApprovalSubmissionStatus.Applied));
+        var conflict = Assert.Single(results.Where(result => result.Status == AcademicApprovalSubmissionStatus.DecisionConflict));
+        var committed = (await harness.Store.LoadAsync(harness.ProjectId, CancellationToken.None))!;
+        var decision = Assert.Single(committed.Approvals);
+
+        Assert.Equal(pending.ApprovalKey, decision.ApprovalKey);
+        Assert.Equal(pending.CheckpointRevision, decision.CheckpointRevision);
+        Assert.Equal(decision.Decision, Assert.Single(applied.Snapshot!.Approvals).Decision);
+        Assert.Equal(committed.Revision, conflict.Snapshot!.Revision);
+        Assert.Equal(decision.Decision == AcademicApprovalDecision.Rejected
+            ? AcademicProjectState.Cancelled
+            : AcademicProjectState.Running, committed.State);
+        Assert.Null(committed.PendingApproval);
+    }
+
+    [Fact]
+    public async Task Duplicate_stage_completion_acknowledgement_is_not_reported_as_a_new_success()
+    {
+        var inner = new InMemoryAcademicWorkflowStateStore();
+        var request = AcademicWorkflowFixtures.Request("duplicate-stage-completion");
+        var snapshot = new AcademicWorkflowSnapshot
+        {
+            ProjectId = AcademicWorkflowOrchestrator.DeriveProjectId(request.WorkspaceId, request.RequestKey),
+            WorkspaceId = request.WorkspaceId,
+            RequestKey = request.RequestKey,
+            Request = request,
+            State = AcademicProjectState.Running,
+            Revision = 0,
+            CreatedAtUtc = DateTime.UtcNow,
+            UpdatedAtUtc = DateTime.UtcNow,
+        };
+        Assert.True(await inner.TryCreateAsync(snapshot, CancellationToken.None));
+
+        var plan = new ScriptedStageHandler(AcademicStage.Plan);
+        var store = new DuplicatePlanCompletionStore(inner);
+        var engine = new AcademicWorkflowOrchestrator(store, [plan], new SteadyTimeProvider());
+        var result = await engine.ResumeAsync(snapshot.ProjectId, CancellationToken.None);
+
+        Assert.Equal(AcademicWorkflowRunStatus.RevisionConflict, result.Status);
+        Assert.Equal(AcademicProjectState.AwaitingApproval, result.Snapshot!.State);
+        Assert.Equal(1, plan.Calls.Count);
+        var durable = await inner.LoadAsync(snapshot.ProjectId, CancellationToken.None);
+        Assert.Equal(AcademicProjectState.AwaitingApproval, durable!.State);
+        Assert.Equal(AcademicApprovalKind.Plan, durable.PendingApproval!.Kind);
+    }
+
+    [Fact]
+    public async Task Undefined_numeric_approval_decision_leaves_the_pending_checkpoint_untouched()
+    {
+        var harness = new AcademicWorkflowHarness();
+        await harness.StartAsync("invalid-decision");
+        var before = await harness.Store.LoadAsync(harness.ProjectId, CancellationToken.None);
+        var pending = before!.PendingApproval!;
+        var invalidDecision = (AcademicApprovalDecision)int.MaxValue;
+
+        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(async () =>
+            await harness.Orchestrator.SubmitApprovalDecisionAsync(
+                harness.ProjectId,
+                AcademicApprovalKind.Plan,
+                pending.ApprovalKey,
+                pending.CheckpointRevision,
+                invalidDecision,
+                "must not be recorded",
+                Guid.NewGuid(),
+                CancellationToken.None));
+
+        var afterInvalid = await harness.Store.LoadAsync(harness.ProjectId, CancellationToken.None);
+        Assert.Equal(before!.Revision, afterInvalid!.Revision);
+        Assert.Equal(AcademicProjectState.AwaitingApproval, afterInvalid.State);
+        Assert.Equal(before.PendingApproval!.ApprovalKey, afterInvalid.PendingApproval!.ApprovalKey);
+        Assert.Empty(afterInvalid.Approvals);
+
+        var valid = await harness.Orchestrator.SubmitApprovalDecisionAsync(
+            harness.ProjectId,
+            AcademicApprovalKind.Plan,
+            pending.ApprovalKey,
+            pending.CheckpointRevision,
+            AcademicApprovalDecision.Approved,
+            "approved after validation",
+            Guid.NewGuid(),
+            CancellationToken.None);
+
+        Assert.Equal(AcademicApprovalSubmissionStatus.Applied, valid.Status);
+        Assert.Equal(AcademicProjectState.Running, valid.Snapshot!.State);
+        Assert.Null(valid.Snapshot.PendingApproval);
+        Assert.Equal(AcademicApprovalDecision.Approved, Assert.Single(valid.Snapshot.Approvals).Decision);
+        Assert.Equal(before.Revision + 1, valid.Snapshot.Revision);
+    }
+
+    [Fact]
+    public async Task Late_Decision_For_A_Stale_Kind_Is_Rejected_Without_State_Movement()
+    {
+        var harness = new AcademicWorkflowHarness();
+        await harness.StartAsync("wrong-gate");
+        var pending = (await harness.Store.LoadAsync(harness.ProjectId, CancellationToken.None))!.PendingApproval!;
+
+        var wrong = await harness.Orchestrator.SubmitApprovalDecisionAsync(
+            harness.ProjectId, AcademicApprovalKind.ChapterDraft, pending.ApprovalKey, pending.CheckpointRevision,
+            AcademicApprovalDecision.Approved, null, Guid.NewGuid(), CancellationToken.None);
+
+        Assert.Equal(AcademicApprovalSubmissionStatus.NoPendingApproval, wrong.Status);
+        Assert.Equal(AcademicProjectState.AwaitingApproval, wrong.Snapshot!.State);
+        Assert.Empty(wrong.Snapshot.Approvals);
+    }
+
+    [Fact]
+    public async Task RequestRevision_Reruns_The_Gated_Stage_Clearing_Downstream_Artifacts()
+    {
+        var harness = new AcademicWorkflowHarness();
+        await harness.ResumeUntilGateAsync(AcademicApprovalKind.Synthesis);
+        var pending = (await harness.Store.LoadAsync(harness.ProjectId, CancellationToken.None))!.PendingApproval!;
+        var themesBefore = (await harness.Store.LoadAsync(harness.ProjectId, CancellationToken.None))!.Themes.Count;
+        Assert.Equal(2, themesBefore);
+
+        var submission = await harness.Orchestrator.SubmitApprovalDecisionAsync(
+            harness.ProjectId,
+            AcademicApprovalKind.Synthesis,
+            pending.ApprovalKey,
+            pending.CheckpointRevision,
+            AcademicApprovalDecision.RequestRevision,
+            "Fold in the KRG-specific pricing literature and state the gap more precisely.",
+            Guid.NewGuid(),
+            CancellationToken.None);
+        Assert.Equal(AcademicApprovalSubmissionStatus.Applied, submission.Status);
+
+        var pausedAgain = await harness.Orchestrator.ResumeAsync(harness.ProjectId, CancellationToken.None);
+
+        Assert.Equal(AcademicWorkflowRunStatus.AwaitingApproval, pausedAgain.Status);
+        Assert.Equal(AcademicApprovalKind.Synthesis, pausedAgain.Snapshot!.PendingApproval!.Kind);
+        var synthesizeCalls = harness.Handlers[AcademicStage.Synthesize].Calls;
+        Assert.Equal(2, synthesizeCalls.Count);
+        Assert.Null(synthesizeCalls[0].ApprovalFeedback);
+        Assert.Contains("KRG-specific pricing literature", synthesizeCalls[1].ApprovalFeedback);
+        Assert.Equal(2, pausedAgain.Snapshot.Themes.Count);            // replaced, never duplicated
+        Assert.Equal(2, pausedAgain.Snapshot.Evidence.Count);          // upstream artifacts survive
+        Assert.NotEqual(synthesizeCalls[0].IdempotencyKey, synthesizeCalls[1].IdempotencyKey); // new lineage
+    }
+
+    [Fact]
+    public async Task Rejected_Approval_Cancels_The_Project_Terminally()
+    {
+        var harness = new AcademicWorkflowHarness();
+        await harness.StartAsync("reject");
+        var pending = (await harness.Store.LoadAsync(harness.ProjectId, CancellationToken.None))!.PendingApproval!;
+
+        var submission = await harness.Orchestrator.SubmitApprovalDecisionAsync(
+            harness.ProjectId, AcademicApprovalKind.Plan, pending.ApprovalKey, pending.CheckpointRevision,
+            AcademicApprovalDecision.Rejected, "Scope needs rework first.", Guid.NewGuid(), CancellationToken.None);
+
+        Assert.Equal(AcademicApprovalSubmissionStatus.Applied, submission.Status);
+        Assert.Equal(AcademicProjectState.Cancelled, submission.Snapshot!.State);
+        Assert.Equal("APPROVAL_REJECTED", submission.Snapshot.StateCode);
+
+        var resumed = await harness.Orchestrator.ResumeAsync(harness.ProjectId, CancellationToken.None);
+        Assert.Equal(AcademicWorkflowRunStatus.Cancelled, resumed.Status);
+        Assert.Equal(0, harness.Handlers[AcademicStage.Discover].Calls.Count);
+    }
+
+    [Fact]
+    public async Task Resume_On_Unknown_Project_Reports_NotFound()
+    {
+        var harness = new AcademicWorkflowHarness();
+
+        var missing = await harness.Orchestrator.ResumeAsync(Guid.NewGuid(), CancellationToken.None);
+
+        Assert.Equal(AcademicWorkflowRunStatus.NotFound, missing.Status);
+    }
+}

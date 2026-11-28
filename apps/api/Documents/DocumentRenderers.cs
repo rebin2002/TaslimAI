@@ -28,6 +28,18 @@ public sealed class DocumentRenderer : IDocumentRenderer
         if (Interlocked.Exchange(ref questPdfConfigured, 1) == 0)
         {
             QuestPDF.Settings.License = LicenseType.Community;
+            // QuestPDF 2026.9 aborts GeneratePdf() on the first glyph no configured font can draw.
+            // PDF text here is user titles and AI-written report content, which legitimately carry
+            // characters outside the shipped Latin/Arabic coverage (emoji, arrows, CJK), and
+            // DocumentDraftValidator admits every one of them on purpose - the DOCX representation
+            // renders them with the reader's own fonts. So the strict default fails a whole Document
+            // export - or a Research report, after its provider spend - at the last percent of the
+            // job, permanently, on a draft that admission and validation both accepted. Uncovered
+            // glyphs now degrade to blanks while the export still produces a valid, readable file.
+            // Settings.ThrowOnMissingFontFamilies deliberately stays enabled: a misconfigured font
+            // family is a deployment error that must keep failing loudly instead of silently
+            // rendering every page in a fallback font.
+            QuestPDF.Settings.ThrowOnMissingTextGlyphs = false;
             var fontPath = Path.Combine(AppContext.BaseDirectory, "Fonts", "NotoSansArabic-Regular.ttf");
             if (File.Exists(fontPath)) FontManager.RegisterFontFromFile(fontPath);
         }
@@ -72,6 +84,13 @@ public sealed class DocumentRenderer : IDocumentRenderer
                 });
                 page.Footer().AlignCenter().Text(text => { text.Span("Taslim · "); text.CurrentPageNumber(); });
             });
+        }).WithMetadata(new DocumentMetadata
+        {
+            // The export's download name is derived from the requested title, so the PDF has to carry that same
+            // document identity inside it. Two different documents from one workspace could otherwise render
+            // byte-identical PDFs, and content-addressed generated-file storage then reuses the earlier file row
+            // for the later job - which drops the later asset's PDF representation and its download button.
+            Title = input.Title,
         }).GeneratePdf();
         return new RenderedDocument(AssetRepresentationTypes.Pdf, SafeFileName(input.Title, ".pdf"), "application/pdf", bytes);
     }

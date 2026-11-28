@@ -345,6 +345,8 @@ public sealed class MovieShotBenchmarkScorer
             ValidateText(errors, $"{field}.{nameof(item.EvidenceReference)}", item.EvidenceReference, MaximumTextLength, "Evidence reference");
             if (item.ObservedAtUtc == default)
                 errors.Add(new("required", $"{field}.{nameof(item.ObservedAtUtc)}", "Observed-at time is required for empirical evidence."));
+            else if (item.ObservedAtUtc > DateTime.UtcNow)
+                errors.Add(new("future_timestamp", $"{field}.{nameof(item.ObservedAtUtc)}", "Observed-at time cannot be in the future."));
         }
     }
 

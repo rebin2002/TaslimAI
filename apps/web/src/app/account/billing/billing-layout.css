@@ -17,6 +17,25 @@
   border-bottom: 1px solid #e8edf2;
 }
 
+/* #700: the "Account" back link above the page title is the only enabled keyboard control on
+   this route, and the shared `.back-link` sizing paints it 17 CSS px tall -- below the 24x24
+   CSS px minimum WCAG 2.5.8 asks of a target, identically at 320px/100% and at 200% zoom. The
+   hit box is raised inside the billing scope only. Presentation only: no markup, label, href,
+   price, credit, ledger or charging semantics are involved, and the link text and its position
+   in the reading order are unchanged. */
+.billing-page .back-link {
+  min-height: 24px;
+}
+
+/* At the 160px layout viewport produced by phone-width 200% zoom, the root's global smooth
+   scrolling can leave Tab-focused controls horizontally stranded while its animation is in flight.
+   Keep browser-managed focus scrolling immediate on this route and only below the 320px canvas. */
+@media (max-width: 320px) {
+  html:has(.billing-page) {
+    scroll-behavior: auto;
+  }
+}
+
 .billing-page .usage-header h1 {
   max-width: 100%;
   margin: 9px 0 8px;
