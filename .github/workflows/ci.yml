@@ -196,8 +196,22 @@ jobs:
           NEXT_PUBLIC_API_URL: http://localhost:5000
           NEXT_PUBLIC_ACADEMIC_RESEARCH_ENABLED: "true"
           E2E_TEST_PASSWORD: E2eStrongPassword!123
+          E2E_SERVER_MODE: development
           CI: "true"
         run: npm run test:e2e --workspace @taslim/web
+      - name: Run private-cache browser tests against production Next server
+        env:
+          E2E_API_URL: http://localhost:5000
+          NEXT_PUBLIC_API_URL: https://127.0.0.1:1
+          NEXT_PUBLIC_ACADEMIC_RESEARCH_ENABLED: "true"
+          E2E_TEST_PASSWORD: E2eStrongPassword!123
+          E2E_SERVER_MODE: production
+          CI: "true"
+        run: >-
+          npm run test:e2e --workspace @taslim/web --
+          e2e/private-route-cache-isolation.spec.ts
+          e2e/private-route-final-response-cache.spec.ts
+          --grep-invert 'second session|synthetic signed-in session'
       - if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:

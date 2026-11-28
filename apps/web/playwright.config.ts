@@ -1,6 +1,13 @@
 import { defineConfig, devices } from "@playwright/test";
 
 const webUrl = process.env.E2E_WEB_URL ?? "http://localhost:3000";
+const serverMode = process.env.E2E_SERVER_MODE ?? "development";
+if (serverMode !== "development" && serverMode !== "production") {
+  throw new Error('E2E_SERVER_MODE must be "development" or "production".');
+}
+const serverCommand = serverMode === "production"
+  ? "npm run build && npm run start -- --hostname 127.0.0.1"
+  : "npm run dev -- --hostname 127.0.0.1";
 
 export default defineConfig({
   testDir: "./e2e",
@@ -47,13 +54,14 @@ export default defineConfig({
   webServer: process.env.E2E_WEB_URL
     ? undefined
     : {
-        command: "npm run dev -- --hostname 127.0.0.1",
+        command: serverCommand,
         url: webUrl,
         reuseExistingServer: !process.env.CI,
-        timeout: 120_000,
+        timeout: serverMode === "production" ? 300_000 : 120_000,
         env: {
           ...process.env,
-          NEXT_PUBLIC_API_URL: process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:5000",
+          NEXT_PUBLIC_API_URL: process.env.NEXT_PUBLIC_API_URL
+            ?? (serverMode === "production" ? "https://127.0.0.1:1" : "http://localhost:5000"),
         },
       },
 });
