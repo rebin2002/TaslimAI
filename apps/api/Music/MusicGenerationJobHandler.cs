@@ -17,14 +17,101 @@ public interface IMusicGenerationProvider
     Task<MusicProviderResult> GenerateAsync(
         MusicGenerationInput request,
         CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// F-36.1: the same submission with a durable acceptance sink, invoked with the provider's own
+    /// operation id the moment the paid create call is answered. A legacy provider cannot expose
+    /// that id, but must record dispatch before it starts. Until its outcome is known, the durable
+    /// marker prevents a second submission.
+    /// </summary>
+    async Task<MusicProviderResult> GenerateAsync(
+        MusicGenerationInput request,
+        CancellationToken cancellationToken,
+        Func<string, Task>? onSubmissionAccepted,
+        Func<Task>? onDispatchSubmitting = null)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        if (onDispatchSubmitting is not null) await onDispatchSubmitting();
+        return await GenerateAsync(request, cancellationToken);
+    }
+
+    /// <summary>
+    /// F-36.1b: asks the provider, by the operation id recorded at acceptance, what actually happened
+    /// to a submission whose outcome this process never observed. Both shipped music providers answer
+    /// with the same non-billable status GET they already use while polling, so asking cannot itself
+    /// create or bill a generation. The default returns Unknown: a provider that has not adopted
+    /// reconciliation changes nothing, and recovery keeps its fail-closed terminal.
+    /// </summary>
+    Task<MusicSubmissionReconciliation> ReconcileAcceptedSubmissionAsync(
+        string providerOperationId,
+        CancellationToken cancellationToken = default)
+        => Task.FromResult(MusicSubmissionReconciliation.Unknown);
+}
+
+/// <summary>
+/// F-36.1b: what a provider reports about an accepted submission. Unknown is deliberately distinct
+/// from "did not happen": the absence of an answer is never evidence that no credits were spent,
+/// which is the whole basis of the fail-closed posture.
+/// </summary>
+public enum MusicSubmissionOutcome
+{
+    Unknown,
+    InProgress,
+    Completed,
+    ProviderDeclaredFailure,
+}
+
+/// <summary>
+/// F-36.1b: a reconciliation answer plus the vendor's own billing statement about it.
+/// ProviderDeclaresNoCharge is true only where the published contract says a failed generation is
+/// not charged (Stability: "you will not be charged for failed generations"). Mubert publishes no
+/// such statement, so a Mubert failure answer keeps ProviderDeclaresNoCharge false and the retry
+/// stays blocked: the release path exists only where a contract actually supports it.
+/// </summary>
+public sealed record MusicSubmissionReconciliation(
+    MusicSubmissionOutcome Outcome,
+    bool ProviderDeclaresNoCharge,
+    decimal? ActualCostUsd = null)
+{
+    public static readonly MusicSubmissionReconciliation Unknown = new(MusicSubmissionOutcome.Unknown, false);
+}
+
+/// <summary>
+/// F-36.1: a handler that runs a paid provider submission accepts the worker's durable acceptance
+/// sink. The worker owns the database and the provider-attempt row, so the record that a provider
+/// accepted paid work is written where lease recovery can still read it after this process is gone;
+/// the handler only forwards it to the provider it is about to call.
+/// </summary>
+public interface IAcceptsMusicSubmissionEvidence
+{
+    Func<string, Task>? AcceptedSubmissionSink { get; set; }
+
+    /// <summary>
+    /// F-36.1b: called immediately BEFORE the paid create request is handed to the transport. Neither
+    /// music vendor accepts a caller-supplied operation id or idempotency key on the create call, so
+    /// the id only exists once the response has been parsed; a process lost between those instants
+    /// would otherwise leave no trace that a paid generation may have been created. This marker is
+    /// what narrows that window to a durable "dispatched, outcome unknown" state.
+    /// </summary>
+    Func<Task>? DispatchingSink { get; set; }
 }
 
 public sealed class MusicGenerationJobHandler(
     IEnumerable<IMusicGenerationProvider> providers,
     IOptions<MusicGenerationOptions> options,
-    ILogger<MusicGenerationJobHandler> logger) : IGenerationJobHandler
+    ILogger<MusicGenerationJobHandler> logger) : IGenerationJobHandler, IAcceptsMusicSubmissionEvidence
 {
     private readonly MusicGenerationOptions settings = options.Value;
+
+    /// <summary>
+    /// F-36.1: supplied by the generation worker before this handler runs and forwarded to the
+    /// provider call. Null when no evidence sink was attached, in which case providers take their
+    /// pre-F-36.1 path unchanged.
+    /// </summary>
+    public Func<string, Task>? AcceptedSubmissionSink { get; set; }
+
+    /// <summary>F-36.1b: supplied by the worker alongside the acceptance sink.</summary>
+    public Func<Task>? DispatchingSink { get; set; }
 
     public bool CanHandle(string jobType) => string.Equals(jobType, GenerationJobTypes.MusicGenerate, StringComparison.OrdinalIgnoreCase);
 
@@ -51,8 +138,12 @@ public sealed class MusicGenerationJobHandler(
 
         logger.LogInformation("Music generation started. JobId={JobId}; ProviderKey={ProviderKey}", job.Id, provider.Key);
         progress.Report(25);
-        var generated = await provider.GenerateAsync(request, cancellationToken);
-        cancellationToken.ThrowIfCancellationRequested();
+        var generated = await provider.GenerateAsync(request, cancellationToken, AcceptedSubmissionSink, DispatchingSink);
+        if (cancellationToken.IsCancellationRequested)
+            throw new MusicProviderCancellationWithAcceptedSubmissionException(
+                providerOperationId: null,
+                outputConfirmedComplete: true,
+                actualCostUsd: generated.Usage.ActualCostUsd);
         progress.Report(82);
 
         var outputInfo = MusicOutputInspector.Validate(generated, settings.MaxOutputBytes);

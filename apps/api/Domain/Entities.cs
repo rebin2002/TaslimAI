@@ -246,7 +246,18 @@ public const string MusicRequestInvalid = "MUSIC_REQUEST_INVALID";
     public const string MusicGenerationFailed = "MUSIC_GENERATION_FAILED";
     public const string MusicOutputInvalid = "MUSIC_OUTPUT_INVALID";
     public const string MusicOutputStorageFailed = "MUSIC_OUTPUT_STORAGE_FAILED";
+    public const string MusicOutputRetrievalFailed = "MUSIC_OUTPUT_RETRIEVAL_FAILED";
+    public const string MusicRetrievalRetryBlocked = "MUSIC_RETRIEVAL_RETRY_BLOCKED";
+    public const string MusicProviderSubmissionUnconfirmed = "MUSIC_PROVIDER_SUBMISSION_UNCONFIRMED";
+    public const string MusicSubmissionRetryBlocked = "MUSIC_SUBMISSION_RETRY_BLOCKED";
     public const string MusicCancelled = "MUSIC_CANCELLED";
+    // F-36: the member cancelled a music job whose paid submission the provider had ALREADY accepted,
+    // and no provider-side cancellation is established, so the accepted attempt may still finish and
+    // still bill. Distinct from MUSIC_CANCELLED above (nothing was submitted, a retry is safe), and
+    // both codes are refused by RetryAsync: the first blocks a second paid submission, the second
+    // records that a finished track exists but was never delivered.
+    public const string MusicCancelledUnconfirmedSubmission = "MUSIC_CANCELLED_UNCONFIRMED_SUBMISSION";
+    public const string MusicCancelledUndeliveredOutput = "MUSIC_CANCELLED_UNDELIVERED_OUTPUT";
     public const string MovieSoundRequestInvalid = "MOVIE_SOUND_REQUEST_INVALID";
     public const string MovieSoundCueInvalid = "MOVIE_SOUND_CUE_INVALID";
     public const string MovieSoundKindInvalid = "MOVIE_SOUND_KIND_INVALID";
@@ -509,6 +520,7 @@ public static class UsageCostBasis
 {
     public const string Actual = "Actual";
     public const string Estimated = "Estimated";
+    public const string Manual = "Manual";
     public const string Unknown = "Unknown";
 }
 

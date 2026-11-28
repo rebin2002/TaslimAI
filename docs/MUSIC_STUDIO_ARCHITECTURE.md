@@ -26,7 +26,7 @@ Provider adapters must not write to the database, choose a workspace, publish As
 
 ## Job lifecycle
 
-The lifecycle is the existing durable Generation Job lifecycle: `Pending`, `Queued`, `Running`, and one terminal state of `Succeeded`, `Failed`, or `Cancelled`.[1] `music.generate` is included in the shared supported job type set. The worker reports progress during validation, provider execution, output validation, and publication. Cancellation is cooperative for running work and immediate for pending or queued work. Music cancellation uses `MUSIC_CANCELLED` for both the job and its usage transaction.
+The lifecycle is the existing durable Generation Job lifecycle: `Pending`, `Queued`, `Running`, and one terminal state of `Succeeded`, `Failed`, or `Cancelled`.[1] `music.generate` is included in the shared supported job type set. The worker reports progress during validation, provider execution, output validation, and publication. Cancellation is cooperative for running work and immediate for pending or queued work. A cancellation before dispatch keeps the ordinary `MUSIC_CANCELLED` outcome. A dispatched request with an unconfirmed outcome uses `MUSIC_CANCELLED_UNCONFIRMED_SUBMISSION`. A cancellation after confirmed generation but before delivery uses `MUSIC_CANCELLED_UNDELIVERED_OUTPUT`. Both require checking the original job.
 
 The job input JSON stores only normalized user intent. It does not store credentials, provider responses, storage keys, or raw audio. The normal job DTO intentionally omits provider and model values. Internal provider and model values remain on the server-side Generation Job and usage ledger where existing administrator-only reporting can inspect them.
 
@@ -95,10 +95,17 @@ The consequence is the reason this contract is safe to merge: modelling a dialec
 
 ## Deferred work
 
-Provider-specific lyric moderation, waveform generation, loudness normalization, transcoding, stems, multi-track projects, editing, waveform visualization, playlisting, webhook callback coordination, and customer billing remain outside this branch. The Mubert and Stable Audio adapters are production-ready at the server boundary but remain disabled until an approved provider account, credentials, private storage configuration, and commercial gate are supplied. Each future feature should preserve the single logical Asset boundary and add a focused representation or related entity only when the product contract requires it.
+Provider-specific lyric moderation, waveform generation, loudness normalization, transcoding, stems, multi-track projects, editing, waveform visualization, playlisting, webhook callback coordination, and customer billing remain outside this branch. Enabling the Mubert or Stable Audio adapter requires an approved provider account, credentials, private storage configuration, and the commercial release decision. Each future feature should preserve the single logical Asset boundary and add a focused representation or related entity only when the product contract requires it.
 
 ## References
 
 [1]: ./GENERATION_JOBS_ARCHITECTURE.md "Generation Jobs Architecture"
 [2]: ./ASSET_ARCHITECTURE.md "Asset Architecture"
 [3]: ./USAGE_ACCOUNTING_ARCHITECTURE.md "Usage Accounting Architecture"
+
+
+## Recovering a generated track that could not be delivered
+
+A failed delivery after confirmed generation keeps the original job ID visible in Music Studio. The member can give that ID to their workspace administrator, who can escalate it to the deployment operator. The operator should confirm the requester owns the job, match its retained provider attempt to the existing operation, and check that operation’s result using a read-only provider lookup. Record whether that same track can still be retrieved and delivered through the authorized private asset path. If the operation cannot be identified or the result has expired, report that outcome to the workspace administrator and keep a fresh generation blocked. Any new spend or credit adjustment requires its own authorization.
+
+If a create response was lost, an attempt may retain only a dispatch marker. This does not establish whether the provider accepted or billed the request. Music Studio shows the job ID and holds the job for investigation. A recovered operation ID can be used to check the existing request. Without one, record the uncertainty and escalate it for reconciliation.
