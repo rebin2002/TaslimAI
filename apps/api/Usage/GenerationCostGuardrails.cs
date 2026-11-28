@@ -67,16 +67,16 @@ public sealed class GenerationCostGuardrailService(
         var workspaceExposure = await ExposureForAsync(
             settings.WorkspaceInternalSafetyCeilingUsd,
             row => row.WorkspaceId == workspaceId,
-            cancellationToken);
+            includeCancelledPresentationSpend: true, cancellationToken);
         var userExposure = await ExposureForAsync(
             userLimit,
             row => row.UserId == userId,
-            cancellationToken);
+            includeCancelledPresentationSpend: true, cancellationToken);
         var projectExposure = projectId.HasValue
             ? await ExposureForAsync(
                 settings.ProjectEstimatedCostCeilingUsd,
                 row => row.WorkspaceId == workspaceId && row.ProjectId == projectId,
-                cancellationToken)
+                includeCancelledPresentationSpend: false, cancellationToken)
             : Exposure.Empty;
 
         var workspaceCap = CreateCap("workspace", settings.WorkspaceInternalSafetyCeilingUsd, workspaceExposure, normalizedEstimate);
@@ -178,11 +178,13 @@ public sealed class GenerationCostGuardrailService(
     private async Task<Exposure> ExposureForAsync(
         decimal? limit,
         System.Linq.Expressions.Expression<Func<UsageTransaction, bool>> predicate,
+        bool includeCancelledPresentationSpend,
         CancellationToken cancellationToken)
     {
         if (!limit.HasValue) return Exposure.Empty;
 
-        var amounts = db.UsageTransactions.AsNoTracking().Where(predicate).Select(row => new
+        var reservations = db.UsageTransactions.AsNoTracking().Where(predicate);
+        var amounts = reservations.Select(row => new
         {
             Cost = row.Status == UsageTransactionStatus.Pending
                 ? row.EstimatedProviderCostUsd ?? 0m
@@ -192,6 +194,10 @@ public sealed class GenerationCostGuardrailService(
                 ? !row.EstimatedProviderCostUsd.HasValue
                 : (row.Status == UsageTransactionStatus.Completed || row.Status == UsageTransactionStatus.Failed || row.Status == UsageTransactionStatus.Refunded) && !row.ProviderCostKnown,
         });
+
+        if (includeCancelledPresentationSpend)
+            amounts = amounts.Concat(CancelledPresentationSpend.ForCancelledReservations(db, reservations)
+                .Select(cost => new { Cost = cost, Unknown = false }));
 
         if (db.Database.IsNpgsql())
         {

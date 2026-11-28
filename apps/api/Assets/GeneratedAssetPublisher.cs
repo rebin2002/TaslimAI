@@ -98,6 +98,15 @@ public sealed class GeneratedAssetPublisher(
             throw new InvalidOperationException("Generated output file is not available in the job scope.");
         if (output.Asset is not null && (storedFile is null || storedFile.Status != StoredFileStatus.Ready))
             throw new InvalidOperationException("Generated assets require a completed private stored file.");
+        if (output.Asset is not null && storageResult is { WasCreated: false }
+            && string.Equals(job.JobType, GenerationJobTypes.ImageGenerate, StringComparison.OrdinalIgnoreCase))
+        {
+            // A ready file can still be removed if the generation that created it rolls back.
+            var reusedId = storageResult.File.Id;
+            var published = await db.StoredFiles.AnyAsync(file => file.Id == reusedId && file.Status == StoredFileStatus.Ready
+                && (file.GenerationJobOutputs.Any() || file.Assets.Any() || file.GeneratedMediaProvenance.Any()), cancellationToken);
+            if (!published) throw new InvalidOperationException("Generated image output cannot reuse an uncommitted private file.");
+        }
 
         try
         {
