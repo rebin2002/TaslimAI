@@ -147,7 +147,7 @@ public sealed class FileValidationService(IOptions<FileOptions> options)
             throw new FileUploadValidationException("The image header is invalid or incomplete.");
 
         var (width, height) = dimensions.Value;
-        if (width <= 0 || height <= 0 || width > MaxImageDimension || height > MaxImageDimension || width * height > MaxImagePixels)
+        if (!IsWithinImageLimits(width, height))
             throw new FileUploadValidationException("The image dimensions exceed the configured safety limits.");
     }
 
@@ -188,29 +188,174 @@ public sealed class FileValidationService(IOptions<FileOptions> options)
         if (bytes[12..16].SequenceEqual("VP8X"u8))
         {
             if (chunkSize != 10 || bytes.Length < 30) return null;
-            return (
+            var canvas = (
                 1L + bytes[24] + ((long)bytes[25] << 8) + ((long)bytes[26] << 16),
                 1L + bytes[27] + ((long)bytes[28] << 8) + ((long)bytes[29] << 16));
+            if (!IsWithinImageLimits(canvas.Item1, canvas.Item2)) return canvas;
+            return ReadWebpExtendedDimensions(bytes, riffEnd, canvas.Item1, canvas.Item2);
         }
 
         if (bytes[12..16].SequenceEqual("VP8L"u8))
         {
-            if (chunkSize < 5 || bytes.Length < 25 || bytes[20] != 0x2F) return null;
-            var bits = BinaryPrimitives.ReadUInt32LittleEndian(bytes[21..25]);
-            return ((long)(bits & 0x3FFF) + 1, (long)((bits >> 14) & 0x3FFF) + 1);
+            return ReadWebpCodedFrameDimensions("VP8L"u8, bytes[20..], chunkSize);
         }
 
         if (bytes[12..16].SequenceEqual("VP8 "u8))
         {
+            return ReadWebpCodedFrameDimensions("VP8 "u8, bytes[20..], chunkSize);
+        }
+
+        return null;
+    }
+
+    private static (long Width, long Height)? ReadWebpExtendedDimensions(
+        ReadOnlySpan<byte> bytes,
+        ulong riffEnd,
+        long canvasWidth,
+        long canvasHeight)
+    {
+        ulong offset = 30;
+        var foundFrame = false;
+        var hasAnimationFlag = (bytes[20] & 0x02) != 0;
+        var foundAnimationFrame = false;
+
+        while (offset < riffEnd)
+        {
+            if (offset > int.MaxValue || offset > (ulong)bytes.Length || bytes.Length - (int)offset < 8)
+                return foundFrame && !hasAnimationFlag ? (canvasWidth, canvasHeight) : null;
+
+            var chunkOffset = (int)offset;
+            var chunkType = bytes.Slice(chunkOffset, 4);
+            var chunkSize = BinaryPrimitives.ReadUInt32LittleEndian(bytes[(chunkOffset + 4)..]);
+            var payloadOffset = offset + 8;
+            var chunkEnd = payloadOffset + chunkSize;
+            var paddedChunkEnd = chunkEnd + (chunkSize & 1U);
+            if (paddedChunkEnd > riffEnd) return null;
+
+            if (chunkType.SequenceEqual("VP8 "u8) || chunkType.SequenceEqual("VP8L"u8))
+            {
+                var dimensions = ReadWebpCodedFrameDimensions(
+                    chunkType,
+                    bytes[(chunkOffset + 8)..],
+                    chunkSize);
+                if (!IsCodedFrameWithinBounds(dimensions, canvasWidth, canvasHeight)) return null;
+                foundFrame = true;
+            }
+            else if (chunkType.SequenceEqual("ANMF"u8))
+            {
+                if (!hasAnimationFlag) return null;
+                if (!ReadWebpAnimationFrame(
+                        bytes,
+                        (int)payloadOffset,
+                        chunkSize,
+                        canvasWidth,
+                        canvasHeight))
+                    return null;
+                foundFrame = true;
+                foundAnimationFrame = true;
+            }
+
+            offset = paddedChunkEnd;
+        }
+
+        return foundFrame && (!hasAnimationFlag || foundAnimationFrame)
+            ? (canvasWidth, canvasHeight)
+            : null;
+    }
+
+    private static bool ReadWebpAnimationFrame(
+        ReadOnlySpan<byte> bytes,
+        int payloadOffset,
+        uint chunkSize,
+        long canvasWidth,
+        long canvasHeight)
+    {
+        if (chunkSize < 16 || payloadOffset > bytes.Length - 16) return false;
+
+        var frameHeader = bytes.Slice(payloadOffset, 16);
+        var x = 2L * ReadUInt24LittleEndian(frameHeader);
+        var y = 2L * ReadUInt24LittleEndian(frameHeader[3..]);
+        var frameWidth = 1L + ReadUInt24LittleEndian(frameHeader[6..]);
+        var frameHeight = 1L + ReadUInt24LittleEndian(frameHeader[9..]);
+        if (!IsWithinImageLimits(frameWidth, frameHeight)
+            || x + frameWidth > canvasWidth
+            || y + frameHeight > canvasHeight)
+            return false;
+
+        var frameEnd = (ulong)payloadOffset + chunkSize;
+        ulong offset = (ulong)payloadOffset + 16;
+        var foundCodedFrame = false;
+        while (offset < frameEnd)
+        {
+            if (offset > int.MaxValue || offset > (ulong)bytes.Length || bytes.Length - (int)offset < 8)
+                return false;
+
+            var chunkOffset = (int)offset;
+            var chunkType = bytes.Slice(chunkOffset, 4);
+            var nestedChunkSize = BinaryPrimitives.ReadUInt32LittleEndian(bytes[(chunkOffset + 4)..]);
+            var payloadStart = offset + 8;
+            var chunkEnd = payloadStart + nestedChunkSize;
+            var paddedChunkEnd = chunkEnd + (nestedChunkSize & 1U);
+            if (paddedChunkEnd > frameEnd) return false;
+
+            if (chunkType.SequenceEqual("VP8 "u8) || chunkType.SequenceEqual("VP8L"u8))
+            {
+                var dimensions = ReadWebpCodedFrameDimensions(
+                    chunkType,
+                    bytes[(chunkOffset + 8)..],
+                    nestedChunkSize);
+                if (!IsCodedFrameWithinBounds(dimensions, frameWidth, frameHeight)) return false;
+                foundCodedFrame = true;
+            }
+
+            offset = paddedChunkEnd;
+        }
+
+        return offset == frameEnd && foundCodedFrame;
+    }
+
+    private static (long Width, long Height)? ReadWebpCodedFrameDimensions(
+        ReadOnlySpan<byte> chunkType,
+        ReadOnlySpan<byte> payload,
+        uint chunkSize)
+    {
+        if (chunkType.SequenceEqual("VP8L"u8))
+        {
+            if (chunkSize < 5 || payload.Length < 5 || payload[0] != 0x2F) return null;
+            var bits = BinaryPrimitives.ReadUInt32LittleEndian(payload[1..5]);
+            return ((long)(bits & 0x3FFF) + 1, (long)((bits >> 14) & 0x3FFF) + 1);
+        }
+
+        if (chunkType.SequenceEqual("VP8 "u8))
+        {
             ReadOnlySpan<byte> frameSignature = [0x9D, 0x01, 0x2A];
-            if (chunkSize < 10 || bytes.Length < 30 || !bytes[23..26].SequenceEqual(frameSignature)) return null;
-            var width = BinaryPrimitives.ReadUInt16LittleEndian(bytes[26..28]) & 0x3FFF;
-            var height = BinaryPrimitives.ReadUInt16LittleEndian(bytes[28..30]) & 0x3FFF;
+            if (chunkSize < 10 || payload.Length < 10 || !payload[3..6].SequenceEqual(frameSignature)) return null;
+            var width = BinaryPrimitives.ReadUInt16LittleEndian(payload[6..8]) & 0x3FFF;
+            var height = BinaryPrimitives.ReadUInt16LittleEndian(payload[8..10]) & 0x3FFF;
             return width > 0 && height > 0 ? (width, height) : null;
         }
 
         return null;
     }
+
+    private static bool IsCodedFrameWithinBounds(
+        (long Width, long Height)? dimensions,
+        long boundWidth,
+        long boundHeight) =>
+        dimensions is { } frame
+        && IsWithinImageLimits(frame.Width, frame.Height)
+        && frame.Width <= boundWidth
+        && frame.Height <= boundHeight;
+
+    private static bool IsWithinImageLimits(long width, long height) =>
+        width > 0
+        && height > 0
+        && width <= MaxImageDimension
+        && height <= MaxImageDimension
+        && width * height <= MaxImagePixels;
+
+    private static uint ReadUInt24LittleEndian(ReadOnlySpan<byte> bytes) =>
+        (uint)(bytes[0] | (bytes[1] << 8) | (bytes[2] << 16));
 
     private static (long Width, long Height)? ReadJpegDimensions(ReadOnlySpan<byte> bytes)
     {

@@ -1,4 +1,5 @@
 using System.Buffers.Binary;
+using System.Text;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Options;
 using Taslim.Api.Files;
@@ -93,6 +94,38 @@ public sealed class FileValidationSecurityTests
 
         Assert.Equal(".png", maxAxis.Extension);
         Assert.Equal(".png", maxPixels.Extension);
+    }
+
+    [Fact]
+    public async Task Extended_webp_rejects_coded_frames_larger_than_the_declared_canvas()
+    {
+        var fixtures = new[]
+        {
+            ExtendedWebp(2, 2, WebpChunk("VP8 ", Vp8FrameHeader(3, 2))),
+            ExtendedWebp(2, 2, WebpChunk("VP8L", Vp8LFrameHeader(2, 3))),
+        };
+
+        foreach (var fixture in fixtures)
+        {
+            await Assert.ThrowsAsync<FileUploadValidationException>(() =>
+                CreateValidator().ValidateAsync(CreateFile("oversized-frame.webp", "image/webp", fixture)));
+        }
+    }
+
+    [Fact]
+    public async Task Extended_webp_rejects_animation_frames_outside_canvas_or_limits()
+    {
+        var fixtures = new[]
+        {
+            ExtendedWebp(2, 2, AnimationFrame(2, 0, 2, 2, WebpChunk("VP8 ", Vp8FrameHeader(2, 2)))),
+            ExtendedWebp(16_384, 1, AnimationFrame(0, 0, 16_385, 1, WebpChunk("VP8 ", Vp8FrameHeader(16_383, 1)))),
+        };
+
+        foreach (var fixture in fixtures)
+        {
+            await Assert.ThrowsAsync<FileUploadValidationException>(() =>
+                CreateValidator().ValidateAsync(CreateFile("oversized-animation.webp", "image/webp", fixture)));
+        }
     }
 
     [Fact]
@@ -191,6 +224,73 @@ public sealed class FileValidationSecurityTests
         WriteUInt24LittleEndian(bytes.AsSpan(24, 3), width - 1);
         WriteUInt24LittleEndian(bytes.AsSpan(27, 3), height - 1);
         return bytes;
+    }
+
+    private static byte[] ExtendedWebp(uint width, uint height, params byte[][] chunks)
+    {
+        var vp8xPayload = new byte[10];
+        if (chunks.Any(chunk => chunk.AsSpan(0, 4).SequenceEqual("ANMF"u8)))
+            vp8xPayload[0] = 0x02;
+        WriteUInt24LittleEndian(vp8xPayload.AsSpan(4, 3), width - 1);
+        WriteUInt24LittleEndian(vp8xPayload.AsSpan(7, 3), height - 1);
+
+        var allChunks = new List<byte[]> { WebpChunk("VP8X", vp8xPayload) };
+        allChunks.AddRange(chunks);
+        var chunkBytesLength = allChunks.Sum(chunk => chunk.Length);
+        var bytes = new byte[12 + chunkBytesLength];
+        "RIFF"u8.CopyTo(bytes.AsSpan(0, 4));
+        BinaryPrimitives.WriteUInt32LittleEndian(bytes.AsSpan(4, 4), (uint)(bytes.Length - 8));
+        "WEBP"u8.CopyTo(bytes.AsSpan(8, 4));
+
+        var offset = 12;
+        foreach (var chunk in allChunks)
+        {
+            chunk.CopyTo(bytes, offset);
+            offset += chunk.Length;
+        }
+
+        return bytes;
+    }
+
+    private static byte[] WebpChunk(string fourCc, byte[] payload)
+    {
+        var chunk = new byte[8 + payload.Length + (payload.Length & 1)];
+        Encoding.ASCII.GetBytes(fourCc).CopyTo(chunk, 0);
+        BinaryPrimitives.WriteUInt32LittleEndian(chunk.AsSpan(4, 4), (uint)payload.Length);
+        payload.CopyTo(chunk, 8);
+        return chunk;
+    }
+
+    private static byte[] Vp8FrameHeader(uint width, uint height)
+    {
+        var payload = new byte[10];
+        new byte[] { 0x9D, 0x01, 0x2A }.CopyTo(payload, 3);
+        BinaryPrimitives.WriteUInt16LittleEndian(payload.AsSpan(6, 2), (ushort)width);
+        BinaryPrimitives.WriteUInt16LittleEndian(payload.AsSpan(8, 2), (ushort)height);
+        return payload;
+    }
+
+    private static byte[] Vp8LFrameHeader(uint width, uint height)
+    {
+        var payload = new byte[5];
+        payload[0] = 0x2F;
+        var dimensions = (width - 1) | ((height - 1) << 14);
+        BinaryPrimitives.WriteUInt32LittleEndian(payload.AsSpan(1, 4), dimensions);
+        return payload;
+    }
+
+    private static byte[] AnimationFrame(uint x, uint y, uint width, uint height, byte[] imageChunk)
+    {
+        if ((x & 1) != 0 || (y & 1) != 0)
+            throw new ArgumentOutOfRangeException(nameof(x), "WebP frame offsets are stored divided by two.");
+
+        var payload = new byte[16 + imageChunk.Length];
+        WriteUInt24LittleEndian(payload.AsSpan(0, 3), x / 2);
+        WriteUInt24LittleEndian(payload.AsSpan(3, 3), y / 2);
+        WriteUInt24LittleEndian(payload.AsSpan(6, 3), width - 1);
+        WriteUInt24LittleEndian(payload.AsSpan(9, 3), height - 1);
+        imageChunk.CopyTo(payload, 16);
+        return WebpChunk("ANMF", payload);
     }
 
     private static void WriteUInt24LittleEndian(Span<byte> destination, uint value)
