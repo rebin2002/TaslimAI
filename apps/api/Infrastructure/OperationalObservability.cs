@@ -24,6 +24,19 @@ public sealed class RequestCorrelationMiddleware(
         var requestId = CreateRequestId();
         context.TraceIdentifier = requestId;
         context.Response.Headers[OperationalObservabilityHeaders.RequestId] = requestId;
+        // Boundaries below this middleware can reset the response before
+        // writing their own safe failure envelope: the exception handler
+        // clears headers and rewrites the status on unhandled failures,
+        // which drops the correlation ID exactly when a client needs an
+        // error ID to quote. Re-assert the server-owned value at the last
+        // moment before any response starts so every outcome, 2xx or 5xx,
+        // stays traceable to the RequestId logged for the request.
+        context.Response.OnStarting(static state =>
+        {
+            var (response, value) = ((HttpResponse, string))state;
+            response.Headers[OperationalObservabilityHeaders.RequestId] = value;
+            return Task.CompletedTask;
+        }, (context.Response, requestId));
 
         using (logger.BeginScope(new Dictionary<string, object?>
         {
@@ -122,7 +135,9 @@ public sealed class OperationalHealthService(
         }
         catch (FileStorageUnavailableException)
         {
-            return "unconfigured";
+            // Readiness is anonymous. Do not disclose whether deployment storage
+            // configuration is absent; expose only the safe dependency state.
+            return "unavailable";
         }
         catch (OperationCanceledException) when (requestCancellationToken.IsCancellationRequested)
         {

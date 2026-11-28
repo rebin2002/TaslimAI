@@ -4,6 +4,10 @@
 # A liveness-only probe can pass while the API cannot reach required dependencies.
 # This gate waits for both liveness and readiness, then validates the safe response
 # shape, cache policy, and request correlation contract.
+#
+# Validation is bound to the terminal HTTP response only. A redirect hop that carries
+# Cache-Control, Pragma, or X-Request-ID does not vouch for the health document that
+# was actually served, so those headers must be present on the final response block.
 set -euo pipefail
 
 BASE_URL="${1:-${API_BASE_URL:-http://127.0.0.1:5000}}"
@@ -34,23 +38,56 @@ validate_response() {
 import json
 import sys
 from pathlib import Path
+from urllib.request import parse_http_list
 
 headers_path, body_path, endpoint = sys.argv[1:]
-headers = {}
+# curl --dump-header appends every response block of a redirect chain to the same
+# file. The cache policy, correlation id, and status must therefore be read from
+# the terminal response that actually produced the body; a header carried only by
+# an earlier 3xx hop must never satisfy the contract for the health document.
+blocks: list[list[str]] = []
 for line in Path(headers_path).read_text(errors="replace").splitlines():
+    if line.lower().startswith("http/"):
+        blocks.append([])
+    if blocks:
+        blocks[-1].append(line)
+
+if not blocks:
+    raise SystemExit(
+        f"{endpoint}: no HTTP response block was captured; refusing to infer a safe response"
+    )
+
+headers = {}
+terminal_status = None
+for position, line in enumerate(blocks[-1]):
+    if position == 0:
+        fields = line.split()
+        if len(fields) < 2 or not fields[1].isdigit():
+            raise SystemExit(f"{endpoint}: terminal HTTP status line is not parseable: {line!r}")
+        terminal_status = int(fields[1])
+        continue
     if ":" not in line:
         continue
     name, value = line.split(":", 1)
-    headers[name.lower()] = value.strip()
+    headers.setdefault(name.lower(), []).append(value.strip())
 
-cache_control = headers.get("cache-control", "").lower()
-if "no-store" not in cache_control:
-    raise SystemExit(f"{endpoint}: missing Cache-Control: no-store")
-if "no-cache" not in headers.get("pragma", "").lower():
-    raise SystemExit(f"{endpoint}: missing Pragma: no-cache")
-request_id = headers.get("x-request-id", "")
+if terminal_status != 200:
+    raise SystemExit(f"{endpoint}: terminal HTTP response status is {terminal_status}, not 200")
+
+def has_directive(name, expected):
+    return any(
+        directive.strip().lower() == expected
+        for field_value in headers.get(name, [])
+        for directive in parse_http_list(field_value)
+    )
+
+if not has_directive("cache-control", "no-store"):
+    raise SystemExit(f"{endpoint}: terminal response is missing Cache-Control: no-store")
+if not has_directive("pragma", "no-cache"):
+    raise SystemExit(f"{endpoint}: terminal response is missing Pragma: no-cache")
+request_id = headers.get("x-request-id", [""])[-1]
 if not request_id:
-    raise SystemExit(f"{endpoint}: missing X-Request-ID")
+    raise SystemExit(f"{endpoint}: terminal response is missing X-Request-ID")
 
 try:
     payload = json.loads(Path(body_path).read_text())
@@ -77,6 +114,9 @@ else:
     database = next((check for check in checks if check.get("name") == "database"), None)
     if database is None or database.get("status") != "available" or database.get("required") is not True:
         raise SystemExit(f"{endpoint}: required database check is not available")
+    storage = next((check for check in checks if check.get("name") == "storage"), None)
+    if storage is None or storage.get("status") != "available" or storage.get("required") is not True:
+        raise SystemExit(f"{endpoint}: required storage check is not available")
     for check in checks:
         if check.get("required") is True and check.get("status") != "available":
             raise SystemExit(f"{endpoint}: required check {check.get('name', '<unnamed>')} is not available")
@@ -126,7 +166,7 @@ probe_endpoint() {
   return 1
 }
 
-printf '%s\n' "[api-health-smoke] checking $BASE_URL"
+printf '%s\n' '[api-health-smoke] checking configured API base URL'
 probe_endpoint "/health/live"
 probe_endpoint "/health/ready"
 printf '%s\n' "[api-health-smoke] PASS — liveness and required dependency readiness are healthy"
