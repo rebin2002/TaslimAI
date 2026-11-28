@@ -349,6 +349,6 @@ public sealed class AuthController(
         user.IncludeSourceLinks,
         user.OnboardingCompletedAt,
         user.OnboardingIntent,
-        user.IsActive && await userManager.IsInRoleAsync(user, AdminPolicies.Role));
+        await AdminPolicies.IsAdministratorAsync(user, userManager));
     private static WorkspaceSummaryDto ToWorkspaceDto(Workspace workspace, WorkspaceRole role) => new(workspace.Id, workspace.Name, workspace.Slug, workspace.Type.ToString(), role.ToString());
 }

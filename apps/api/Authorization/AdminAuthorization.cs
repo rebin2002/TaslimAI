@@ -9,6 +9,9 @@ public static class AdminPolicies
 {
     public const string Usage = "TaslimAdminUsage";
     public const string Role = "TaslimAdministrator";
+
+    public static async Task<bool> IsAdministratorAsync(ApplicationUser user, UserManager<ApplicationUser> userManager) =>
+        user.IsActive && user.EmailConfirmed && await userManager.IsInRoleAsync(user, Role);
 }
 
 public sealed class AdminUsageRequirement : IAuthorizationRequirement;
@@ -21,7 +24,7 @@ public sealed class AdminUsageAuthorizationHandler(
         var value = context.User.FindFirstValue(ClaimTypes.NameIdentifier);
         if (!Guid.TryParse(value, out var userId)) return;
         var user = await userManager.FindByIdAsync(userId.ToString());
-        if (user is not null && user.IsActive && await userManager.IsInRoleAsync(user, AdminPolicies.Role))
+        if (user is not null && await AdminPolicies.IsAdministratorAsync(user, userManager))
             context.Succeed(requirement);
     }
 }
@@ -48,6 +51,12 @@ public static class AdminRoleBootstrapper
             if (user is null)
             {
                 logger.LogWarning("A configured administrator account was not found.");
+                continue;
+            }
+
+            if (!user.EmailConfirmed)
+            {
+                logger.LogWarning("A configured administrator account is not confirmed.");
                 continue;
             }
 
