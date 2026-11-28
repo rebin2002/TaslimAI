@@ -1,8 +1,9 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { AlertTriangle, CheckCircle2, Clock3, MessageSquare, RefreshCw, ShieldCheck, UserCheck, Users, X } from "lucide-react";
 import { api, type MovieCollaboration, type MovieProject } from "@/lib/api";
+import { useAuth } from "@/components/AuthProvider";
 import { useLocale } from "@/components/LocaleProvider";
 
 const projectTarget = "MovieProject";
@@ -12,32 +13,93 @@ const projectTarget = "MovieProject";
  * persisted server-side; the permissions shown here are the ones the server
  * actually granted to the signed-in user, not a client-side guess.
  */
+// Clear every project-scoped review form, permission and request result on
+// identity or project change; the API remains authoritative for all mutations.
 export function MovieTeamWorkspace({ project }: { project: MovieProject }) {
+  const { user, loading } = useAuth();
+  // Collaboration can be granted on a project in another user's workspace.
+  // Verify the authenticated user, but key the boundary to the actual project
+  // workspace rather than incorrectly requiring the personal workspace to match.
+  if (loading || !user?.id || !project.workspaceId || !project.id) return null;
+  return <IdentityScopedMovieTeamWorkspace key={movieTeamIdentityKey(user.id, project.workspaceId, project.id)} project={project} />;
+}
+
+export function movieTeamIdentityKey(userId: string, workspaceId: string, projectId: string) {
+  return [userId, workspaceId, projectId].map(encodeURIComponent).join(":");
+}
+
+function IdentityScopedMovieTeamWorkspace({ project }: { project: MovieProject }) {
+  const { user } = useAuth();
   const { t } = useLocale();
   const [collaboration, setCollaboration] = useState<MovieCollaboration | null>(null);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(false);
   const [busy, setBusy] = useState(false);
   const [commentBody, setCommentBody] = useState("");
+  const [reviewerUserId, setReviewerUserId] = useState("");
+  const [reviewNote, setReviewNote] = useState("");
+  const [decisionNotes, setDecisionNotes] = useState<Record<string, string>>({});
+  const [reviewIsFinal, setReviewIsFinal] = useState(false);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
+  // A refresh issued before a decision must never overwrite the newer
+  // server-authorized permission/review snapshot when it resolves last.
+  const loadRevision = useRef(0);
+  const mounted = useRef(false);
+  // React state can lag a rapid double click; guard all four server writes
+  // synchronously so a review/comment cannot be submitted twice.
+  const mutationInFlight = useRef(false);
 
-  const load = useCallback(async () => {
+  const beginMutation = () => {
+    if (mutationInFlight.current || !mounted.current) return false;
+    mutationInFlight.current = true;
+    setBusy(true);
+    loadRevision.current += 1; // Invalidate earlier permission reads.
+    return true;
+  };
+
+  const endMutation = () => {
+    mutationInFlight.current = false;
+    if (mounted.current) setBusy(false);
+  };
+
+  const load = useCallback(async (afterMutation = false) => {
+    // A user-triggered Refresh during a write must not fetch pre-write state
+    // and overwrite the authoritative mutation response when it arrives later.
+    // Only the post-write reconciliation read may bypass this gate.
+    if (!mounted.current || (mutationInFlight.current && !afterMutation)) return;
+    const revision = ++loadRevision.current;
+    setLoading(true);
     try {
-      setCollaboration(await api.getMovieCollaboration(project.id));
+      const next = await api.getMovieCollaboration(project.id);
+      if (mounted.current && revision === loadRevision.current) {
+        setCollaboration(next);
+        setLoadError(false);
+        // A fresh server permission snapshot revokes any stale final-gate choice.
+        if (!next.currentUserPermissions.includes("FinalApproval")) setReviewIsFinal(false);
+      }
     } catch {
-      setCollaboration(null);
+      if (mounted.current && revision === loadRevision.current) {
+        setCollaboration(null);
+        setReviewIsFinal(false);
+        setLoadError(true);
+      }
     } finally {
-      setLoading(false);
+      if (mounted.current && revision === loadRevision.current) setLoading(false);
     }
   }, [project.id]);
 
   useEffect(() => {
+    mounted.current = true;
     void Promise.resolve().then(() => load());
+    return () => {
+      mounted.current = false;
+      loadRevision.current += 1;
+    };
   }, [load]);
 
   async function submitComment() {
-    if (commentBody.trim().length === 0) return;
-    setBusy(true);
+    if (commentBody.trim().length === 0 || !canComment || !beginMutation()) return;
     setError("");
     setMessage("");
     try {
@@ -53,12 +115,12 @@ export function MovieTeamWorkspace({ project }: { project: MovieProject }) {
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "The note could not be saved.");
     } finally {
-      setBusy(false);
+      endMutation();
     }
   }
 
   async function resolve(commentId: string) {
-    setBusy(true);
+    if (!canComment || !beginMutation()) return;
     setError("");
     try {
       setCollaboration(await api.resolveMovieComment(project.id, commentId));
@@ -66,7 +128,48 @@ export function MovieTeamWorkspace({ project }: { project: MovieProject }) {
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "The note could not be resolved.");
     } finally {
-      setBusy(false);
+      endMutation();
+    }
+  }
+
+  async function requestReview() {
+    if (!user || !canRequestReviews || !reviewerOptions.some((member) => member.userId === reviewerUserId) || !beginMutation()) return;
+    setError("");
+    setMessage("");
+    try {
+      await api.requestMovieReview(project.id, {
+        targetType: "project",
+        targetId: project.id,
+        reviewerUserId,
+        isFinal: reviewIsFinal && canRequestFinalReview,
+        requestNote: reviewNote.trim() || null,
+      });
+      await load(true);
+      setReviewerUserId("");
+      setReviewNote("");
+      setReviewIsFinal(false);
+      setMessage("Review request saved.");
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "The review request could not be saved.");
+    } finally {
+      endMutation();
+    }
+  }
+
+  async function decideReview(reviewId: string, status: "Approved" | "ChangesRequested" | "Rejected") {
+    const review = collaboration?.reviews.find((item) => item.id === reviewId);
+    if (!review || !canDecide(review) || !beginMutation()) return;
+    setError("");
+    setMessage("");
+    try {
+      await api.decideMovieReview(project.id, reviewId, { status, decisionNote: decisionNotes[reviewId]?.trim() || null });
+      await load(true);
+      setDecisionNotes((notes) => { const next = { ...notes }; delete next[reviewId]; return next; });
+      setMessage(status === "Approved" ? "Review approved." : status === "ChangesRequested" ? "Changes requested." : "Review rejected.");
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "The review decision could not be saved.");
+    } finally {
+      endMutation();
     }
   }
 
@@ -77,6 +180,37 @@ export function MovieTeamWorkspace({ project }: { project: MovieProject }) {
   const openComments = comments.filter((comment) => !comment.resolvedAt);
   const pendingReviews = reviews.filter((review) => review.status !== "Approved" && review.status !== "Rejected");
   const canComment = (collaboration?.currentUserPermissions ?? []).includes("Comment");
+  const canRequestReviews = Boolean(user && canComment);
+  const canRequestFinalReview = (collaboration?.currentUserPermissions ?? []).includes("FinalApproval");
+  const reviewerOptions = user ? team.filter((member) => member.userId !== user.id) : [];
+  const canDecide = (review: MovieCollaboration["reviews"][number]) => Boolean(
+    user
+      && review.reviewerUserId === user.id
+      && (review.isFinal ? (collaboration?.currentUserPermissions ?? []).includes("FinalApproval") : (collaboration?.currentUserPermissions ?? []).includes("Approve")),
+  );
+
+  // A failed or pending permissions fetch is not an empty team. Do not
+  // expose prior notes, reviewer identities or actions during a refresh either.
+  if (loading || loadError) {
+    return (
+      <div className="movie-team-workspace" data-testid="movie-team-workspace">
+        {loading ? (
+          <div className="movie-team-empty" role="status">
+            <Clock3 size={18} />
+            <span>Refreshing Movie Team permissions and reviews…</span>
+          </div>
+        ) : (
+          <div className="movie-selects-notice is-error" role="alert">
+            <AlertTriangle size={16} />
+            <span>Unable to load Movie Team permissions and reviews. No action is available until the connection is restored.</span>
+            <button type="button" className="movie-workspace-button is-quiet" onClick={() => void load()} disabled={busy}>
+              <RefreshCw size={13} /> Retry
+            </button>
+          </div>
+        )}
+      </div>
+    );
+  }
 
   return (
     <div className="movie-team-workspace" data-testid="movie-team-workspace">
@@ -136,7 +270,7 @@ export function MovieTeamWorkspace({ project }: { project: MovieProject }) {
             <h3 id="movie-team-members-title">Who can act on this movie.</h3>
             <p>Membership and role changes are enforced by the API, not by this view.</p>
           </div>
-          <button type="button" className="movie-workspace-button is-quiet" onClick={() => void load()}>
+          <button type="button" className="movie-workspace-button is-quiet" onClick={() => void load()} disabled={busy}>
             <RefreshCw size={13} /> {t("movieTeam.refresh")}
           </button>
         </div>
@@ -224,10 +358,12 @@ export function MovieTeamWorkspace({ project }: { project: MovieProject }) {
                     <span className="movie-team-resolved">
                       <CheckCircle2 size={12} /> Resolved
                     </span>
-                  ) : (
+                  ) : canComment ? (
                     <button type="button" className="movie-text-action" onClick={() => void resolve(comment.id)} disabled={busy}>
                       <CheckCircle2 size={12} /> Resolve
                     </button>
+                  ) : (
+                    <span className="movie-team-permissions">Read only · resolve requires Comment permission</span>
                   )}
                 </footer>
               </li>
@@ -245,6 +381,22 @@ export function MovieTeamWorkspace({ project }: { project: MovieProject }) {
           </div>
           <UserCheck size={18} />
         </div>
+        {canRequestReviews && reviewerOptions.length > 0 && (
+          <div className="movie-team-compose">
+            <label htmlFor="movie-team-reviewer">Request project sign-off</label>
+            <select id="movie-team-reviewer" value={reviewerUserId} onChange={(event) => setReviewerUserId(event.target.value)} disabled={busy}>
+              <option value="">Choose a reviewer</option>
+              {reviewerOptions.map((member) => <option key={member.userId} value={member.userId}>{member.displayName} · {member.role}</option>)}
+            </select>
+            <textarea id="movie-team-review-note" value={reviewNote} rows={2} maxLength={4000} placeholder="What should the reviewer check?" onChange={(event) => setReviewNote(event.target.value)} disabled={busy} />
+            <label><input type="checkbox" checked={reviewIsFinal && canRequestFinalReview} onChange={(event) => setReviewIsFinal(event.target.checked)} disabled={busy || !canRequestFinalReview} /> <span>Mark this as a final gate request</span></label>
+            <div className="movie-team-compose-actions">
+              <button type="button" className="movie-workspace-button is-primary" onClick={() => void requestReview()} disabled={busy || !reviewerUserId}>{busy ? "Saving…" : "Request review"}</button>
+              {!canRequestFinalReview && <span>Final gate requests require FinalApproval authority.</span>}
+            </div>
+          </div>
+        )}
+        {canRequestReviews && reviewerOptions.length === 0 && <div className="movie-team-compose-actions"><span>Add another current team member before requesting a review.</span></div>}
         {reviews.length === 0 ? (
           <div className="movie-team-empty">
             <UserCheck size={20} />
@@ -264,8 +416,30 @@ export function MovieTeamWorkspace({ project }: { project: MovieProject }) {
                     Requested by {review.requestedByDisplayName} · {review.targetType}
                     {review.requestNote ? ` · ${review.requestNote}` : ""}
                   </small>
+                  {review.decisionNote && <small>Decision note: {review.decisionNote}</small>}
                 </div>
-                <span className={`movie-team-review-status is-${review.status.toLowerCase()}`}>{review.status}</span>
+                <div className="movie-team-compose-actions">
+                  <span className={`movie-team-review-status is-${review.status.toLowerCase()}`}>{review.status}</span>
+                  {canDecide(review) && review.status !== "Approved" && review.status !== "Rejected" && (
+                    <div className="movie-team-compose">
+                      <label htmlFor={`movie-team-decision-note-${review.id}`}>Decision note (optional)</label>
+                      <textarea
+                        id={`movie-team-decision-note-${review.id}`}
+                        rows={2}
+                        maxLength={4000}
+                        value={decisionNotes[review.id] ?? ""}
+                        placeholder="Explain your approval, requested changes or rejection."
+                        onChange={(event) => setDecisionNotes((notes) => ({ ...notes, [review.id]: event.target.value }))}
+                        disabled={busy}
+                      />
+                      <div className="movie-team-compose-actions">
+                        <button type="button" className="movie-text-action" onClick={() => void decideReview(review.id, "Approved")} disabled={busy}><CheckCircle2 size={12} /> Approve</button>
+                        <button type="button" className="movie-text-action" onClick={() => void decideReview(review.id, "ChangesRequested")} disabled={busy}>Request changes</button>
+                        <button type="button" className="movie-text-action is-danger" onClick={() => void decideReview(review.id, "Rejected")} disabled={busy}><X size={12} /> Reject</button>
+                      </div>
+                    </div>
+                  )}
+                </div>
               </li>
             ))}
           </ul>
