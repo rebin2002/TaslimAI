@@ -4,6 +4,7 @@ using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Text;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Data.Sqlite;
@@ -136,6 +137,7 @@ public sealed class ContextIntegrationTests : IClassFixture<ContextRecordingFact
         Assert.Contains("PROJECT_FILE_CONTEXT_MARKER", recorder.LastRequest.SystemInstruction, StringComparison.Ordinal);
         Assert.DoesNotContain(file.StorageProvider, recorder.LastRequest.SystemInstruction, StringComparison.Ordinal);
         Assert.DoesNotContain(file.Id.ToString(), recorder.LastRequest.SystemInstruction, StringComparison.Ordinal);
+        AssertAttachedFileFence(recorder.LastRequest!.SystemInstruction, 1, "brief.txt");
     }
 
     [Fact]
@@ -164,10 +166,15 @@ public sealed class ContextIntegrationTests : IClassFixture<ContextRecordingFact
         Assert.Contains(db.ChatMessageAttachments, attachment => attachment.StoredFileId == file.Id);
 
         var recorder = factory.Services.GetRequiredService<RecordingChatCompletionService>();
-        Assert.Contains("[Attached file: research proposal.pdf]", recorder.LastRequest!.SystemInstruction, StringComparison.Ordinal);
+        Assert.Matches(@"\[BEGIN ATTACHED FILE:[0-9a-fA-F]{32} file=1\] research proposal\.pdf", recorder.LastRequest!.SystemInstruction);
         Assert.Contains("PDF_CONTEXT_MARKER", recorder.LastRequest.SystemInstruction, StringComparison.Ordinal);
-        Assert.Contains("[End attached file]", recorder.LastRequest.SystemInstruction, StringComparison.Ordinal);
+        Assert.Matches(@"\[END ATTACHED FILE:[0-9a-fA-F]{32} file=1\]", recorder.LastRequest.SystemInstruction);
         Assert.Single(recorder.LastRequest.Attachments!);
+        // Regression guard: the forgeable static boundaries this lane replaced must stay gone,
+        // and the fenced region must hold exactly one live marker pair for this file.
+        Assert.DoesNotContain("[End attached file]", recorder.LastRequest.SystemInstruction, StringComparison.Ordinal);
+        Assert.DoesNotContain("[Attached file: ", recorder.LastRequest.SystemInstruction, StringComparison.Ordinal);
+        AssertAttachedFileFence(recorder.LastRequest.SystemInstruction, 1, "research proposal.pdf");
     }
 
     [Fact]
@@ -188,7 +195,7 @@ public sealed class ContextIntegrationTests : IClassFixture<ContextRecordingFact
         Assert.Equal(HttpStatusCode.OK, send.StatusCode);
 
         var recorder = factory.Services.GetRequiredService<RecordingChatCompletionService>();
-        Assert.Contains("[Attached file: existing.pdf]", recorder.LastRequest!.SystemInstruction, StringComparison.Ordinal);
+        Assert.Matches(@"\[BEGIN ATTACHED FILE:[0-9a-fA-F]{32} file=1\] existing\.pdf", recorder.LastRequest!.SystemInstruction);
         Assert.Contains("EXISTING_PDF_MARKER", recorder.LastRequest.SystemInstruction, StringComparison.Ordinal);
     }
 
@@ -212,9 +219,9 @@ public sealed class ContextIntegrationTests : IClassFixture<ContextRecordingFact
         Assert.Equal(HttpStatusCode.OK, send.StatusCode);
 
         var recorder = factory.Services.GetRequiredService<RecordingChatCompletionService>();
-        Assert.Contains("[Attached file: one.txt]", recorder.LastRequest!.SystemInstruction, StringComparison.Ordinal);
+        Assert.Matches(@"\[BEGIN ATTACHED FILE:[0-9a-fA-F]{32} file=1\] one\.txt", recorder.LastRequest!.SystemInstruction);
         Assert.Contains("FIRST_ATTACHMENT_MARKER", recorder.LastRequest.SystemInstruction, StringComparison.Ordinal);
-        Assert.Contains("[Attached file: two.txt]", recorder.LastRequest.SystemInstruction, StringComparison.Ordinal);
+        Assert.Matches(@"\[BEGIN ATTACHED FILE:[0-9a-fA-F]{32} file=2\] two\.txt", recorder.LastRequest.SystemInstruction);
         Assert.Contains("SECOND_ATTACHMENT_MARKER", recorder.LastRequest.SystemInstruction, StringComparison.Ordinal);
     }
 
@@ -599,6 +606,19 @@ public sealed class ContextIntegrationTests : IClassFixture<ContextRecordingFact
         using var request = new HttpRequestMessage(HttpMethod.Post, $"/api/workspaces/{workspaceId}/files") { Content = form };
         request.Headers.Add("X-CSRF-TOKEN", csrf.GetProperty("token").GetString()!);
         return await client.SendAsync(request);
+    }
+
+    // Asserts the nth attachment is fenced by exactly one well-formed BEGIN/END pair sharing a
+    // single 32-hex per-request token, with that file's label on the BEGIN line.
+    private static void AssertAttachedFileFence(string systemInstruction, int fileIndex, string fileName)
+    {
+        var header = new Regex($@"\[BEGIN ATTACHED FILE:([0-9a-fA-F]{{32}}) file={fileIndex}\] {Regex.Escape(fileName)}");
+        var match = header.Match(systemInstruction);
+        Assert.True(match.Success, $"No builder header for file {fileIndex} ({fileName}).");
+        Assert.Equal(1, header.Matches(systemInstruction).Count);
+        var footer = $"[END ATTACHED FILE:{match.Groups[1].Value} file={fileIndex}]";
+        Assert.Equal(1, Regex.Matches(systemInstruction, Regex.Escape(footer)).Count);
+        Assert.True(match.Index < systemInstruction.IndexOf(footer, StringComparison.Ordinal));
     }
 
     private static byte[] CreatePdf(string text)
