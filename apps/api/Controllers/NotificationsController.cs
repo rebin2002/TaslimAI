@@ -43,5 +43,7 @@ public sealed class NotificationsController(INotificationService notifications) 
         return result ? Ok(new { read = true }) : Forbid();
     }
 
-    private bool TryGetUserId(out Guid userId) => Guid.TryParse(User.FindFirstValue(ClaimTypes.NameIdentifier), out userId);
+    private bool TryGetUserId(out Guid userId) =>
+        Guid.TryParse(User.FindFirstValue(ClaimTypes.NameIdentifier), out userId)
+        && userId != Guid.Empty;
 }

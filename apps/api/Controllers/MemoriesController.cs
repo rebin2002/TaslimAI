@@ -85,5 +85,7 @@ public sealed class MemoriesController(TaslimDbContext db, WorkspaceAccessServic
 
     private static string NormalizeCategory(string category) => PersonalMemoryCategories.Initial.First(item => string.Equals(item, category.Trim(), StringComparison.OrdinalIgnoreCase));
     private static PersonalMemoryDto ToDto(PersonalMemory memory) => new(memory.Id, memory.WorkspaceId, memory.Category, memory.Title, memory.Content, memory.Source, memory.IsActive, memory.CreatedAt, memory.UpdatedAt);
-    private bool TryGetUserId(out Guid userId) => Guid.TryParse(User.FindFirst(ClaimTypes.NameIdentifier)?.Value, out userId);
+    private bool TryGetUserId(out Guid userId) =>
+        Guid.TryParse(User.FindFirst(ClaimTypes.NameIdentifier)?.Value, out userId)
+        && userId != Guid.Empty;
 }
