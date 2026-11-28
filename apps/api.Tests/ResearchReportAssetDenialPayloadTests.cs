@@ -2,6 +2,7 @@ using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
 using System.Text.RegularExpressions;
+using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Taslim.Api.Contracts;
@@ -147,12 +148,14 @@ public sealed class ResearchReportAssetDenialPayloadTests : IClassFixture<Resear
     [Fact]
     public async Task Revoked_member_and_cross_workspace_stranger_receive_no_url_or_metadata_on_research_report_asset_reads()
     {
+        // Observe the first HTTP response: a redirect to a generic 404 must never mask
+        // a leaked Location header or an unexpected 3xx status on any denied route.
         // Workspace A: owner + researcher member + shared project; researcher runs Research.
-        using var owner = factory.CreateClient();
+        using var owner = factory.CreateClient(new WebApplicationFactoryClientOptions { AllowAutoRedirect = false });
         var ownerAuth = await Register(owner, "Denial Payload Workspace Owner");
         var project = await CreateProject(owner, ownerAuth.PersonalWorkspace.Id, "Denial Payload Program (synthetic)");
 
-        using var researcher = factory.CreateClient();
+        using var researcher = factory.CreateClient(new WebApplicationFactoryClientOptions { AllowAutoRedirect = false });
         var researcherAuth = await Register(researcher, "Denial Payload Researcher");
         await SetMembership(ownerAuth.PersonalWorkspace.Id, researcherAuth.User.Id, attach: true);
 
@@ -197,7 +200,7 @@ public sealed class ResearchReportAssetDenialPayloadTests : IClassFixture<Resear
         };
 
         // Subject 1: cross-workspace stranger - its own workspace, never a member of A.
-        using var stranger = factory.CreateClient();
+        using var stranger = factory.CreateClient(new WebApplicationFactoryClientOptions { AllowAutoRedirect = false });
         var strangerAuth = await Register(stranger, "Denial Payload Foreign Workspace User");
         Assert.NotEqual(strangerAuth.PersonalWorkspace.Id, ownerAuth.PersonalWorkspace.Id);
         foreach (var (name, path) in channels)
