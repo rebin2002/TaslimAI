@@ -800,6 +800,19 @@ public sealed class MovieDirectorService(
         var action = await db.DirectorActions.Include(item => item.Proposal).Include(item => item.Results).FirstOrDefaultAsync(item => item.Id == actionId, cancellationToken);
         if (action is null || !await authorization.CanAsync(userId, action.MovieProjectId, MovieOperationalActions.DirectorProposalExecution, cancellationToken)) return null;
         EnsureActionIntegrity(action);
+        // The claim below commits Running before any executor runs, so a process that dies mid-flight -
+        // or a request whose client disconnects, which rethrows OperationCanceledException without
+        // settling - can strand the action in Running. Nothing else can move it out of that state, so
+        // the action would stay Running forever and every later attempt would be rejected. Reconcile an
+        // orphaned claim into a terminal failure before evaluating the executable precondition.
+        var attemptedAt = DateTime.UtcNow;
+        if (action.Status == DirectorActionStatuses.Running && await TryRecoverStaleRunningActionAsync(db, action.Id, attemptedAt, cancellationToken))
+        {
+            action.Status = DirectorActionStatuses.Failed;
+            action.FailureCode = InterruptedFailureCode;
+            action.CompletedAt = attemptedAt;
+            throw new DirectorActionExecutionException(InterruptedFailureCode, "The previous run of this Director action was interrupted before it could finish. Review the Director history and create a new proposal to try again.");
+        }
         if (action.Status != DirectorActionStatuses.Ready || action.Proposal.Status != DirectorProposalStatuses.Approved) throw new DirectorActionNotApprovedException();
         try
         {
@@ -822,8 +835,11 @@ public sealed class MovieDirectorService(
         }
         var executor = executors.FirstOrDefault(item => string.Equals(item.ActionType, action.ActionType, StringComparison.OrdinalIgnoreCase));
         if (executor is null) throw new DirectorActionExecutionException("DIRECTOR_ACTION_UNSUPPORTED", "This Director action is not available.");
+        var startedAt = DateTime.UtcNow;
+        if (!await TryClaimReadyActionAsync(db, action.Id, startedAt, cancellationToken))
+            throw new DirectorActionExecutionException("DIRECTOR_ACTION_ALREADY_RUNNING", "This Director action is already running or has already completed.");
         action.Status = DirectorActionStatuses.Running;
-        action.StartedAt = DateTime.UtcNow;
+        action.StartedAt = startedAt;
         db.DirectorHistoryEvents.Add(new DirectorHistoryEvent { Id = Guid.NewGuid(), WorkspaceId = action.WorkspaceId, DirectorActionId = action.Id, DirectorProposalId = action.DirectorProposalId, EventType = DirectorHistoryEventTypes.ActionStarted, CreatedAt = DateTime.UtcNow });
         await db.SaveChangesAsync(cancellationToken);
 
@@ -840,6 +856,67 @@ public sealed class MovieDirectorService(
         db.DirectorHistoryEvents.Add(new DirectorHistoryEvent { Id = Guid.NewGuid(), WorkspaceId = action.WorkspaceId, DirectorActionId = action.Id, DirectorProposalId = action.DirectorProposalId, EventType = execution.Succeeded ? DirectorHistoryEventTypes.ActionSucceeded : DirectorHistoryEventTypes.ActionFailed, SafeDetailsJson = JsonSerializer.Serialize(new { execution.FailureCode }), CreatedAt = now });
         await db.SaveChangesAsync(cancellationToken);
         return new DirectorActionExecutionResponse(ToDto(action), ToDto(result));
+    }
+
+    internal static async Task<bool> TryClaimReadyActionAsync(
+        TaslimDbContext db,
+        Guid actionId,
+        DateTime startedAt,
+        CancellationToken cancellationToken)
+    {
+        var affected = await db.DirectorActions
+            .Where(item => item.Id == actionId
+                && item.Status == DirectorActionStatuses.Ready
+                && item.Proposal.Status == DirectorProposalStatuses.Approved)
+            .ExecuteUpdateAsync(setters => setters
+                .SetProperty(item => item.Status, DirectorActionStatuses.Running)
+                .SetProperty(item => item.StartedAt, startedAt), cancellationToken);
+        return affected == 1;
+    }
+
+    /// <summary>
+    /// How long a claimed action may stay Running before it is treated as orphaned. Every Director
+    /// executor runs inside the request that claimed the action, and production bounds that request
+    /// well below this window (RequestTimeoutSeconds is 120 and the AI provider timeout is clamped to
+    /// at most 300 seconds), so a Running claim older than this grace period cannot still be owned by
+    /// a live request in any supported deployment.
+    /// </summary>
+    internal static readonly TimeSpan RunningActionGrace = TimeSpan.FromMinutes(15);
+
+    /// <summary>Terminal failure code recorded when an orphaned Running claim is reconciled.</summary>
+    internal const string InterruptedFailureCode = "DIRECTOR_ACTION_INTERRUPTED";
+
+    /// <summary>
+    /// Reconciles a Director action that a crashed or client-aborted request left permanently Running.
+    /// Recovery is a single compare-and-set over the same stale-Running predicate, so only one caller
+    /// can win the transition and concurrent recoveries cannot settle an action twice or duplicate its
+    /// history. The action is driven to a terminal Failed state rather than back to Ready: the executor
+    /// may already have reached a paid provider before the process died, so re-driving it automatically
+    /// could charge twice. A retry therefore goes through a fresh proposal.
+    /// </summary>
+    /// <returns>True only when this call won the Running to Failed transition.</returns>
+    internal static async Task<bool> TryRecoverStaleRunningActionAsync(
+        TaslimDbContext db,
+        Guid actionId,
+        DateTime now,
+        CancellationToken cancellationToken)
+    {
+        var cutoff = now - RunningActionGrace;
+        var affected = await db.DirectorActions
+            .Where(item => item.Id == actionId
+                && item.Status == DirectorActionStatuses.Running
+                && (item.StartedAt == null || item.StartedAt <= cutoff))
+            .ExecuteUpdateAsync(setters => setters
+                .SetProperty(item => item.Status, DirectorActionStatuses.Failed)
+                .SetProperty(item => item.FailureCode, InterruptedFailureCode)
+                .SetProperty(item => item.CompletedAt, now), cancellationToken);
+        if (affected != 1) return false;
+        var settled = await db.DirectorActions.AsNoTracking().FirstOrDefaultAsync(item => item.Id == actionId, cancellationToken);
+        if (settled is null) return true;
+        db.DirectorActionResults.Add(new DirectorActionResult { Id = Guid.NewGuid(), DirectorActionId = settled.Id, Status = DirectorActionStatuses.Failed, SafeMessage = "The Director action was interrupted before it could finish. Create a new proposal to try again.", ResultJson = null, CreatedAt = now });
+        db.DirectorHistoryEvents.Add(new DirectorHistoryEvent { Id = Guid.NewGuid(), WorkspaceId = settled.WorkspaceId, DirectorActionId = settled.Id, DirectorProposalId = settled.DirectorProposalId, EventType = DirectorHistoryEventTypes.ActionFailed, SafeDetailsJson = JsonSerializer.Serialize(new { FailureCode = InterruptedFailureCode }), CreatedAt = now });
+        await db.SaveChangesAsync(cancellationToken);
+        return true;
     }
 
     private async Task<DirectorProposalDto?> SetProposalStatusAsync(Guid userId, Guid proposalId, bool approve, CancellationToken cancellationToken)
