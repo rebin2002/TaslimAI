@@ -24,6 +24,87 @@ public sealed class MovieDirectorScenePlanValidationTests
         Assert.Contains(result.Findings, item => item.ReasonCode == DirectorScenePlanValidationReasonCodes.Placeholder);
     }
 
+    [Theory]
+    [InlineData(-10)]
+    [InlineData(0)]
+    [InlineData(7_201)]
+    [InlineData(int.MaxValue)]
+    public void Runtime_validator_never_accepts_an_out_of_range_context_as_a_clamped_plan(int requestedDurationSeconds)
+    {
+        var validator = CreateValidator();
+        var context = CreateContext() with { DurationSeconds = requestedDurationSeconds };
+        var clampedDuration = Math.Clamp(requestedDurationSeconds, 1, MovieDurationBudgetPolicy.MaxMovieDurationSeconds);
+        var payload = new DirectorScenePlanActionPayload(
+            DirectorScenePlanActionTypes.PlanScenes, context.CurrentRevision!.RevisionId,
+            "snapshot", "en", "16:9", clampedDuration, clampedDuration,
+            DirectorQualityLevels.Fast, "Fast", null, [Scene(clampedDuration)]);
+
+        var result = validator.Validate(payload, context);
+
+        Assert.False(result.IsValid);
+        Assert.Contains(result.Findings, finding =>
+            finding.ReasonCode == DirectorScenePlanValidationReasonCodes.RuntimeMismatch
+            && finding.Field == "targetDurationSeconds");
+    }
+
+    [Theory]
+    [InlineData(3_600)]
+    [InlineData(7_200)]
+    public void Runtime_validator_accepts_a_plan_at_the_default_project_duration_ceiling(int targetDurationSeconds)
+    {
+        var validator = CreateValidator();
+        var context = CreateContext() with { DurationSeconds = targetDurationSeconds };
+        var scenes = Enumerable.Range(1, targetDurationSeconds / MovieDurationBudgetPolicy.MaxShotDurationSeconds)
+            .Select(sequence => Scene(MovieDurationBudgetPolicy.MaxShotDurationSeconds, sequence: sequence))
+            .ToArray();
+        var payload = new DirectorScenePlanActionPayload(
+            DirectorScenePlanActionTypes.PlanScenes, context.CurrentRevision!.RevisionId,
+            "snapshot", "en", "16:9", targetDurationSeconds, targetDurationSeconds,
+            DirectorQualityLevels.Fast, "Fast", null, scenes);
+
+        var result = validator.Validate(payload, context);
+
+        Assert.True(result.IsValid, string.Join(", ", result.Findings.Select(f => $"{f.ReasonCode}: {f.Field}")));
+    }
+
+    [Theory]
+    [InlineData(30, 31)]
+    [InlineData(30, 7_200)]
+    [InlineData(300, 301)]
+    public void Runtime_validator_follows_the_configured_ceiling_rather_than_the_default_three_thousand_six_hundred(
+        int configuredMaxDurationSeconds, int requestedDurationSeconds)
+    {
+        var validator = CreateValidator(configuredMaxDurationSeconds);
+        var context = CreateContext() with { DurationSeconds = requestedDurationSeconds };
+        var clampedDuration = Math.Clamp(requestedDurationSeconds, 1, configuredMaxDurationSeconds);
+        var payload = new DirectorScenePlanActionPayload(
+            DirectorScenePlanActionTypes.PlanScenes, context.CurrentRevision!.RevisionId,
+            "snapshot", "en", "16:9", clampedDuration, clampedDuration,
+            DirectorQualityLevels.Fast, "Fast", null, [Scene(clampedDuration)]);
+
+        var result = validator.Validate(payload, context);
+
+        Assert.False(result.IsValid);
+        Assert.Contains(result.Findings, finding =>
+            finding.ReasonCode == DirectorScenePlanValidationReasonCodes.RuntimeMismatch
+            && finding.Field == "targetDurationSeconds");
+    }
+
+    [Fact]
+    public void Runtime_validator_accepts_a_plan_at_the_one_second_floor()
+    {
+        var validator = CreateValidator();
+        var context = CreateContext() with { DurationSeconds = 1 };
+        var payload = new DirectorScenePlanActionPayload(
+            DirectorScenePlanActionTypes.PlanScenes, context.CurrentRevision!.RevisionId,
+            "snapshot", "en", "16:9", 1, 1,
+            DirectorQualityLevels.Fast, "Fast", null, [Scene(1)]);
+
+        var result = validator.Validate(payload, context);
+
+        Assert.True(result.IsValid, string.Join(", ", result.Findings.Select(f => $"{f.ReasonCode}: {f.Field}")));
+    }
+
     [Fact]
     public async Task Unavailable_scene_plan_ai_fails_honestly_without_a_placeholder_plan()
     {
@@ -55,8 +136,12 @@ public sealed class MovieDirectorScenePlanValidationTests
         Options.Create(new MovieDirectorScenePlanningOptions()),
         NullLogger<MovieDirectorScenePlanValidator>.Instance);
 
-    private static DirectorSceneProposal Scene(int duration, string title = "Seed at Dawn") => new(
-        1, title, "Mara protects the last seed.", "Mara discovers the seed at the dry riverbed.", "Dry riverbed", "Dawn", ["Mara"], "Move from fear to responsibility.", duration, "Open from silence into wind.", ["The last seed remains in Mara's left hand."], "Use blue hour naturalism.");
+    private static IMovieDirectorScenePlanValidator CreateValidator(int maxDurationSeconds) => new MovieDirectorScenePlanValidator(
+        Options.Create(new MovieDirectorScenePlanningOptions { MaxDurationSeconds = maxDurationSeconds }),
+        NullLogger<MovieDirectorScenePlanValidator>.Instance);
+
+    private static DirectorSceneProposal Scene(int duration, string title = "Seed at Dawn", int sequence = 1) => new(
+        sequence, title, "Mara protects the last seed.", "Mara discovers the seed at the dry riverbed.", "Dry riverbed", "Dawn", ["Mara"], "Move from fear to responsibility.", duration, "Open from silence into wind.", ["The last seed remains in Mara's left hand."], "Use blue hour naturalism.");
 
     private static DirectorStoryBoundedContextDto CreateContext() => new(
         Guid.NewGuid(), Guid.NewGuid(), "Mara protects the last seed at the dry riverbed.",

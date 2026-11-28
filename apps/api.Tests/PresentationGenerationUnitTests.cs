@@ -1,6 +1,7 @@
 using System.IO.Compression;
 using System.Text;
 using System.Xml.Linq;
+using Taslim.Api.Ai;
 using Taslim.Api.Contracts;
 using Taslim.Api.Domain;
 using Taslim.Api.Presentations;
@@ -20,6 +21,16 @@ public sealed class PresentationGenerationUnitTests
         var slide = schema.GetProperty("properties").GetProperty("slides").GetProperty("items");
         Assert.False(slide.GetProperty("additionalProperties").GetBoolean());
         Assert.Contains("sourceRefs", slide.GetProperty("required").EnumerateArray().Select(item => item.GetString()));
+    }
+
+    [Fact]
+    public void Failure_code_mapping_classifies_malformed_provider_output_as_invalid_result()
+    {
+        var exception = new AiProviderException(failureCategory: AiProviderFailureCategories.MalformedResponse);
+
+        var code = PresentationGenerationFailureCodes.ForProvider(exception);
+
+        Assert.Equal(GenerationJobErrorCodes.PresentationOutputInvalid, code);
     }
 
     [Fact]

@@ -27,9 +27,19 @@ public sealed class MovieDirectorScenePlanActionExecutor(
             return new(false, "DIRECTOR_SCENE_PLAN_STALE", "The Story, Guide, Cast, World, or continuity context changed after this proposal was created. Create a fresh scene plan.", null);
 
         var validation = validator.Validate(payload, assembled.Value.Context, assembled.Value.SnapshotHash);
-        if (!validation.IsValid || validation.Output is null)
-            return new(false, "DIRECTOR_SCENE_PLAN_INVALID", "The scene-plan proposal no longer passes the current runtime and grounding checks. Create a fresh scene plan.", null, validation.ReasonCodes);
-        payload = validation.Output;
+        if (validation.IsValid && validation.Output is not null)
+        {
+            payload = validation.Output;
+        }
+        else
+        {
+            // Stored plans retain their apply-time failure contract. Only a duplicate-target
+            // finding is resolved below against the actual production rows, before any mutation.
+            var reasons = validation.ReasonCodes;
+            var otherReasons = reasons.Where(code => code != DirectorScenePlanValidationReasonCodes.DuplicateTarget).ToArray();
+            if (reasons.Count == 0 || otherReasons.Length > 0)
+                return new(false, "DIRECTOR_SCENE_PLAN_INVALID", "The scene-plan proposal no longer passes the current runtime and grounding checks. Create a fresh scene plan.", null, otherReasons);
+        }
 
         var screenplayScenes = (assembled.Value.Context.CurrentRevision?.Scenes ?? [])
             .Concat(assembled.Value.Context.ApprovedRevision?.Scenes ?? [])
@@ -39,6 +49,8 @@ public sealed class MovieDirectorScenePlanActionExecutor(
         var existingScenes = await db.MovieScenes.Where(item => item.MovieProjectId == action.MovieProjectId).ToListAsync(cancellationToken);
         var existingById = existingScenes.ToDictionary(item => item.Id);
         var sceneIds = new List<Guid>();
+        var prepared = new List<(DirectorSceneProposal Proposal, MovieScene? Scene)>();
+        var targetedSceneIds = new HashSet<Guid>();
 
         foreach (var proposal in payload.Scenes.OrderBy(item => item.Sequence))
         {
@@ -51,6 +63,15 @@ public sealed class MovieDirectorScenePlanActionExecutor(
                     existingById.TryGetValue(linkedId, out scene);
             }
 
+            if (scene is not null && !targetedSceneIds.Add(scene.Id))
+                return new(false, "DIRECTOR_SCENE_PLAN_DUPLICATE_TARGET", "The scene-plan proposal targets the same production scene more than once. Create a fresh plan with one proposal per scene.", null, ["DIRECTOR_SCENE_PLAN_DUPLICATE_TARGET"]);
+
+            prepared.Add((proposal, scene));
+        }
+
+        foreach (var (proposal, existingScene) in prepared)
+        {
+            var scene = existingScene;
             if (scene is null)
             {
                 scene = new MovieScene
