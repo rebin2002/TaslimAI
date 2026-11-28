@@ -247,8 +247,12 @@ public sealed class MusicLeaseRecoveryDuplicateSubmissionTests : IClassFixture<M
         }
     }
 
-    [Fact]
-    public async Task Manual_settlement_is_admin_policy_guarded_audited_one_time_and_never_changes_customer_money()
+    [Theory]
+    [InlineData("USD", "USD")]
+    [InlineData("EUR", "USD")]
+    [InlineData("USD", "EUR")]
+    [InlineData("EUR", "EUR")]
+    public async Task Manual_settlement_is_admin_policy_guarded_audited_one_time_and_never_changes_customer_money(string attemptCurrency, string ledgerCurrency)
     {
         using var client = factory.CreateClient();
         var auth = await Register(client, $"music-cost-manual-{Guid.NewGuid():N}@example.com");
@@ -282,6 +286,7 @@ public sealed class MusicLeaseRecoveryDuplicateSubmissionTests : IClassFixture<M
             usage.Model = "music-test";
             usage.ProviderCostUsd = 0m;
             usage.ProviderCostKnown = false;
+            usage.Currency = ledgerCurrency;
             usage.CostBasis = UsageCostBasis.Unknown;
             usage.ChargedAmount = 0m;
             usage.ReversedAmount = 0m;
@@ -294,6 +299,7 @@ public sealed class MusicLeaseRecoveryDuplicateSubmissionTests : IClassFixture<M
                 JobConcurrencyToken = jobRow.ConcurrencyToken,
                 IdempotencyKey = $"music-cost-manual:{job.Id:N}",
                 Capability = GenerationJobTypes.MusicGenerate,
+                Currency = attemptCurrency,
                 AttemptNumber = 1,
                 Provider = "test",
                 Model = "music-test",
@@ -332,6 +338,27 @@ public sealed class MusicLeaseRecoveryDuplicateSubmissionTests : IClassFixture<M
             Assert.Contains(pending, item => item.AttemptId == attemptId && !item.LedgerProviderCostKnown);
 
             var settleAction = await controller.Settle(attemptId, new SettleMusicProviderCostRequest(0.037m, "invoice:music-2026-17"), CancellationToken.None);
+            if (attemptCurrency != UsageCurrencies.Usd || ledgerCurrency != UsageCurrencies.Usd)
+            {
+                var conflict = Assert.IsType<ConflictObjectResult>(settleAction.Result);
+                using var error = JsonDocument.Parse(JsonSerializer.Serialize(conflict.Value));
+                Assert.Equal("MUSIC_PROVIDER_COST_SETTLEMENT_CURRENCY_MISMATCH", error.RootElement.GetProperty("error").GetProperty("code").GetString());
+                using var mismatchScope = factory.Services.CreateScope();
+                var mismatchDb = mismatchScope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+                var unchangedAttempt = await mismatchDb.GenerationProviderAttempts.AsNoTracking().SingleAsync(item => item.Id == attemptId);
+                var unchangedUsage = await mismatchDb.UsageTransactions.AsNoTracking().SingleAsync(item => item.GenerationJobId == job.Id);
+                Assert.Equal(attemptCurrency, unchangedAttempt.Currency);
+                Assert.Equal(ledgerCurrency, unchangedUsage.Currency);
+                Assert.False(unchangedAttempt.ActualProviderCostKnown);
+                Assert.Null(unchangedAttempt.ActualProviderCostUsd);
+                Assert.False(unchangedUsage.ProviderCostKnown);
+                Assert.Equal(0m, unchangedUsage.ProviderCostUsd);
+                Assert.Equal(0m, unchangedUsage.ChargedAmount);
+                Assert.Equal(0m, unchangedUsage.ReversedAmount);
+                Assert.DoesNotContain("manualProviderCostSettlements", unchangedAttempt.SafeMetadataJson ?? "");
+                Assert.DoesNotContain("manualProviderCostSettlements", unchangedUsage.SafeMetadataJson ?? "");
+                return;
+            }
             var settledResult = Assert.IsType<OkObjectResult>(settleAction.Result);
             var response = Assert.IsType<SettleMusicProviderCostResponse>(settledResult.Value);
             Assert.Equal(0.037m, response.AttemptActualProviderCostUsd);

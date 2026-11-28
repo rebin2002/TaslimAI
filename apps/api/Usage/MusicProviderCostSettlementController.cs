@@ -149,13 +149,18 @@ public sealed class MusicProviderCostSettlementController(TaslimDbContext db) : 
         if (usage.ProviderCostKnown)
             return Conflict(new { error = new { code = "MUSIC_PROVIDER_COST_LEDGER_ALREADY_SETTLED", message = "The matching usage ledger already has a known provider cost." } });
 
+        if (!string.Equals(attempt.Currency, UsageCurrencies.Usd, StringComparison.Ordinal)
+            || !string.Equals(usage.Currency, UsageCurrencies.Usd, StringComparison.Ordinal))
+            return Conflict(new { error = new { code = "MUSIC_PROVIDER_COST_SETTLEMENT_CURRENCY_MISMATCH", message = "Both the provider attempt and usage ledger must be denominated in USD before manual settlement." } });
+
         var settlementAt = DateTime.UtcNow;
         var attemptMetadata = AddSettlementAudit(attempt.SafeMetadataJson, attemptId, request.ActualProviderCostUsd, evidenceReference!, actorUserId, settlementAt);
         var changed = await db.GenerationProviderAttempts
             .Where(item => item.Id == attemptId
                 && item.JobConcurrencyToken == attempt.JobConcurrencyToken
                 && !item.ActualProviderCostKnown
-                && item.Status == attempt.Status)
+                && item.Status == attempt.Status
+                && item.Currency == UsageCurrencies.Usd)
             .ExecuteUpdateAsync(setters => setters
                 .SetProperty(item => item.ActualProviderCostUsd, request.ActualProviderCostUsd)
                 .SetProperty(item => item.ActualProviderCostKnown, true)
