@@ -19,9 +19,9 @@
 #   * Provider-free by construction: Ai__OpenAI__Enabled and
 #     MovieVideo__Enabled are forced off for the whole run; nothing here
 #     deploys, merges or charges.
-#   * The expected major is asserted from the live server, so a PG15 run can
-#     never be reported as PG18 qualification and a PG18 run can never
-#     silently replace the PG15 control.
+#   * The expected major is asserted on both live databases: the migration
+#     ladder before migration and the reset test database before each suite.
+#     A PG18 ladder cannot mask a PG15 test server in an opt-in local run.
 #
 # Modes (first argument):
 #   autopilot           bounded Autopilot regression (leases, takeover,
@@ -206,6 +206,11 @@ else
 
   step "Fresh disposable test database (EnsureCreated path, as the api job uses)"
   reset_db "$test_conn"
+
+  # The reported regression results come from this database, not the migration
+  # ladder. Attest its live server major after reset and immediately before the
+  # suite so a split PG18-ladder / PG15-test configuration cannot pass.
+  assert_major "$test_conn" "test database" "$expected_major"
 
   step "$mode regression (fake Manus/Bridge, no providers, no charging)"
   printf '  expected server major: %s\n' "$expected_major"

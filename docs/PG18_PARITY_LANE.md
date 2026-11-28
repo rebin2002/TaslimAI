@@ -41,9 +41,11 @@ without waiting for it.
   prefix on a loopback/service host. An inherited production URL is refused
   before any connection is opened, so "no migrations on real databases" is
   enforced by the harness, not by convention.
-* The expected PostgreSQL major is read from the live server. A run whose
-  server is not the expected major fails, which is what prevents a green PG15
-  execution from ever being reported as PG18 qualification.
+* For every regression mode, the harness reads `server_version` from both the
+  migration-ladder server and the freshly reset test server, requiring the
+  mode's expected major on both before the migration or test evidence is
+  reported. The schema-diff leg separately checks both its PG15 and PG18
+  servers.
 * `Ai__OpenAI__Enabled` and `MovieVideo__Enabled` are forced off for the whole
   run: provider-free, fake Manus/Bridge only, no deploy, no merge, no charging.
 
@@ -51,6 +53,8 @@ without waiting for it.
 
 ```bash
 bash scripts/pg18-parity-gate.test.sh          # offline guard contracts, no DB
+bash scripts/pg18-parity-gate.major-split.test.sh --strict # offline PG18/PG15 split negative control
+bash scripts/pg18-parity-gate.matched-controls.test.sh # offline matched PG18 and PG15 positive controls
 bash scripts/pg18-parity-gate.sh autopilot            # PG18: Autopilot + ladder
 bash scripts/pg18-parity-gate.sh billing             # PG18: billing/ledger + ladder
 bash scripts/pg18-parity-gate.sh autopilot-control   # PG15 control, same filter
@@ -62,7 +66,9 @@ A local run requires the typed switch `PG18_PARITY_LOCAL_OPT_IN=1`; without it
 the harness refuses. The migration ladder and the test run always use separate
 databases: `EnsureCreated()` is a no-op on a database that already has tables,
 so sharing one hides the newest tables and reports false failures (found on
-the first local run, now guarded and regression-tested).
+the first local run, now guarded and regression-tested). Before the test suite
+starts, the harness separately asserts the actual major reported by the test
+database; a valid disposable PG18 ladder cannot qualify a PG15 test database.
 
 ## Evidence from the first qualification run
 
