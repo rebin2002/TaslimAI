@@ -17,6 +17,8 @@ public static class GenerationJobErrorMessages
             GenerationJobErrorCodes.TypeNotSupported => "This job type is not available.",
             GenerationJobErrorCodes.Cancelled => "The job was cancelled.",
             GenerationJobErrorCodes.Poisoned => "The generation could not be recovered safely. Please try again.",
+            GenerationJobErrorCodes.ProviderOutcomeUnconfirmed => "The provider may have accepted this request, but its result and final cost could not be confirmed. It was not restarted. Please contact support before retrying.",
+            GenerationJobErrorCodes.ProviderOutcomeRetryBlocked => "This retry was blocked because the first provider attempt's result and cost remain unconfirmed.",
             GenerationJobErrorCodes.NoBillableAsset => "The generation completed without a publishable asset. Please try again.",
             GenerationJobErrorCodes.ImageStudioUnavailable => "Image generation is not available right now.",
             GenerationJobErrorCodes.ImageProviderUnavailable => "Image generation is temporarily unavailable. Please try again later.",

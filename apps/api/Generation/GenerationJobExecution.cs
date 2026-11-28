@@ -528,6 +528,15 @@ public sealed class GenerationJobService(
                 GenerationJobErrorCodes.MusicSubmissionRetryBlocked,
                 "This retry was blocked because the first attempt may already have reached the provider and its outcome has not been reconciled yet. Starting another would risk a duplicate paid generation.");
         }
+        if (source.ErrorCode == GenerationJobErrorCodes.ProviderOutcomeUnconfirmed
+            && (string.Equals(source.JobType, GenerationJobTypes.ResearchGenerate, StringComparison.OrdinalIgnoreCase)
+                || string.Equals(source.JobType, GenerationJobTypes.SocialGenerate, StringComparison.OrdinalIgnoreCase)))
+        {
+            throw new GenerationJobValidationException(
+                GenerationJobErrorCodes.ProviderOutcomeRetryBlocked,
+                GenerationJobErrorMessages.For(GenerationJobErrorCodes.ProviderOutcomeRetryBlocked)
+                    ?? "This retry was blocked because the first provider attempt's result and cost remain unconfirmed.");
+        }
         if (string.Equals(source.JobType, GenerationJobTypes.ImageGenerate, StringComparison.OrdinalIgnoreCase) && !imageOptions.Value.Enabled)
             throw new GenerationJobValidationException(GenerationJobErrorCodes.ImageStudioUnavailable, "Image generation is not available right now.");
         // Same fail-closed boundary as the Image gate above. Every retry entry
@@ -1484,8 +1493,20 @@ await RecoverExpiredClaimsAsync(db, usage, movieExecutions, notifications, scope
             // the re-queue, carrying a dedicated code that records the unknown submission outcome; the
             // terminal is deliberately shared rather than duplicated so that the claim-token fencing
             // contract (GenerationJobFinalizationSourceContractTests) keeps exactly one Running ->
-            // Failed write here. Every other job type keeps the current bounded recovery unchanged.
-            var automaticRedispatchAllowed = !string.Equals(job.JobType, GenerationJobTypes.MusicGenerate, StringComparison.OrdinalIgnoreCase);
+            // Failed write here. Research/Social with an unresolved actual provider cost are terminalized below.
+            // Research and Social have no durable provider reconciliation handle: if this expired claim's
+            // attempt is non-rejected and its actual cost is unknown, restarting may create a second paid request.
+            // Bind the check to the expired claim token so an older attempt cannot fence the current claim.
+            var researchOrSocial = string.Equals(job.JobType, GenerationJobTypes.ResearchGenerate, StringComparison.OrdinalIgnoreCase)
+                || string.Equals(job.JobType, GenerationJobTypes.SocialGenerate, StringComparison.OrdinalIgnoreCase);
+            var hasUnresolvedProviderOutcome = researchOrSocial
+                && await db.GenerationProviderAttempts.AsNoTracking().AnyAsync(attempt =>
+                    attempt.GenerationJobId == job.Id
+                    && attempt.JobConcurrencyToken == expired.ConcurrencyToken
+                    && attempt.Status != GenerationProviderAttemptStatus.Rejected
+                    && !attempt.ActualProviderCostKnown, cancellationToken);
+            var isMusic = string.Equals(job.JobType, GenerationJobTypes.MusicGenerate, StringComparison.OrdinalIgnoreCase);
+            var automaticRedispatchAllowed = !isMusic && !hasUnresolvedProviderOutcome;
             var maxAutomaticRetries = Math.Max(0, settings.MaxAutomaticRetries);
             if (automaticRedispatchAllowed && job.RetryCount < maxAutomaticRetries)
             {
@@ -1517,15 +1538,21 @@ await RecoverExpiredClaimsAsync(db, usage, movieExecutions, notifications, scope
                 continue;
             }
 
-            if (!automaticRedispatchAllowed)
+            if (isMusic)
                 logger.LogWarning("Music generation lease expired with the provider submission outcome unknown; automatic re-dispatch suppressed so no duplicate paid generation was created. JobId={JobId}; RetryCount={RetryCount}; MaxAutomaticRetries={MaxAutomaticRetries}",
                     job.Id, job.RetryCount, maxAutomaticRetries);
+            if (hasUnresolvedProviderOutcome)
+                logger.LogWarning("Research or Social generation lease expired with provider outcome and actual cost unknown; automatic re-dispatch suppressed. JobId={JobId}; JobType={JobType}; RetryCount={RetryCount}; MaxAutomaticRetries={MaxAutomaticRetries}",
+                    job.Id, job.JobType, job.RetryCount, maxAutomaticRetries);
 
             // Music arrives here on its first expired lease because rebilling automatically is the
-            // hazard; every other lane arrives only after exhausting its bounded retries.
-            var terminalCode = automaticRedispatchAllowed
-                ? GenerationJobErrorCodes.Poisoned
-                : GenerationJobErrorCodes.MusicProviderSubmissionUnconfirmed;
+            // hazard; unresolved paid Research/Social outcomes also arrive here immediately, while
+            // other lanes arrive only after exhausting their bounded retries.
+            var terminalCode = hasUnresolvedProviderOutcome
+                ? GenerationJobErrorCodes.ProviderOutcomeUnconfirmed
+                : automaticRedispatchAllowed
+                    ? GenerationJobErrorCodes.Poisoned
+                    : GenerationJobErrorCodes.MusicProviderSubmissionUnconfirmed;
             var terminalMessage = terminalCode == GenerationJobErrorCodes.Poisoned
                 ? PoisonJobMessage
                 : GenerationJobErrorMessages.For(terminalCode) ?? PoisonJobMessage;
@@ -1554,8 +1581,9 @@ await RecoverExpiredClaimsAsync(db, usage, movieExecutions, notifications, scope
             var poisonUsage = await usage.BeginAsync(job, cancellationToken: cancellationToken);
             await usage.FailAsync(poisonUsage, terminalCode, cancellationToken: cancellationToken);
             await poisonFinalization.CommitAsync(cancellationToken);
-            logger.LogError("Generation job moved to poison terminal state after bounded lease recovery. JobId={JobId}; RetryCount={RetryCount}; MaxAutomaticRetries={MaxAutomaticRetries}",
-                job.Id, job.RetryCount, maxAutomaticRetries);
+            if (!hasUnresolvedProviderOutcome && !isMusic)
+                logger.LogError("Generation job moved to poison terminal state after bounded lease recovery. JobId={JobId}; RetryCount={RetryCount}; MaxAutomaticRetries={MaxAutomaticRetries}",
+                    job.Id, job.RetryCount, maxAutomaticRetries);
             await TryNotifyAsync(() => notifications.CreateGenerationFailedAsync(job.Id, cancellationToken), job.Id, cancellationToken);
         }
     }
