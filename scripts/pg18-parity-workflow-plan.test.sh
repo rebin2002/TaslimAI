@@ -4,14 +4,17 @@
 set -Eeuo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 WORKFLOW="$ROOT_DIR/.github/workflows/pg18-parity.yml"
+DOC="$ROOT_DIR/docs/PG18_PARITY_LANE.md"
 SANDBOX="$(mktemp -d)"
 trap 'rm -rf "$SANDBOX"' EXIT
 PLAN_SCRIPT="$SANDBOX/plan.sh"
 
-python3 - "$WORKFLOW" "$PLAN_SCRIPT" <<'PY'
+python3 - "$WORKFLOW" "$PLAN_SCRIPT" "$DOC" <<'PY'
 from pathlib import Path
 import sys
-workflow = Path(sys.argv[1]).read_text().splitlines()
+workflow_text = Path(sys.argv[1]).read_text()
+workflow = workflow_text.splitlines()
+doc = Path(sys.argv[3]).read_text()
 step = next(i for i, line in enumerate(workflow)
             if line.strip() == "- name: Decide which legs this run may execute")
 run = next(i for i in range(step + 1, len(workflow))
@@ -30,9 +33,14 @@ for contract in (
     'printf -- \'- reason: %s\\n\' "$REASON"',
     'git check-ref-format --branch "$candidate_branch"',
     'guards-only | billing | autopilot | schema-diff | all',
+    '*"[pg18-lane=schema-diff]"*) legs="schema-diff" ;;',
 ):
     if contract not in text:
         raise SystemExit(f"missing workflow-plan safety contract: {contract}")
+if '"ci/postgres18-**"' not in workflow_text:
+    raise SystemExit("push trigger is not scoped to the lane-prefixed branch namespace")
+if 'ci/postgres18-parity-harness-20261113' not in doc or '[pg18-lane=schema-diff]' not in doc:
+    raise SystemExit("lane docs must disclose the current PR-head push marker opt-in path")
 Path(sys.argv[2]).write_text(text)
 PY
 
@@ -60,6 +68,37 @@ if env EVENT=workflow_dispatch MESSAGE= CHOICE= REQUESTED= SHA="$sha" \
   fi
 else
   fail "safe guards-only plan invocation was refused"
+fi
+
+: > "$SANDBOX/output"
+: > "$SANDBOX/summary"
+if env EVENT=push MESSAGE='ordinary PR-head update' CHOICE= REQUESTED= SHA="$sha" \
+  REF_NAME=ci/postgres18-parity-harness-20261113 REASON='(commit marker)' \
+  GITHUB_OUTPUT="$SANDBOX/output" GITHUB_STEP_SUMMARY="$SANDBOX/summary" \
+  bash "$PLAN_SCRIPT"; then
+  if grep -Fxq "value=guards-only" "$SANDBOX/output"; then
+    ok "unmarked push to the actual lane-prefixed PR head stays guards-only"
+  else
+    fail "unmarked PR-head push did not stay guards-only"
+  fi
+else
+  fail "unmarked push to the lane-prefixed PR head was refused"
+fi
+
+: > "$SANDBOX/output"
+: > "$SANDBOX/summary"
+if env EVENT=push MESSAGE='bounded opt-in [pg18-lane=schema-diff]' CHOICE= REQUESTED= SHA="$sha" \
+  REF_NAME=ci/postgres18-parity-harness-20261113 REASON='(commit marker)' \
+  GITHUB_OUTPUT="$SANDBOX/output" GITHUB_STEP_SUMMARY="$SANDBOX/summary" \
+  bash "$PLAN_SCRIPT"; then
+  if grep -Fxq "value=schema-diff" "$SANDBOX/output" \
+    && grep -Fq 'ci/postgres18-parity-harness-20261113' "$SANDBOX/summary"; then
+    ok "schema-diff marker on the actual PR-head branch selects the database lane"
+  else
+    fail "actual PR-head marker did not select schema-diff"
+  fi
+else
+  fail "schema-diff marker on the lane-prefixed PR head was refused"
 fi
 
 : > "$SANDBOX/output"

@@ -38,6 +38,8 @@ expect_refused "dispatch from a product branch refused" \
   pg18_classify_ref workflow_dispatch "refs/heads/main" "" "" "main"
 expect_ok    "push under ci/postgres18- prefix allowed" \
   pg18_classify_ref push "refs/heads/ci/postgres18-experiment" "" "" ""
+expect_ok    "push to this PR's exact lane-prefixed branch allowed" \
+  pg18_classify_ref push "refs/heads/ci/postgres18-parity-harness-20261113" "" "" ""
 expect_refused "push to main refused" \
   pg18_classify_ref push "refs/heads/main" "" "" "main"
 expect_refused "push to an unrelated branch refused" \
@@ -142,6 +144,18 @@ if [[ "$got" == "localhost" ]]; then
 else
   printf '  FAIL Host field parsed as %s\n' "$got"; fail_count=$((fail_count + 1))
 fi
+expect_refused "schema-diff aliases and changed credentials cannot hide the same target" \
+  pg18_assert_distinct_database_targets \
+  "Host=localhost;Port=05432;Database=taslim_pg18_shared;Username=pg15user;Password=pg15-secret" \
+  "Host=127.0.0.1;Port=5432;Database=taslim_pg18_shared;Username=pg18user;Password=pg18-secret"
+expect_ok "same database name is allowed on distinct PG15/PG18 services" \
+  pg18_assert_distinct_database_targets \
+  "Host=pg15;Port=5432;Database=taslim_pg18_shared;Username=taslim;Password=pg15-secret" \
+  "Host=pg18;Port=5432;Database=taslim_pg18_shared;Username=taslim;Password=pg18-secret"
+expect_refused "unrelated host aliases with same database fail closed as ambiguous" \
+  pg18_assert_distinct_database_targets \
+  "Host=postgres;Port=5432;Database=taslim_pg18_shared;Username=taslim;Password=offline-only" \
+  "Host=db;Port=5432;Database=taslim_pg18_shared;Username=taslim;Password=offline-only"
 
 echo "== fail-closed behaviour of the harness itself =="
 if GITHUB_EVENT_NAME=push GITHUB_REF="refs/heads/main" \

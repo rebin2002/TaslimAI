@@ -223,6 +223,65 @@ pg18_conn_field() {
   printf '%s\n' "$canonical" | tr ';' '\n' | sed -n "s/^${field}=//p"
 }
 
+# Canonical identity excludes credentials: different users/passwords do not
+# make the same PostgreSQL endpoint/database safe to use as both schema legs.
+# The only unconditional hostname alias is localhost == 127.0.0.1. Other
+# cross-name comparisons are ambiguous unless they are the two explicitly
+# distinct PG15/PG18 service names used by this lane.
+pg18_database_identity() { # <conn> -> canonical server endpoint + database
+  local canonical host port db endpoint_host
+  canonical="$(pg18_canonical_connection "${1:-}")" || return 1
+  host="$(pg18_conn_field "$canonical" Host)" || return 1
+  port="$(pg18_conn_field "$canonical" Port)" || return 1
+  db="$(pg18_conn_field "$canonical" Database)" || return 1
+  case "$host" in
+    localhost | 127.0.0.1) endpoint_host=loopback ;;
+    *) endpoint_host="$host" ;;
+  esac
+  printf 'Host=%s;Port=%s;Database=%s\n' "$endpoint_host" "$port" "$db"
+}
+
+pg18_assert_distinct_database_targets() { # <left-conn> <right-conn>
+  local left right left_host right_host left_port right_port left_db right_db
+  local left_identity right_identity
+  left="$(pg18_canonical_connection "${1:-}")" || return 1
+  right="$(pg18_canonical_connection "${2:-}")" || return 1
+  left_host="$(pg18_conn_field "$left" Host)" || return 1
+  right_host="$(pg18_conn_field "$right" Host)" || return 1
+  left_port="$(pg18_conn_field "$left" Port)" || return 1
+  right_port="$(pg18_conn_field "$right" Port)" || return 1
+  left_db="$(pg18_conn_field "$left" Database)" || return 1
+  right_db="$(pg18_conn_field "$right" Database)" || return 1
+  left_identity="$(pg18_database_identity "$left")" || return 1
+  right_identity="$(pg18_database_identity "$right")" || return 1
+
+  if [[ "$left_identity" == "$right_identity" ]]; then
+    printf 'PG18 parity lane refused: PG15 and PG18 targets identify the same PostgreSQL database.\n' >&2
+    return 1
+  fi
+  # Different database names are distinct identities even on one endpoint.
+  [[ "$left_db" == "$right_db" ]] || return 0
+
+  # Same canonical host with different ports, or the lane's explicitly
+  # separate PG15/PG18 services, identify distinct server endpoints. A bare
+  # database-name comparison would incorrectly reject these valid controls.
+  if [[ "$left_host" == localhost || "$left_host" == 127.0.0.1 ]]; then
+    if [[ ( "$right_host" == localhost || "$right_host" == 127.0.0.1 ) \
+       && "$left_port" != "$right_port" ]]; then
+      return 0
+    fi
+  elif [[ "$left_host" == "$right_host" && "$left_port" != "$right_port" ]]; then
+    return 0
+  fi
+  if [[ ( "$left_host" == pg15 && "$right_host" == pg18 ) \
+     || ( "$left_host" == pg18 && "$right_host" == pg15 ) ]]; then
+    return 0
+  fi
+
+  printf 'PG18 parity lane refused: PG15/PG18 database identity is ambiguous across these host aliases; use a canonical shared host with distinct ports or the distinct pg15/pg18 service names.\n' >&2
+  return 1
+}
+
 # Reject any connection string whose database is not disposable or whose host
 # is not loopback / a CI service container. Production hosts (Railway, managed
 # Postgres) never match, so an accidentally inherited DATABASE_URL fails the

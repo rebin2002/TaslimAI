@@ -14,9 +14,13 @@ cat >"$BIN/psql" <<'STUB'
 #!/usr/bin/env bash
 DB=""
 QUERY=""
+HOST=""
+PORT=""
 printf 'psql %s\n' "$*" >> "${PG18_FAKE_CALLLOG:-/dev/null}"
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    -h) HOST="${2:-}"; shift 2 ;;
+    -p) PORT="${2:-}"; shift 2 ;;
     -d) DB="${2:-}"; shift 2 ;;
     -tAc|-c) QUERY="${2:-}"; shift 2 ;;
     *) shift ;;
@@ -26,7 +30,8 @@ if [[ "$QUERY" == *"SHOW server_version"* ]]; then
   IFS=';' read -ra PAIRS <<< "${PG18_FAKE_VERSIONS:-}"
   for pair in "${PAIRS[@]}"; do
     [[ -z "$pair" ]] && continue
-    if [[ "${pair%%=*}" == "$DB" ]]; then
+    key="${pair%%=*}"
+    if [[ "$key" == "$DB" || "$key" == "$HOST:$PORT:$DB" ]]; then
       printf '%s\n' "${pair#*=}"
       exit 0
     fi
@@ -107,5 +112,86 @@ else
   grep -E 'dotnet ef database update|test-connection|psql -h' "$SANDBOX/calls.log" || true
   failures=$((failures + 1))
 fi
+
+run_schema_diff() { # <call-log> <versions> <PG15-url> <PG18-url> -> output
+  local call_log="$1" versions="$2" pg15_url="$3" pg18_url="$4"
+  : > "$call_log"
+  env \
+    PATH="$BIN:$PATH" \
+    PG18_PARITY_LOCAL_OPT_IN=1 \
+    GITHUB_EVENT_NAME= GITHUB_REF= GITHUB_BASE_REF= GITHUB_HEAD_REF= \
+    PG18_FAKE_VERSIONS="$versions" \
+    PG18_FAKE_CALLLOG="$call_log" \
+    PG15_URL="$pg15_url" PG18_URL="$pg18_url" \
+    FRESH_DATABASE_URL= ConnectionStrings__Postgres= \
+    bash "$HARNESS" schema-diff 2>&1
+}
+
+printf '\n== schema-diff identity preflight (offline stubs only) ==\n'
+same_db="taslim_pg18_schema_shared"
+alias_call_log="$SANDBOX/schema-alias-refused.log"
+alias_out=""
+if alias_out="$(run_schema_diff "$alias_call_log" "" \
+    "Host=localhost;Port=05432;Database=$same_db;Username=pg15user;Password=pg15-secret" \
+    "Host=127.0.0.1;Port=5432;Database=$same_db;Username=pg18user;Password=pg18-secret")"; then
+  printf '  FAIL schema-diff accepted the same DB through host aliases and changed credentials\n'
+  failures=$((failures + 1))
+elif [[ ! -s "$alias_call_log" ]] && grep -qi 'same PostgreSQL database' <<<"$alias_out"; then
+  printf '  ok   aliased same-DB target refused before any psql or EF call, credentials ignored\n'
+  pass=$((pass + 1))
+else
+  printf '  FAIL alias collision was not refused by the preflight before database commands\n'
+  printf '%s\n' "$alias_out" | tail -12
+  cat "$alias_call_log"
+  failures=$((failures + 1))
+fi
+
+ambiguous_call_log="$SANDBOX/schema-ambiguous-refused.log"
+ambiguous_out=""
+if ambiguous_out="$(run_schema_diff "$ambiguous_call_log" "" \
+    "Host=postgres;Port=5432;Database=$same_db;Username=taslim;Password=offline-only" \
+    "Host=db;Port=5432;Database=$same_db;Username=taslim;Password=offline-only")"; then
+  printf '  FAIL schema-diff accepted unverified host aliases with the same database name\n'
+  failures=$((failures + 1))
+elif [[ ! -s "$ambiguous_call_log" ]] && grep -qi 'ambiguous' <<<"$ambiguous_out"; then
+  printf '  ok   ambiguous host aliases refused before any psql or EF call\n'
+  pass=$((pass + 1))
+else
+  printf '  FAIL ambiguous target was not rejected before database commands\n'
+  printf '%s\n' "$ambiguous_out" | tail -12
+  cat "$ambiguous_call_log"
+  failures=$((failures + 1))
+fi
+
+# Different service ports identify separate instances even with the same
+# database name. This mirrors the workflow's localhost:5432/localhost:5433
+# PG15/PG18 service mapping and proves database-name-only rejection is wrong.
+positive_call_log="$SANDBOX/schema-distinct-shared-name.log"
+positive_out=""
+if positive_out="$(run_schema_diff "$positive_call_log" \
+    "localhost:5432:$same_db=15.20;localhost:5433:$same_db=18.7" \
+    "Host=localhost;Port=5432;Database=$same_db;Username=pg15user;Password=pg15-secret" \
+    "Host=localhost;Port=5433;Database=$same_db;Username=pg18user;Password=pg18-secret")"; then
+  if grep -Fq 'PG15 control server major = 15' <<<"$positive_out" \
+    && grep -Fq 'PG18 target server major = 18' <<<"$positive_out" \
+    && grep -Fq 'column-level schema identical across PG15 and PG18' <<<"$positive_out" \
+    && grep -Fq -- 'psql -h localhost -p 5432' "$positive_call_log" \
+    && grep -Fq -- 'psql -h localhost -p 5433' "$positive_call_log" \
+    && grep -Fq -- "Database=$same_db;Username=pg15user;Password=pg15-secret" "$positive_call_log" \
+    && grep -Fq -- "Database=$same_db;Username=pg18user;Password=pg18-secret" "$positive_call_log"; then
+    printf '  ok   distinct PG15/PG18 endpoints may share a DB name; offline schema-diff control completes\n'
+    pass=$((pass + 1))
+  else
+    printf '  FAIL distinct same-name schema-diff control missed a major/target assertion\n'
+    printf '%s\n' "$positive_out" | tail -20
+    cat "$positive_call_log"
+    failures=$((failures + 1))
+  fi
+else
+  printf '  FAIL distinct same-name schema-diff control was refused\n'
+  printf '%s\n' "$positive_out" | tail -20
+  failures=$((failures + 1))
+fi
+
 printf '\npg18-parity-gate.matched-controls.test.sh: %s passed, %s failed\n' "$pass" "$failures"
 [[ "$failures" -eq 0 ]]

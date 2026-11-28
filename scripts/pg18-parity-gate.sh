@@ -201,6 +201,9 @@ printf '%s\n' "--- ladder database: $(pg18_conn_field "$ladder_conn" Database)"
 if [[ "$mode" == "schema-diff" ]]; then
   pg15_conn="$(pg18_canonical_connection "${PG15_URL:-}")" || exit 1
   pg18_conn="$(pg18_canonical_connection "${PG18_URL:-}")" || exit 1
+  step "PG15/PG18 database identity preflight"
+  pg18_assert_distinct_database_targets "$pg15_conn" "$pg18_conn" || exit 1
+  printf '  PG15 and PG18 targets resolve to distinct canonical database identities\n'
   step "PostgreSQL 18 identity"
   ensure_db "$pg18_conn"
   assert_major "$pg18_conn" "PG18 target" 18

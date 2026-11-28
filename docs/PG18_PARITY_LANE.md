@@ -27,12 +27,16 @@ without waiting for it.
 
 ## Safe defaults
 
-* The lane executes from two explicit opt-ins and nothing else: a `push` to a
-  branch inside its own `ci/postgres18-` prefix (the only branch namespace it
-  can ever run on) or a `workflow_dispatch` (listed once the file exists on the
-  default branch). There is no `pull_request` or `schedule`/`cron` trigger, and
-  a prefix push still defaults to `guards-only`, so an ordinary branch or PR
-  cannot consume CI minutes or silently start a database-backed run.
+* The workflow's automatic trigger is a `push` to `ci/postgres18-**`, including
+  pushes to this PR's head branch,
+  `ci/postgres18-parity-harness-20261113`. There is no `pull_request` or
+  `schedule`/`cron` trigger. A push to that PR branch without a marker runs
+  `guards-only`; a commit message containing an explicit marker such as
+  `[pg18-lane=schema-diff]` or `[pg18-lane=all]` opts that push into its named
+  database-backed leg(s). The marker path is real for this PR head, not limited
+  to `workflow_dispatch`; review the commit message before pushing to the
+  lane-prefixed branch. `workflow_dispatch` is separately available once the
+  workflow exists on the default branch.
 * `legs` defaults to `guards-only`, which runs the offline guard contracts and
   touches no database at all.
 * `candidate_ref` lets the lane qualify an **exact composed candidate** (for
@@ -48,6 +52,11 @@ without waiting for it.
   connection string before either psql or EF receives them. Disposable database
   names are restricted to SQL-safe characters and are explicitly quoted for
   identifier/literal use.
+* In `schema-diff`, PG15 and PG18 connection identities are checked before the
+  first `psql` or EF invocation. Identity includes canonical host/port/database
+  and ignores credentials; `localhost` and `127.0.0.1` normalize together.
+  Distinct service endpoints may reuse a database name, while unverified
+  cross-host aliases with the same name fail closed as ambiguous.
 * For every regression mode, the harness reads `server_version` from both the
   migration-ladder server and the freshly reset test server, requiring the
   mode's expected major on both before the migration or test evidence is
