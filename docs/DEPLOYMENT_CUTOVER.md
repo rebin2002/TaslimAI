@@ -36,9 +36,12 @@ justify emergency change; it justifies a gate.
 The 502 cannot have been produced by the application. The application has no code
 path that returns 502 on `/health`: `/health` and `/health/live` return `Results.Ok`
 unconditionally once routed, and `/health/ready` returns 200 or 503
-(`apps/api/Program.cs:586-608` on `bea15310`; `567-599` on the `1e2cb80a` tree these observations were actually taken from). A process that has not bound its socket cannot
-emit any status line, so a 502 inside the cutover window is the platform proxy
-answering **on behalf of** a container that was not yet listening.
+(`apps/api/Program.cs:626-660` on current PR base
+`14848b17c70397aacb29a65145db21d5e864b9af`; the readiness payload is defined in
+`apps/api/Infrastructure/OperationalObservability.cs:63-124`). A process that has
+not bound its socket cannot emit any status line, so a 502 inside the historical
+cutover window is the platform proxy answering **on behalf of** a container that
+was not yet listening.
 
 Why there is such a window is visible in the startup order. `Program.cs` configures
 middleware and maps every endpoint, then applies migrations, and only then calls
@@ -67,16 +70,14 @@ built from `1e2cb80a`:
 | B | `ApplyMigrations=false`, same database | 7.6s | ~30 |
 | A | `ApplyMigrations=true`, fresh schema, 82 migrations, 148 tables created | **21.6s** | ~100 |
 
-**Chain length has since moved, so 21.6 s is a floor, not a current measurement.**
-The three rows above were measured by building `1e2cb80a`. Current `main`
-(`bea15310`, merged #1268) carries **83** migrations, the chain head being
-`20261124065935_AddAcademicResearchIntegration` rather than
-`20261005112000_AddImageActiveJobGuard`, so case A understates today's cold-start worst
-case by one migration. This lane has no .NET SDK, no PostgreSQL and no Docker, so the
-window was **not re-measured** on `bea15310` and no re-measured figure is claimed here.
-Cases B and C are unaffected in kind: case B shows the window exists with no schema walk
-at all, which is chain-length independent, and case C depends only on the schema already
-being current.
+The three rows above are historical measurements from image `1e2cb80a`; they are
+not measurements of the current PR base. The current base
+(`14848b17c70397aacb29a65145db21d5e864b9af`) contains **84 migration source files**;
+the earlier `bea15310` snapshot had 83. No startup duration has been measured on
+the 84-migration base. In particular, 21.6 s is neither a current measurement nor
+a defensible floor for that base, and no current cold-start duration or timeout
+margin is asserted here. Cases B and C are also historical observations on
+`1e2cb80a`; they describe those test postures only.
 
 Two conclusions, both measured rather than assumed:
 
@@ -104,18 +105,15 @@ polls `/health/live` every 2 s via `probe_production_liveness`
 18:03:46.536Z  [api-health-smoke] /health/live passed on attempt 3
 ```
 
-i.e. **~19.5 s between the smoke container starting and the first 200**, on GitHub's
-runner against a real `postgres:15` service, plus a further attempt-3 wait in the same
-job. This matters for three reasons: it confirms the pre-bind window on infrastructure
-this lane does not control; it shows CI already *expects* that window and absorbs it
-with retries, which is precisely the tolerance production traffic does not get; and it
-places the measured worst case (~20-24 s) inside the 60 s API healthcheck floor
-proposed in §3.2 with roughly 2.5x margin on the 82-migration figure. §1.2 of the first
-draft called that 60 s value "300 s": 300 s is the gate script's own total-probe budget
-argument used in §3.3, not the Railway `healthcheckTimeout`, and the two must not be
-conflated — a platform timeout of 300 s would mask a genuinely wedged startup for five
-minutes before failing the deploy. The reconciled value is the §3.2 floor of 60 s, and
-it should be re-measured against the 83-migration chain before it is relied on.
+i.e. **~19.5 s between the smoke container starting and the first 200** in that
+historical GitHub-runner observation against a real `postgres:15` service, plus a
+further attempt-3 wait in the same job. This corroborates a pre-bind window on that
+image and runner; it does **not** establish startup time on the current base, a current
+worst case, or adequacy/margin for a 60 s API timeout. The 60 s value in §3.2 is a
+provisional setting to validate in staging, not a measured current-base threshold.
+§1.2 of the first draft called that value "300 s": 300 s is the gate's shared
+end-to-end API/Web probe budget used in §3.3, including bounded in-flight requests,
+not the Railway `healthcheckTimeout`. The two must not be conflated.
 
 ### 1.3 Unresolved, and how to settle it
 
@@ -144,7 +142,7 @@ observation. Confirm independently before acting on it.
    probe, the release smoke, and browser traffic. Compare `requestId`/`X-Request-ID`
    in the deployment logs against the reviewer's smoke run.
 
-### 1.4 Current-head qualification and hold (2026-11-26)
+### 1.4 Historical current-head qualification and hold (2026-11-26; superseded)
 
 This subsection separates readiness-tool preparation from permission to cut over.
 The prior current-head record is [PR comment #7203105747](https://github.com/rebin2002/TaslimAI/pull/1277#issuecomment-7203105747), recorded against PR head
@@ -224,13 +222,34 @@ staged no-op deployment and deployment-scoped logs must still be verified in a
 separate environment before any production apply. The shared production service
 domain exposes no candidate revision identity, so an unverified green remains
 shape-only and cannot authorize promotion. No Railway action or production probe is
-recorded by this qualification.
+recorded by this historical qualification.
+
+### 1.5 Current PR/base qualification (2026-11-28)
+
+The live existing PR #1277 was rechecked before this update: it is open and draft,
+at head `ccf493f0d1a9512ceedd75df769dd4659c38577c`, based on `main`
+`14848b17c70397aacb29a65145db21d5e864b9af`. Its source diff contains the workflow
+file, this runbook, and the two readiness-gate scripts; this update changes only the
+two scripts and this runbook. The current base has **84 EF migration source files**.
+The readiness response still has `status`, `service`, `requestId`, and typed `checks`,
+and the production startup path still applies migrations before `app.Run()` (see
+the current-base source references in §1.2). No timing was measured on this base.
+
+The pre-update head's hosted checks were 7/7 successful on exact SHA
+`ccf493f0d1a9512ceedd75df769dd4659c38577c`: runs
+[46075207532](https://github.com/rebin2002/TaslimAI/actions/runs/46075207532),
+[46075207578](https://github.com/rebin2002/TaslimAI/actions/runs/46075207578), and
+[46075207688](https://github.com/rebin2002/TaslimAI/actions/runs/46075207688).
+Those checks are historical for that exact head and are not evidence for any later
+head or for a Railway staging cutover. No production/staging probe or platform
+configuration read was performed for this qualification.
 
 ## 2. The gate contract
 
 `deploy-readiness-gate.sh` promotes a cutover only when both services are
-demonstrably serving. Its verdict taxonomy is deliberate: an application 503 and a
-proxy 502 mean opposite things and must not be merged into one failure.
+demonstrably serving. Only HTTP 503 with a valid, matching `not_ready` readiness
+document and at least one red required check is a dependency verdict; HTTP 502/504
+and malformed or contradictory 503 responses are gateway/contract errors.
 
 **The gate and the platform healthcheck deliberately use different API
 endpoints.** This script is an *operator* decision aid and reads `/health/ready`,
@@ -243,12 +262,14 @@ its reason are recorded in section 3.2.
 | Verdict | Meaning | Promote? |
 | --- | --- | --- |
 | `ready` | 2xx and every `required: true` check is `available` | yes |
-| `not-ready` | bound, but a required dependency check is red | no; investigate the dependency |
-| `no-upstream` | refused / timeout / empty reply, or a 5xx carrying no Taslim readiness document | no; the revision never bound |
+| `not-ready` | a 2xx readiness result is not promotable, or HTTP 503 carries a valid matching `not_ready` document with a red required check | no; investigate the dependency/contract |
+| `no-upstream` | connection refused, timeout, or empty reply | no; no application response was received |
+| `gateway-error` | HTTP 502/504, or HTTP 503 that is malformed, foreign, or lacks a red required check in a valid `not_ready` document | no; verify proxy/route/contract, not dependencies |
+| `budget-exhausted` | the shared API/Web deadline expired before a confirming green, including an in-flight request | no; do not promote; review the total budget and service latency |
 | `throttled` | 429 from the health limiter | no; back the probe rate off |
 | `redirect` | 3xx. Reached only because the probe **does not follow redirects**: following one lands on a 200 page and would be classified green | no; a redirect is not a serving endpoint |
 | `foreign-service` | a 2xx readiness document whose `service` is not the expected one | no; wrong URL, wrong vhost, or a proxy answering with another app's JSON |
-| `conflict-5xx` | a 5xx whose own body claims `ready` | no; self-contradictory, and no non-2xx is ever promotable |
+| `conflict-5xx` | HTTP 503 with a valid matching readiness document that claims `ready` | no; self-contradictory, and no non-2xx is ever promotable |
 | `identity-mismatch` | a revision is demanded and the responder names a different one | no; the replacement is not serving |
 | `identity-unavailable` | a revision is demanded but the responder exposes no revision field or header | no; proof was asked for and cannot be produced - see section 2.1 |
 | `http-N`, `bad-body` | route or contract drift | no; inspect before retrying |
@@ -256,7 +277,11 @@ its reason are recorded in section 3.2.
 `GATE_EXPECT_SERVICE` defaults to `Taslim API` and is what makes the
 `foreign-service` check possible; setting it empty opts out deliberately.
 `GATE_EXPECT_REVISION` is empty by default, which is why the normal PASS prints
-`IDENTITY UNVERIFIED` instead of claiming authority (section 2.1).
+`IDENTITY UNVERIFIED` instead of claiming authority (section 2.1). If set, it must
+be an exact 40-character hexadecimal commit SHA; abbreviated prefixes are rejected.
+The third positional argument / `GATE_BUDGET_SECONDS` is one absolute end-to-end
+budget shared by API and Web, and each request timeout and retry sleep is capped by
+the remaining time.
 
 **Malformed documents are classified, not crashed on.** This was checked by
 feeding the gate deliberately broken readiness responses on loopback. At the
@@ -264,10 +289,11 @@ reviewed head, a JSON *array* instead of an object, or a `checks` entry that is 
 bare string rather than an object, raised an unhandled exception inside the
 classifier and printed `probe-error` - a red, but with no diagnosis, and an
 exception path in a tool meant to be read under pressure. Both now resolve to a
-named verdict (`bad-body` and `not-ready` respectively). A `204` with no body and
-a `503` carrying HTML are `bad-body` and `no-upstream`; a `500` is `http-500`,
-which is deliberately *not* the same thing as a `503` with our document. Only a
-genuine 2xx readiness document with an available required check produces `ready`.
+named verdict (`bad-body` and `not-ready` respectively). A `204` with no body is
+`bad-body`; HTTP 502/504 and an HTTP 503 carrying HTML or malformed/foreign JSON are
+`gateway-error`, never `not-ready`. A `500` is `http-500`, deliberately distinct
+from a valid application 503. Only a genuine 2xx readiness document with an
+available required check produces `ready`.
 
 Endpoints used, and why they are the right ones:
 
@@ -317,7 +343,7 @@ The gate behaves as follows rather than pretending otherwise:
 | `GATE_EXPECT_REVISION` | Behaviour |
 | --- | --- |
 | unset (default) | green is green, but the PASS line prints `PASS (IDENTITY UNVERIFIED)` and states that this is **not a promotion authority** |
-| set, responder exposes a revision | compared against `revision`/`buildSha`/`gitCommit`/`version` in the body, or `x-taslim-revision`/`x-revision`/`x-build-sha`/`x-git-sha`/`x-commit-sha` in the headers. Match → `revision identity verified`; mismatch → RED `identity-mismatch` |
+| set, responder exposes a revision | must be an exact full 40-hex commit SHA and match exactly against `revision`/`buildSha`/`gitCommit`/`version` in the body, or `x-taslim-revision`/`x-revision`/`x-build-sha`/`x-git-sha`/`x-commit-sha` in the headers. Prefixes and mismatches → RED; exact match → `revision identity verified` |
 | set, responder exposes no identity at all | **RED `identity-unavailable`**, not a green. Demanding proof and not receiving it is a failure, because the alternative is the false green described above |
 
 Two consequences for how this is used:
@@ -375,7 +401,7 @@ adopted.
 | 1 | Taslim Web | Healthcheck Path | `/` | public, non-paid, matches the existing smoke contract |
 | 1 | Taslim Web | Healthcheck Timeout | `30` | `next start` binds without a migration chain |
 | 2 | Taslim API | Healthcheck Path | **`/health/live`** | see the reversal below |
-| 2 | Taslim API | Healthcheck Timeout | **`60` minimum** | measured cold window is 21.6s worst case; the reviewer's floor of 60s leaves ~3x margin plus image start |
+| 2 | Taslim API | Healthcheck Timeout | **`60` provisional** | operational starting value only; current-base startup is unmeasured, so validate in staging before relying on 60s |
 | 2 | Taslim API | Restart policy | `ON_FAILURE`, max retries `10` | unchanged from the platform default; a failed healthcheck marks the deploy failed, it does not restart a healthy process |
 | both | Overlap seconds | `30` | keeps the previous deployment answering while clients finish in-flight work |
 | both | Draining seconds | `10` | graceful SIGTERM window; the readiness endpoint already returns 503 while stopping |
@@ -440,7 +466,8 @@ an outcome has not been verified, whatever the documentation says.
 3. **Web only:** set `healthcheckPath=/`, `healthcheckTimeout=30`. Lowest-risk
    service, no migration step. Trigger no deploy yet.
 4. **API only, after Web is observed:** set `healthcheckPath=/health/live`,
-   `healthcheckTimeout=60` (never less), and keep the platform probe interval at or
+   `healthcheckTimeout=60` as the provisional value (do not treat it as validated
+   until the staged startup is measured), and keep the platform probe interval at or
    above 30s so it cannot consume the #249 anonymous budget or throttle itself.
 5. Deploy the candidate SHA to staging and read the deployment detail page: the
    healthcheck value must show, with the icon that names its config source.
@@ -497,13 +524,14 @@ manifest for the SHA is retained; a rollback target is named in advance.
      https://taslim-web-production.up.railway.app 300
    ```
 
-   Measured at `2026-11-24T20:12Z` against live production, both forms behave as
-   documented: the default run returned `PASS (IDENTITY UNVERIFIED)` at exit 0,
-   and `GATE_EXPECT_REVISION=1e2cb80a` returned `identity-unavailable` at exit 1
-   for **both** services - a correct refusal, not a failed deploy. The same demand
-   against a responder that does publish a revision returned `ready` on a matching
-   prefix and `identity-mismatch` on a non-matching one, so the mechanism
-   discriminates; it simply has nothing to read from this API yet.
+   Historical observation at `2026-11-24T20:12Z` against live production: the default
+   run returned `PASS (IDENTITY UNVERIFIED)` at exit 0. The then-current gate accepted
+   the abbreviated `GATE_EXPECT_REVISION=1e2cb80a` and returned `identity-unavailable`
+   at exit 1 for both services. The abbreviated value is now rejected as a usage
+   error; with a valid full 40-hex SHA, the current API still returns
+   `identity-unavailable` until it discloses revision identity. The then-current
+   synthetic test also accepted a matching prefix; that behavior was unsafe and is
+   superseded by the exact-full-SHA rule in §2.1.
 
 5. Green means: sample the deployment-scoped HTTP logs for the cutover window and
    record that 5xx on `/health` and `/health/ready` is zero. Record the deployment
@@ -517,12 +545,14 @@ Choose by verdict; the three cases need opposite responses.
 
 | Gate verdict | Meaning | Action |
 | --- | --- | --- |
-| `no-upstream` after the full budget | the revision never bound; startup is blocked on the advisory lock or a migration | **Abort/Redeploy is not the first move.** Read the API startup logs for `Taslim.DatabaseMigration`. If a migration failed, fix forward through the reviewed path. `pg_advisory_lock` is held per session and released when the connection closes, so a wedged predecessor is cleared by stopping the old deployment, not by killing the database |
+| `no-upstream` after the full budget | no application response was received; startup may be blocked on the advisory lock or a migration | **Abort/Redeploy is not the first move.** Read the API startup logs for `Taslim.DatabaseMigration`. If a migration failed, fix forward through the reviewed path. `pg_advisory_lock` is held per session and released when the connection closes, so a wedged predecessor is cleared by stopping the old deployment, not by killing the database |
+| `budget-exhausted` | the single API/Web deadline expired, potentially during an in-flight request | Do not promote. Check service-scoped latency and whether the configured total budget is appropriate; do not assume a stalled service is healthy. |
+| `gateway-error` | HTTP 502/504, or a malformed/foreign/semantically invalid 503 | Verify proxy, route, service domain and response contract. Do not diagnose a dependency unless the valid application 503 criteria are met. |
 | `not-ready`, `database=unavailable` | the schema target is unreachable | check Railway PostgreSQL status; do not roll code back for an infrastructure fault |
 | `not-ready`, `storage=unavailable` | the R2 adapter is not answering | `Health:StorageRequired=true` makes this a promotion blocker on purpose; verify R2 settings and provider status before touching the deployment |
 | `throttled` | probe budget exhausted | widen the gate interval; if PR #249 has landed, re-check its per-client-IP budget before promoting |
 | `foreign-service` | something that is not the Taslim API answered the readiness path | wrong URL, wrong vhost, or a proxy fronting another app. Nothing to roll back; fix the target the gate was pointed at |
-| `conflict-5xx` | a 5xx carrying a document that claims `ready` | a non-2xx is never promotable. Treat as not bound and investigate the proxy, not the app |
+| `conflict-5xx` | HTTP 503 with a valid matching readiness document that claims `ready` | a non-2xx is never promotable. Treat as contradictory and investigate the proxy/response contract |
 | `identity-mismatch` | the responder identifies a revision other than the expected one | **the replacement is not serving.** Do not promote. Check which deployment the domain is routed to; the previous revision is still live |
 | `identity-unavailable` | identity was demanded but the responder exposes no revision field or header | expected against the shared production domain until a revision field or `/version` lands - the API exposes none today, so this verdict is the gate behaving correctly, not a failed deploy. Re-run the gate **pointed at an isolated staging or PR environment** (one candidate to serve, so a green there is a promotion assertion), or read the production green as shape-only. There is **no per-deployment URL** to fall back on: Railway routes at environment and service granularity (section 2.1). Deployment **logs** are per-deployment, which is how you confirm which one started |
 | gate green but the release is wrong | a functional regression, not a cutover failure | roll back. Note that a green on the *service domain* does not prove the new revision is the one answering (section 2.1), so confirm the serving revision before concluding a regression is attributable to it |
@@ -591,13 +621,15 @@ was touched.
   Web failing independently of a green API, a closed port reporting `no-upstream`,
   API-only operation, the 5s probe-interval default, and the usage guards.
 
-### 7.1 Three of the four review gaps were live false greens, not test gaps
+### 7.1 Historical review comparison before the 2026-11-28 repair
 
 `7141321366` classifies all four gaps as surviving mutants - a statement about the
 *tests*. Three of them were also producing a wrong verdict at the shipped head
 `c0156e2e`, and one was not. Rather than reason about it from the source, the old
 script (`git show c0156e2e:...`) and the new one were run **side by side against the
-same loopback responders**:
+same loopback responders**. The rows below document the earlier comparison and the
+pre-2026-11-28 implementation; the current repair adds explicit 502/504, malformed
+503, exact-SHA and shared-deadline regressions in §7.5.
 
 | Responder | Old script at `c0156e2e` | New script | |
 | --- | --- | --- | --- |
@@ -668,17 +700,17 @@ recording, because both are places where a mutation run can lie:
 The harness itself is a local verification artefact, deliberately not committed, since
 it exists only to answer a review claim about this script.
 
-### 7.3 Live verification, read-only
+### 7.3 Historical live verification, read-only (2026-11-24)
 
 - `deploy-readiness-gate.sh` against production, `20:12Z`: default run printed
   `PASS (IDENTITY UNVERIFIED)` and exited 0. Attempt 1 on the API returned a transient
   `no-upstream` and attempt 2 was green 10s later; that is one sample of the instability
   the retry design exists for, not a reason to loosen any timeout.
-- With `GATE_EXPECT_REVISION=1e2cb80a`: **both** services returned `identity-unavailable`
-  and exit 1. The gate refuses to claim a revision it cannot observe.
-- Against a synthetic responder that does publish a revision: matching prefix printed
-  `ready`, a non-matching one printed `identity-mismatch`. The mechanism works; the
-  production API simply does not expose the field yet (section 2.1).
+- At the time, abbreviated `GATE_EXPECT_REVISION=1e2cb80a` returned
+  `identity-unavailable` for both services, and a synthetic responder's matching
+  prefix printed `ready`. Both behaviors are historical and superseded: the current
+  gate rejects abbreviated input and only accepts an exact full SHA. The production
+  API still does not expose that field (section 2.1).
 - Response headers on the live health routes carry `x-request-id`,
   `x-railway-request-id`, `x-railway-edge` and `x-hikari-trace` - no revision, build or
   deployment identifier. This is the observed basis for the identity limitation, not an
@@ -717,7 +749,7 @@ Still not done by this lane, deliberately: any `railway config plan` / `apply`, 
 applying the section 3.2 settings to any environment. Those are live changes and are
 the release owner's call, gated on section 3.3.
 
-### 7.4 Re-verification against live main `bea15310` (2026-11-25)
+### 7.4 Historical re-verification against main `bea15310` (2026-11-25; superseded)
 
 The measurements above were taken at `1e2cb80a`. `main` has since advanced 43 commits
 to `bea15310cdb4a495ef1c47456eaa349d4d3af604` (merged #1268, 2026-11-25T00:32:37Z), so
@@ -774,9 +806,24 @@ opposite direction before. Neither ordering enforces more checks than the other.
 | `railway.json` / `railway.toml` / `.railway/` in the tree | none | **still none**, so health-check settings remain dashboard-only and unreviewable |
 | Branch protection / rulesets | none | **still none**: `404` on `/branches/main/protection`, `[]` from `/rulesets`, #283 still open |
 
-**Not re-measured here, stated as a limit rather than assumed.** The 8.1 s / 7.6 s /
-21.6 s startup windows of §1.2 were **not** reproduced: this sandbox has no .NET SDK, no
-PostgreSQL and no Docker, so no bind-window figure on `bea15310` is claimed anywhere in
-this document. Because the chain is one migration longer, 21.6 s is a **floor**, and the
-60 s API healthcheck floor in §3.2 should be re-measured against the 83-migration chain
-before it is relied on. Container-backed smoke remains a hosted-runner verification.
+**Not re-measured then, stated as a limit rather than assumed.** The 8.1 s / 7.6 s /
+21.6 s startup windows of §1.2 were **not** reproduced on `bea15310`; they remain
+historical observations from `1e2cb80a`. The later current base has 84 migration source
+files, and no startup duration or 60 s timeout margin has been measured on it. The
+provisional timeout requires staged measurement before reliance. Container-backed
+smoke remains a hosted-runner verification, not a current-base timing measurement.
+
+### 7.5 Current exact-head verification boundary (2026-11-28)
+
+The initial verification for this repair began from PR head
+`ccf493f0d1a9512ceedd75df769dd4659c38577c` and base
+`14848b17c70397aacb29a65145db21d5e864b9af` (84 migration source files). The hosted
+7/7 check result listed in §1.5 belongs only to that pre-repair head. The updated
+loopback suite passes **90/90**, including positive/negative app-503 schema cases,
+app-shaped 502/504 responses, full-SHA matches/mismatches/prefix rejection, advisory
+worker behavior, and API/Web shared-deadline and in-flight bounds; Bash syntax checks
+also pass. New hosted checks must complete on the eventual pushed head before it is
+described as CI-green. Neither
+hosted CI nor loopback tests qualify staging healthcheck settings, startup duration,
+release-record provenance, candidate identity on the production service domain, or
+formal release-owner approval.

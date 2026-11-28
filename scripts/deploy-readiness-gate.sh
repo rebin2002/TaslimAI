@@ -9,8 +9,8 @@
 # proxy answers 502 on the application's behalf. An application 503 and a proxy
 # 502 therefore mean opposite things, and a cutover gate must not merge them:
 #
-#   proxy 502/504 or a refused connection -> the revision has not bound yet
-#   application 503 {"status":"not_ready"} -> bound, dependencies not satisfied
+#   proxy 502/504 or a refused connection -> no valid application verdict
+#   application 503 with a valid not_ready document -> bound, dependencies red
 #   application 429                        -> probe budget exhausted (rate limiter)
 #
 # The gate holds traffic promotion until both services are actually serving:
@@ -38,7 +38,8 @@
 #   GATE_EXPECT_REVISION (default empty)        demand proof of which revision is
 #       serving, matched against a readiness body field (revision, buildSha,
 #       gitCommit, version) or a response header (x-taslim-revision, x-revision,
-#       x-build-sha, x-git-sha, x-commit-sha). Unset means identity is NOT
+#       x-build-sha, x-git-sha, x-commit-sha). The value must be the exact full
+#       40-character hexadecimal commit SHA; prefixes are never accepted. Unset means identity is NOT
 #       verified and the PASS line says so out loud. The shipped API exposes no
 #       such field or header today, so setting this against production yields
 #       identity-unavailable rather than a false green.
@@ -47,7 +48,7 @@
 #   0  both requested probes are green inside the budget. This is a probe result,
 #      not deployment authority on a shared service domain: promotion still
 #      requires candidate identity by isolation or by an observable revision.
-#   1  budget exhausted or a red verdict: do not promote; keep the previous
+#   1  shared API/Web budget exhausted or a red verdict: do not promote; keep the previous
 #      deployment serving.
 #   2  usage or argument error
 set -uo pipefail
@@ -80,9 +81,18 @@ fi
 [[ "$GATE_CONNECT_TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ ]] || die "GATE_CONNECT_TIMEOUT_SECONDS must be positive"
 [[ "$GATE_REQUEST_TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ ]] || die "GATE_REQUEST_TIMEOUT_SECONDS must be positive"
 if [[ -n "$GATE_EXPECT_REVISION" ]]; then
-    [[ "$GATE_EXPECT_REVISION" =~ ^[A-Za-z0-9._-]{4,128}$ ]] \
-        || die "GATE_EXPECT_REVISION must be a short revision token, not arbitrary text"
+    [[ "$GATE_EXPECT_REVISION" =~ ^[A-Fa-f0-9]{40}$ ]] \
+        || die "GATE_EXPECT_REVISION must be a full 40-character hexadecimal commit SHA"
 fi
+
+GATE_RETRY_MILLISECONDS="$(python3 - "$GATE_RETRY_SECONDS" <<'PY'
+from decimal import Decimal, ROUND_CEILING
+import sys
+
+milliseconds = (Decimal(sys.argv[1]) * 1000).to_integral_value(rounding=ROUND_CEILING)
+print(int(milliseconds))
+PY
+)"
 
 for base in "$API_BASE_URL" "$WEB_BASE_URL"; do
     [[ -n "$base" ]] || continue
@@ -164,6 +174,31 @@ def doc():
     return payload if isinstance(payload, dict) else None
 
 
+def valid_readiness(payload):
+    """Validate the current API wire shape before trusting a 503 as a dependency verdict."""
+    if not isinstance(payload, dict):
+        return False
+    if payload.get("status") not in ("ready", "not_ready"):
+        return False
+    if not isinstance(payload.get("service"), str) or not payload["service"].strip():
+        return False
+    if not isinstance(payload.get("requestId"), str) or not payload["requestId"].strip():
+        return False
+    checks = payload.get("checks")
+    if not isinstance(checks, list) or not checks:
+        return False
+    for check in checks:
+        if not isinstance(check, dict):
+            return False
+        if not isinstance(check.get("name"), str) or not check["name"].strip():
+            return False
+        if not isinstance(check.get("status"), str) or not check["status"].strip():
+            return False
+        if not isinstance(check.get("required"), bool):
+            return False
+    return True
+
+
 def revision_from(payload):
     for key in ("revision", "buildSha", "build_sha", "gitCommit", "version"):
         value = payload.get(key) if isinstance(payload, dict) else None
@@ -189,7 +224,7 @@ def identity(payload, verdict_if_ok):
             # Refuse rather than guess: an unprovable identity is not a green.
             print("identity-unavailable")
             return
-        if not found.lower().startswith(expect_revision.lower()):
+        if found.lower() != expect_revision.lower():
             print("identity-mismatch")
             return
     print(verdict_if_ok)
@@ -198,21 +233,32 @@ def identity(payload, verdict_if_ok):
 if code == 429:
     print("throttled")
     sys.exit(0)
-if code in (502, 503, 504):
-    # A gateway 502/504 carries no Taslim readiness document. An application 503
-    # does, and that document is what makes it a dependency verdict instead.
+if code in (502, 504):
+    # 502/504 are gateway statuses, even if an intermediary echoes an
+    # application-shaped body. They are never dependency verdicts.
+    print("gateway-error")
+    sys.exit(0)
+if code == 503:
+    # Only the application's documented 503 contract proves a dependency
+    # failure. A malformed, foreign, or contradictory gateway response does not.
     payload = doc()
-    if payload is None:
-        print("no-upstream")
+    if not valid_readiness(payload):
+        print("gateway-error")
         sys.exit(0)
     if expect_service and payload.get("service") != expect_service:
-        # Some other service answered at this path. Not our readiness document.
+        # Some other service answered at this path. Not this API's readiness document.
         print("gateway-error")
         sys.exit(0)
     if payload.get("status") == "ready":
         # A 5xx whose body claims ready is self-contradictory. Never allow a
         # non-2xx to produce a green, whatever the document asserts.
         print("conflict-5xx")
+        sys.exit(0)
+    required = [c for c in payload["checks"] if c["required"] is True]
+    if not required or all(c["status"] == "available" for c in required):
+        # A not_ready word without a red required check is not the API's
+        # dependency-failure semantics, so retain the gateway/contract verdict.
+        print("gateway-error")
         sys.exit(0)
     print("not-ready")
     sys.exit(0)
@@ -275,48 +321,92 @@ PY
 }
 
 probe() {
-    local base="$1" endpoint="$2" label="$3" body_file="$4"
-    local code rc
+    local base="$1" endpoint="$2" label="$3" body_file="$4" deadline_ms="$5"
+    local code rc now_ms remaining_ms request_timeout_ms max_time
+    now_ms="$(date +%s%3N)"
+    remaining_ms=$((deadline_ms - now_ms))
+    if (( remaining_ms <= 0 )); then
+        printf 'budget-exhausted'
+        return 0
+    fi
+    request_timeout_ms=$((GATE_REQUEST_TIMEOUT_SECONDS * 1000))
+    (( request_timeout_ms > remaining_ms )) && request_timeout_ms=$remaining_ms
+    printf -v max_time '%d.%03d' "$((request_timeout_ms / 1000))" "$((request_timeout_ms % 1000))"
     # No --location on purpose: following a redirect would let a 3xx land on a
     # 200 page and be classified as a healthy service.
     code="$(curl --silent --show-error --max-redirs 0 \
         --connect-timeout "$GATE_CONNECT_TIMEOUT_SECONDS" \
-        --max-time "$GATE_REQUEST_TIMEOUT_SECONDS" \
+        --max-time "$max_time" \
         --dump-header "$TMP_DIR/${label}.headers" \
         --output "$body_file" \
         --write-out '%{http_code}' \
         "${base}${endpoint}" 2>"$TMP_DIR/${label}.curl.error")"
     rc=$?
     [[ -n "$code" ]] || code="000"
+    now_ms="$(date +%s%3N)"
+    if (( now_ms >= deadline_ms )); then
+        printf 'budget-exhausted'
+        return 0
+    fi
     classify "$endpoint" "$body_file" "$code" "$rc" "$TMP_DIR/${label}.headers"
 }
 
-# One gate per service: retry inside the shared budget until green or exhausted.
+# Both service gates share one absolute end-to-end deadline. Every in-flight
+# request and retry sleep is capped by the time remaining to that deadline.
 run_gate() {
-    local label="$1" base="$2" endpoint="$3" deadline budget_start outcome last attempt
-    budget_start=$(date +%s)
-    deadline=$((budget_start + BUDGET_SECONDS))
+    local label="$1" base="$2" endpoint="$3" deadline_ms="$4"
+    local gate_start_ms outcome last attempt now_ms remaining_ms sleep_ms sleep_seconds elapsed_secs
+    gate_start_ms="$(date +%s%3N)"
     attempt=0
     last=""
     while :; do
+        now_ms="$(date +%s%3N)"
+        if (( now_ms >= deadline_ms )); then
+            [[ -n "$last" ]] || last="budget-exhausted"
+            printf '[cutover-gate] %s: shared API/Web end-to-end budget expired (including any in-flight request).\n' "$label" >&2
+            break
+        fi
         attempt=$((attempt + 1))
-        outcome="$(probe "$base" "$endpoint" "$label" "$TMP_DIR/${label}.body" || echo probe-error)"
+        outcome="$(probe "$base" "$endpoint" "$label" "$TMP_DIR/${label}.body" "$deadline_ms" || echo probe-error)"
+        now_ms="$(date +%s%3N)"
+        if (( now_ms >= deadline_ms )) && [[ "$outcome" == "ready" ]]; then
+            outcome="budget-exhausted"
+        fi
+        if [[ "$outcome" == "budget-exhausted" ]]; then
+            [[ -n "$last" ]] || last="budget-exhausted"
+            printf '[cutover-gate] %s: shared API/Web end-to-end budget expired (including any in-flight request).\n' "$label" >&2
+            break
+        fi
         if [[ "$outcome" == "ready" ]]; then
-            local secs=$(( $(date +%s) - budget_start ))
-            printf '[cutover-gate] %s GREEN on attempt %d after %ds (%s)\n' "$label" "$attempt" "$secs" "$endpoint"
+            elapsed_secs=$(( (now_ms - gate_start_ms) / 1000 ))
+            printf '[cutover-gate] %s GREEN on attempt %d after %ds (%s)\n' "$label" "$attempt" "$elapsed_secs" "$endpoint"
             return 0
         fi
         [[ "$outcome" != "$last" ]] && printf '[cutover-gate] %s waiting: %s (%s)\n' "$label" "$outcome" "$endpoint"
         last="$outcome"
-        [[ $(date +%s) -ge $deadline ]] && break
-        sleep "$GATE_RETRY_SECONDS"
+        now_ms="$(date +%s%3N)"
+        remaining_ms=$((deadline_ms - now_ms))
+        if (( remaining_ms <= 0 )); then
+            [[ -n "$last" ]] || last="budget-exhausted"
+            printf '[cutover-gate] %s: shared API/Web end-to-end budget expired (including any in-flight request).\n' "$label" >&2
+            break
+        fi
+        sleep_ms=$GATE_RETRY_MILLISECONDS
+        (( sleep_ms > remaining_ms )) && sleep_ms=$remaining_ms
+        if (( sleep_ms > 0 )); then
+            printf -v sleep_seconds '%d.%03d' "$((sleep_ms / 1000))" "$((sleep_ms % 1000))"
+            sleep "$sleep_seconds"
+        fi
     done
-    printf '[cutover-gate] %s RED after %ds: last verdict %s (%s)\n' "$label" "$BUDGET_SECONDS" "$last" "$endpoint" >&2
+    now_ms="$(date +%s%3N)"
+    elapsed_secs=$(( (now_ms - gate_start_ms) / 1000 ))
+    printf '[cutover-gate] %s RED after %ds (shared budget %ss): last verdict %s (%s)\n' "$label" "$elapsed_secs" "$BUDGET_SECONDS" "$last" "$endpoint" >&2
     case "$last" in
         no-upstream)          printf '[cutover-gate] %s: the revision never bound its HTTP port inside the budget. Do not promote: the gateway is answering for the app. Check the startup migration window and the service healthcheck port.\n' "$label" >&2 ;;
         not-ready)            printf '[cutover-gate] %s: the revision is serving but no required dependency check is satisfiable. Do not promote: investigate database/storage, not the deployment.\n' "$label" >&2 ;;
+        budget-exhausted)     printf '[cutover-gate] %s: the shared API/Web end-to-end budget expired, including any in-flight request. Do not promote.\n' "$label" >&2 ;;
         throttled)            printf '[cutover-gate] %s: the probe budget was exhausted by the health rate limiter. Raise the interval or the per-source budget before retrying.\n' "$label" >&2 ;;
-        gateway-error)        printf '[cutover-gate] %s: the gateway returned a 5xx without a Taslim readiness document. Verify the healthcheck port and the service domain.\n' "$label" >&2 ;;
+        gateway-error)        printf '[cutover-gate] %s: a 502/504 or a 503 without a valid, matching not_ready document and a red required check was returned. Do not diagnose dependencies from a gateway/contract response; verify the healthcheck port and service domain.\n' "$label" >&2 ;;
         foreign-service)      printf '[cutover-gate] %s: a responder that is not "%s" answered the readiness path. Wrong URL, wrong vhost, or a proxy serving another app. Do not promote.\n' "$label" "$GATE_EXPECT_SERVICE" >&2 ;;
         conflict-5xx)         printf '[cutover-gate] %s: a 5xx carrying a document that claims ready. Self-contradictory response; a non-2xx is never promotable. Do not promote.\n' "$label" >&2 ;;
         identity-mismatch)    printf '[cutover-gate] %s: the responder identifies a revision other than the expected one. The replacement is NOT serving. Do not promote.\n' "$label" >&2 ;;
@@ -327,15 +417,18 @@ run_gate() {
     return 1
 }
 
+SHARED_BUDGET_START_MS="$(date +%s%3N)"
+SHARED_DEADLINE_MS=$((SHARED_BUDGET_START_MS + BUDGET_SECONDS * 1000))
+
 web_scope="enabled"
 [[ "$GATE_SKIP_WEB" == "1" ]] && web_scope="skipped"
-printf '[cutover-gate] budget %ss, retry %ss, API enabled, Web %s\n' \
+printf '[cutover-gate] shared end-to-end budget %ss, retry %ss, API enabled, Web %s\n' \
     "$BUDGET_SECONDS" "$GATE_RETRY_SECONDS" "$web_scope"
 
 rc=0
-run_gate "api" "$API_BASE_URL" "/health/ready" || rc=1
+run_gate "api" "$API_BASE_URL" "/health/ready" "$SHARED_DEADLINE_MS" || rc=1
 if [[ "$GATE_SKIP_WEB" != "1" ]]; then
-    run_gate "web" "$WEB_BASE_URL" "/" || rc=1
+    run_gate "web" "$WEB_BASE_URL" "/" "$SHARED_DEADLINE_MS" || rc=1
 fi
 
 if (( rc == 0 )); then
