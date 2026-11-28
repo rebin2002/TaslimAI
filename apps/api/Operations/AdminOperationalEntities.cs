@@ -27,6 +27,26 @@ public static class GenerationWorkerStatuses
 }
 
 /// <summary>
+/// The single definition of "this heartbeat no longer proves a live worker".
+/// Readiness and the administrator operations report must classify degradation
+/// identically, otherwise an operator can see a clean dashboard beside a
+/// degraded readiness document, or the reverse. The window is clamped so a
+/// misconfigured option can never make every worker look alive (zero) or
+/// permanently dead (unbounded).
+/// </summary>
+public static class GenerationWorkerLiveness
+{
+    public const int MinStaleAfterSeconds = 30;
+    public const int MaxStaleAfterSeconds = 3_600;
+
+    public static TimeSpan StaleWindow(int heartbeatStaleAfterSeconds) =>
+        TimeSpan.FromSeconds(Math.Clamp(heartbeatStaleAfterSeconds, MinStaleAfterSeconds, MaxStaleAfterSeconds));
+
+    public static bool IsStale(string status, DateTime lastSeenAt, DateTime now, TimeSpan staleAfter) =>
+        status != GenerationWorkerStatuses.Running || now - lastSeenAt > staleAfter;
+}
+
+/// <summary>
 /// Append-only audit evidence for protected administrator operational actions.
 /// State fields are deliberately bounded summaries; request input, prompts,
 /// provider payloads, credentials, and storage keys must never be written here.
