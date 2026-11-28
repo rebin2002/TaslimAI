@@ -2,6 +2,8 @@ import { createSseParser, type TaslimSseEvent } from "./sse";
 import { API_URL, assetFileUrl, assetRepresentationUrl } from "./apiBase";
 import { awaitWithChatStreamWatchdog, CHAT_STREAM_WATCHDOG_TIMEOUT_MS, ChatStreamTransportError } from "./chatStreamTransport";
 import { collectAllProjectPages } from "./projectListPagination";
+import { isAbortError } from "./requestLifecycle";
+import { getUserUploadSizeError } from "./fileUploadLimits";
 import {
   isIdempotentRead,
   isThrottleRetryStatus,
@@ -13,7 +15,7 @@ export type User = {
   id: string;
   email: string;
   displayName: string;
-  preferredLanguage: "en" | "ar" | "ku";
+  preferredLanguage: string;
   personalWorkspaceId: string;
   createdAt: string;
   defaultGenerationLanguage: "en" | "ar" | "ku";
@@ -42,7 +44,6 @@ export type PasswordPolicy = {
   requireNonAlphanumeric: boolean;
   requiredUniqueChars: number;
 };
-
 export type Project = {
   id: string;
   workspaceId: string;
@@ -67,10 +68,12 @@ export type ProjectOverview = {
 
 export type RegisterInput = { displayName: string; email: string; password: string; preferredLanguage?: string };
 export type LoginInput = { email: string; password: string };
+export type PasswordResetRequestInput = { email: string };
+export type PasswordResetInput = { email: string; token: string; newPassword: string };
 export type OnboardingIntent = "project" | "chat" | "image" | "document" | "presentation" | "research";
 export type OnboardingInput = {
   displayName?: string;
-  preferredLanguage: "en" | "ar" | "ku";
+  preferredLanguage: string;
   defaultGenerationLanguage: "en" | "ar" | "ku";
   intent?: OnboardingIntent;
 };
@@ -374,7 +377,8 @@ export type MovieTimelineRevisionRequest = { baseRevisionId?: string | null; lab
 export type MovieTakeUpscaleEligibility = { takeId: string; movieShotId: string; eligible: boolean; isSelected: boolean; isFinal: boolean; code: string; message: string; targetMasterResolution: string; sourceResolution: string | null; auditId: string | null; auditStatus: string | null; evaluatedAt: string };
 export type MovieFinalMaster = { id: string; movieProjectId: string; movieShotId: string; sourceTakeId: string; sourceMovieClipId: string | null; sourceAssetId: string | null; outputAssetId: string | null; generationJobId: string | null; targetProfile: string; sourceWidth: number | null; sourceHeight: number | null; targetWidth: number; targetHeight: number; state: string; stateReason: string | null; qcStatus: string; qcResultJson: string | null; provenanceJson: string | null; supersedesMasterId: string | null; supersededByMasterId: string | null; requestedAt: string; updatedAt: string; completedAt: string | null; supersededAt: string | null };
 export type MovieProductionVersion = { id: string; movieShotId: string; versionNumber: number; stage: MovieProductionStage; status: "Draft" | "PendingApproval" | "Approved" | "Rejected" | "Selected"; label: string | null; compositionJson: string; regenerationMetadataJson: string | null; stageProvenanceJson: string | null; continuitySnapshotReferenceJson: string | null; cinematographyReferenceJson: string | null; sourceVersionId: string | null; generationJobId: string | null; assetId: string | null; firstFrameAssetId: string | null; lastFrameAssetId: string | null; firstFrameNotes: string | null; lastFrameNotes: string | null; rejectionReason: string | null; createdAt: string; updatedAt: string; reviewedAt: string | null; assetReferences: MovieProductionAssetReference[]; execution: MovieProductionExecution | null; isLocked?: boolean; lockedAt?: string | null; lockedByUserId?: string | null; isSelected?: boolean };
-export type MovieRegenerationRequest = { id: string; movieShotId: string; targetType: string; targetId: string; actionType: string; requestedStage: MovieProductionStage; reason: string; sourceVersionId: string | null; changedInputsJson: string; compositionJson: string; status: string; createdByUserId: string; confirmedByUserId: string | null; generationJobId: string | null; resultingProductionVersionId: string | null; resultingTakeId: string | null; createdAt: string; confirmedAt: string | null; costPreview: { estimatedProviderCostUsd: number | null; estimatedProviderCostKnown: boolean; currency: string; costEstimateJson: string | null; confirmationRequired: boolean; guardrails: GenerationCostPreview | null } };
+export type MovieRegenerationCostPreview = { estimatedProviderCostUsd: number | null; estimatedProviderCostKnown: boolean; currency: string; costEstimateJson: string | null; confirmationRequired: boolean; estimateState?: string; minimumEstimatedProviderCostUsd?: number | null; maximumEstimatedProviderCostUsd?: number | null; guardrails: GenerationCostPreview | null };
+export type MovieRegenerationRequest = { id: string; movieShotId: string; targetType: string; targetId: string; actionType: string; requestedStage: MovieProductionStage; reason: string; sourceVersionId: string | null; changedInputsJson: string; compositionJson: string; status: string; createdByUserId: string; confirmedByUserId: string | null; generationJobId: string | null; resultingProductionVersionId: string | null; resultingTakeId: string | null; createdAt: string; confirmedAt: string | null; costPreview: MovieRegenerationCostPreview };
 export type MovieSelectiveRegenerationResponse = { request: MovieRegenerationRequest; job: GenerationJob | null; productionVersion: MovieProductionVersion | null; take: MovieTake | null };
 export type MovieProductionStageTransition = { id: string; movieShotId: string; movieProductionVersionId: string; fromStage: MovieProductionStage; toStage: MovieProductionStage; eventType: string; reason: string | null; metadataJson: string | null; sourceVersionId: string | null; generationJobId: string | null; actorUserId: string; createdAt: string };
 export type MovieProductionCheckpointItem = { shotId: string; sceneTitle: string; sceneSequence: number; shotSequence: number; label: string; state: "Complete" | "Running" | "Blocked" | "Recoverable" | string; currentStage: MovieProductionStage | string; progressPercent: number; blockedReason: string | null; nextAction: string | null; recoveryJobId: string | null; selectedTakeId: string | null; updatedAt: string };
@@ -724,6 +728,149 @@ export type ResearchSource = {
   evidence?: ResearchEvidence[];
 };
 export type ResearchEvidence = { topic: string; excerpt: string; context: string | null; publishedAt: string | null };
+// Issue #1267 slice 1 — scholarly source discovery. The shape mirrors the API's customer-facing
+// DTO exactly: there is no provider, model, routing or cost field to receive, and `accessLevel`
+// describes what this service holds (metadata or an abstract), never what the student has read.
+export type AcademicSearchSource = {
+  title: string;
+  authors: string[];
+  publicationYear: number | null;
+  sourceType: string;
+  containerTitle: string | null;
+  publisher: string | null;
+  volume: string | null;
+  issue: string | null;
+  pageRange: string | null;
+  pageCount: number | null;
+  language: string | null;
+  citationCount: number | null;
+  doi: string | null;
+  isbn13: string | null;
+  isbn10: string | null;
+  abstract: string | null;
+  publisherDescription: string | null;
+  landingUrl: string | null;
+  fullTextUrl: string | null;
+  accessLevel: "metadata" | "abstract";
+  fullTextIndicated: boolean;
+  provenance: { basis: string; retrievedAtUtc: string; accessDescription: string };
+  relevance: number | null;
+};
+export type AcademicDoiCheck = { submittedDoi: string; isRegistered: boolean; failureCode: string | null };
+export type AcademicSourceSearchResponse = {
+  workspaceId: string;
+  page: number;
+  pageSize: number;
+  totalMatched: number;
+  hasMore: boolean;
+  partial: boolean;
+  partialNotice: string | null;
+  sources: AcademicSearchSource[];
+  doiChecks: AcademicDoiCheck[];
+};
+export type AcademicSourceSearchParams = {
+  term: string;
+  page: number;
+  pageSize: number;
+  yearFrom?: number | null;
+  yearTo?: number | null;
+  openAccessOnly?: boolean;
+  dois?: string[];
+  isbns?: string[];
+};
+export type AcademicProjectSummary = {
+  projectId: string;
+  workspaceId: string;
+  requestKey: string;
+  researchQuestion: string;
+  discipline: string;
+  level: string;
+  state: string;
+  stateCode: string | null;
+  revision: number;
+  createdAtUtc: string;
+  updatedAtUtc: string;
+};
+export type AcademicProjectStage = {
+  stage: string;
+  state: string;
+  attemptCount: number;
+  outputCheckpointRevision: number | null;
+  lastErrorCode: string | null;
+  lastErrorDetail: string | null;
+  startedAtUtc: string | null;
+  completedAtUtc: string | null;
+};
+export type AcademicProjectApproval = { kind: string; checkpointRevision: number; requestedAtUtc?: string; decision?: string; notes?: string | null; decidedAtUtc?: string };
+export type AcademicSearchSpecification = { collection: string; query: string; filters: string[] };
+export type AcademicResearchPlan = {
+  planVersion: number;
+  researchQuestion: string;
+  workingTitle: string | null;
+  level: string;
+  method: string;
+  methodologies: string[];
+  citationStyle: string;
+  objectives: string[];
+  inclusionCriteria: string[];
+  exclusionCriteria: string[];
+  searchStrategy: AcademicSearchSpecification[];
+  chapterOutline: string[];
+  geographicScope: string | null;
+  populationOrContext: string | null;
+  timePeriod: string | null;
+  subQuestions: string[];
+  keywords: string[];
+  minimumSources: number | null;
+  minimumPeerReviewed: number | null;
+  allowedSourceTypes: string[];
+  requireFullText: boolean;
+  programmeRequirements: string | null;
+};
+export type AcademicProjectDto = {
+  project: AcademicProjectSummary;
+  stages: AcademicProjectStage[];
+  activeAttemptId: string | null;
+  pendingApproval: { kind: string; approvalKey: string; checkpointRevision: number; requestedAtUtc: string; reviewerPrompts: string[] } | null;
+  approvals: AcademicProjectApproval[];
+  usage: { spentUsd: number; ceilingUsd: number; remainingUsd: number; callsUsed: number; callCeiling: number; callsRemaining: number };
+  connectedStages: string[];
+  missingStages: string[];
+  evidenceCurrent: boolean;
+  planVersion: number;
+  sourceCount: number;
+  includedCount: number;
+  excludedCount: number;
+  undeterminedCount: number;
+  evidenceCount: number;
+  themeCount: number;
+  chapterCount: number;
+  verification: unknown | null;
+  plan?: AcademicResearchPlan | null;
+  code: string | null;
+};
+export type AcademicProjectCreateInput = {
+  requestKey: string;
+  researchQuestion: string;
+  discipline: string;
+  level: "Masters" | "Doctoral";
+  method: string;
+  methodologies: string[];
+  citationStyle: string;
+  language: string;
+  targetChapterHeadings: string[];
+  workingTitle: string | null;
+  geographicScope: string | null;
+  populationOrContext: string | null;
+  timePeriod: string | null;
+  subQuestions: string[];
+  keywords: string[];
+  minimumSources: number | null;
+  minimumPeerReviewed: number | null;
+  allowedSourceTypes: string[];
+  requireFullText: boolean;
+  programmeRequirements: string | null;
+};
 export type AssetStatus = "Active" | "Archived";
 export type AssetType = "image" | "document" | "presentation" | "video" | "audio" | "music" | "research" | "social" | "file" | "other";
 export type Asset = {
@@ -746,7 +893,11 @@ export type Asset = {
   archivedAt: string | null;
   representations: AssetRepresentation[];
 };
-export type AssetRepresentation = { id: string; representationType: string; fileName: string; contentType: string; sizeBytes: number; createdAt: string };
+// canDownload mirrors the read model's per-representation availability (#1030): the download
+// route answers 409 for any representation whose stored file is not Ready, so the row is only
+// linked when the flag is true. Optional so payloads from an older API stay usable (assumed
+// downloadable, which is exactly the pre-#1030 behavior).
+export type AssetRepresentation = { id: string; representationType: string; fileName: string; contentType: string; sizeBytes: number; createdAt: string; canDownload?: boolean };
 export type AssetList = { items: Asset[]; page: number; pageSize: number; totalCount: number; totalPages: number };
 export type AssetSort = "recent" | "oldest" | "name" | "size";
 export type AssetFilters = { projectId?: string; assetType?: AssetType; status?: AssetStatus; search?: string; sort?: AssetSort; page?: number; pageSize?: number };
@@ -775,7 +926,13 @@ async function csrf(forceRefresh = false) {
     // token: an auth transition may have changed the antiforgery user binding
     // while the earlier request was still completing.
     if (forceRefresh && csrfRequest) await csrfRequest.catch(() => undefined);
-    const response = await fetch(`${API_URL}/api/auth/csrf`, { credentials: "include", cache: "no-store" });
+    let response: Response;
+    try {
+      response = await fetch(`${API_URL}/api/auth/csrf`, { credentials: "include", cache: "no-store" });
+    } catch (error) {
+      if (isAbortError(error)) throw error;
+      throw new ApiError(503, "The service is temporarily unavailable. Please try again.", undefined, "NETWORK_ERROR");
+    }
     if (!response.ok) throw new Error("CSRF token unavailable");
     const body = await response.json().catch(() => null) as { token?: unknown } | null;
     if (!body || typeof body.token !== "string" || body.token.length === 0) throw new Error("CSRF token unavailable");
@@ -794,15 +951,35 @@ async function csrf(forceRefresh = false) {
 
 type ErrorBody = { error?: { code?: string; message?: string; fields?: Record<string, string[]> } };
 
+/**
+ * Optional out-parameter for a call that needs the server's `ETag` verbatim.
+ *
+ * The project revision fence uses the published token exactly as the API wrote
+ * it: one UTC designator with seven fractional digits, matching the
+ * `timestamp with time zone` grid the row is stamped on. Re-deriving it from a
+ * JavaScript `Date` would round to milliseconds and produce a token the server
+ * refuses, so the header value is carried through untouched.
+ */
+export type ProjectRevisionSink = { etag: string | null };
+
 async function parseError(response: Response) {
   return await response.json().catch(() => null) as ErrorBody | null;
 }
 
-async function request<T>(path: string, init: RequestInit = {}, withCsrf = false, retryCsrf = true, retryThrottled = true): Promise<T> {
+async function request<T>(path: string, init: RequestInit = {}, withCsrf = false, retryCsrf = true, retryThrottled = true, revision?: ProjectRevisionSink): Promise<T> {
   const headers = new Headers(init.headers);
   headers.set("Content-Type", "application/json");
   if (withCsrf) headers.set("X-CSRF-TOKEN", csrfToken ?? await csrf());
-  const response = await fetch(`${API_URL}${path}`, { ...init, headers, credentials: "include" });
+  let response: Response;
+  try {
+    response = await fetch(`${API_URL}${path}`, { ...init, headers, credentials: "include" });
+  } catch (error) {
+    if (isAbortError(error)) throw error;
+    throw new ApiError(503, "The service is temporarily unavailable. Please try again.", undefined, "NETWORK_ERROR");
+  }
+  // Recorded before any early return, so a caller learns the revision the
+  // server committed even when the answer is a 204 or a 409 rather than a body.
+  if (revision) revision.etag = response.headers.get("ETag");
   if (response.status === 204) return undefined as T;
 
   // Parsed once per response: the same instruction drives the repeat below and
@@ -820,7 +997,7 @@ async function request<T>(path: string, init: RequestInit = {}, withCsrf = false
   if (retryThrottled && isIdempotentRead(init) && retryAfterSeconds !== null && retryAfterSeconds * 1000 <= MAX_THROTTLE_RETRY_WAIT_MS) {
     await response.body?.cancel().catch(() => undefined);
     await waitBeforeRetry(retryAfterSeconds * 1000, init.signal);
-    return request<T>(path, init, withCsrf, retryCsrf, false);
+    return request<T>(path, init, withCsrf, retryCsrf, false, revision);
   }
 
   const body = await response.json().catch(() => null) as T & ErrorBody | null;
@@ -828,9 +1005,13 @@ async function request<T>(path: string, init: RequestInit = {}, withCsrf = false
     if (response.status === 400 && withCsrf && retryCsrf && body?.error?.code === "CSRF_VALIDATION_FAILED") {
       csrfToken = null;
       await csrf(true);
-      return request<T>(path, init, true, false);
+      return request<T>(path, init, true, false, true, revision);
     }
-    throw new ApiError(response.status, body?.error?.message ?? "Something went wrong.", body?.error?.fields, body?.error?.code, retryAfterSeconds ?? undefined);
+    const failure = new ApiError(response.status, body?.error?.message ?? "Something went wrong.", body?.error?.fields, body?.error?.code, retryAfterSeconds ?? undefined);
+    // The fence names the revision that actually holds the row on its 409, and
+    // the conflict handling reads it from here rather than racing a second GET.
+    if (revision) failure.revision = revision.etag;
+    throw failure;
   }
   return body as T;
 }
@@ -838,7 +1019,13 @@ async function request<T>(path: string, init: RequestInit = {}, withCsrf = false
 async function requestForm<T>(path: string, form: FormData, withCsrf = false, retryCsrf = true): Promise<T> {
   const headers = new Headers();
   if (withCsrf) headers.set("X-CSRF-TOKEN", csrfToken ?? await csrf());
-  const response = await fetch(`${API_URL}${path}`, { method: "POST", headers, credentials: "include", body: form });
+  let response: Response;
+  try {
+    response = await fetch(`${API_URL}${path}`, { method: "POST", headers, credentials: "include", body: form });
+  } catch (error) {
+    if (isAbortError(error)) throw error;
+    throw new ApiError(503, "The service is temporarily unavailable. Please try again.", undefined, "NETWORK_ERROR");
+  }
   const body = await response.json().catch(() => null) as T & ErrorBody | null;
   if (!response.ok) {
     if (response.status === 400 && withCsrf && retryCsrf && body?.error?.code === "CSRF_VALIDATION_FAILED") {
@@ -935,6 +1122,12 @@ export class ApiError extends Error {
     public code?: string,
     /** The `Retry-After` instruction the server sent, in whole seconds. */
     public retryAfterSeconds?: number,
+    /**
+     * The `ETag` the server published with this answer. For a revision conflict
+     * it is the revision that actually holds the row, which is what lets the
+     * conflict handling describe the newer version without another read.
+     */
+    public revision?: string | null,
   ) { super(message); }
 }
 
@@ -1193,6 +1386,8 @@ export type MovieCollaboration = { movieProjectId: string; team: MovieTeamMember
 export const api = {
   me: () => request<AuthResponse>("/api/auth/me"),
   passwordPolicy: () => request<PasswordPolicy>("/api/auth/password-policy"),
+  requestPasswordReset: (input: PasswordResetRequestInput) => request<{ message: string }>("/api/auth/password/forgot", { method: "POST", body: JSON.stringify(input) }, true),
+  resetPassword: (input: PasswordResetInput) => request<{ success: boolean }>("/api/auth/password/reset", { method: "POST", body: JSON.stringify(input) }, true),
   register: async (input: RegisterInput) => { const result = await request<AuthResponse>("/api/auth/register", { method: "POST", body: JSON.stringify(input) }, true); csrfToken = null; clearMovieWorkspaceRequests(); await csrf(true); return result; },
   login: async (input: LoginInput) => { const result = await request<AuthResponse>("/api/auth/login", { method: "POST", body: JSON.stringify(input) }, true); csrfToken = null; await csrf(true); return result; },
   logout: async () => { const result = await request<{ success: boolean }>("/api/auth/logout", { method: "POST" }, true); csrfToken = null; await csrf(true); return result; },
@@ -1213,6 +1408,54 @@ export const api = {
   updateProject: (projectId: string, input: ProjectInput) => request<Project>(`/api/projects/${projectId}`, { method: "PATCH", body: JSON.stringify(input) }, true),
   archiveProject: (projectId: string) => request<Project>(`/api/projects/${projectId}/archive`, { method: "POST" }, true),
   restoreProject: (projectId: string) => request<Project>(`/api/projects/${projectId}/restore`, { method: "POST" }, true),
+  /**
+   * Reads one project together with the exact `ETag` the server published for
+   * it. This is the only supported way to obtain a revision token: the header
+   * is the row's stamp verbatim, while the body's `updatedAt` is a display
+   * value that a JavaScript `Date` cannot round-trip at microsecond precision.
+   */
+  getProjectWithRevision: async (projectId: string): Promise<{ project: Project; revision: string | null }> => {
+    const sink: ProjectRevisionSink = { etag: null };
+    const project = await request<Project>(`/api/projects/${projectId}`, {}, false, true, true, sink);
+    return { project, revision: sink.etag };
+  },
+  /**
+   * Fenced write. `ifMatch` must be a token this client received from
+   * `getProjectWithRevision` or from an earlier write's own answer - never a
+   * value rebuilt from a timestamp. On success the answer carries the revision
+   * that the write committed, so the caller can keep editing without a re-read;
+   * on a `409 PROJECT_REVISION_CONFLICT` the thrown `ApiError.revision` is the
+   * revision that actually holds the row and nothing was written.
+   */
+  updateProjectWithRevision: async (projectId: string, input: ProjectInput, ifMatch: string): Promise<{ project: Project; revision: string | null }> => {
+    const sink: ProjectRevisionSink = { etag: null };
+    const project = await request<Project>(
+      `/api/projects/${projectId}`,
+      { method: "PATCH", headers: { "If-Match": ifMatch }, body: JSON.stringify(input) },
+      true,
+      true,
+      true,
+      sink,
+    );
+    return { project, revision: sink.etag };
+  },
+  /**
+   * Archive/restore publish a new revision but declare none: they intentionally
+   * apply over whatever the row holds (the API's `RevisionFence.LiveRow` path),
+   * so no `If-Match` is sent and no conflict can be raised here. The answer's
+   * revision is still returned so an open edit session can adopt it instead of
+   * being walked into a self-inflicted conflict by its own status change.
+   */
+  archiveProjectWithRevision: async (projectId: string): Promise<{ project: Project; revision: string | null }> => {
+    const sink: ProjectRevisionSink = { etag: null };
+    const project = await request<Project>(`/api/projects/${projectId}/archive`, { method: "POST" }, true, true, true, sink);
+    return { project, revision: sink.etag };
+  },
+  restoreProjectWithRevision: async (projectId: string): Promise<{ project: Project; revision: string | null }> => {
+    const sink: ProjectRevisionSink = { etag: null };
+    const project = await request<Project>(`/api/projects/${projectId}/restore`, { method: "POST" }, true, true, true, sink);
+    return { project, revision: sink.etag };
+  },
   listConversations: (workspaceId: string, status: "Active" | "Archived" = "Active", signal?: AbortSignal) => request<Conversation[]>(`/api/workspaces/${workspaceId}/conversations?status=${status}`, { signal }),
   createConversation: (workspaceId: string, input: { title?: string; projectId?: string } = {}) => request<Conversation>(`/api/workspaces/${workspaceId}/conversations`, { method: "POST", body: JSON.stringify(input) }, true),
   getConversation: (conversationId: string, signal?: AbortSignal) => request<Conversation>(`/api/conversations/${conversationId}`, { signal }),
@@ -1413,7 +1656,9 @@ export const api = {
     const query = params.toString();
     return request<StoredFile[]>(`/api/workspaces/${workspaceId}/files${query ? `?${query}` : ""}`);
   },
-  uploadFile: (workspaceId: string, file: File, scope: { projectId?: string; conversationId?: string } = {}) => {
+  uploadFile: async (workspaceId: string, file: File, scope: { projectId?: string; conversationId?: string } = {}) => {
+    const sizeError = getUserUploadSizeError(file.size);
+    if (sizeError) throw new ApiError(400, sizeError, undefined, "FILE_TOO_LARGE");
     const form = new FormData();
     form.append("file", file);
     if (scope.projectId) form.append("projectId", scope.projectId);
@@ -1468,4 +1713,41 @@ export const api = {
   resolveMovieComment: (projectId: string, commentId: string) => request<MovieCollaboration>(`/api/movie-studio/projects/${projectId}/collaboration/comments/${commentId}/resolve`, { method: "POST" }, true),
   requestMovieReview: (projectId: string, input: { targetType: string; targetId: string; reviewerUserId: string; isFinal: boolean; requestNote?: string | null }) => request<MovieCollaboration>(`/api/movie-studio/projects/${projectId}/collaboration/reviews`, { method: "POST", body: JSON.stringify(input) }, true),
   decideMovieReview: (projectId: string, reviewId: string, input: { status: string; decisionNote?: string | null }) => request<MovieCollaboration>(`/api/movie-studio/projects/${projectId}/collaboration/reviews/${reviewId}/decision`, { method: "POST", body: JSON.stringify(input) }, true),
+  // Issue #1267 slice 1: a read-only, workspace-scoped scholarly search. It is a GET with no
+  // CSRF token and no job creation, so it cannot spend credits or change any state; the abort
+  // signal lets a new page or a closed panel cancel the in-flight search. Note what a call is: one
+  // search, every time. The server keeps no cursor and caches no pool, so asking for page 2 is a
+  // second lookup rather than a slice of the answer to page 1, and the two answers can differ.
+  searchAcademicSources: (workspaceId: string, params: AcademicSourceSearchParams, signal?: AbortSignal) => {
+    const query = new URLSearchParams();
+    query.set("q", params.term.trim());
+    query.set("page", String(params.page));
+    query.set("pageSize", String(params.pageSize));
+    if (params.yearFrom) query.set("yearFrom", String(params.yearFrom));
+    if (params.yearTo) query.set("yearTo", String(params.yearTo));
+    if (params.openAccessOnly) query.set("openAccessOnly", "true");
+    for (const doi of params.dois ?? []) query.append("doi", doi);
+    for (const isbn of params.isbns ?? []) query.append("isbn", isbn);
+    return request<AcademicSourceSearchResponse>(`/api/workspaces/${encodeURIComponent(workspaceId)}/academic-sources/search?${query.toString()}`, { signal });
+  },
+  listAcademicProjects: (workspaceId: string, page = 1, pageSize = 100) => request<AcademicProjectSummary[]>(`/api/workspaces/${encodeURIComponent(workspaceId)}/academic-projects?page=${page}&pageSize=${pageSize}`),
+  createAcademicProject: (workspaceId: string, input: AcademicProjectCreateInput) => request<AcademicProjectDto>(
+    `/api/workspaces/${encodeURIComponent(workspaceId)}/academic-projects`,
+    generationInit({ method: "POST", body: JSON.stringify(input) }, input.requestKey),
+    true,
+  ),
+  getAcademicProject: (projectId: string) => request<AcademicProjectDto>(`/api/academic-projects/${encodeURIComponent(projectId)}`),
+  runAcademicProject: (projectId: string) => request<AcademicProjectDto>(`/api/academic-projects/${encodeURIComponent(projectId)}/run`, { method: "POST", body: "{}" }, true),
+  submitAcademicApproval: (
+    projectId: string,
+    kind: string,
+    approvalKey: string,
+    checkpointRevision: number,
+    decision: "Approved" | "RequestRevision" | "Rejected",
+    notes?: string | null,
+  ) => request<AcademicProjectDto>(
+    `/api/academic-projects/${encodeURIComponent(projectId)}/approvals/${encodeURIComponent(kind)}`,
+    { method: "POST", body: JSON.stringify({ approvalKey, checkpointRevision, decision, notes: notes ?? null }) },
+    true,
+  ),
 };

@@ -1,0 +1,79 @@
+import { ApiError, type MovieRegenerationCostPreview, type MovieSelectiveRegenerationResponse } from "@/lib/api";
+import { localeTag, type Locale } from "@/lib/i18n";
+
+export type MovieRegenerationIdempotencyKeys = { create: string; confirm: string };
+export type MovieRegenerationAttempt = { key: string; generation: number; keys: MovieRegenerationIdempotencyKeys };
+
+export function newMovieRegenerationKeys(): MovieRegenerationIdempotencyKeys {
+  const nonce = globalThis.crypto?.randomUUID?.() ?? `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+  return { create: `regen-create-${nonce}`, confirm: `regen-confirm-${nonce}` };
+}
+
+export function movieRegenerationAttemptIsCurrent(current: MovieRegenerationAttempt | undefined, candidate: MovieRegenerationAttempt): boolean {
+  return current?.key === candidate.key && current.generation === candidate.generation;
+}
+
+export function retireMovieRegenerationAttempt(current: MovieRegenerationAttempt | undefined, candidate: MovieRegenerationAttempt): MovieRegenerationAttempt | undefined {
+  return movieRegenerationAttemptIsCurrent(current, candidate) ? undefined : current;
+}
+
+export function isDefinitiveMovieRegenerationRefusal(error: unknown): boolean {
+  return error instanceof ApiError && error.status >= 400 && error.status < 500
+    && ![408, 425, 429].includes(error.status);
+}
+
+export type MovieRegenerationConfirmationState = {
+  requestId: string;
+  preview: MovieRegenerationCostPreview;
+  canConfirm: boolean;
+  blockedReason: "already-confirmed" | "readiness-unavailable" | "server-blocked" | "confirmation-required" | null;
+};
+
+export function buildMovieRegenerationConfirmation(response: MovieSelectiveRegenerationResponse): MovieRegenerationConfirmationState {
+  const preview = response.request.costPreview;
+  if (response.request.status === "Confirmed" || response.request.generationJobId || response.job) {
+    return { requestId: response.request.id, preview, canConfirm: false, blockedReason: "already-confirmed" };
+  }
+  const blockedReason = !preview.guardrails
+    ? "readiness-unavailable"
+    : !preview.guardrails.canProceed
+      ? "server-blocked"
+      : response.request.status !== "PendingConfirmation" || !preview.confirmationRequired
+        ? "confirmation-required"
+        : null;
+  return {
+    requestId: response.request.id,
+    preview,
+    canConfirm: blockedReason === null,
+    blockedReason,
+  };
+}
+
+export async function confirmMovieRegenerationIfAllowed(state: MovieRegenerationConfirmationState, confirm: (requestId: string) => Promise<unknown>): Promise<boolean> {
+  if (!state.canConfirm) return false;
+  await confirm(state.requestId);
+  return true;
+}
+
+export function formatMovieRegenerationCost(preview: MovieRegenerationCostPreview, locale: Locale): string | null {
+  const currency = preview.currency || "USD";
+  const formatter = (amount: number) => {
+    try {
+      return new Intl.NumberFormat(localeTag(locale), { style: "currency", currency, maximumFractionDigits: 4 }).format(amount);
+    } catch {
+      return `${amount} ${currency}`;
+    }
+  };
+  // Treat malformed or inconsistent server estimates as unknown rather than
+  // showing a misleading price (for example, NaN, a negative amount, or a reversed range).
+  const validAmount = (value: unknown): value is number => typeof value === "number" && Number.isFinite(value) && value >= 0;
+  if (preview.estimatedProviderCostKnown && validAmount(preview.estimatedProviderCostUsd)) return formatter(preview.estimatedProviderCostUsd);
+  const minimum = preview.minimumEstimatedProviderCostUsd;
+  const maximum = preview.maximumEstimatedProviderCostUsd;
+  if (validAmount(minimum) && validAmount(maximum) && minimum <= maximum) {
+    return minimum === maximum
+      ? formatter(minimum)
+      : `${formatter(minimum)}–${formatter(maximum)}`;
+  }
+  return null;
+}

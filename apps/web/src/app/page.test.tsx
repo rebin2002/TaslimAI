@@ -106,6 +106,14 @@ function findByClass(node: TestNode, className: string): TestNode[] {
     ...node.childNodes.flatMap((child) => findByClass(child, className)),
   ];
 }
+function findByTestId(node: TestNode, testId: string): TestNode | null {
+  if (node.getAttribute("data-testid") === testId) return node;
+  for (const child of node.childNodes) {
+    const match = findByTestId(child, testId);
+    if (match) return match;
+  }
+  return null;
+}
 
 type Deferred<T> = { promise: Promise<T>; resolve: (value: T) => void; reject: (error: unknown) => void };
 function deferred<T>(): Deferred<T> {
@@ -119,7 +127,8 @@ function deferred<T>(): Deferred<T> {
 // rebuild the component's useCallback and re-run the loader indefinitely.
 const harness = vi.hoisted(() => ({
   locale: { t: (key: string) => key, locale: "en" },
-  auth: { workspace: null as unknown },
+  auth: { workspace: null as unknown, userId: "user-personal" },
+  router: { push: vi.fn(), replace: vi.fn(), prefetch: vi.fn() },
   api: {
     listProjects: vi.fn(),
     listConversations: vi.fn(),
@@ -132,7 +141,7 @@ const harness = vi.hoisted(() => ({
 }));
 
 vi.mock("@/components/AuthProvider", () => ({
-  useAuth: () => ({ user: { displayName: "Rebin" }, workspace: harness.auth.workspace, loading: false }),
+  useAuth: () => ({ user: { id: harness.auth.userId, displayName: "Rebin" }, workspace: harness.auth.workspace, loading: false }),
 }));
 vi.mock("@/components/LocaleProvider", () => ({ useLocale: () => harness.locale }));
 vi.mock("@/lib/api", () => ({ api: harness.api }));
@@ -141,15 +150,36 @@ vi.mock("@/components/ProtectedPage", () => ({
 }));
 vi.mock("@/components/StudioChooser", () => ({ StudioChooser: () => <div className="studio-chooser" /> }));
 vi.mock("@/components/HomeComposer", () => ({
-  HomeComposer: (props: { projects: { id: string; name: string }[] }) => (
-    <div className="home-composer-stub">{props.projects.map((project) => <span key={project.id}>{project.name}</span>)}</div>
-  ),
+  HomeComposer: (props: {
+    value: string;
+    busy: boolean;
+    files: File[];
+    projects: { id: string; name: string }[];
+    onChange: (value: string) => void;
+    onSubmit: () => void;
+    onFilesChange: (files: File[]) => void;
+    onProjectChange: (projectId: string) => void;
+  }) => {
+    const canCreate = !props.busy && (Boolean(props.value.trim()) || props.files.length > 0);
+    return (
+      <div className="home-composer-stub">
+        {props.projects.map((project) => <span key={project.id}>{project.name}</span>)}
+        {props.files.map((file, index) => <span key={`${file.name}-${index}`}>{file.name}</span>)}
+        <button type="button" data-testid="set-prompt" onClick={() => props.onChange("Summarize the attached PDF")}>Set instructions</button>
+        <button type="button" data-testid="attach-fixture" onClick={() => props.onFilesChange([new File([new Uint8Array([1, 2, 3])], "home-fixture.pdf", { type: "application/pdf" })])}>Attach local fixture</button>
+        <button type="button" data-testid="attach-scoped-fixture" onClick={() => props.onFilesChange([new File([new Uint8Array([4, 5, 6])], `${props.projects[0]?.id ?? "unscoped"}-private.pdf`, { type: "application/pdf" })])}>Attach current-scope fixture</button>
+        <button type="button" data-testid="select-project" onClick={() => { const project = props.projects[0]; if (project) props.onProjectChange(project.id); }}>Select current project</button>
+        <button type="button" data-testid="home-create" disabled={!canCreate} onClick={props.onSubmit}>Create</button>
+        <button type="button" data-testid="home-create-twice" disabled={!canCreate} onClick={() => { props.onSubmit(); props.onSubmit(); }}>Double-submit fixture</button>
+      </div>
+    );
+  },
 }));
 vi.mock("next/link", () => ({
   default: (props: { href: string; className?: string; children?: unknown }) => <a href={props.href} className={props.className}>{props.children as never}</a>,
 }));
 vi.mock("next/navigation", () => ({
-  useRouter: () => ({ push: vi.fn(), replace: vi.fn(), prefetch: vi.fn() }),
+  useRouter: () => harness.router,
   usePathname: () => "/",
 }));
 vi.mock("lucide-react", () => {
@@ -225,8 +255,19 @@ beforeEach(() => {
   vi.stubGlobal("navigator", { userAgent: "test" });
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
   harness.auth.workspace = PERSONAL;
+  harness.auth.userId = "user-personal";
   harness.locale = { t: (key: string) => key, locale: "en" };
   for (const fn of Object.values(harness.api)) fn.mockReset();
+  harness.api.listProjects.mockResolvedValue([]);
+  harness.api.listConversations.mockResolvedValue([]);
+  harness.api.listActivity.mockResolvedValue({ items: [] });
+  harness.api.listAssets.mockResolvedValue({ items: [] });
+  harness.api.createConversation.mockResolvedValue({ id: "conversation-fixture" });
+  harness.api.uploadFile.mockImplementation(async (_workspaceId: string, file: File) => ({ id: `uploaded-${file.name}` }));
+  harness.api.sendMessage.mockResolvedValue(undefined);
+  harness.router.push.mockReset();
+  harness.router.replace.mockReset();
+  harness.router.prefetch.mockReset();
 });
 
 afterEach(() => {
@@ -251,6 +292,122 @@ function switchWorkspace(next: WorkspaceFixture) {
   harness.auth.workspace = next;
   act(() => { root.render(<HomePage />); });
 }
+
+function switchUser(userId: string) {
+  harness.auth.userId = userId;
+  act(() => { root.render(<HomePage />); });
+}
+
+function clickTestId(testId: string): boolean {
+  const target = findByTestId(container, testId);
+  if (!target || target.disabled || target.getAttribute("disabled") !== null) return false;
+  act(() => { target.dispatchEvent({ type: "click", bubbles: true }); });
+  return true;
+}
+
+function mockResolvedDashboardForWorkspaces() {
+  const labelFor = (workspaceId: string) => workspaceId === PERSONAL.id ? "personal" : "business";
+  harness.api.listProjects.mockImplementation((workspaceId: string) => Promise.resolve([projectRow(workspaceId, labelFor(workspaceId))]));
+  harness.api.listConversations.mockImplementation((workspaceId: string) => Promise.resolve([conversationRow(workspaceId, labelFor(workspaceId))]));
+  harness.api.listActivity.mockImplementation((workspaceId: string) => Promise.resolve({ items: [activityRow(workspaceId, labelFor(workspaceId))] }));
+  harness.api.listAssets.mockImplementation((workspaceId: string) => Promise.resolve({ items: [assetRow(workspaceId, labelFor(workspaceId))] }));
+}
+
+describe("Home creation API flow with local fixtures", () => {
+  it("sends explicit text plus the selected file within the current workspace and project", async () => {
+    mockResolvedDashboardForWorkspaces();
+    harness.api.createConversation.mockResolvedValue({ id: "conversation-text-file" });
+    harness.api.uploadFile.mockResolvedValue({ id: "attachment-text-file" });
+    mount();
+    await flush();
+
+    expect(clickTestId("set-prompt")).toBe(true);
+    expect(clickTestId("attach-fixture")).toBe(true);
+    expect(clickTestId("select-project")).toBe(true);
+    expect(text()).toContain("home-fixture.pdf");
+    expect(clickTestId("home-create")).toBe(true);
+    await flush(16);
+
+    expect(harness.api.createConversation).toHaveBeenCalledTimes(1);
+    expect(harness.api.createConversation).toHaveBeenCalledWith(PERSONAL.id, { projectId: "project-personal" });
+    expect(harness.api.uploadFile).toHaveBeenCalledTimes(1);
+    expect(harness.api.uploadFile).toHaveBeenCalledWith(PERSONAL.id, expect.objectContaining({ name: "home-fixture.pdf" }), {
+      conversationId: "conversation-text-file",
+      projectId: "project-personal",
+    });
+    expect(harness.api.sendMessage).toHaveBeenCalledTimes(1);
+    expect(harness.api.sendMessage).toHaveBeenCalledWith("conversation-text-file", "Summarize the attached PDF", undefined, ["attachment-text-file"]);
+    expect(harness.router.push).toHaveBeenCalledWith("/chat/conversation-text-file");
+  });
+
+  it("sends the deterministic attachment-only prompt exactly once for a selected local file", async () => {
+    mount();
+    await flush();
+    expect(clickTestId("attach-fixture")).toBe(true);
+    expect(clickTestId("home-create-twice")).toBe(true);
+    await flush(16);
+
+    expect(harness.api.createConversation).toHaveBeenCalledTimes(1);
+    expect(harness.api.uploadFile).toHaveBeenCalledTimes(1);
+    expect(harness.api.sendMessage).toHaveBeenCalledTimes(1);
+    expect(harness.api.sendMessage).toHaveBeenCalledWith("conversation-fixture", "Please review the attached files.", undefined, ["uploaded-home-fixture.pdf"]);
+    expect(harness.router.push).toHaveBeenCalledWith("/chat/conversation-fixture");
+  });
+
+  it("drops a prior workspace's local attachment and project before a new-scope request", async () => {
+    mockResolvedDashboardForWorkspaces();
+    mount();
+    await flush();
+    expect(clickTestId("attach-fixture")).toBe(true);
+    expect(clickTestId("select-project")).toBe(true);
+    expect(text()).toContain("home-fixture.pdf");
+    expect(text()).toContain("personal-plan");
+
+    switchWorkspace(BUSINESS);
+    expect(text()).not.toContain("home-fixture.pdf");
+    expect(text()).not.toContain("personal-plan");
+    await flush();
+    expect(text()).toContain("business-plan");
+    expect(findByTestId(container, "home-create")?.getAttribute("disabled")).not.toBeNull();
+    expect(clickTestId("home-create")).toBe(false);
+    expect(harness.api.createConversation).not.toHaveBeenCalled();
+    expect(harness.api.uploadFile).not.toHaveBeenCalled();
+    expect(harness.api.sendMessage).not.toHaveBeenCalled();
+
+    expect(clickTestId("select-project")).toBe(true);
+    expect(clickTestId("attach-scoped-fixture")).toBe(true);
+    expect(text()).toContain("project-business-private.pdf");
+    expect(clickTestId("home-create")).toBe(true);
+    await flush(16);
+    expect(harness.api.createConversation).toHaveBeenCalledTimes(1);
+    expect(harness.api.createConversation).toHaveBeenCalledWith(BUSINESS.id, { projectId: "project-business" });
+    expect(harness.api.uploadFile).toHaveBeenCalledTimes(1);
+    expect(harness.api.uploadFile).toHaveBeenCalledWith(BUSINESS.id, expect.objectContaining({ name: "project-business-private.pdf" }), {
+      conversationId: "conversation-fixture",
+      projectId: "project-business",
+    });
+    expect(harness.api.sendMessage).toHaveBeenCalledTimes(1);
+    expect(harness.api.sendMessage).toHaveBeenCalledWith("conversation-fixture", "Please review the attached files.", undefined, ["uploaded-project-business-private.pdf"]);
+    expect(harness.router.push).toHaveBeenCalledWith("/chat/conversation-fixture");
+  });
+
+  it("drops unsent local attachment state when the authenticated user changes in the same mounted workspace", async () => {
+    mockResolvedDashboardForWorkspaces();
+    mount();
+    await flush();
+    expect(clickTestId("attach-fixture")).toBe(true);
+    expect(text()).toContain("home-fixture.pdf");
+
+    switchUser("user-next");
+    expect(harness.auth.workspace).toBe(PERSONAL);
+    expect(text()).not.toContain("home-fixture.pdf");
+    expect(findByTestId(container, "home-create")?.getAttribute("disabled")).not.toBeNull();
+    expect(harness.api.createConversation).not.toHaveBeenCalled();
+    expect(harness.api.uploadFile).not.toHaveBeenCalled();
+    expect(harness.api.sendMessage).not.toHaveBeenCalled();
+    await flush();
+  });
+});
 
 describe("home dashboard workspace response fence", () => {
   it("publishes the mounted workspace's own dashboard", async () => {
