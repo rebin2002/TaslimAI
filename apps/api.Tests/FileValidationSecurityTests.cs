@@ -24,6 +24,12 @@ public sealed class FileValidationSecurityTests
     private static readonly byte[] ValidWebpExtended = Convert.FromBase64String(
         "UklGRloAAABXRUJQVlA4WAoAAAAQAAAAAgAAAQAAQUxQSAcAAAAAgICAgICAAFZQOCAsAAAA0AEAnQEqAwACAAIANCWgAnS6AfgAA7AA/u+9V/5miY5j+TP/ylXgsbm+AAA=");
 
+    private static readonly byte[] ValidAnimatedWebp = ExtendedWebp(
+        4,
+        4,
+        AnimationFrame(0, 0, 2, 2, WebpChunk("VP8 ", Vp8FrameHeader(2, 2))),
+        AnimationFrame(2, 2, 2, 2, WebpChunk("VP8L", Vp8LFrameHeader(2, 2))));
+
     [Fact]
     public async Task Small_valid_png_jpeg_and_webp_images_remain_accepted()
     {
@@ -34,6 +40,7 @@ public sealed class FileValidationSecurityTests
             ("small-lossless.webp", "image/webp", ValidWebpLossless),
             ("small-lossy.webp", "image/webp", ValidWebpLossy),
             ("small-extended.webp", "image/webp", ValidWebpExtended),
+            ("small-animated.webp", "image/webp", ValidAnimatedWebp),
         };
 
         foreach (var fixture in fixtures)
@@ -129,6 +136,69 @@ public sealed class FileValidationSecurityTests
     }
 
     [Fact]
+    public async Task Extended_webp_accepts_bounded_multiframe_image_payload_beyond_one_megabyte_without_reading_payload()
+    {
+        const int largeImagePayloadBytes = 1_100_000;
+        var bytes = ExtendedWebp(
+            4,
+            4,
+            AnimationFrame(0, 0, 2, 2, WebpChunk("VP8 ", Vp8FrameHeader(2, 2, largeImagePayloadBytes))),
+            AnimationFrame(2, 2, 2, 2, WebpChunk("VP8L", Vp8LFrameHeader(2, 2))));
+        Assert.True(bytes.Length > 1024 * 1024);
+
+        var stream = new CountingSeekableStream(bytes);
+        var result = await CreateValidator().ValidateAsync(CreateFile("large-animated.webp", "image/webp", stream, bytes.Length));
+
+        Assert.Equal(".webp", result.Extension);
+        Assert.True(stream.BytesRead < 1024, $"Expected header-only reads, observed {stream.BytesRead} bytes.");
+    }
+
+    [Fact]
+    public async Task Extended_webp_rejects_out_of_bounds_late_frame_after_large_image_payload()
+    {
+        const int largeImagePayloadBytes = 1_100_000;
+        var bytes = ExtendedWebp(
+            4,
+            4,
+            AnimationFrame(0, 0, 2, 2, WebpChunk("VP8 ", Vp8FrameHeader(2, 2, largeImagePayloadBytes))),
+            AnimationFrame(4, 2, 2, 2, WebpChunk("VP8L", Vp8LFrameHeader(2, 2))));
+        Assert.True(bytes.Length > 1024 * 1024);
+
+        var stream = new CountingSeekableStream(bytes);
+        await Assert.ThrowsAsync<FileUploadValidationException>(() =>
+            CreateValidator().ValidateAsync(CreateFile("late-out-of-bounds.webp", "image/webp", stream, bytes.Length)));
+
+        Assert.True(stream.BytesRead < 1024, $"Expected header-only reads, observed {stream.BytesRead} bytes.");
+    }
+
+    [Fact]
+    public async Task Extended_webp_rejects_truncated_late_animation_frame()
+    {
+        var truncated = ValidAnimatedWebp[..^1];
+
+        var exception = await Assert.ThrowsAsync<FileUploadValidationException>(() =>
+            CreateValidator().ValidateAsync(CreateFile("truncated-animation.webp", "image/webp", truncated)));
+
+        Assert.Contains("header", exception.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task Extended_webp_rejects_when_aggregate_header_read_budget_is_exhausted()
+    {
+        var bytes = ExtendedWebpWithEmptyChunks(
+            4,
+            4,
+            131_100,
+            AnimationFrame(0, 0, 2, 2, WebpChunk("VP8 ", Vp8FrameHeader(2, 2))));
+        var stream = new CountingSeekableStream(bytes);
+
+        await Assert.ThrowsAsync<FileUploadValidationException>(() =>
+            CreateValidator().ValidateAsync(CreateFile("header-budget.webp", "image/webp", stream, bytes.Length)));
+
+        Assert.InRange(stream.BytesRead, 1_000_000L, 1024L * 1024);
+    }
+
+    [Fact]
     public async Task Malformed_or_incomplete_image_headers_are_rejected()
     {
         var malformedPng = PngHeader(320, 180);
@@ -167,6 +237,13 @@ public sealed class FileValidationSecurityTests
 
     private static FormFile CreateFile(string fileName, string contentType, byte[] bytes) =>
         new(new MemoryStream(bytes), 0, bytes.Length, "file", fileName)
+        {
+            Headers = new HeaderDictionary(),
+            ContentType = contentType,
+        };
+
+    private static FormFile CreateFile(string fileName, string contentType, Stream stream, long length) =>
+        new(stream, 0, length, "file", fileName)
         {
             Headers = new HeaderDictionary(),
             ContentType = contentType,
@@ -252,6 +329,42 @@ public sealed class FileValidationSecurityTests
         return bytes;
     }
 
+    private static byte[] ExtendedWebpWithEmptyChunks(uint width, uint height, int emptyChunkCount, params byte[][] chunks)
+    {
+        if (emptyChunkCount < 0) throw new ArgumentOutOfRangeException(nameof(emptyChunkCount));
+
+        var vp8xPayload = new byte[10];
+        if (chunks.Any(chunk => chunk.AsSpan(0, 4).SequenceEqual("ANMF"u8)))
+            vp8xPayload[0] = 0x02;
+        WriteUInt24LittleEndian(vp8xPayload.AsSpan(4, 3), width - 1);
+        WriteUInt24LittleEndian(vp8xPayload.AsSpan(7, 3), height - 1);
+
+        var vp8xChunk = WebpChunk("VP8X", vp8xPayload);
+        var emptyChunksLength = checked(emptyChunkCount * 8);
+        var trailingChunksLength = chunks.Sum(chunk => chunk.Length);
+        var bytes = new byte[checked(12 + vp8xChunk.Length + emptyChunksLength + trailingChunksLength)];
+        "RIFF"u8.CopyTo(bytes.AsSpan(0, 4));
+        BinaryPrimitives.WriteUInt32LittleEndian(bytes.AsSpan(4, 4), (uint)(bytes.Length - 8));
+        "WEBP"u8.CopyTo(bytes.AsSpan(8, 4));
+
+        var offset = 12;
+        vp8xChunk.CopyTo(bytes, offset);
+        offset += vp8xChunk.Length;
+        for (var index = 0; index < emptyChunkCount; index++)
+        {
+            "JUNK"u8.CopyTo(bytes.AsSpan(offset, 4));
+            offset += 8;
+        }
+
+        foreach (var chunk in chunks)
+        {
+            chunk.CopyTo(bytes, offset);
+            offset += chunk.Length;
+        }
+
+        return bytes;
+    }
+
     private static byte[] WebpChunk(string fourCc, byte[] payload)
     {
         var chunk = new byte[8 + payload.Length + (payload.Length & 1)];
@@ -261,9 +374,9 @@ public sealed class FileValidationSecurityTests
         return chunk;
     }
 
-    private static byte[] Vp8FrameHeader(uint width, uint height)
+    private static byte[] Vp8FrameHeader(uint width, uint height, int trailingBytes = 0)
     {
-        var payload = new byte[10];
+        var payload = new byte[checked(10 + trailingBytes)];
         new byte[] { 0x9D, 0x01, 0x2A }.CopyTo(payload, 3);
         BinaryPrimitives.WriteUInt16LittleEndian(payload.AsSpan(6, 2), (ushort)width);
         BinaryPrimitives.WriteUInt16LittleEndian(payload.AsSpan(8, 2), (ushort)height);
@@ -298,5 +411,64 @@ public sealed class FileValidationSecurityTests
         destination[0] = (byte)value;
         destination[1] = (byte)(value >> 8);
         destination[2] = (byte)(value >> 16);
+    }
+
+    private sealed class CountingSeekableStream(byte[] bytes) : Stream
+    {
+        private readonly MemoryStream inner = new(bytes, writable: false);
+
+        public long BytesRead { get; private set; }
+        public override bool CanRead => inner.CanRead;
+        public override bool CanSeek => inner.CanSeek;
+        public override bool CanWrite => false;
+        public override long Length => inner.Length;
+        public override long Position { get => inner.Position; set => inner.Position = value; }
+
+        public override void Flush() => inner.Flush();
+
+        public override int Read(byte[] buffer, int offset, int count)
+        {
+            var read = inner.Read(buffer, offset, count);
+            BytesRead += read;
+            return read;
+        }
+
+        public override int Read(Span<byte> buffer)
+        {
+            var read = inner.Read(buffer);
+            BytesRead += read;
+            return read;
+        }
+
+        public override ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var read = inner.Read(buffer.Span);
+            BytesRead += read;
+            return ValueTask.FromResult(read);
+        }
+
+        public override async Task<int> ReadAsync(
+            byte[] buffer,
+            int offset,
+            int count,
+            CancellationToken cancellationToken)
+        {
+            var read = await inner.ReadAsync(buffer, offset, count, cancellationToken);
+            BytesRead += read;
+            return read;
+        }
+
+        public override long Seek(long offset, SeekOrigin origin) => inner.Seek(offset, origin);
+
+        public override void SetLength(long value) => throw new NotSupportedException();
+
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing) inner.Dispose();
+            base.Dispose(disposing);
+        }
     }
 }

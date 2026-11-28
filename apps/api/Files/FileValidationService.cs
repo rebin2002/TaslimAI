@@ -33,7 +33,7 @@ public sealed class FileValidationService(IOptions<FileOptions> options)
         if (!IsSafeContent(extension, file.ContentType, expectedContentType, signature[..read], input))
             throw new FileUploadValidationException("The file content does not match its declared type.");
         if (FileContentTypes.IsImage(extension))
-            await ValidateImageDimensionsAsync(extension, input, cancellationToken);
+            await ValidateImageDimensionsAsync(extension, input, cancellationToken, read);
 
         return new FileValidationResult(safeName, extension, expectedContentType, file.Length);
     }
@@ -131,18 +131,31 @@ public sealed class FileValidationService(IOptions<FileOptions> options)
         };
     }
 
-    private static async Task ValidateImageDimensionsAsync(string extension, Stream input, CancellationToken cancellationToken)
+    private static async Task ValidateImageDimensionsAsync(
+        string extension,
+        Stream input,
+        CancellationToken cancellationToken,
+        int bytesReadBeforeDimensionScan)
     {
-        var header = new byte[(int)Math.Min(input.Length, MaxImageHeaderBytes)];
-        var length = 0;
-        while (length < header.Length)
+        (long Width, long Height)? dimensions;
+        if (extension == ".webp")
         {
-            var read = await input.ReadAsync(header.AsMemory(length), cancellationToken);
-            if (read == 0) break;
-            length += read;
+            dimensions = await ReadWebpDimensionsAsync(input, bytesReadBeforeDimensionScan, cancellationToken);
+        }
+        else
+        {
+            var header = new byte[(int)Math.Min(input.Length, MaxImageHeaderBytes)];
+            var length = 0;
+            while (length < header.Length)
+            {
+                var read = await input.ReadAsync(header.AsMemory(length), cancellationToken);
+                if (read == 0) break;
+                length += read;
+            }
+
+            dimensions = ReadImageDimensions(extension, header.AsSpan(0, length));
         }
 
-        var dimensions = ReadImageDimensions(extension, header.AsSpan(0, length), input.Length);
         if (dimensions is null)
             throw new FileUploadValidationException("The image header is invalid or incomplete.");
 
@@ -151,11 +164,10 @@ public sealed class FileValidationService(IOptions<FileOptions> options)
             throw new FileUploadValidationException("The image dimensions exceed the configured safety limits.");
     }
 
-    private static (long Width, long Height)? ReadImageDimensions(string extension, ReadOnlySpan<byte> bytes, long fileLength) => extension switch
+    private static (long Width, long Height)? ReadImageDimensions(string extension, ReadOnlySpan<byte> bytes) => extension switch
     {
         ".png" => ReadPngDimensions(bytes),
         ".jpg" or ".jpeg" => ReadJpegDimensions(bytes),
-        ".webp" => ReadWebpDimensions(bytes, fileLength),
         _ => null,
     };
 
@@ -173,84 +185,142 @@ public sealed class FileValidationService(IOptions<FileOptions> options)
         return width > 0 && height > 0 ? ((long)width, (long)height) : null;
     }
 
-    private static (long Width, long Height)? ReadWebpDimensions(ReadOnlySpan<byte> bytes, long fileLength)
+    private static async Task<(long Width, long Height)?> ReadWebpDimensionsAsync(
+        Stream input,
+        int bytesReadBeforeDimensionScan,
+        CancellationToken cancellationToken)
     {
-        if (bytes.Length < 20 || !bytes[..4].SequenceEqual("RIFF"u8) || !bytes[8..12].SequenceEqual("WEBP"u8))
+        if (!input.CanSeek
+            || bytesReadBeforeDimensionScan < 0
+            || bytesReadBeforeDimensionScan > MaxImageHeaderBytes
+            || input.Length < 20)
             return null;
 
-        var riffSize = BinaryPrimitives.ReadUInt32LittleEndian(bytes[4..8]);
-        var riffEnd = 8UL + riffSize;
-        var chunkSize = BinaryPrimitives.ReadUInt32LittleEndian(bytes[16..20]);
-        var chunkEnd = 20UL + chunkSize + (chunkSize & 1U);
-        if (riffSize < 12 || riffEnd > (ulong)fileLength || chunkEnd > riffEnd)
+        // The initial content-sniff read already consumed part of the same aggregate 1 MiB budget.
+        var budget = new WebpHeaderReadBudget(MaxImageHeaderBytes - bytesReadBeforeDimensionScan);
+        var scratch = new byte[16];
+        if (!await ReadWebpBytesAtAsync(input, 0, scratch, 12, budget, cancellationToken)) return null;
+        if (!scratch.AsSpan(0, 4).SequenceEqual("RIFF"u8)
+            || !scratch.AsSpan(8, 4).SequenceEqual("WEBP"u8))
             return null;
 
-        if (bytes[12..16].SequenceEqual("VP8X"u8))
+        var riffSize = BinaryPrimitives.ReadUInt32LittleEndian(scratch.AsSpan(4, 4));
+        if (riffSize < 12) return null;
+        long riffEnd;
+        try
         {
-            if (chunkSize != 10 || bytes.Length < 30) return null;
-            var canvas = (
-                1L + bytes[24] + ((long)bytes[25] << 8) + ((long)bytes[26] << 16),
-                1L + bytes[27] + ((long)bytes[28] << 8) + ((long)bytes[29] << 16));
-            if (!IsWithinImageLimits(canvas.Item1, canvas.Item2)) return canvas;
-            return ReadWebpExtendedDimensions(bytes, riffEnd, canvas.Item1, canvas.Item2);
+            riffEnd = checked(8L + riffSize);
+        }
+        catch (OverflowException)
+        {
+            return null;
         }
 
-        if (bytes[12..16].SequenceEqual("VP8L"u8))
-        {
-            return ReadWebpCodedFrameDimensions("VP8L"u8, bytes[20..], chunkSize);
-        }
+        if (riffEnd > input.Length) return null;
 
-        if (bytes[12..16].SequenceEqual("VP8 "u8))
-        {
-            return ReadWebpCodedFrameDimensions("VP8 "u8, bytes[20..], chunkSize);
-        }
-
-        return null;
-    }
-
-    private static (long Width, long Height)? ReadWebpExtendedDimensions(
-        ReadOnlySpan<byte> bytes,
-        ulong riffEnd,
-        long canvasWidth,
-        long canvasHeight)
-    {
-        ulong offset = 30;
+        var offset = 12L;
+        var hasExtendedHeader = false;
+        var hasAnimationFlag = false;
         var foundFrame = false;
-        var hasAnimationFlag = (bytes[20] & 0x02) != 0;
         var foundAnimationFrame = false;
+        var simpleWidth = 0L;
+        var simpleHeight = 0L;
+        var canvasWidth = 0L;
+        var canvasHeight = 0L;
 
         while (offset < riffEnd)
         {
-            if (offset > int.MaxValue || offset > (ulong)bytes.Length || bytes.Length - (int)offset < 8)
-                return foundFrame && !hasAnimationFlag ? (canvasWidth, canvasHeight) : null;
+            if (riffEnd - offset < 8
+                || !await ReadWebpBytesAtAsync(input, offset, scratch, 8, budget, cancellationToken))
+                return null;
 
-            var chunkOffset = (int)offset;
-            var chunkType = bytes.Slice(chunkOffset, 4);
-            var chunkSize = BinaryPrimitives.ReadUInt32LittleEndian(bytes[(chunkOffset + 4)..]);
-            var payloadOffset = offset + 8;
-            var chunkEnd = payloadOffset + chunkSize;
-            var paddedChunkEnd = chunkEnd + (chunkSize & 1U);
-            if (paddedChunkEnd > riffEnd) return null;
+            var chunkSize = BinaryPrimitives.ReadUInt32LittleEndian(scratch.AsSpan(4, 4));
+            if (!TryGetPaddedWebpChunkEnd(
+                    offset,
+                    chunkSize,
+                    riffEnd,
+                    out var payloadOffset,
+                    out var chunkEnd,
+                    out var paddedChunkEnd))
+                return null;
 
-            if (chunkType.SequenceEqual("VP8 "u8) || chunkType.SequenceEqual("VP8L"u8))
+            var isFirstChunk = offset == 12;
+            var isVp8x = scratch.AsSpan(0, 4).SequenceEqual("VP8X"u8);
+            var isVp8 = scratch.AsSpan(0, 4).SequenceEqual("VP8 "u8);
+            var isVp8l = scratch.AsSpan(0, 4).SequenceEqual("VP8L"u8);
+            var isAnimationFrame = scratch.AsSpan(0, 4).SequenceEqual("ANMF"u8);
+
+            if (isFirstChunk)
             {
-                var dimensions = ReadWebpCodedFrameDimensions(
-                    chunkType,
-                    bytes[(chunkOffset + 8)..],
-                    chunkSize);
+                if (isVp8x)
+                {
+                    if (chunkSize != 10
+                        || !await ReadWebpBytesAtAsync(input, payloadOffset, scratch, 10, budget, cancellationToken))
+                        return null;
+
+                    hasExtendedHeader = true;
+                    hasAnimationFlag = (scratch[0] & 0x02) != 0;
+                    canvasWidth = 1L + ReadUInt24LittleEndian(scratch.AsSpan(4, 3));
+                    canvasHeight = 1L + ReadUInt24LittleEndian(scratch.AsSpan(7, 3));
+                    if (!IsWithinImageLimits(canvasWidth, canvasHeight))
+                        return (canvasWidth, canvasHeight);
+                }
+                else if (isVp8 || isVp8l)
+                {
+                    var codedHeaderLength = isVp8 ? 10 : 5;
+                    if (chunkSize < codedHeaderLength
+                        || !await ReadWebpBytesAtAsync(input, payloadOffset, scratch, codedHeaderLength, budget, cancellationToken))
+                        return null;
+
+                    var dimensions = ReadWebpCodedFrameDimensions(
+                        isVp8 ? "VP8 "u8 : "VP8L"u8,
+                        scratch.AsSpan(0, codedHeaderLength),
+                        chunkSize);
+                    if (dimensions is null) return null;
+                    if (!IsWithinImageLimits(dimensions.Value.Width, dimensions.Value.Height)) return dimensions;
+                    simpleWidth = dimensions.Value.Width;
+                    simpleHeight = dimensions.Value.Height;
+                    foundFrame = true;
+                }
+                else
+                {
+                    return null;
+                }
+            }
+            else if (isVp8x)
+            {
+                return null;
+            }
+            else if (isVp8 || isVp8l)
+            {
+                if (!hasExtendedHeader) return null;
+                var dimensions = await ReadWebpCodedFrameDimensionsAsync(
+                    input,
+                    payloadOffset,
+                    chunkSize,
+                    isVp8,
+                    budget,
+                    scratch,
+                    cancellationToken);
                 if (!IsCodedFrameWithinBounds(dimensions, canvasWidth, canvasHeight)) return null;
+
                 foundFrame = true;
             }
-            else if (chunkType.SequenceEqual("ANMF"u8))
+            else if (isAnimationFrame)
             {
-                if (!hasAnimationFlag) return null;
-                if (!ReadWebpAnimationFrame(
-                        bytes,
-                        (int)payloadOffset,
+                if (!hasExtendedHeader || !hasAnimationFlag
+                    || !await ReadWebpAnimationFrameAsync(
+                        input,
+                        payloadOffset,
+                        chunkEnd,
                         chunkSize,
                         canvasWidth,
-                        canvasHeight))
+                        canvasHeight,
+                        budget,
+                        scratch,
+                        cancellationToken))
                     return null;
+
                 foundFrame = true;
                 foundAnimationFrame = true;
             }
@@ -258,60 +328,154 @@ public sealed class FileValidationService(IOptions<FileOptions> options)
             offset = paddedChunkEnd;
         }
 
-        return foundFrame && (!hasAnimationFlag || foundAnimationFrame)
-            ? (canvasWidth, canvasHeight)
-            : null;
+        if (hasExtendedHeader)
+            return foundFrame && (!hasAnimationFlag || foundAnimationFrame)
+                ? (canvasWidth, canvasHeight)
+                : null;
+
+        return foundFrame ? (simpleWidth, simpleHeight) : null;
     }
 
-    private static bool ReadWebpAnimationFrame(
-        ReadOnlySpan<byte> bytes,
-        int payloadOffset,
+    private static async Task<(long Width, long Height)?> ReadWebpCodedFrameDimensionsAsync(
+        Stream input,
+        long payloadOffset,
+        uint chunkSize,
+        bool isVp8,
+        WebpHeaderReadBudget budget,
+        byte[] scratch,
+        CancellationToken cancellationToken)
+    {
+        var codedHeaderLength = isVp8 ? 10 : 5;
+        if (chunkSize < codedHeaderLength
+            || !await ReadWebpBytesAtAsync(input, payloadOffset, scratch, codedHeaderLength, budget, cancellationToken))
+            return null;
+
+        return ReadWebpCodedFrameDimensions(
+            isVp8 ? "VP8 "u8 : "VP8L"u8,
+            scratch.AsSpan(0, codedHeaderLength),
+            chunkSize);
+    }
+
+    private static async Task<bool> ReadWebpAnimationFrameAsync(
+        Stream input,
+        long payloadOffset,
+        long frameEnd,
         uint chunkSize,
         long canvasWidth,
-        long canvasHeight)
+        long canvasHeight,
+        WebpHeaderReadBudget budget,
+        byte[] scratch,
+        CancellationToken cancellationToken)
     {
-        if (chunkSize < 16 || payloadOffset > bytes.Length - 16) return false;
+        if (chunkSize < 16
+            || !await ReadWebpBytesAtAsync(input, payloadOffset, scratch, 16, budget, cancellationToken))
+            return false;
 
-        var frameHeader = bytes.Slice(payloadOffset, 16);
-        var x = 2L * ReadUInt24LittleEndian(frameHeader);
-        var y = 2L * ReadUInt24LittleEndian(frameHeader[3..]);
-        var frameWidth = 1L + ReadUInt24LittleEndian(frameHeader[6..]);
-        var frameHeight = 1L + ReadUInt24LittleEndian(frameHeader[9..]);
+        var x = 2L * ReadUInt24LittleEndian(scratch.AsSpan(0, 3));
+        var y = 2L * ReadUInt24LittleEndian(scratch.AsSpan(3, 3));
+        var frameWidth = 1L + ReadUInt24LittleEndian(scratch.AsSpan(6, 3));
+        var frameHeight = 1L + ReadUInt24LittleEndian(scratch.AsSpan(9, 3));
         if (!IsWithinImageLimits(frameWidth, frameHeight)
             || x + frameWidth > canvasWidth
             || y + frameHeight > canvasHeight)
             return false;
 
-        var frameEnd = (ulong)payloadOffset + chunkSize;
-        ulong offset = (ulong)payloadOffset + 16;
+        var offset = payloadOffset + 16;
         var foundCodedFrame = false;
         while (offset < frameEnd)
         {
-            if (offset > int.MaxValue || offset > (ulong)bytes.Length || bytes.Length - (int)offset < 8)
+            if (frameEnd - offset < 8
+                || !await ReadWebpBytesAtAsync(input, offset, scratch, 8, budget, cancellationToken))
                 return false;
 
-            var chunkOffset = (int)offset;
-            var chunkType = bytes.Slice(chunkOffset, 4);
-            var nestedChunkSize = BinaryPrimitives.ReadUInt32LittleEndian(bytes[(chunkOffset + 4)..]);
-            var payloadStart = offset + 8;
-            var chunkEnd = payloadStart + nestedChunkSize;
-            var paddedChunkEnd = chunkEnd + (nestedChunkSize & 1U);
-            if (paddedChunkEnd > frameEnd) return false;
+            var nestedChunkSize = BinaryPrimitives.ReadUInt32LittleEndian(scratch.AsSpan(4, 4));
+            if (!TryGetPaddedWebpChunkEnd(
+                    offset,
+                    nestedChunkSize,
+                    frameEnd,
+                    out var nestedPayloadOffset,
+                    out _,
+                    out var paddedNestedChunkEnd))
+                return false;
 
-            if (chunkType.SequenceEqual("VP8 "u8) || chunkType.SequenceEqual("VP8L"u8))
+            var isVp8 = scratch.AsSpan(0, 4).SequenceEqual("VP8 "u8);
+            var isVp8l = scratch.AsSpan(0, 4).SequenceEqual("VP8L"u8);
+            if (isVp8 || isVp8l)
             {
-                var dimensions = ReadWebpCodedFrameDimensions(
-                    chunkType,
-                    bytes[(chunkOffset + 8)..],
-                    nestedChunkSize);
+                var dimensions = await ReadWebpCodedFrameDimensionsAsync(
+                    input,
+                    nestedPayloadOffset,
+                    nestedChunkSize,
+                    isVp8,
+                    budget,
+                    scratch,
+                    cancellationToken);
                 if (!IsCodedFrameWithinBounds(dimensions, frameWidth, frameHeight)) return false;
                 foundCodedFrame = true;
             }
 
-            offset = paddedChunkEnd;
+            offset = paddedNestedChunkEnd;
         }
 
         return offset == frameEnd && foundCodedFrame;
+    }
+
+    private static async Task<bool> ReadWebpBytesAtAsync(
+        Stream input,
+        long offset,
+        byte[] buffer,
+        int count,
+        WebpHeaderReadBudget budget,
+        CancellationToken cancellationToken)
+    {
+        if (offset < 0
+            || offset > input.Length
+            || count < 0
+            || count > buffer.Length
+            || count > input.Length - offset
+            || count > budget.Remaining)
+            return false;
+
+        input.Position = offset;
+        var totalRead = 0;
+        while (totalRead < count)
+        {
+            var read = await input.ReadAsync(buffer.AsMemory(totalRead, count - totalRead), cancellationToken);
+            if (read == 0) return false;
+            budget.Consume(read);
+            totalRead += read;
+        }
+
+        return true;
+    }
+
+    private static bool TryGetPaddedWebpChunkEnd(
+        long chunkOffset,
+        uint chunkSize,
+        long parentEnd,
+        out long payloadOffset,
+        out long chunkEnd,
+        out long paddedChunkEnd)
+    {
+        payloadOffset = 0;
+        chunkEnd = 0;
+        paddedChunkEnd = 0;
+        if (chunkOffset < 0 || chunkOffset > parentEnd || parentEnd - chunkOffset < 8) return false;
+
+        payloadOffset = chunkOffset + 8;
+        if ((long)chunkSize > parentEnd - payloadOffset) return false;
+        chunkEnd = payloadOffset + chunkSize;
+        var paddingLength = (long)(chunkSize & 1U);
+        if (paddingLength > parentEnd - chunkEnd) return false;
+        paddedChunkEnd = chunkEnd + paddingLength;
+        return true;
+    }
+
+    private sealed class WebpHeaderReadBudget(int remaining)
+    {
+        public int Remaining { get; private set; } = remaining;
+
+        public void Consume(int count) => Remaining -= count;
     }
 
     private static (long Width, long Height)? ReadWebpCodedFrameDimensions(
