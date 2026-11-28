@@ -4,6 +4,7 @@ set -euo pipefail
 base=${PR_BASE_SHA:?}
 head=${PR_HEAD_SHA:?}
 migration=20261005160000_AddMovieMissingInsertDecisions
+retained_migration=20261127200658_RecordProviderFinalizationOutcome
 path="apps/api/Persistence/Migrations/$migration.cs"
 [[ $base =~ ^[0-9a-f]{40}$ && $head =~ ^[0-9a-f]{40}$ ]]
 git cat-file -e "$base^{commit}"
@@ -48,6 +49,8 @@ echo "Apply the PR base $base to the disposable database"
 migrate "$work/base"
 before=$(history)
 grep -Fxq '20261124065935_AddAcademicResearchIntegration' <<<"$before"
+grep -Fxq "$retained_migration" <<<"$before"
+echo "Verified PR base migration history retains $retained_migration"
 if grep -Fxq "$migration" <<<"$before"; then exit 1; fi
 [[ $(sql -c "SELECT to_regclass('public.\"MovieMissingInsertDecisions\"') IS NULL") == t ]]
 sql <<'SQL'

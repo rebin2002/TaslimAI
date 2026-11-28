@@ -1758,6 +1758,8 @@ public sealed class TaslimDbContext(DbContextOptions<TaslimDbContext> options)
             entity.HasKey(finalization => finalization.Id);
             entity.Property(finalization => finalization.IdempotencyKey).HasMaxLength(180).IsRequired();
             entity.Property(finalization => finalization.State).HasMaxLength(20).IsRequired();
+            entity.Property(finalization => finalization.ResultCategory).HasMaxLength(40);
+            entity.Property(finalization => finalization.ResultCode).HasMaxLength(100);
             entity.Property(finalization => finalization.ClaimedAt).IsRequired();
             entity.HasIndex(finalization => new { finalization.GenerationJobId, finalization.IdempotencyKey }).IsUnique();
             entity.HasIndex(finalization => new { finalization.State, finalization.ClaimExpiresAt });

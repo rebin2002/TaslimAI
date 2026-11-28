@@ -63,15 +63,15 @@ public sealed class MovieDirectorController(IMovieDirectorService director, IMov
                 throw new MovieIntercutPlanningException(MovieIntercutPlanCodes.ClipRequired, "Intercut coverage candidates are required.");
             if (request.TimelineId is Guid requestedTimelineId && requestedTimelineId != Guid.Empty)
             {
-                var timeline = await db.MovieTimelines.AsNoTracking()
-                    .Where(item => item.Id == requestedTimelineId)
-                    .Select(item => new { item.MovieProjectId, item.CurrentRevisionNumber })
+                var revision = await db.MovieTimelines.AsNoTracking()
+                    .Where(item => item.Id == requestedTimelineId && item.MovieProjectId == movieProjectId)
+                    .Select(item => (int?)item.CurrentRevisionNumber)
                     .SingleOrDefaultAsync(cancellationToken);
-                if (timeline is null || timeline.MovieProjectId != movieProjectId)
+                if (revision is null)
                     throw new MovieIntercutPlanningException(MovieIntercutPlanCodes.TimelineProjectMismatch, "The intercut timeline must belong to the requested movie project.");
                 // A proposal based on an older canonical revision must be rebuilt before review.
                 // This check is read-only and does not persist a timeline or start generation.
-                if (timeline.CurrentRevisionNumber != request.BaseTimelineVersion)
+                if (revision != request.BaseTimelineVersion)
                     throw new MovieIntercutPlanningException(MovieIntercutPlanCodes.TimelineVersionMismatch, "The intercut timeline revision has changed; refresh the timeline before planning.");
             }
 

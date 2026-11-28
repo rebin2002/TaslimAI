@@ -2,6 +2,7 @@ using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using Taslim.Api.Ai;
+using Taslim.Api.Presentations;
 using Xunit;
 
 namespace Taslim.Api.Tests;
@@ -215,7 +216,26 @@ public sealed class AiCoreTests
             item => Assert.Equal("completed", ((AiMessageCompleted)item).Usage.FinishReason));
     }
 
-    private sealed class FakeProvider : IAiProvider
+    [Theory]
+    [InlineData("USD", true)]
+    [InlineData("EUR", false)]
+    [InlineData("", false)]
+    [InlineData(null, false)]
+    public async Task Presentation_cancellation_uses_the_raw_provider_currency_after_chat_usage_enrichment(string? currency, bool usd)
+    {
+        var options = Options.Create(new AiOptions { AllowMockProvider = false, OpenAI = new OpenAiOptions { Enabled = true, ApiKey = "test-only" } });
+        var catalog = ConfiguredCatalog();
+        var completion = new ChatCompletionService(new AiModelRouter(options, catalog), [new FakeProvider(0.04m, currency)],
+            new AiCostCalculator(catalog), NullLogger<ChatCompletionService>.Instance);
+        var result = await completion.CompleteAsync(new AiChatRequest([new("user", "test")], "system", "Smart"));
+        using var source = new CancellationTokenSource();
+        source.Cancel();
+        var cancelled = Assert.Throws<PresentationCancellationException>(() =>
+            PresentationCancellationException.ThrowIfCancelled(source.Token, result.Usage));
+        Assert.Equal(usd ? 0.04m : (decimal?)null, cancelled.ReportedCostUsd);
+    }
+
+    private sealed class FakeProvider(decimal? actual = null, string? currency = null) : IAiProvider
     {
         public string Key => "openai";
 
@@ -224,7 +244,7 @@ public sealed class AiCoreTests
             await Task.Yield();
             yield return new AiMessageDelta("hello ");
             yield return new AiMessageDelta("world");
-            yield return new AiMessageCompleted(new AiUsageMetadata(selection.ProviderKey, selection.ModelKey, 1000, 200, 1000, null, null, 4, "completed", false));
+            yield return new AiMessageCompleted(new AiUsageMetadata(selection.ProviderKey, selection.ModelKey, 1000, 200, 1000, null, actual, 4, "completed", false, Currency: currency));
         }
     }
 

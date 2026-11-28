@@ -3836,6 +3836,14 @@ namespace Taslim.Api.Persistence.Migrations
                     b.Property<Guid>("JobConcurrencyToken")
                         .HasColumnType("uuid");
 
+                    b.Property<string>("ResultCategory")
+                        .HasMaxLength(40)
+                        .HasColumnType("character varying(40)");
+
+                    b.Property<string>("ResultCode")
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)");
+
                     b.Property<string>("State")
                         .IsRequired()
                         .HasMaxLength(20)
