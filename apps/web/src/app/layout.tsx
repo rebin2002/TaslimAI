@@ -5,6 +5,7 @@ import { LocaleProvider } from "@/components/LocaleProvider";
 import { OnboardingGate } from "@/components/OnboardingGate";
 import "./globals.css";
 import "./auth-recovery.css";
+import "./onboarding-first-login.css";
 import "./chat.css";
 
 export const metadata: Metadata = {

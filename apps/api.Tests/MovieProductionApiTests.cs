@@ -568,7 +568,8 @@ public sealed class MovieProductionApiTests : IClassFixture<GenerationJobsNoWork
             var db = beforeConfirmation.ServiceProvider.GetRequiredService<TaslimDbContext>();
             Assert.Equal(0, await db.GenerationJobs.CountAsync(item => item.WorkspaceId == auth.PersonalWorkspace.Id));
         }
-        var preview = await SendWithCsrf<MovieSelectiveRegenerationResponse>(client, HttpMethod.Post, $"/api/movie-studio/shots/{shot.Id}/regeneration-requests", new
+        var previewPath = $"/api/movie-studio/shots/{shot.Id}/regeneration-requests";
+        var payload = new
         {
             actionType = MovieRegenerationActionTypes.ProductionKeyframeCandidate,
             requestedStage = MovieProductionStages.ProductionKeyframe,
@@ -577,7 +578,20 @@ public sealed class MovieProductionApiTests : IClassFixture<GenerationJobsNoWork
             changedInputsJson = "{\"characterContinuity\":\"updated\"}",
             compositionJson = "{\"frame\":\"updated\"}",
             estimatedProviderCostUsd = 0.25m,
-        });
+        };
+        var previewKey = $"regen-create-{Guid.NewGuid()}";
+        var preview = await SendWithCsrf<MovieSelectiveRegenerationResponse>(client, HttpMethod.Post, previewPath, payload, previewKey);
+        var replay = await SendWithCsrf<MovieSelectiveRegenerationResponse>(client, HttpMethod.Post, previewPath, payload, previewKey);
+        Assert.Equal(preview.Request.Id, replay.Request.Id);
+        using var mismatch = await SendWithCsrf(client, HttpMethod.Post, previewPath, payload with { reason = "Different intent" }, previewKey);
+        Assert.Equal(HttpStatusCode.Conflict, mismatch.StatusCode);
+        using (var afterPreview = factory.Services.CreateScope())
+        {
+            var db = afterPreview.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            Assert.Equal(1, await db.MovieRegenerationRequests.CountAsync(item => item.MovieShotId == shot.Id));
+            Assert.Equal(0, await db.GenerationJobs.CountAsync(item => item.WorkspaceId == auth.PersonalWorkspace.Id));
+        }
+
         Assert.Equal(MovieRegenerationStatuses.PendingConfirmation, preview.Request.Status);
         Assert.True(preview.Request.CostPreview.ConfirmationRequired);
         Assert.Null(preview.Job);
@@ -585,17 +599,25 @@ public sealed class MovieProductionApiTests : IClassFixture<GenerationJobsNoWork
         var notConfirmed = await SendWithCsrf(client, HttpMethod.Post, $"/api/movie-studio/regeneration-requests/{preview.Request.Id}/confirm", new { confirm = false });
         Assert.Equal(HttpStatusCode.BadRequest, notConfirmed.StatusCode);
 
-        var confirmed = await SendWithCsrf<MovieSelectiveRegenerationResponse>(client, HttpMethod.Post, $"/api/movie-studio/regeneration-requests/{preview.Request.Id}/confirm", new { confirm = true });
+        var confirmed = await SendWithCsrf<MovieSelectiveRegenerationResponse>(client, HttpMethod.Post, $"/api/movie-studio/regeneration-requests/{preview.Request.Id}/confirm", new { confirm = true }, $"regen-confirm-{Guid.NewGuid()}");
         Assert.Equal(MovieRegenerationStatuses.Confirmed, confirmed.Request.Status);
         Assert.NotNull(confirmed.Job);
         Assert.NotNull(confirmed.ProductionVersion);
         Assert.NotNull(confirmed.Take);
+        Assert.False(confirmed.Request.CostPreview.ConfirmationRequired);
+        var completedReplay = await SendWithCsrf<MovieSelectiveRegenerationResponse>(client, HttpMethod.Post, previewPath, payload, previewKey);
+        Assert.Equal(preview.Request.Id, completedReplay.Request.Id);
+        Assert.Equal(MovieRegenerationStatuses.Confirmed, completedReplay.Request.Status);
+        Assert.False(completedReplay.Request.CostPreview.ConfirmationRequired);
+        Assert.Equal(confirmed.Job!.Id, completedReplay.Job!.Id);
+        Assert.Equal(confirmed.ProductionVersion!.Id, completedReplay.ProductionVersion!.Id);
+        Assert.Equal(confirmed.Take!.Id, completedReplay.Take!.Id);
         Assert.Equal(GenerationJobStatus.Queued.ToString(), confirmed.Job!.Status);
         Assert.Equal(MovieTakeStatuses.Generating, confirmed.Take!.Status);
 
         using var scope = factory.Services.CreateScope();
         var dbAfter = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
-        Assert.Equal(1, await dbAfter.GenerationJobs.CountAsync(item => item.Id == confirmed.Job.Id));
+        Assert.Equal(1, await dbAfter.GenerationJobs.CountAsync(item => item.WorkspaceId == auth.PersonalWorkspace.Id));
         Assert.Equal(3, await dbAfter.MovieProductionVersions.CountAsync(item => item.MovieShotId == shot.Id));
         Assert.Equal(MovieProductionVersionStatuses.ReviewRequired, await dbAfter.MovieProductionVersions.Where(item => item.Id == downstream.Id).Select(item => item.Status).SingleAsync());
         Assert.Contains(await dbAfter.MovieProductionStageTransitions.Where(item => item.MovieShotId == shot.Id).ToListAsync(), item => item.EventType == "invalidated" && item.MovieProductionVersionId == downstream.Id);
@@ -647,18 +669,19 @@ public sealed class MovieProductionApiTests : IClassFixture<GenerationJobsNoWork
         await db.SaveChangesAsync();
     }
 
-    private static async Task<T> SendWithCsrf<T>(HttpClient client, HttpMethod method, string path, object? payload)
+    private static async Task<T> SendWithCsrf<T>(HttpClient client, HttpMethod method, string path, object? payload, string? idempotencyKey = null)
     {
-        var response = await SendWithCsrf(client, method, path, payload);
+        var response = await SendWithCsrf(client, method, path, payload, idempotencyKey);
         Assert.True(response.IsSuccessStatusCode, await response.Content.ReadAsStringAsync());
         return (await response.Content.ReadFromJsonAsync<T>())!;
     }
 
-    private static async Task<HttpResponseMessage> SendWithCsrf(HttpClient client, HttpMethod method, string path, object? payload)
+    private static async Task<HttpResponseMessage> SendWithCsrf(HttpClient client, HttpMethod method, string path, object? payload, string? idempotencyKey = null)
     {
         var csrf = await client.GetFromJsonAsync<JsonElement>("/api/auth/csrf");
         using var request = new HttpRequestMessage(method, path);
         request.Headers.Add("X-CSRF-TOKEN", csrf.GetProperty("token").GetString());
+        if (idempotencyKey is not null) request.Headers.Add("Idempotency-Key", idempotencyKey);
         if (payload is not null) request.Content = JsonContent.Create(payload);
         return await client.SendAsync(request);
     }

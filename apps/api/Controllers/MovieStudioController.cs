@@ -857,6 +857,10 @@ public sealed class MovieStudioController(IMovieStudioService movies, IMovieProd
     {
         try
         {
+            var shot = await movies.GetShotPlanningAsync(GetUserId(), shotId, cancellationToken);
+            if (shot is null) return ApiResults.Error(this, 404, "MOVIE_SHOT_NOT_FOUND", "Movie shot not found.");
+            if (shot.DurationSeconds.HasValue && !MovieDurationBudgetPolicy.IsSupportedSingleClipDuration(shot.DurationSeconds.Value))
+                return ApiResults.Error(this, 400, MovieDurationBudgetPolicy.SingleClipDurationUnsupportedCode, MovieDurationBudgetPolicy.SingleClipDurationUnsupportedMessage);
             var result = await productionPreflight.EvaluateAsync(
                 GetUserId(),
                 shotId,
@@ -1016,9 +1020,11 @@ public sealed class MovieStudioController(IMovieStudioService movies, IMovieProd
     {
         try
         {
-            var result = await movies.CreateRegenerationRequestAsync(GetUserId(), shotId, request, cancellationToken);
+            var result = await movies.CreateRegenerationRequestAsync(GetUserId(), shotId, request, cancellationToken, Request.Headers["Idempotency-Key"].FirstOrDefault());
             return result is null ? ApiResults.Error(this, 404, "MOVIE_SHOT_NOT_FOUND", "Movie shot not found.") : Ok(result);
         }
+        catch (GenerationJobValidationException exception) { return ApiResults.Error(this, 400, exception.Code, exception.Message); }
+        catch (MovieProductionValidationException exception) when (exception.Code == MovieStudioClipIdempotency.ReusedCode) { return ApiResults.Error(this, 409, exception.Code, exception.Message); }
         catch (MovieProductionValidationException exception) { return ApiResults.Error(this, 400, exception.Code, exception.Message); }
     }
 
