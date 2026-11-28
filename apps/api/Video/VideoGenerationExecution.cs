@@ -309,7 +309,7 @@ public sealed class VideoGenerationAdapterExecutionService(
         {
             VideoGenerationContract.ValidateCapabilities(capabilities);
         }
-        catch (ArgumentException)
+        catch (Exception exception) when (exception is ArgumentException or NullReferenceException)
         {
             throw new VideoGenerationAdapterExecutionException(
                 VideoGenerationFailureCategory.MalformedResponse,

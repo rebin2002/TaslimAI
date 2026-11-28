@@ -10,6 +10,14 @@ describe("root error locale recovery", () => {
     expect(readRootErrorLocale("ar", storage("ku"))).toBe("ar");
   });
 
+  it("preserves a regional Arabic document tag over stale storage", () => {
+    expect(readRootErrorLocale("ar-SA", storage("en"))).toBe("ar");
+  });
+
+  it("preserves a regional Sorani document tag over stale storage", () => {
+    expect(readRootErrorLocale("ckb-IQ", storage("ar"))).toBe("ku");
+  });
+
   it("restores an anonymous persisted locale when the document is still English", () => {
     expect(readRootErrorLocale("en", storage("ar"))).toBe("ar");
     expect(readRootErrorLocale("en", storage("ku"))).toBe("ku");
@@ -17,6 +25,7 @@ describe("root error locale recovery", () => {
 
   it("fails closed to English for unsupported or unavailable state", () => {
     expect(readRootErrorLocale("fr", storage("not-supported"))).toBe("en");
+    expect(readRootErrorLocale("ku-Latn-TR", storage("not-supported"))).toBe("en");
     expect(readRootErrorLocale(null, null)).toBe("en");
   });
 

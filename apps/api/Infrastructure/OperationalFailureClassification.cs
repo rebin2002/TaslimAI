@@ -30,6 +30,25 @@ public static class GenerationFailureClassifier
         if (normalized == GenerationJobErrorCodes.ResearchSearchUnavailable)
             return new(normalized, "provider", true);
 
+        // Isolated ahead of the STORAGE / OUTPUT / PROVIDER heuristics. These codes mean the provider
+        // already produced and billed the result and only delivery failed (including the F-36 case where
+        // the member cancelled after the output was observed complete), so they must
+        // never read as a retryable provider outage: a retry would create a duplicate paid
+        // submission. Retryable is currently log-only for generation jobs, which is exactly why
+        // the refusal is also enforced in GenerationJobService.RetryAsync.
+        if (normalized is GenerationJobErrorCodes.MusicOutputRetrievalFailed or GenerationJobErrorCodes.MusicRetrievalRetryBlocked or GenerationJobErrorCodes.MusicCancelledUndeliveredOutput)
+            return new(normalized, "delivery", false);
+
+        // The provider submission outcome is unknown: automatic re-dispatch is suppressed for music
+        // (see RecoverExpiredClaimsAsync) and the customer's retry endpoint refuses the job too (see
+        // GenerationJobExecution.RetryAsync), so neither an operator automaton nor the member can
+        // produce the duplicate paid submission. The retry-refusal code names the same event and takes
+        // the same posture.
+        if (normalized is GenerationJobErrorCodes.MusicProviderSubmissionUnconfirmed
+            or GenerationJobErrorCodes.MusicSubmissionRetryBlocked
+            or GenerationJobErrorCodes.MusicCancelledUnconfirmedSubmission)
+            return new(normalized, "provider", false);
+
         if (normalized.Contains("STORAGE", StringComparison.Ordinal))
             return new(normalized, "storage", true);
 

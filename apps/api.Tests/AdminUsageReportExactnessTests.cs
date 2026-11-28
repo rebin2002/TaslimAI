@@ -27,6 +27,26 @@ public sealed class AdminUsageReportExactnessTests
     private static readonly DateTime WindowStart = new(2026, 11, 16, 12, 0, 0, DateTimeKind.Utc);
 
     [Fact]
+    public void Double_accumulation_of_representable_magnitudes_still_drifts()
+    {
+        const decimal rowAmount = 0.10m;
+        const int rowCount = 100_000;
+        var exactTotal = rowCount * rowAmount;
+        var accumulated = 0d;
+        for (var index = 0; index < rowCount; index++) accumulated += (double)rowAmount;
+        // Premise first: this total is nowhere near the integer-exactness limit of a double, which at
+        // the ledger's scale of 8 decimal places is 90,071,992.547409912.
+        Assert.Equal(10_000.00m, exactTotal);
+        Assert.True(exactTotal < 90_071_992.547409912m);
+        // The accumulation disagrees with the exact decimal sum.
+        Assert.NotEqual((double)exactTotal, accumulated);
+        Assert.Equal("10000.000000018848", accumulated.ToString(CultureInfo.InvariantCulture));
+        var roundedDouble = decimal.Round((decimal)accumulated, 8);
+        Assert.Equal(10000.00000002m, roundedDouble);
+        Assert.NotEqual(exactTotal, roundedDouble);
+    }
+
+    [Fact]
     public async Task Report_totals_preserve_fractional_ledger_units()
     {
         await using var fixture = await AdminUsageFixture.CreateAsync();

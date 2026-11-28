@@ -17,6 +17,8 @@ public static class GenerationJobErrorMessages
             GenerationJobErrorCodes.TypeNotSupported => "This job type is not available.",
             GenerationJobErrorCodes.Cancelled => "The job was cancelled.",
             GenerationJobErrorCodes.Poisoned => "The generation could not be recovered safely. Please try again.",
+            GenerationJobErrorCodes.ProviderOutcomeUnconfirmed => "The provider may have accepted this request, but its result and final cost could not be confirmed. It was not restarted. Please contact support before retrying.",
+            GenerationJobErrorCodes.ProviderOutcomeRetryBlocked => "This retry was blocked because the first provider attempt's result and cost remain unconfirmed.",
             GenerationJobErrorCodes.NoBillableAsset => "The generation completed without a publishable asset. Please try again.",
             GenerationJobErrorCodes.ImageStudioUnavailable => "Image generation is not available right now.",
             GenerationJobErrorCodes.ImageProviderUnavailable => "Image generation is temporarily unavailable. Please try again later.",
@@ -72,7 +74,32 @@ public static class GenerationJobErrorMessages
             GenerationJobErrorCodes.MusicProviderInvalidRequest => "Please check the music request and try again.",
             GenerationJobErrorCodes.MusicOutputInvalid => "The generated music was invalid. Please try again.",
             GenerationJobErrorCodes.MusicOutputStorageFailed => "The music was generated but could not be saved. Please try again.",
+            // Both arms are exact-match and precede the MUSIC_ prefix fallback, which otherwise
+            // would render any unmapped MUSIC_ code as "The music could not be generated. Please
+            // try again." and invite a paid regeneration of a track that already exists. The copy
+            // states what happened without asking for a retry and without claiming that automatic
+            // re-delivery or a refund exists today.
+            GenerationJobErrorCodes.MusicOutputRetrievalFailed => "Your music was generated, but the finished track could not be delivered. It was not generated a second time, because that would create a duplicate.",
+            GenerationJobErrorCodes.MusicRetrievalRetryBlocked => "This retry was blocked because the track was already generated and only delivery failed. Please contact support to recover it.",
+            // Deliberate contrast with the two arms above: here the finished track is NOT known to
+            // exist, so nothing is deliverable, and the first attempt may still be running and
+            // billing. The customer's retry endpoint is therefore refused as well (see
+            // GenerationJobExecution.RetryAsync and the arm below): an informed retry would still be
+            // a second paid submission whose sibling may already exist, and fair billing outweighs
+            // the convenience of an immediate retry. The wording states the unknown outcome without
+            // claiming a finished track and without inviting the customer to submit another job.
+            GenerationJobErrorCodes.MusicProviderSubmissionUnconfirmed => "Music generation stopped before its outcome could be confirmed: the first attempt may already have reached the provider. It was not restarted automatically, and this job cannot be retried while that outcome is unconfirmed, so you are not billed a second time for it.",
+            GenerationJobErrorCodes.MusicSubmissionRetryBlocked => "This retry was blocked because the first attempt may already have reached the provider and its outcome has not been reconciled yet. Starting another would risk a duplicate paid generation.",
             GenerationJobErrorCodes.MusicCancelled => "The music generation was cancelled.",
+            // F-36: both arms distinguish a cancellation that happened AFTER the provider accepted the
+            // paid generation from the ordinary one above, where nothing was submitted. Neither asserts
+            // an outcome that was never observed and neither invites another submission - the accepted
+            // attempt may still be running and billing, so RetryAsync refuses the retry (see
+            // GenerationJobExecution.RetryAsync) and the copy points at reconciliation instead.
+            GenerationJobErrorCodes.MusicCancelledUnconfirmedSubmission => "The music generation was cancelled after the provider had already accepted it, so the first attempt may still finish and may still be charged. It was not started again, and it will not be retried until that attempt has been reconciled. Please contact support if the track does not appear.",
+            // Here the finished track IS established - polling saw it complete - and only the delivery
+            // was lost to the cancellation, so the copy may say so without claiming a second generation.
+            GenerationJobErrorCodes.MusicCancelledUndeliveredOutput => "Your music was generated, but the cancellation stopped it before the finished track could be delivered. It was not generated a second time. Please contact support to recover it.",
             GenerationJobErrorCodes.VoiceProviderUnavailable or GenerationJobErrorCodes.VoiceProviderAuthentication => "Voice generation is temporarily unavailable. Please try again later.",
             GenerationJobErrorCodes.VoiceProviderRateLimited => "Voice generation is busy right now. Please try again later.",
             GenerationJobErrorCodes.VoiceProviderTimeout => "Voice generation took too long to complete. Please try again.",

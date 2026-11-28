@@ -1,4 +1,5 @@
 using System.Data;
+using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -209,6 +210,11 @@ public sealed class PaymentLifecycleService(TaslimDbContext db, ICreditLedgerSer
 
     public async Task<Subscription> ActivateSubscriptionAsync(Guid workspaceId, Guid subscriptionId, Guid planId, string provider, string providerSubscriptionReference, DateTime periodStart, DateTime periodEnd, string reason, CancellationToken cancellationToken = default)
     {
+        // Both boundaries are normalised at the entry, before anything reads them, so the identity, the
+        // ordering check, the persisted columns and the expiry all describe one instant. Existing UTC
+        // whole-second input - every caller in the shipped code today - is unaffected.
+        periodStart = ToStoreInstant(periodStart);
+        periodEnd = ToStoreInstant(periodEnd);
         ValidatePeriod(periodStart, periodEnd);
         ValidateReason(reason, nameof(reason));
         var ownsTransaction = db.Database.CurrentTransaction is null;
@@ -236,6 +242,10 @@ public sealed class PaymentLifecycleService(TaslimDbContext db, ICreditLedgerSer
 
     public async Task<Subscription> RenewSubscriptionAsync(Guid workspaceId, Guid subscriptionId, DateTime periodStart, DateTime periodEnd, string idempotencyKey, string reason, CancellationToken cancellationToken = default)
     {
+        // As in ActivateSubscriptionAsync: one instant, one representation, taken before the ordering
+        // check and before the row is written.
+        periodStart = ToStoreInstant(periodStart);
+        periodEnd = ToStoreInstant(periodEnd);
         ValidatePeriod(periodStart, periodEnd);
         ValidateReason(idempotencyKey, nameof(idempotencyKey));
         ValidateReason(reason, nameof(reason));
@@ -371,15 +381,137 @@ public sealed class PaymentLifecycleService(TaslimDbContext db, ICreditLedgerSer
         {
             period = new BillingPeriod
             {
-                Id = Guid.NewGuid(), SubscriptionId = subscription.Id, Status = BillingPeriodStatus.Open,
+                // Identity, not entropy: the primary key is a function of the same natural key that
+                // the durable unique index on BillingPeriod (SubscriptionId, StartsAt) already treats
+                // as one period. See RenewalPeriodIdentity for why that is the concurrency guard.
+                Id = RenewalPeriodIdentity(subscription.Id, periodStart), SubscriptionId = subscription.Id, Status = BillingPeriodStatus.Open,
                 StartsAt = periodStart, EndsAt = periodEnd, IncludedCredits = plan.MonthlyCreditAllowance, CreatedAt = DateTime.UtcNow,
             };
             db.BillingPeriods.Add(period);
             await db.SaveChangesAsync(cancellationToken);
         }
+        await ExpireEndedPeriodsAsync(subscription.Id, period.Id, periodStart, cancellationToken);
         var idempotencyKey = $"included:{subscription.Id}:{period.Id}";
         await creditLedger.GrantAsync(subscription.WorkspaceId, CreditEntitlementType.IncludedMonthly, plan.MonthlyCreditAllowance,
             idempotencyKey, reason, periodEnd, period.Id, sourceReference: subscription.ProviderSubscriptionReference, cancellationToken: cancellationToken);
+    }
+
+    // Rollover boundary state. A billing period ends when the next one opens: the included
+    // entitlement granted into it already stops being spendable at that boundary, so the
+    // auditable period row has to record the same fact instead of staying Open forever.
+    // Only boundaries that end at or before the period being provisioned expire, so a
+    // redelivered event for an older period can never walk a later, still-open period back
+    // in time, and an already-closed period is never reopened or re-closed by a replay.
+    private async Task ExpireEndedPeriodsAsync(Guid subscriptionId, Guid currentPeriodId, DateTime periodStart, CancellationToken cancellationToken)
+    {
+        var ended = await db.BillingPeriods
+            .Where(item => item.SubscriptionId == subscriptionId && item.Id != currentPeriodId && item.Status == BillingPeriodStatus.Open && item.EndsAt <= periodStart)
+            .ToListAsync(cancellationToken);
+        if (ended.Count == 0) return;
+        foreach (var item in ended)
+        {
+            item.Status = BillingPeriodStatus.Expired;
+            item.ClosedAt = item.EndsAt;
+        }
+        await db.SaveChangesAsync(cancellationToken);
+    }
+    // The renewal identity is a name-based (RFC 9562 version 5 style) UUID over the durable natural
+    // key of a renewal - the subscription, and the period it renews - instead of per-delivery
+    // entropy. It changes nothing about what a period *is*; it only makes the minting of its primary
+    // key a function of that identity.
+    //
+    // Why that matters: `included:{subscriptionId}:{periodId}` is the key the credit ledger
+    // deduplicates on, and with a `Guid.NewGuid()` period id two deliveries that each read "no such
+    // period" computed two *different* grant keys. A unique index cannot refuse a collision that does
+    // not exist, so across two independent transactions the ledger guard was inert and the invariant
+    // rested entirely on the BillingPeriod index - proven by the mutation test in PR #1094, where
+    // dropping that index pays the workspace the monthly allowance twice.
+    //
+    // Deriving the key from the identity makes the collision real, so a duplicate delivery is now
+    // refused by durable constraints that already exist - the BillingPeriod primary key and the
+    // unique indexes on CreditEntitlements and CreditLedgerEntries (WorkspaceId, IdempotencyKey) -
+    // rather than by one index alone. No schema change, no migration, no new lock protocol, no
+    // provider call and no monetary value changes: the granted amount is still
+    // plan.MonthlyCreditAllowance and the audit reason is still the caller's string.
+    //
+    // Rows created before this derivation are unaffected: the lookup above still finds them first and
+    // their stored id keeps producing the historical grant key. The name is over the instant at the
+    // resolution the store keeps it at, because two representations of one instant denote one renewal
+    // period - exactly what the unique index on (SubscriptionId, StartsAt) enforces. The quantising
+    // that makes that true on both sides of the persistence boundary is StoreResolutionTicks.
+    internal static Guid RenewalPeriodIdentity(Guid subscriptionId, DateTime periodStart)
+    {
+        var name = Encoding.UTF8.GetBytes(string.Create(
+            CultureInfo.InvariantCulture,
+            $"taslim:billing-period:v1:{subscriptionId:N}:{StoreResolutionTicks(periodStart)}"));
+        var digest = SHA1.HashData(name);
+        digest[6] = (byte)((digest[6] & 0x0F) | 0x50); // version 5 (name-based)
+        digest[8] = (byte)((digest[8] & 0x3F) | 0x80); // RFC 4122 variant
+        // Parsed from hex so the byte order is the RFC 4122 order that PostgreSQL also displays,
+        // rather than whatever an overload or platform endianness convention happens to select. A
+        // silently constant identity would be worse than the bug this replaces, so the derivation is
+        // pinned by a golden value in BillingRenewalPeriodIdentityTests.
+        return Guid.Parse(Convert.ToHexString(digest.AsSpan(0, 16)).ToLowerInvariant());
+    }
+
+    // The ticks a renewal period is named over, expressed at the resolution a BillingPeriod row can
+    // actually hold.
+    //
+    // A .NET DateTime carries 100-nanosecond ticks; the timestamp column the period is stored in
+    // carries microseconds, and the provider discards the finer digits on the way in - measured
+    // against this exact stack rather than assumed: a start at base+7 ticks is stored as base, while
+    // base+15 is stored as base+10. So a boundary that reaches this derivation still holding
+    // sub-microsecond precision - one computed in memory by the renewal path instead of read back
+    // from the row it describes - names a value no stored row can ever reproduce.
+    //
+    // That matters because the identity is the second line of defence, not the first. The durable
+    // unique index on (SubscriptionId, StartsAt) is what actually refuses a duplicate allowance; the
+    // identity exists so a duplicate delivery collides on the BillingPeriod primary key as well,
+    // which is the defence PR #1094 proved was missing while the period id was per-delivery entropy.
+    // A derivation the store cannot recompute quietly removes that second collision: the two
+    // deliveries mint two keys, the primary key accepts both, and the invariant rests on one index
+    // again. Quantising to the stored resolution makes the collision real for every representation
+    // of the same persisted instant.
+    //
+    // Nothing that works today changes. Whole-second boundaries - what an activation or a renewal
+    // computes, and what every existing row holds - are already multiples of ten ticks, so existing
+    // ids, the grant keys derived from them and the golden value pinned by
+    // BillingRenewalPeriodIdentityTests are byte-identical before and after this.
+    private const long TicksPerMicrosecond = 10;
+    internal static long StoreResolutionTicks(DateTime value)
+    {
+        return ToStoreInstant(value).Ticks;
+    }
+
+    // One instant, one representation of it, at the resolution the billing row can hold.
+    //
+    // A local value is converted to UTC and a value that names no offset is read as UTC. This is not
+    // the provider doing the work for us - it does the opposite. Measured on this stack with the
+    // shipped renewal path on a host at UTC-5: writing a boundary whose Kind is Local or Unspecified
+    // is refused outright ("Cannot write DateTime with Kind=Local to PostgreSQL type 'timestamp with
+    // time zone', only UTC is supported"), and an offset-bearing webhook timestamp parsed by
+    // System.Text.Json arrives as Kind=Local. Normalising at the entry is therefore what lets such a
+    // renewal persist on a non-UTC host at all, and what keeps the identity, the ordering check, the
+    // stored row and the entitlement expiry on one instant instead of on two spellings of it.
+    //
+    // The ticks are then floored to whole microseconds, because that is what the column keeps:
+    // measured through this same path, a start at base+7 ticks is stored as base and base+15 as
+    // base+10. A boundary that reached the identity still holding those digits named a value no
+    // stored row could reproduce, which is the half of the finding the quantising closes.
+    //
+    // Nothing that works today moves. Whole-second UTC boundaries - what an activation or a renewal
+    // computes, and what every existing row holds - are already multiples of ten ticks, so existing
+    // ids, the grant keys derived from them and the golden value pinned by
+    // BillingRenewalPeriodIdentityTests are byte-identical before and after this.
+    internal static DateTime ToStoreInstant(DateTime value)
+    {
+        var instant = value.Kind switch
+        {
+            DateTimeKind.Utc => value,
+            DateTimeKind.Local => value.ToUniversalTime(),
+            _ => DateTime.SpecifyKind(value, DateTimeKind.Utc),
+        };
+        return new DateTime(instant.Ticks / TicksPerMicrosecond * TicksPerMicrosecond, DateTimeKind.Utc);
     }
 
     private async Task<PaymentAttempt> GetAttemptAsync(Guid workspaceId, Guid id, CancellationToken cancellationToken) =>
@@ -430,7 +562,16 @@ public sealed class PaymentLifecycleService(TaslimDbContext db, ICreditLedgerSer
 
     private static void ValidatePeriod(DateTime start, DateTime end)
     {
-        if (end <= start) throw new ArgumentException("The billing period must end after it starts.");
+        // Compared on the normalised instants rather than on the raw DateTime values: the built-in
+        // ordering ignores Kind, so a start arriving as the offset-bearing form a webhook payload
+        // parses into and an end arriving in UTC can be ordered by their wall-clock digits instead of
+        // by time whenever the host offset is not the one the payload carried. Both sides go through
+        // the same normalising the identity uses, so the ordering decision and the identity decision
+        // are taken on one representation of the period.
+        if (StoreResolutionTicks(end) <= StoreResolutionTicks(start))
+        {
+            throw new ArgumentException("The billing period must end after it starts.");
+        }
     }
 }
 

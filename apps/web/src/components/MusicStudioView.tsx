@@ -12,7 +12,7 @@ import { MediaJobArtifactDownload } from "@/components/MediaJobArtifactDownload"
 import { useLocale } from "@/components/LocaleProvider";
 import { api, type Asset, type GenerationJob, type MusicGenerationInput, type Project } from "@/lib/api";
 import { findMediaJobArtifact, mediaJobArtifactDownloadState } from "@/lib/mediaJobArtifactState";
-import { canCancelMusicJob, isMusicProviderUnavailable, parseMusicJobResult } from "@/lib/musicStudioState";
+import { canCancelMusicJob, isMusicProviderUnavailable, musicStudioFailureCopy, parseMusicJobResult } from "@/lib/musicStudioState";
 import {
   decideMusicStudioSubmit,
   musicStudioPreflightCopy,
@@ -99,6 +99,30 @@ export function MusicStudioActionNoticeView({ message }: { message: string }) {
       <span>{message}</span>
     </div>
   );
+}
+
+export function MusicStudioFailureActions({
+  allowRetry,
+  allowRecheck,
+  working,
+  error,
+  onRetry,
+  onRecheck,
+  t,
+}: {
+  allowRetry: boolean;
+  allowRecheck: boolean;
+  working: boolean;
+  error: string;
+  onRetry: () => void;
+  onRecheck: () => void;
+  t: (key: string) => string;
+}) {
+  return <>
+    {error ? <MusicStudioActionNoticeView message={error} /> : null}
+    {allowRecheck ? <button className="music-action-button" type="button" data-action="recheck-original-job" onClick={onRecheck} disabled={working}><RefreshCw size={15} /> {t("movieAudio.refresh")}</button> : null}
+    {allowRetry ? <button className="music-action-button is-primary" type="button" onClick={onRetry} disabled={working}><RefreshCw size={15} /> {t("music.retry")}</button> : null}
+  </>;
 }
 
 
@@ -597,6 +621,22 @@ function WorkspaceMusicStudio({ workspace }: { workspace: ReturnType<typeof useA
     }
   }
 
+  async function recheckOriginalJob() {
+    if (!current) return;
+    setWorking(true);
+    setError("");
+    try {
+      // Recovery is deliberately a read of this exact job id; it cannot launch
+      // another paid operation or alter the original request.
+      setCurrent(await api.getGenerationJob(current.id));
+      setPollError("");
+    } catch {
+      setError(t("music.pollError"));
+    } finally {
+      setWorking(false);
+    }
+  }
+
   function createAnother() {
     setCurrent(null);
     setError("");
@@ -612,7 +652,7 @@ function WorkspaceMusicStudio({ workspace }: { workspace: ReturnType<typeof useA
   const isSuccess = current?.status === "Succeeded" && !!result?.assetId;
   const isFailure = current?.status === "Failed" || current?.status === "Cancelled";
   const referenceCandidates = useMemo(() => selectUnclaimedReferenceAudioCandidates(referenceAudioAssets), [referenceAudioAssets]);
-  const failureCopy = current?.status === "Cancelled" ? { title: t("music.cancelledTitle"), text: t("music.cancelledText") } : isMusicProviderUnavailable(current) ? { title: t("music.providerUnavailableTitle"), text: t("music.providerUnavailableText") } : { title: t("music.failureTitle"), text: t("music.failureText") };
+  const failureCopy = musicStudioFailureCopy(current, t);
 
   return <div className="music-studio-page">
     <section className="music-studio-hero">
@@ -667,7 +707,7 @@ function WorkspaceMusicStudio({ workspace }: { workspace: ReturnType<typeof useA
       <div className="music-result-heading"><div><p className="music-overline">{t("music.resultEyebrow")}</p><h2>{t("music.resultTitle")}</h2></div><span className="music-success-badge"><CheckCircle2 size={15} /> {t("music.savedToAssets")}</span></div>
       <div className="music-result-hero"><MusicArtwork large /><div className="music-result-copy"><h3>{result.title ?? current.title ?? t("music.generatedTitle")}</h3><p>{result.format?.toUpperCase() ?? "AUDIO"}{result.durationSeconds ? ` · ${t("music.durationValue", { seconds: String(result.durationSeconds) })}` : ""}</p><AudioPlayer assetId={result.assetId} title={result.title ?? t("music.generatedTitle")} durationSeconds={result.durationSeconds} /></div></div>
       <div className="music-result-actions"><MediaJobArtifactDownload href={api.assetFileUrl(result.assetId)} state={resultArtifactState} className="music-action-button is-primary" label={t("music.download")} unavailableLabel={t("assets.fileUnavailable")} />{current.projectId && <Link className="music-action-button" href={`/projects/${current.projectId}`}><FolderOpen size={15} /> {t("music.openProject")}</Link>}<Link className="music-action-button" href={`/assets?search=${encodeURIComponent(result.title ?? t("music.generatedTitle"))}`}><Music2 size={15} /> {t("music.openAssets")}</Link><button className="music-action-button is-quiet" type="button" onClick={createAnother}><RefreshCw size={15} /> {t("music.createAnother")}</button></div>
-    </section> : isFailure ? <section className="music-state-panel is-failure" aria-live="polite"><div className="music-state-icon"><AlertCircle size={24} /></div><p className="music-overline">{isMusicProviderUnavailable(current) ? t("music.providerStatus") : t("music.progressEyebrow")}</p><h2>{failureCopy.title}</h2><p>{failureCopy.text}</p><button className="music-action-button is-primary" type="button" onClick={createAnother}><RefreshCw size={15} /> {t("music.retry")}</button></section> : <section className="music-state-panel" aria-live="polite"><div className="music-state-icon is-active"><LoaderCircle size={24} className="music-spin" aria-hidden="true" /></div><p className="music-overline">{t("music.progressEyebrow")}</p><h2>{t(`jobs.status${current.status}`)}</h2><p>{t("music.progressText")}</p><div className="music-progress-meta"><span>{t("jobs.progress")}</span><strong>{current.progressPercent}%</strong></div><AccessibleProgressBar className="music-progress-track" label={t("jobs.progress")} value={current.progressPercent} />{pollError && <MusicStudioPollingNoticeView message={pollError} />}{error && <MusicStudioActionNoticeView message={error} />}{canCancelMusicJob(current) && <button className="music-action-button" type="button" onClick={() => void cancel()} disabled={working}><XCircle size={15} /> {t("music.cancel")}</button>}</section>}
+    </section> : isFailure ? <section className="music-state-panel is-failure" aria-live="polite"><div className="music-state-icon"><AlertCircle size={24} /></div><p className="music-overline">{isMusicProviderUnavailable(current) ? t("music.providerStatus") : t("music.progressEyebrow")}</p><h2>{failureCopy.title}</h2><p>{failureCopy.text}</p><MusicStudioFailureActions allowRetry={failureCopy.allowRetry} allowRecheck={failureCopy.allowRecheck} working={working} error={error} onRetry={createAnother} onRecheck={() => void recheckOriginalJob()} t={t} /></section> : <section className="music-state-panel" aria-live="polite"><div className="music-state-icon is-active"><LoaderCircle size={24} className="music-spin" aria-hidden="true" /></div><p className="music-overline">{t("music.progressEyebrow")}</p><h2>{t(`jobs.status${current.status}`)}</h2><p>{t("music.progressText")}</p><div className="music-progress-meta"><span>{t("jobs.progress")}</span><strong>{current.progressPercent}%</strong></div><AccessibleProgressBar className="music-progress-track" label={t("jobs.progress")} value={current.progressPercent} />{pollError && <MusicStudioPollingNoticeView message={pollError} />}{error && <MusicStudioActionNoticeView message={error} />}{canCancelMusicJob(current) && <button className="music-action-button" type="button" onClick={() => void cancel()} disabled={working}><XCircle size={15} /> {t("music.cancel")}</button>}</section>}
 
     <RecentMusicLibrary assets={recentMusic} loading={loadingLibrary} error={libraryError} locale={locale} t={t} />
     <p className="music-studio-footnote">{t("music.safetyNote")}</p>

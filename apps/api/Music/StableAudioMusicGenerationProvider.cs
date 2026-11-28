@@ -31,9 +31,16 @@ public sealed class StableAudioMusicGenerationProvider(
 
     public string Key => "stable-audio";
 
-    public async Task<MusicProviderResult> GenerateAsync(
+    public Task<MusicProviderResult> GenerateAsync(
         MusicGenerationInput request,
         CancellationToken cancellationToken = default)
+        => GenerateAsync(request, cancellationToken, onSubmissionAccepted: null, onDispatchSubmitting: null);
+
+    public async Task<MusicProviderResult> GenerateAsync(
+        MusicGenerationInput request,
+        CancellationToken cancellationToken,
+        Func<string, Task>? onSubmissionAccepted,
+        Func<Task>? onDispatchSubmitting = null)
     {
         if (!settings.Enabled
             || !string.Equals(settings.ProviderKey, Key, StringComparison.OrdinalIgnoreCase)
@@ -43,6 +50,23 @@ public sealed class StableAudioMusicGenerationProvider(
         }
 
         var pollAttempts = 0;
+        // Set once the result endpoint answers 2xx, i.e. once Stability has produced and billed the
+        // generation. Any timeout after that point only stopped us from reading a track that exists,
+        // so it must not be reported as the retryable timeout code: a retry would POST a second
+        // billable generation and orphan the first.
+        var billableResultReceived = false;
+        // Set as soon as the text-to-audio POST is answered with a generation id. Stability has then
+        // accepted a paid generation, while its completion and charge are still unknown to us. This
+        // middle stage is deliberately distinct from "nothing was submitted": the retryable timeout
+        // code makes the job layer re-run CreateAsync, which posts a second generation while the
+        // accepted one may still be running and billing. It is equally not the retrieval class, whose
+        // customer copy asserts the music was generated. The policy is to stop the machine from
+        // submitting again (terminal MUSIC_PROVIDER_SUBMISSION_UNCONFIRMED, whose automatic
+        // re-dispatch is suppressed) and keep the generation id in the log so the pending result can be
+        // reconciled by hand.
+        var providerSubmissionAccepted = false;
+        var providerCreateMayHaveReachedProvider = false;
+        string? providerGenerationId = null;
 
         try
         {
@@ -51,37 +75,151 @@ public sealed class StableAudioMusicGenerationProvider(
             var format = NormalizeFormat(settings.StableAudioOutputFormat);
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             timeout.CancelAfter(TimeSpan.FromSeconds(Math.Clamp(settings.ProviderTimeoutSeconds, 15, 900)));
+            // F-36.1b: make the dispatch itself durable before the request leaves this process. The
+            // provider's operation id does not exist yet (neither vendor lets us supply one), so this
+            // marker is the only evidence that a paid submission may have been accepted. A failure to
+            // write it is logged, not fatal: refusing the customer's generation because a telemetry
+            // write hiccuped would be the wrong direction of error, and the acceptance stamp below
+            // still fails closed.
+            if (onDispatchSubmitting is not null) await onDispatchSubmitting();
+
             var stopwatch = Stopwatch.StartNew();
+            providerCreateMayHaveReachedProvider = true;
             var createdBody = await SendCreateAsync(
                 new Uri(baseUri, "v2beta/audio/stable-audio/text-to-audio"),
                 BuildForm(request, model, format),
                 timeout.Token);
-            var generationId = ReadGenerationId(createdBody);
+            string generationId;
+            try
+            {
+                generationId = ReadGenerationId(createdBody);
+            }
+            catch (MusicProviderFailureException exception)
+            {
+                logger.LogWarning(exception, "Stable Audio accepted a create request but returned no usable operation id; the dispatch was not repeated.");
+                throw new MusicProviderSubmissionUnconfirmedException();
+            }
+            providerSubmissionAccepted = true;
+            providerGenerationId = generationId;
+
+            // F-36.1: make the acceptance durable before the first poll. Anything after this point can
+            // lose the process (crash, OOM kill, a rollout mid-generation), and the only surviving
+            // evidence that a paid generation exists is the provider operation id on the attempt row.
+            // A sink that cannot persist is a fail-closed signal, never a silent success.
+            if (onSubmissionAccepted is not null) await onSubmissionAccepted(generationId);
 
             byte[]? output = null;
             string? contentType = null;
-            for (pollAttempts = 1; pollAttempts <= Math.Max(1, settings.StableAudioMaxPollAttempts); pollAttempts++)
+            // A transport fault while the audio body is streaming happens after Stability has
+            // already produced and billed this generation id. The only safe recovery is another
+            // result GET for the same generation: re-posting text-to-audio would spend credits a
+            // second time for the same requested track. Re-fetches are bounded by the existing
+            // request-retry budget and deliberately do not consume polling attempts, so a slow
+            // but healthy generation keeps its full wait window.
+            var transportFaults = 0;
+            var transportFaultBudget = Math.Clamp(settings.StableAudioMaxRetryAttempts, 0, 5);
+            for (pollAttempts = 1; pollAttempts <= Math.Max(1, settings.StableAudioMaxPollAttempts);)
             {
-                using var result = await SendResultAsync(
-                    new Uri(baseUri, $"v2beta/audio/results/{Uri.EscapeDataString(generationId)}"),
-                    timeout.Token);
-                if (result.StatusCode == HttpStatusCode.Accepted)
+                HttpResponseMessage result;
+                try
                 {
-                    await Task.Delay(
-                        TimeSpan.FromMilliseconds(Math.Clamp(settings.StableAudioPollIntervalMilliseconds, 100, 30_000)),
+                    result = await SendResultAsync(
+                        new Uri(baseUri, $"v2beta/audio/results/{Uri.EscapeDataString(generationId)}"),
                         timeout.Token);
-                    continue;
+                }
+                catch (Exception exception) when (providerSubmissionAccepted && exception is MusicProviderUnavailableException or MusicProviderFailureException)
+                {
+                    // The bounded result-GET retries were exhausted (transport faults persisting past
+                    // the budget) for a generation Stability already accepted. As an unavailable or
+                    // generic fault this is a retryable public code, and the replay POSTs a second
+                    // paid generation while the accepted one may still be running and billing, so the
+                    // unknown outcome is reported as an unconfirmed submission instead.
+                    throw CreateSubmissionUnconfirmed("result request", exception, providerGenerationId, pollAttempts);
                 }
 
-                if (!result.IsSuccessStatusCode)
-                    throw await MapFailureAsync(result);
+                using (result)
+                {
+                    if (result.StatusCode == HttpStatusCode.Accepted)
+                    {
+                        pollAttempts++;
+                        await Task.Delay(
+                            TimeSpan.FromMilliseconds(Math.Clamp(settings.StableAudioPollIntervalMilliseconds, 100, 30_000)),
+                            timeout.Token);
+                        continue;
+                    }
 
-                (output, contentType) = await ReadBoundedAudioAsync(result, timeout.Token);
-                break;
+                    if (!result.IsSuccessStatusCode)
+                    {
+                        var declared = await MapFailureAsync(result);
+                        // This is a GET error, not the generation's own terminal status. Error-body words
+                        // such as "rejected", "moderation", or "invalid" cannot prove that the already-
+                        // accepted paid generation failed or was not charged.
+                        throw CreateSubmissionUnconfirmed("result status", declared, providerGenerationId, pollAttempts);
+                    }
+
+                    billableResultReceived = true;
+
+                    try
+                    {
+                        (output, contentType) = await ReadBoundedAudioAsync(result, timeout.Token);
+                        break;
+                    }
+                    catch (Exception exception) when (exception is HttpRequestException or IOException)
+                    {
+                        // IOException covers SocketException, which derives from it: a reset mid-body
+                        // used to reach the job handler unclassified. MusicOutputInvalidException (an
+                        // integrity rejection) and the timeout cancellation are not caught here, so a
+                        // corrupt artifact is never retried and a cancelled job still reports
+                        // MusicProviderTimeoutException below.
+                        if (transportFaults >= transportFaultBudget)
+                        {
+                            logger.LogWarning(
+                                exception,
+                                "Stable Audio result transport fault persisted after {TransportFaults} bounded result re-fetch(es). The completed generation was not re-created, so no second billable request was issued. ProviderKey={ProviderKey}; OperationId={OperationId}",
+                                transportFaults,
+                                Key,
+                                generationId);
+                            // Post-billing exhaustion: the generation exists and is billed, so this is
+                            // reported as a retrieval failure rather than a generic provider outage.
+                            // The generic code invites the customer to retry, and a retry here would
+                            // create a second paid generation instead of delivering the finished one.
+                            throw new MusicOutputRetrievalFailedException();
+                        }
+
+                        transportFaults++;
+                        logger.LogWarning(
+                            exception,
+                            "Stable Audio result transport fault after the generation completed; re-fetching the same result with a GET instead of creating a second billable generation. Attempt={Attempt}; Stage={Stage}; ProviderKey={ProviderKey}; OperationId={OperationId}",
+                            transportFaults,
+                            exception is IOException ? "audio_body_stream" : "result_response",
+                            Key,
+                            generationId);
+                        await RetryDelayAsync(transportFaults - 1, timeout.Token);
+                        continue;
+                    }
+                }
             }
 
             if (output is null || string.IsNullOrWhiteSpace(contentType))
-                throw new MusicProviderTimeoutException();
+            {
+                if (!billableResultReceived)
+                    logger.LogWarning(
+                        "Stable Audio music provider stopped polling an accepted generation whose completion was never confirmed; the generation was not re-submitted. ProviderKey={ProviderKey}; ProviderOperationId={ProviderOperationId}; PollAttempts={PollAttempts}",
+                        Key,
+                        providerGenerationId,
+                        pollAttempts);
+
+                throw billableResultReceived || providerSubmissionAccepted
+                    // A 2xx result that yielded no usable body is post-billing: the generation exists
+                    // and was charged, so this is a retrieval failure, not a retryable timeout. Bounded
+                    // polling of an accepted generation whose completion was never confirmed shares the
+                    // non-repetition posture but not the claim: it reports the unconfirmed class, so no
+                    // copy asserts a finished track. Both keep the id in the log for reconciliation.
+                    ? billableResultReceived
+                        ? new MusicOutputRetrievalFailedException()
+                        : new MusicProviderSubmissionUnconfirmedException()
+                    : new MusicProviderTimeoutException();
+            }
 
             var normalizedContentType = NormalizeContentType(contentType, format);
             if (!MusicOutputInspector.HasValidAudioSignature(output, format))
@@ -112,8 +250,62 @@ public sealed class StableAudioMusicGenerationProvider(
                 pollAttempts);
             return new MusicProviderResult(output, normalizedContentType, format, request.DurationSeconds, usage);
         }
-        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        catch (OperationCanceledException exception) when (cancellationToken.IsCancellationRequested && providerCreateMayHaveReachedProvider && !providerSubmissionAccepted)
         {
+            logger.LogWarning(exception, "Stable Audio create was cancelled after dispatch began but before an operation id was observed; the submission remains unconfirmed and was not re-submitted.");
+            throw new MusicProviderCancellationWithAcceptedSubmissionException(null, outputConfirmedComplete: false);
+        }
+        catch (OperationCanceledException exception) when (!cancellationToken.IsCancellationRequested && providerCreateMayHaveReachedProvider && !providerSubmissionAccepted)
+        {
+            logger.LogWarning(exception, "Stable Audio create timed out after dispatch began but before an operation id was observed; the submission remains unconfirmed and was not re-submitted.");
+            throw new MusicProviderSubmissionUnconfirmedException();
+        }
+        catch (OperationCanceledException exception) when (cancellationToken.IsCancellationRequested && providerSubmissionAccepted)
+        {
+            // F-36: same posture as Mubert. The create call was answered with a generation id, so
+            // Stable Audio holds an accepted (and possibly billed) generation that this integration
+            // never cancels at the provider. A plain cancellation would leave the job on MUSIC_CANCELLED,
+            // which RetryAsync treats as safe to restart - a second paid generation while the first is
+            // still running. Typed cancellation keeps the member's cancellation and records the unknown.
+            if (billableResultReceived)
+            {
+                logger.LogWarning(
+                    exception,
+                    "Stable Audio music provider generation was cancelled while delivering an already-completed generation; it was not re-generated. ProviderKey={ProviderKey}; ProviderOperationId={ProviderOperationId}",
+                    Key,
+                    providerGenerationId);
+                throw new MusicProviderCancellationWithAcceptedSubmissionException(providerGenerationId, outputConfirmedComplete: true);
+            }
+            logger.LogWarning(
+                exception,
+                "Stable Audio music provider generation was cancelled after the provider accepted it; the accepted outcome is unconfirmed and was not re-submitted. ProviderKey={ProviderKey}; ProviderOperationId={ProviderOperationId}",
+                Key,
+                providerGenerationId);
+            throw new MusicProviderCancellationWithAcceptedSubmissionException(providerGenerationId, outputConfirmedComplete: false);
+        }
+        catch (OperationCanceledException exception) when (!cancellationToken.IsCancellationRequested)
+        {
+            if (billableResultReceived)
+            {
+                logger.LogWarning(
+                    exception,
+                    "Stable Audio music provider timed out while retrieving an already-completed generation. ProviderKey={ProviderKey}",
+                    Key);
+                throw new MusicOutputRetrievalFailedException();
+            }
+
+            if (providerSubmissionAccepted)
+            {
+                // Accepted, unconfirmed: charging state unknown, so the retryable timeout code would
+                // instruct a second paid submission. Terminal instead, with the id logged.
+                logger.LogWarning(
+                    exception,
+                    "Stable Audio music provider timed out before an accepted generation's completion could be confirmed; the generation was not re-submitted. ProviderKey={ProviderKey}; ProviderOperationId={ProviderOperationId}",
+                    Key,
+                    providerGenerationId);
+                throw new MusicProviderSubmissionUnconfirmedException();
+            }
+
             logger.LogWarning("Stable Audio music provider timed out. ProviderKey={ProviderKey}", Key);
             throw new MusicProviderTimeoutException();
         }
@@ -135,17 +327,33 @@ public sealed class StableAudioMusicGenerationProvider(
             {
                 response = await httpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
             }
-            catch (HttpRequestException exception)
+            catch (Exception exception) when (exception is HttpRequestException or IOException)
             {
-                logger.LogWarning(exception, "Stable Audio create request failed.");
-                throw new MusicProviderUnavailableException();
+                logger.LogWarning(exception, "Stable Audio create transport failed after dispatch; the request may have reached the provider, so its outcome is unconfirmed.");
+                throw new MusicProviderSubmissionUnconfirmedException();
             }
 
             using (response)
             {
                 if (response.StatusCode != HttpStatusCode.Accepted)
+                {
+                    if (response.IsSuccessStatusCode || IsAmbiguousCreateStatus(response.StatusCode))
+                    {
+                        logger.LogWarning("Stable Audio create returned an ambiguous status after dispatch. StatusCode={StatusCode}", (int)response.StatusCode);
+                        throw new MusicProviderSubmissionUnconfirmedException();
+                    }
                     throw await MapFailureAsync(response);
-                return await response.Content.ReadAsStringAsync(cancellationToken);
+                }
+
+                try
+                {
+                    return await response.Content.ReadAsStringAsync(cancellationToken);
+                }
+                catch (Exception exception) when (exception is HttpRequestException or IOException)
+                {
+                    logger.LogWarning(exception, "Stable Audio accepted the create request but its response body was lost; the operation id is unavailable for reconciliation.");
+                    throw new MusicProviderSubmissionUnconfirmedException();
+                }
             }
         }
     }
@@ -319,6 +527,73 @@ public sealed class StableAudioMusicGenerationProvider(
         await Task.Delay(TimeSpan.FromMilliseconds(Math.Min(delay, 30_000)), cancellationToken);
     }
 
+    /// <summary>
+    /// True when the provider answered in a way that settles the fate of this submission: the prompt
+    /// was rejected or the request was invalid, so no generation will come from it and an ordinary
+    /// retry is honest. Anything else on the polling path leaves an accepted generation unresolved.
+    /// </summary>
+    /// <summary>
+    /// F-36.1b: Stability documents GET /v2beta/audio/results/{id} as the polling endpoint for an
+    /// async audio generation (202 while in progress, 200 with the audio when complete), and credits
+    /// are described as "8 credits per successful generation" with "you will not be charged for
+    /// failed generations". That last sentence is what makes a release safe here and nowhere else:
+    /// a provider-declared terminal failure is the vendor itself stating nothing was billed. Results
+    /// are only retained for 24 hours, so a missing answer (404, transport fault, unparseable body)
+    /// is Unknown and must never be read as "not charged".
+    /// </summary>
+    public async Task<MusicSubmissionReconciliation> ReconcileAcceptedSubmissionAsync(
+        string providerOperationId,
+        CancellationToken cancellationToken = default)
+    {
+        var operationId = (providerOperationId ?? string.Empty).Trim();
+        if (operationId.Length == 0 || operationId.StartsWith("taslim:", StringComparison.Ordinal))
+            return MusicSubmissionReconciliation.Unknown;
+        if (!settings.Enabled
+            || !string.Equals(settings.ProviderKey, Key, StringComparison.OrdinalIgnoreCase)
+            || string.IsNullOrWhiteSpace(settings.StableAudioApiKey))
+        {
+            return MusicSubmissionReconciliation.Unknown;
+        }
+        try
+        {
+            var baseUri = BuildBaseUri(settings.StableAudioApiBaseUrl);
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            timeout.CancelAfter(TimeSpan.FromSeconds(Math.Clamp(settings.ProviderTimeoutSeconds, 15, 900)));
+            using var result = await SendResultAsync(new Uri(baseUri, $"v2beta/audio/results/{Uri.EscapeDataString(operationId)}"), timeout.Token);
+            if (result.StatusCode == HttpStatusCode.Accepted)
+                return new MusicSubmissionReconciliation(MusicSubmissionOutcome.InProgress, false);
+            if (result.IsSuccessStatusCode)
+                return new MusicSubmissionReconciliation(MusicSubmissionOutcome.Completed, false);
+            // An HTTP status/body from the lookup is not the generation's own terminal status.
+            // In particular, text in a result error cannot prove that the customer was not charged.
+            return MusicSubmissionReconciliation.Unknown;
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            logger.LogWarning(exception, "Stable Audio accepted-submission reconciliation was inconclusive. OperationId={OperationId}", operationId);
+            return MusicSubmissionReconciliation.Unknown;
+        }
+    }
+
+    /// <summary>
+    /// Builds the exception for a generation Stability accepted but whose outcome was never observed,
+    /// after logging the accepted generation id for hand reconciliation. Only reached after the create
+    /// call returned an id, so an unknown outcome is reported neither as the retryable outage class
+    /// (whose replay would POST a second paid generation) nor as a finished track (which is what the
+    /// retrieval-failure copy asserts). No provider payload or key is carried in the message.
+    /// </summary>
+    private Exception CreateSubmissionUnconfirmed(string stage, Exception cause, string? providerGenerationId, int attempts)
+    {
+        logger.LogWarning(
+            cause,
+            "Stable Audio music provider lost the outcome of an accepted generation during {Stage}; the generation was not re-submitted automatically. ProviderKey={ProviderKey}; ProviderOperationId={ProviderOperationId}; PollAttempts={PollAttempts}",
+            stage,
+            Key,
+            providerGenerationId,
+            attempts);
+        return new MusicProviderSubmissionUnconfirmedException();
+    }
+
     private decimal CalculateCost() => Math.Max(0, settings.StableAudioCreditsPerGeneration) * Math.Max(0, settings.StableAudioUsdPerCredit);
 
     private static void AddField(MultipartFormDataContent form, string name, string value) =>
@@ -355,6 +630,9 @@ public sealed class StableAudioMusicGenerationProvider(
         statusCode == HttpStatusCode.RequestTimeout
         || statusCode == HttpStatusCode.TooManyRequests
         || (int)statusCode >= 500;
+
+    private static bool IsAmbiguousCreateStatus(HttpStatusCode statusCode) =>
+        statusCode == HttpStatusCode.RequestTimeout || (int)statusCode >= 500;
 
     private static string Clip(string? value, int maxLength)
     {

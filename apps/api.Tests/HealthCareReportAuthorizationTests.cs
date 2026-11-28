@@ -109,7 +109,12 @@ public sealed class HealthCareReportAuthorizationTests : IClassFixture<HealthCar
                 ProjectId = project.Id,
                 CreatedByUserId = ownerAuth.User.Id,
                 Name = "Synthetic private health-care report",
-                AssetType = AssetTypes.Research,
+                // A health-care report in this product is an uploaded document asset, not
+                // research-generation output. Project-scoped Research report assets are
+                // creator-private (#936, fixed by #1042), so typing this fixture as Research
+                // makes the co-member read fail for the wrong reason and the test stops
+                // exercising membership revocation.
+                AssetType = AssetTypes.File,
                 MimeType = "text/plain",
                 Status = AssetStatus.Active,
                 CreatedAt = now,

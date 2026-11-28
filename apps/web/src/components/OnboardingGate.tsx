@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState, type RefObject } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type RefObject } from "react";
 import { useRouter } from "next/navigation";
 import {
   ArrowLeft,
@@ -38,9 +38,9 @@ type OnboardingStep = "preferences" | "tour" | "workflow";
 
 export function OnboardingGate() {
   const { user } = useAuth();
-
   const isOpen = Boolean(user && shouldShowOnboarding(user));
   const openerRef = useRef<HTMLElement | null>(null);
+
   useEffect(() => {
     if (isOpen) return;
     const rememberOpener = (event: FocusEvent) => {
@@ -52,6 +52,7 @@ export function OnboardingGate() {
     document.addEventListener("focusin", rememberOpener, true);
     return () => document.removeEventListener("focusin", rememberOpener, true);
   }, [isOpen]);
+
   if (!user || !isOpen) return null;
   return <OnboardingFlow key={user.id} user={user} openerRef={openerRef} />;
 }
@@ -66,16 +67,30 @@ function OnboardingFlow({ user, openerRef }: Readonly<{ user: User; openerRef: R
   const [preferredLanguage, setPreferredLanguage] = useState<string>(defaults.preferredLanguage);
   const [defaultGenerationLanguage, setDefaultGenerationLanguage] = useState<Locale>(defaults.defaultGenerationLanguage);
   const [saving, setSaving] = useState(false);
+  // A state-driven disabled button alone is not a synchronous single-flight
+  // boundary: two clicks can enter before React commits the saving render.
+  const finishingRef = useRef(false);
   const [error, setError] = useState("");
   const showOnboarding = shouldShowOnboarding(user);
+  const stepHeadingRef = useRef<HTMLHeadingElement | null>(null);
+  // Onboarding is blocking: Escape keeps focus inside, and the parent gate's
+  // saved opener survives the auth response that first mounts this dialog.
   const dialogRef = useDialogAccessibility(showOnboarding, () => undefined, openerRef);
-  if (!showOnboarding) return null;
 
+  useLayoutEffect(() => {
+    // Replacing a step unmounts its focused controls. Move focus into the new
+    // step synchronously so it cannot fall back to BODY between steps.
+    stepHeadingRef.current?.focus();
+  }, [step]);
+
+  if (!showOnboarding) return null;
   const steps: OnboardingStep[] = ["preferences", "tour", "workflow"];
   const currentStep = steps.indexOf(step) + 1;
   const NextIcon = languagePackDirection(languagePackId) === "ltr" ? ArrowRight : ArrowLeft;
 
   async function finish(intent?: OnboardingIntent, href = "/projects") {
+    if (finishingRef.current) return;
+    finishingRef.current = true;
     setSaving(true);
     setError("");
     try {
@@ -90,6 +105,7 @@ function OnboardingFlow({ user, openerRef }: Readonly<{ user: User; openerRef: R
       router.push(href);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : t("onboarding.saveError"));
+      finishingRef.current = false; // Allow retry after a failed completion.
       setSaving(false);
     }
   }
@@ -102,38 +118,38 @@ function OnboardingFlow({ user, openerRef }: Readonly<{ user: User; openerRef: R
           <button type="button" className="onboarding-skip" onClick={() => void finish()} disabled={saving}>{t("onboarding.skip")}</button>
         </header>
 
-        <div className="onboarding-progress" aria-label={t("onboarding.progress", { current: String(currentStep), total: String(steps.length) })}>
+        <div className="onboarding-progress" role="progressbar" aria-label={t("onboarding.progress", { current: String(currentStep), total: String(steps.length) })} aria-valuemin={1} aria-valuemax={steps.length} aria-valuenow={currentStep}>
           {steps.map((item, index) => <span key={item} className={index < currentStep ? "is-complete" : ""} />)}
         </div>
 
         {step === "preferences" && <div className="onboarding-body">
           <p className="section-eyebrow">{t("onboarding.eyebrow")}</p>
-          <h1 id="onboarding-title">{t("onboarding.preferencesTitle")}</h1>
+          <h1 ref={stepHeadingRef} id="onboarding-title" tabIndex={-1}>{t("onboarding.preferencesTitle")}</h1>
           <p className="onboarding-description">{t("onboarding.preferencesDescription")}</p>
           <div className="onboarding-fields">
-            <label><span>{t("onboarding.displayName")}</span><input data-dialog-autofocus value={displayName} maxLength={120} onChange={(event) => setDisplayName(event.target.value)} placeholder={t("onboarding.displayNamePlaceholder")} autoComplete="name" /></label>
-            <label><span><Globe2 size={15} /> {t("onboarding.interfaceLanguage")}</span><select value={preferredLanguage} onChange={(event) => { const next = event.target.value; setPreferredLanguage(next); setLanguagePack(next, { persist: false, source: "user" }); }}>{languagePackIds.map((item) => <option key={item} value={item}>{languagePackNames[item]}</option>)}</select></label>
-            <label><span><Languages size={15} /> {t("onboarding.generationLanguage")}</span><select value={defaultGenerationLanguage} onChange={(event) => setDefaultGenerationLanguage(event.target.value as Locale)}>{locales.map((item) => <option key={item} value={item}>{localeNames[item]}</option>)}</select></label>
+            <label><span>{t("onboarding.displayName")}</span><input data-dialog-autofocus disabled={saving} value={displayName} maxLength={120} onChange={(event) => setDisplayName(event.target.value)} placeholder={t("onboarding.displayNamePlaceholder")} autoComplete="name" /></label>
+            <label><span><Globe2 size={15} /> {t("onboarding.interfaceLanguage")}</span><select disabled={saving} value={preferredLanguage} onChange={(event) => { const next = event.target.value; setPreferredLanguage(next); setLanguagePack(next, { persist: false, source: "user" }); }}>{languagePackIds.map((item) => <option key={item} value={item}>{languagePackNames[item]}</option>)}</select></label>
+            <label><span><Languages size={15} /> {t("onboarding.generationLanguage")}</span><select disabled={saving} value={defaultGenerationLanguage} onChange={(event) => setDefaultGenerationLanguage(event.target.value as Locale)}>{locales.map((item) => <option key={item} value={item}>{localeNames[item]}</option>)}</select></label>
           </div>
           {preferredLanguage === "zh-CN" && <p className="onboarding-description" role="status">{t("onboarding.zhPreviewNote")}</p>}
-          <footer className="onboarding-actions"><span>{t("onboarding.preferencesHint")}</span><button type="button" className="primary-button" onClick={() => setStep("tour")}><span>{t("onboarding.continue")}</span><NextIcon size={16} /></button></footer>
+          <footer className="onboarding-actions"><span>{t("onboarding.preferencesHint")}</span><button type="button" className="primary-button" disabled={saving} onClick={() => setStep("tour")}><span>{t("onboarding.continue")}</span><NextIcon size={16} /></button></footer>
         </div>}
 
         {step === "tour" && <div className="onboarding-body">
           <p className="section-eyebrow">{t("onboarding.tourEyebrow")}</p>
-          <h1 id="onboarding-title">{t("onboarding.tourTitle")}</h1>
+          <h1 ref={stepHeadingRef} id="onboarding-title" tabIndex={-1}>{t("onboarding.tourTitle")}</h1>
           <p className="onboarding-description">{t("onboarding.tourDescription")}</p>
           <div className="onboarding-intro-grid">
             <article><span className="onboarding-intro-icon is-project"><FolderKanban size={19} /></span><div><h2>{t("onboarding.projectsTitle")}</h2><p>{t("onboarding.projectsDescription")}</p></div></article>
             <article><span className="onboarding-intro-icon is-chat"><MessageSquare size={19} /></span><div><h2>{t("onboarding.chatTitle")}</h2><p>{t("onboarding.chatDescription")}</p></div></article>
             <article><span className="onboarding-intro-icon is-create"><Sparkles size={19} /></span><div><h2>{t("onboarding.createTitle")}</h2><p>{t("onboarding.createDescription")}</p></div></article>
           </div>
-          <footer className="onboarding-actions"><button type="button" className="onboarding-back" onClick={() => setStep("preferences")}>{t("onboarding.back")}</button><button type="button" className="primary-button" onClick={() => setStep("workflow")}><span>{t("onboarding.chooseAction")}</span><NextIcon size={16} /></button></footer>
+          <footer className="onboarding-actions"><button type="button" className="onboarding-back" disabled={saving} onClick={() => setStep("preferences")}>{t("onboarding.back")}</button><button type="button" className="primary-button" disabled={saving} onClick={() => setStep("workflow")}><span>{t("onboarding.chooseAction")}</span><NextIcon size={16} /></button></footer>
         </div>}
 
         {step === "workflow" && <div className="onboarding-body onboarding-workflow-body">
           <p className="section-eyebrow">{t("onboarding.workflowEyebrow")}</p>
-          <h1 id="onboarding-title">{t("create.title")}</h1>
+          <h1 ref={stepHeadingRef} id="onboarding-title" tabIndex={-1}>{t("create.title")}</h1>
           <p className="onboarding-description">{t("onboarding.workflowDescription")}</p>
           <div className="onboarding-workflow-grid">
             {onboardingWorkflowDefinitions.map((workflow) => {

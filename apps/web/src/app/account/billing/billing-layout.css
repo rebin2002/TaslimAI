@@ -9,6 +9,12 @@
   color: #172639;
 }
 
+.billing-page button:focus-visible,
+.billing-page a:focus-visible {
+  outline: 3px solid rgba(31, 95, 184, 0.42);
+  outline-offset: 3px;
+}
+
 .billing-page .usage-header {
   align-items: center;
   gap: 24px;

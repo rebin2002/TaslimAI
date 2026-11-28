@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
@@ -40,10 +41,15 @@ public sealed class GenerationJobLeaseRecoveryStateFactory : GenerationJobsApiFa
 
 public sealed class BlockingGenerationJobHandler : IGenerationJobHandler
 {
+    private readonly ConcurrentDictionary<Guid, int> dispatches = new();
+
     public bool CanHandle(string jobType) => true;
+
+    public int DispatchCount(Guid jobId) => dispatches.TryGetValue(jobId, out var count) ? count : 0;
 
     public async Task<GenerationHandlerResult> ExecuteAsync(GenerationJob job, IProgress<int> progress, CancellationToken cancellationToken)
     {
+        dispatches.AddOrUpdate(job.Id, 1, (_, count) => count + 1);
         await Task.Delay(Timeout.Infinite, cancellationToken);
         throw new InvalidOperationException("The blocking recovery-test handler must be cancelled before it completes.");
     }
@@ -167,6 +173,98 @@ public sealed class GenerationJobLeaseRecoveryStateTests : IClassFixture<Generat
         await StopWorkerAsync(worker);
     }
 
+    [Theory]
+    [InlineData(GenerationJobTypes.ResearchGenerate)]
+    [InlineData(GenerationJobTypes.SocialGenerate)]
+    public async Task Expired_paid_provider_attempt_with_unknown_cost_is_not_redispatched_or_manually_retried(string jobType)
+    {
+        using var client = factory.CreateClient();
+        var workspaceId = await RegisterAsync(client);
+        var stalled = await CreateJobAsync(client, workspaceId, $"unknown-cost-{jobType}", jobType);
+        var handler = factory.Services.GetServices<IGenerationJobHandler>().OfType<BlockingGenerationJobHandler>().Single();
+
+        Guid staleToken;
+        var claimStart = DateTime.UtcNow;
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            var job = await db.GenerationJobs.FirstAsync(item => item.Id == stalled.Id);
+            job.Status = GenerationJobStatus.Running;
+            job.StartedAt = claimStart.AddMinutes(-5);
+            job.ProgressPercent = 35;
+            job.ClaimExpiresAt = claimStart.AddMinutes(-1);
+            staleToken = job.ConcurrencyToken;
+            db.GenerationProviderAttempts.Add(new GenerationProviderAttempt
+            {
+                Id = Guid.NewGuid(),
+                GenerationJobId = job.Id,
+                JobConcurrencyToken = staleToken,
+                IdempotencyKey = $"generation:{job.Id:N}:accepted-lease-test",
+                Capability = jobType,
+                AttemptNumber = 1,
+                Provider = "synthetic-provider",
+                ProviderExecutionId = "synthetic-accepted-operation",
+                Status = GenerationProviderAttemptStatus.Cancelled,
+                ResultClassification = nameof(GenerationProviderAttemptStatus.Cancelled),
+                ActualProviderCostKnown = false,
+                FinalizationKey = $"generation:{job.Id:N}:accepted-lease-test",
+                StartedAt = claimStart.AddMinutes(-4),
+                CompletedAt = claimStart.AddMinutes(-3),
+            });
+            await db.SaveChangesAsync();
+        }
+
+        using var stopping = new CancellationTokenSource();
+        var worker = CreateWorker(maxAutomaticRetries: 3);
+        var workerStarted = false;
+        try
+        {
+            await StartWorkerAsync(worker, stopping.Token);
+            workerStarted = true;
+
+            // If recovery requeues this expired accepted attempt, the blocking
+            // synthetic handler records that duplicate dispatch without any provider call.
+            var recovered = await WaitForFailureOrDuplicateDispatchAsync(client, stalled.Id, handler);
+            Assert.Equal(0, handler.DispatchCount(stalled.Id));
+            Assert.Equal("Failed", recovered.Status);
+            Assert.Equal(GenerationJobErrorCodes.ProviderOutcomeUnconfirmed, recovered.ErrorCode);
+
+            using (var scope = factory.Services.CreateScope())
+            {
+                var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+                var durable = await db.GenerationJobs.AsNoTracking().FirstAsync(item => item.Id == stalled.Id);
+                var attempt = await db.GenerationProviderAttempts.AsNoTracking()
+                    .SingleAsync(item => item.GenerationJobId == stalled.Id && item.JobConcurrencyToken == staleToken);
+                var usageRows = await db.UsageTransactions.AsNoTracking()
+                    .Where(item => item.GenerationJobId == stalled.Id || item.RequestId == $"generation:{stalled.Id:N}")
+                    .ToListAsync();
+
+                Assert.Equal(GenerationJobStatus.Failed, durable.Status);
+                Assert.Equal(GenerationJobErrorCodes.ProviderOutcomeUnconfirmed, durable.ErrorCode);
+                Assert.False(durable.CancellationRequested);
+                Assert.Null(durable.ClaimExpiresAt);
+                Assert.NotEqual(staleToken, durable.ConcurrencyToken);
+                Assert.Equal(GenerationProviderAttemptStatus.Cancelled, attempt.Status);
+                Assert.False(attempt.ActualProviderCostKnown);
+                Assert.Null(attempt.ActualProviderCostUsd);
+                Assert.NotEmpty(usageRows);
+                Assert.Contains(usageRows, item => item.Status == UsageTransactionStatus.Failed);
+                Assert.All(usageRows, item => Assert.Equal(0m, item.ChargedAmount));
+            }
+
+            using var retry = await SendWithCsrfAsync(client, HttpMethod.Post,
+                $"/api/generation/jobs/{stalled.Id}/retry", null,
+                $"unknown-cost-retry-{Guid.NewGuid():N}");
+            Assert.Equal(HttpStatusCode.BadRequest, retry.StatusCode);
+            Assert.Contains(GenerationJobErrorCodes.ProviderOutcomeRetryBlocked, await retry.Content.ReadAsStringAsync());
+        }
+        finally
+        {
+            stopping.Cancel();
+            if (workerStarted) await StopWorkerAsync(worker);
+        }
+    }
+
     private GenerationJobWorker CreateWorker(int maxAutomaticRetries)
         => new(
             factory.Services.GetRequiredService<IServiceScopeFactory>(),
@@ -201,6 +299,20 @@ public sealed class GenerationJobLeaseRecoveryStateTests : IClassFixture<Generat
         throw new TimeoutException($"Job {jobId} never reached {status}.");
     }
 
+    private static async Task<GenerationJobDto> WaitForFailureOrDuplicateDispatchAsync(
+        HttpClient client, Guid jobId, BlockingGenerationJobHandler handler)
+    {
+        for (var attempt = 0; attempt < 240; attempt++)
+        {
+            var job = await client.GetFromJsonAsync<GenerationJobDto>($"/api/generation/jobs/{jobId}");
+            Assert.NotNull(job);
+            if (job.Status == "Failed" || handler.DispatchCount(jobId) > 0) return job;
+            await Task.Delay(50);
+        }
+
+        throw new TimeoutException($"Job {jobId} neither failed closed nor exposed a duplicate dispatch.");
+    }
+
     private static async Task<Guid> RegisterAsync(HttpClient client)
     {
         var response = await SendWithCsrfAsync(client, HttpMethod.Post, "/api/auth/register", new
@@ -215,12 +327,12 @@ public sealed class GenerationJobLeaseRecoveryStateTests : IClassFixture<Generat
         return auth.PersonalWorkspace.Id;
     }
 
-    private static async Task<GenerationJobDto> CreateJobAsync(HttpClient client, Guid workspaceId, string title)
+    private static async Task<GenerationJobDto> CreateJobAsync(HttpClient client, Guid workspaceId, string title, string jobType = GenerationJobTypes.SystemTest)
     {
         var job = await SendWithCsrfAsync<GenerationJobDto>(client, HttpMethod.Post, "/api/generation/jobs", new
         {
             workspaceId,
-            jobType = "system.test",
+            jobType,
             inputJson = "{}",
             title,
         });
@@ -234,14 +346,15 @@ public sealed class GenerationJobLeaseRecoveryStateTests : IClassFixture<Generat
         return (await response.Content.ReadFromJsonAsync<T>())!;
     }
 
-    private static async Task<HttpResponseMessage> SendWithCsrfAsync(HttpClient client, HttpMethod method, string path, object payload)
+    private static async Task<HttpResponseMessage> SendWithCsrfAsync(HttpClient client, HttpMethod method, string path, object? payload, string? idempotencyKey = null)
     {
         var csrf = await client.GetFromJsonAsync<JsonElement>("/api/auth/csrf");
         using var request = new HttpRequestMessage(method, path)
         {
-            Content = JsonContent.Create(payload),
+            Content = payload is null ? null : JsonContent.Create(payload),
         };
         request.Headers.Add("X-CSRF-TOKEN", csrf.GetProperty("token").GetString());
+        if (!string.IsNullOrWhiteSpace(idempotencyKey)) request.Headers.Add("Idempotency-Key", idempotencyKey);
         return await client.SendAsync(request);
     }
 }
