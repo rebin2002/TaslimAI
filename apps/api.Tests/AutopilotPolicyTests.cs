@@ -329,6 +329,8 @@ public sealed class AutopilotPolicyTests
         Assert.False(authenticator.Verify(null, "0", payload, now).Valid);
         Assert.False(authenticator.Verify("sha256=abc", null, payload, now).Valid);
         Assert.False(authenticator.Verify("sha256=abc", $"{new DateTimeOffset(now.AddMinutes(-30)).ToUnixTimeSeconds()}", payload, now).Valid);
+        Assert.Equal("timestamp_invalid", authenticator.Verify("sha256=abc", long.MaxValue.ToString(), payload, now).FailureReason);
+        Assert.Equal("timestamp_invalid", authenticator.Verify("sha256=abc", long.MinValue.ToString(), payload, now).FailureReason);
 
         var unsignedDisabled = new AutopilotOptions { RequireSignedEvents = false };
         unsignedDisabled.Normalize();
