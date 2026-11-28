@@ -469,5 +469,5 @@ public sealed class ChatAttachmentStorageReadbackTests
     /// Keep the upload length stable so streamed fault fixtures exercise the same boundary.
     /// </summary>
     private static byte[] PngFixture() => Convert.FromBase64String(
-        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAAL3RFWHRGaXh0dXJlAHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eNxAqDMAAAAMSURBVHicY/jPwAAAAwEBAMn+ku8AAAAASUVORK5CYII=");
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAAL3RFWHRGaXh0dXJlAHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eNxAqDMAAAAMSURBVHicY/jPwAAAAwEBAMn+ku8AAAAASUVORK5CYII=");
 }
