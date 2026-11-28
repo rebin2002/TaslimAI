@@ -93,8 +93,8 @@ public sealed class GenerationBudgetService(
         var snapshot = new GenerationBudgetSnapshot(
             priorAttempts.Count(item => item.Status != GenerationProviderAttemptStatus.Rejected),
             priorAttempts.Where(item => item.EstimatedProviderCostKnown).Sum(item => item.EstimatedProviderCostUsd ?? 0m),
-            await EstimatedCostForWorkspaceAsync(job.WorkspaceId, cancellationToken),
-            await EstimatedCostForUserAsync(job.CreatedByUserId, cancellationToken));
+            await ScopeCostAsync(db.GenerationProviderAttempts.Where(item => item.GenerationJob.WorkspaceId == job.WorkspaceId), cancellationToken),
+            await ScopeCostAsync(db.GenerationProviderAttempts.Where(item => item.GenerationJob.CreatedByUserId == job.CreatedByUserId), cancellationToken));
         var decision = GenerationBudgetGuardrail.Evaluate(estimate, snapshot, settings);
         if (!decision.Allowed)
         {
@@ -150,17 +150,24 @@ public sealed class GenerationBudgetService(
     private static bool HasFailureToken(string? value, string token) =>
         value?.Contains(token, StringComparison.OrdinalIgnoreCase) == true;
 
-    private async Task<decimal> EstimatedCostForWorkspaceAsync(Guid workspaceId, CancellationToken cancellationToken) =>
-        (decimal)await db.GenerationProviderAttempts
-            .Where(item => item.GenerationJob.WorkspaceId == workspaceId && item.EstimatedProviderCostKnown)
-            .Select(item => (double?)(item.EstimatedProviderCostUsd ?? 0m))
-            .SumAsync(cancellationToken);
+    private async Task<decimal> ScopeCostAsync(IQueryable<GenerationProviderAttempt> attempts, CancellationToken cancellationToken)
+    {
+        var estimates = attempts.Where(attempt => attempt.EstimatedProviderCostKnown
+                && !(attempt.GenerationJob.JobType == GenerationJobTypes.PresentationGenerate
+                    && attempt.GenerationJob.Status == GenerationJobStatus.Cancelled
+                    && attempt.Status == GenerationProviderAttemptStatus.Cancelled))
+            .Select(attempt => attempt.EstimatedProviderCostUsd ?? 0m);
+        // Replace the cancelled attempt's reservation estimate with its reported actual at most once.
+        var amounts = estimates.Concat(CancelledPresentationSpend.ReportedUsd(attempts));
+        if (db.Database.IsNpgsql())
+            return await amounts.SumAsync(cancellationToken);
 
-    private async Task<decimal> EstimatedCostForUserAsync(Guid userId, CancellationToken cancellationToken) =>
-        (decimal)await db.GenerationProviderAttempts
-            .Where(item => item.GenerationJob.CreatedByUserId == userId && item.EstimatedProviderCostKnown)
-            .Select(item => (double?)(item.EstimatedProviderCostUsd ?? 0m))
-            .SumAsync(cancellationToken);
+        // SQLite has no exact decimal aggregate.
+        var total = 0m;
+        await foreach (var amount in amounts.AsAsyncEnumerable().WithCancellation(cancellationToken))
+            total += amount;
+        return total;
+    }
 }
 
 public sealed class GenerationBudgetRejectedException(string code, string message) : Exception(message)

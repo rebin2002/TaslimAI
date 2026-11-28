@@ -68,7 +68,10 @@ public enum MusicSubmissionOutcome
 /// such statement, so a Mubert failure answer keeps ProviderDeclaresNoCharge false and the retry
 /// stays blocked: the release path exists only where a contract actually supports it.
 /// </summary>
-public sealed record MusicSubmissionReconciliation(MusicSubmissionOutcome Outcome, bool ProviderDeclaresNoCharge)
+public sealed record MusicSubmissionReconciliation(
+    MusicSubmissionOutcome Outcome,
+    bool ProviderDeclaresNoCharge,
+    decimal? ActualCostUsd = null)
 {
     public static readonly MusicSubmissionReconciliation Unknown = new(MusicSubmissionOutcome.Unknown, false);
 }
@@ -136,7 +139,11 @@ public sealed class MusicGenerationJobHandler(
         logger.LogInformation("Music generation started. JobId={JobId}; ProviderKey={ProviderKey}", job.Id, provider.Key);
         progress.Report(25);
         var generated = await provider.GenerateAsync(request, cancellationToken, AcceptedSubmissionSink, DispatchingSink);
-        cancellationToken.ThrowIfCancellationRequested();
+        if (cancellationToken.IsCancellationRequested)
+            throw new MusicProviderCancellationWithAcceptedSubmissionException(
+                providerOperationId: null,
+                outputConfirmedComplete: true,
+                actualCostUsd: generated.Usage.ActualCostUsd);
         progress.Report(82);
 
         var outputInfo = MusicOutputInspector.Validate(generated, settings.MaxOutputBytes);

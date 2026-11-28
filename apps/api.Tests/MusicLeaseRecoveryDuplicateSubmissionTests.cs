@@ -1,7 +1,11 @@
 using System.Net;
 using System.Net.Http.Json;
+using System.Security.Claims;
 using System.Text.Json;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Hosting;
+using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
@@ -14,6 +18,7 @@ using Taslim.Api.Domain;
 using Taslim.Api.Generation;
 using Taslim.Api.Music;
 using Taslim.Api.Persistence;
+using Taslim.Api.Usage;
 using Xunit;
 
 namespace Taslim.Api.Tests;
@@ -42,6 +47,7 @@ public sealed class MusicLeaseRecoveryDuplicateSubmissionTests : IClassFixture<M
     [Fact]
     public async Task Expired_music_lease_terminates_without_re_dispatching_the_billable_provider_request()
     {
+        var submissionsBefore = Provider().SubmittedGenerations;
         using var client = factory.CreateClient();
         var auth = await Register(client, $"music-lease-{Guid.NewGuid():N}@example.com");
         var created = await SendWithCsrf(client, HttpMethod.Post, "/api/music-generation/jobs", new
@@ -60,7 +66,7 @@ public sealed class MusicLeaseRecoveryDuplicateSubmissionTests : IClassFixture<M
         var job = (await created.Content.ReadFromJsonAsync<CreateMusicGenerationResponse>(JsonOptions))!.Job;
 
         // The application worker is disabled in this factory, so nothing has been submitted yet.
-        Assert.Equal(0, Provider().SubmittedGenerations);
+        Assert.Equal(submissionsBefore, Provider().SubmittedGenerations);
 
         var claimStart = DateTime.UtcNow;
         Guid staleToken;
@@ -93,7 +99,7 @@ public sealed class MusicLeaseRecoveryDuplicateSubmissionTests : IClassFixture<M
         await ((IHostedService)worker).StopAsync(CancellationToken.None);
 
         // No re-dispatch means no second billable provider request, now or later.
-        Assert.Equal(0, Provider().SubmittedGenerations);
+        Assert.Equal(submissionsBefore, Provider().SubmittedGenerations);
 
         using var finalScope = factory.Services.CreateScope();
         var finalDb = finalScope.ServiceProvider.GetRequiredService<TaslimDbContext>();
@@ -102,11 +108,16 @@ public sealed class MusicLeaseRecoveryDuplicateSubmissionTests : IClassFixture<M
         Assert.Null(durable.ClaimExpiresAt);
         Assert.Equal(0, durable.RetryCount);
 
-        // The reservation is finalized as failed with zero customer charge, like every other failure.
+        // No attempt/dispatch evidence exists, so recovery records a confirmed zero provider cost;
+        // customer charge and reversal remain zero as on every failure.
         var usage = await finalDb.UsageTransactions.AsNoTracking()
             .SingleAsync(item => item.RequestId == $"generation:{job.Id:N}");
         Assert.Equal(UsageTransactionStatus.Failed, usage.Status);
+        Assert.Equal(0m, usage.ProviderCostUsd);
+        Assert.True(usage.ProviderCostKnown);
+        Assert.Equal(UsageCostBasis.Actual, usage.CostBasis);
         Assert.Equal(0m, usage.ChargedAmount);
+        Assert.Equal(0m, usage.ReversedAmount);
 
         // Fail-closed policy (explicit product directive): an informed customer retry is still a
         // SECOND billable submission while the accepted outcome is unreconciled, so the retry
@@ -123,8 +134,261 @@ public sealed class MusicLeaseRecoveryDuplicateSubmissionTests : IClassFixture<M
     }
 
     [Fact]
+    public async Task Successful_music_records_only_provider_confirmed_cost_and_keeps_customer_charge_zero()
+    {
+        using var client = factory.CreateClient();
+        var auth = await Register(client, $"music-cost-success-{Guid.NewGuid():N}@example.com");
+        var created = await SendWithCsrf(client, HttpMethod.Post, "/api/music-generation/jobs", new
+        {
+            workspaceId = auth.PersonalWorkspace.Id,
+            title = "Known Music cost",
+            description = "Deterministic provider-cost accounting test.",
+            purpose = "Verify confirmed Music provider spend without a customer charge.",
+            genre = "cinematic",
+            mood = "calm",
+            durationSeconds = 60,
+            vocalPreference = "instrumental",
+            language = "auto",
+        });
+        Assert.Equal(HttpStatusCode.Accepted, created.StatusCode);
+        var job = (await created.Content.ReadFromJsonAsync<CreateMusicGenerationResponse>(JsonOptions))!.Job;
+
+        using var stopping = new CancellationTokenSource();
+        var worker = CreateWorker(maxAutomaticRetries: 1);
+        await ((IHostedService)worker).StartAsync(stopping.Token);
+        try
+        {
+            var succeeded = await WaitForStatusAsync(client, job.Id, "Succeeded");
+            Assert.Equal("Succeeded", succeeded.Status);
+        }
+        finally
+        {
+            stopping.Cancel();
+            await ((IHostedService)worker).StopAsync(CancellationToken.None);
+        }
+
+        using var finalScope = factory.Services.CreateScope();
+        var db = finalScope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        var usage = await db.UsageTransactions.AsNoTracking().SingleAsync(item => item.GenerationJobId == job.Id);
+        Assert.Equal(UsageTransactionStatus.Completed, usage.Status);
+        Assert.True(usage.ProviderCostKnown);
+        Assert.Equal(0.004m, usage.ProviderCostUsd);
+        Assert.Equal(UsageCostBasis.Actual, usage.CostBasis);
+        Assert.Equal(0m, usage.ChargedAmount);
+        Assert.Equal(0m, usage.ReversedAmount);
+
+        var attempt = await db.GenerationProviderAttempts.AsNoTracking().SingleAsync(item => item.GenerationJobId == job.Id);
+        Assert.Equal(GenerationProviderAttemptStatus.Succeeded, attempt.Status);
+        Assert.True(attempt.ActualProviderCostKnown);
+        Assert.Equal(0.004m, attempt.ActualProviderCostUsd);
+        using var metadata = JsonDocument.Parse(attempt.SafeMetadataJson!);
+        var settlement = metadata.RootElement.GetProperty("musicProviderCostSettlement");
+        Assert.Equal("settled", settlement.GetProperty("status").GetString());
+        Assert.Equal("provider_response", settlement.GetProperty("source").GetString());
+    }
+
+    [Fact]
+    public async Task Successful_music_with_estimate_but_no_provider_actual_remains_unknown_and_manual_required()
+    {
+        var provider = Provider();
+        provider.SetCosts(estimatedCostUsd: 0.125m, actualCostUsd: null);
+        try
+        {
+            using var client = factory.CreateClient();
+            var auth = await Register(client, $"music-cost-unknown-{Guid.NewGuid():N}@example.com");
+            var created = await SendWithCsrf(client, HttpMethod.Post, "/api/music-generation/jobs", new
+            {
+                workspaceId = auth.PersonalWorkspace.Id,
+                title = "Unknown Music cost",
+                description = "Deterministic provider-cost accounting test.",
+                purpose = "An estimate must not be promoted to actual provider spend.",
+                genre = "cinematic",
+                mood = "calm",
+                durationSeconds = 60,
+                vocalPreference = "instrumental",
+                language = "auto",
+            });
+            Assert.Equal(HttpStatusCode.Accepted, created.StatusCode);
+            var job = (await created.Content.ReadFromJsonAsync<CreateMusicGenerationResponse>(JsonOptions))!.Job;
+
+            using var stopping = new CancellationTokenSource();
+            var worker = CreateWorker(maxAutomaticRetries: 1);
+            await ((IHostedService)worker).StartAsync(stopping.Token);
+            try
+            {
+                var succeeded = await WaitForStatusAsync(client, job.Id, "Succeeded");
+                Assert.Equal("Succeeded", succeeded.Status);
+            }
+            finally
+            {
+                stopping.Cancel();
+                await ((IHostedService)worker).StopAsync(CancellationToken.None);
+            }
+
+            using var finalScope = factory.Services.CreateScope();
+            var db = finalScope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            var usage = await db.UsageTransactions.AsNoTracking().SingleAsync(item => item.GenerationJobId == job.Id);
+            Assert.Equal(UsageTransactionStatus.Completed, usage.Status);
+            Assert.False(usage.ProviderCostKnown);
+            Assert.Equal(0m, usage.ProviderCostUsd);
+            Assert.Equal(UsageCostBasis.Unknown, usage.CostBasis);
+            Assert.Equal(0m, usage.ChargedAmount);
+            Assert.Equal(0m, usage.ReversedAmount);
+
+            var attempt = await db.GenerationProviderAttempts.AsNoTracking().SingleAsync(item => item.GenerationJobId == job.Id);
+            Assert.False(attempt.ActualProviderCostKnown);
+            Assert.Null(attempt.ActualProviderCostUsd);
+            using var metadata = JsonDocument.Parse(attempt.SafeMetadataJson!);
+            Assert.Equal("manual_required", metadata.RootElement.GetProperty("musicProviderCostSettlement").GetProperty("status").GetString());
+        }
+        finally
+        {
+            provider.SetCosts(estimatedCostUsd: 0.004m, actualCostUsd: 0.004m);
+        }
+    }
+
+    [Fact]
+    public async Task Manual_settlement_is_admin_policy_guarded_audited_one_time_and_never_changes_customer_money()
+    {
+        using var client = factory.CreateClient();
+        var auth = await Register(client, $"music-cost-manual-{Guid.NewGuid():N}@example.com");
+        var created = await SendWithCsrf(client, HttpMethod.Post, "/api/music-generation/jobs", new
+        {
+            workspaceId = auth.PersonalWorkspace.Id,
+            title = "Manual Music cost",
+            description = "Deterministic manual reconciliation test.",
+            purpose = "Exercise the admin-only provider-cost settlement control.",
+            genre = "cinematic",
+            mood = "calm",
+            durationSeconds = 60,
+            vocalPreference = "instrumental",
+            language = "auto",
+        });
+        Assert.Equal(HttpStatusCode.Accepted, created.StatusCode);
+        var job = (await created.Content.ReadFromJsonAsync<CreateMusicGenerationResponse>(JsonOptions))!.Job;
+        var actorId = Guid.NewGuid();
+        var attemptId = Guid.NewGuid();
+
+        using (var seedScope = factory.Services.CreateScope())
+        {
+            var db = seedScope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            var jobRow = await db.GenerationJobs.SingleAsync(item => item.Id == job.Id);
+            jobRow.Status = GenerationJobStatus.Failed;
+            jobRow.FailedAt = DateTime.UtcNow;
+            jobRow.ErrorCode = GenerationJobErrorCodes.MusicProviderSubmissionUnconfirmed;
+            var usage = await db.UsageTransactions.SingleAsync(item => item.GenerationJobId == job.Id);
+            usage.Status = UsageTransactionStatus.Failed;
+            usage.Provider = "test";
+            usage.Model = "music-test";
+            usage.ProviderCostUsd = 0m;
+            usage.ProviderCostKnown = false;
+            usage.CostBasis = UsageCostBasis.Unknown;
+            usage.ChargedAmount = 0m;
+            usage.ReversedAmount = 0m;
+            usage.IsBillable = false;
+            usage.FailureCode = GenerationJobErrorCodes.MusicProviderSubmissionUnconfirmed;
+            db.GenerationProviderAttempts.Add(new GenerationProviderAttempt
+            {
+                Id = attemptId,
+                GenerationJobId = job.Id,
+                JobConcurrencyToken = jobRow.ConcurrencyToken,
+                IdempotencyKey = $"music-cost-manual:{job.Id:N}",
+                Capability = GenerationJobTypes.MusicGenerate,
+                AttemptNumber = 1,
+                Provider = "test",
+                Model = "music-test",
+                ProviderExecutionId = AcceptedCancellationMusicProvider.AcceptedOperationId,
+                Status = GenerationProviderAttemptStatus.Failed,
+                ResultClassification = "Failed",
+                FailureCode = GenerationJobErrorCodes.MusicProviderSubmissionUnconfirmed,
+                SafeMetadataJson = "{\"musicProviderCostSettlement\":{\"status\":\"manual_required\"}}",
+                FinalizationKey = $"music-cost-manual-final:{job.Id:N}",
+                StartedAt = DateTime.UtcNow.AddMinutes(-1),
+                CompletedAt = DateTime.UtcNow,
+            });
+            await db.SaveChangesAsync();
+        }
+
+        var authorize = Attribute.GetCustomAttribute(typeof(MusicProviderCostSettlementController), typeof(AuthorizeAttribute)) as AuthorizeAttribute;
+        Assert.NotNull(authorize);
+        Assert.Equal(Taslim.Api.Authorization.AdminPolicies.Usage, authorize!.Policy);
+
+        using (var settleScope = factory.Services.CreateScope())
+        {
+            var db = settleScope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            var controller = new MusicProviderCostSettlementController(db)
+            {
+                ControllerContext = new ControllerContext
+                {
+                    HttpContext = new DefaultHttpContext
+                    {
+                        User = new ClaimsPrincipal(new ClaimsIdentity([new Claim(ClaimTypes.NameIdentifier, actorId.ToString("D"))], "test")),
+                    },
+                },
+            };
+            var pendingAction = await controller.Pending(CancellationToken.None);
+            var pendingResult = Assert.IsType<OkObjectResult>(pendingAction.Result);
+            var pending = Assert.IsAssignableFrom<IReadOnlyList<MusicProviderCostSettlementCandidateDto>>(pendingResult.Value);
+            Assert.Contains(pending, item => item.AttemptId == attemptId && !item.LedgerProviderCostKnown);
+
+            var settleAction = await controller.Settle(attemptId, new SettleMusicProviderCostRequest(0.037m, "invoice:music-2026-17"), CancellationToken.None);
+            var settledResult = Assert.IsType<OkObjectResult>(settleAction.Result);
+            var response = Assert.IsType<SettleMusicProviderCostResponse>(settledResult.Value);
+            Assert.Equal(0.037m, response.AttemptActualProviderCostUsd);
+            Assert.True(response.LedgerProviderCostKnown);
+            Assert.Equal(UsageCostBasis.Manual, response.CostBasis);
+            Assert.Equal(0m, response.CustomerChargedAmount);
+            Assert.Equal(0m, response.CustomerReversedAmount);
+            Assert.Equal(actorId, response.SettledByUserId);
+            Assert.Equal("invoice:music-2026-17", response.EvidenceReference);
+        }
+
+        using (var verifyScope = factory.Services.CreateScope())
+        {
+            var db = verifyScope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            var attempt = await db.GenerationProviderAttempts.AsNoTracking().SingleAsync(item => item.Id == attemptId);
+            var usage = await db.UsageTransactions.AsNoTracking().SingleAsync(item => item.GenerationJobId == job.Id);
+            Assert.True(attempt.ActualProviderCostKnown);
+            Assert.Equal(0.037m, attempt.ActualProviderCostUsd);
+            Assert.True(usage.ProviderCostKnown);
+            Assert.Equal(0.037m, usage.ProviderCostUsd);
+            Assert.Equal(UsageCostBasis.Manual, usage.CostBasis);
+            Assert.Equal(UsageTransactionStatus.Failed, usage.Status);
+            Assert.Equal(0m, usage.ChargedAmount);
+            Assert.Equal(0m, usage.ReversedAmount);
+            Assert.False(usage.IsBillable);
+            foreach (var json in new[] { attempt.SafeMetadataJson!, usage.SafeMetadataJson! })
+            {
+                using var metadata = JsonDocument.Parse(json);
+                var audit = metadata.RootElement.GetProperty("manualProviderCostSettlements").GetProperty(attemptId.ToString("D"));
+                Assert.Equal(0.037m, audit.GetProperty("amountUsd").GetDecimal());
+                Assert.Equal("invoice:music-2026-17", audit.GetProperty("evidenceReference").GetString());
+                Assert.Equal(actorId.ToString("D"), audit.GetProperty("settledByUserId").GetString());
+                Assert.False(string.IsNullOrWhiteSpace(audit.GetProperty("settledAtUtc").GetString()));
+            }
+        }
+
+        using (var retryScope = factory.Services.CreateScope())
+        {
+            var controller = new MusicProviderCostSettlementController(retryScope.ServiceProvider.GetRequiredService<TaslimDbContext>())
+            {
+                ControllerContext = new ControllerContext
+                {
+                    HttpContext = new DefaultHttpContext
+                    {
+                        User = new ClaimsPrincipal(new ClaimsIdentity([new Claim(ClaimTypes.NameIdentifier, actorId.ToString("D"))], "test")),
+                    },
+                },
+            };
+            var second = await controller.Settle(attemptId, new SettleMusicProviderCostRequest(0.999m, "invoice:overwrite"), CancellationToken.None);
+            Assert.IsType<ConflictObjectResult>(second.Result);
+        }
+    }
+
+    [Fact]
     public async Task Non_music_lease_recovery_still_requeues_unchanged()
     {
+        var submissionsBefore = Provider().SubmittedGenerations;
         using var client = factory.CreateClient();
         var auth = await Register(client, $"generic-lease-{Guid.NewGuid():N}@example.com");
         var stalled = await SendWithCsrf<GenerationJobDto>(client, HttpMethod.Post, "/api/generation/jobs", new
@@ -164,7 +428,7 @@ public sealed class MusicLeaseRecoveryDuplicateSubmissionTests : IClassFixture<M
         // Recovery re-dispatched it once, which is the pre-existing behaviour for every non-music lane.
         Assert.True(resumed!.RetryCount >= 1, $"expected the generic job to be requeued, status={resumed.Status} retryCount={resumed.RetryCount}");
         Assert.NotEqual(GenerationJobErrorCodes.MusicProviderSubmissionUnconfirmed, resumed.ErrorCode);
-        Assert.Equal(0, Provider().SubmittedGenerations);
+        Assert.Equal(submissionsBefore, Provider().SubmittedGenerations);
     }
 
     [Fact]
@@ -274,8 +538,16 @@ internal sealed class CountingMusicProvider : IMusicGenerationProvider
     public string Key => "test";
 
     private int submittedGenerations;
+    private decimal? estimatedCostUsd = 0.004m;
+    private decimal? actualCostUsd = 0.004m;
 
     public int SubmittedGenerations => Volatile.Read(ref submittedGenerations);
+
+    public void SetCosts(decimal? estimatedCostUsd, decimal? actualCostUsd)
+    {
+        this.estimatedCostUsd = estimatedCostUsd;
+        this.actualCostUsd = actualCostUsd;
+    }
 
     public Task<MusicProviderResult> GenerateAsync(MusicGenerationInput request, CancellationToken cancellationToken = default)
     {
@@ -285,7 +557,13 @@ internal sealed class CountingMusicProvider : IMusicGenerationProvider
             "audio/mpeg",
             "mp3",
             request.DurationSeconds,
-            new MusicProviderUsage(100, 200, 0.004m, 0.004m, 12, CostBasis: UsageCostBasis.Actual)));
+            new MusicProviderUsage(
+                100,
+                200,
+                estimatedCostUsd,
+                actualCostUsd,
+                12,
+                CostBasis: actualCostUsd.HasValue ? UsageCostBasis.Actual : estimatedCostUsd.HasValue ? UsageCostBasis.Estimated : UsageCostBasis.Unknown)));
     }
 
     private static byte[] CreateMinimalMp3()
@@ -420,8 +698,18 @@ public sealed class MusicAcceptedCancellationLeaseRecoveryTests : IClassFixture<
         // One reservation, cancelled: never charged a second time, and no refund is invented for a
         // generation whose provider outcome is still unknown.
         Assert.Equal(UsageTransactionStatus.Cancelled, usage.Status);
+        Assert.Equal(0m, usage.ProviderCostUsd);
+        Assert.False(usage.ProviderCostKnown);
+        Assert.Equal(UsageCostBasis.Unknown, usage.CostBasis);
         Assert.Equal(0m, usage.ChargedAmount);
         Assert.Equal(0m, usage.ReversedAmount);
+
+        var unknownAttempt = await finalDb.GenerationProviderAttempts.AsNoTracking()
+            .SingleAsync(item => item.GenerationJobId == job.Id);
+        Assert.False(unknownAttempt.ActualProviderCostKnown);
+        Assert.Null(unknownAttempt.ActualProviderCostUsd);
+        using (var attemptMetadata = JsonDocument.Parse(unknownAttempt.SafeMetadataJson!))
+            Assert.Equal("manual_required", attemptMetadata.RootElement.GetProperty("musicProviderCostSettlement").GetProperty("status").GetString());
 
         // The accepted operation id outlives the terminalisation, from a context that never wrote it: that
         // is the handle a later provider-status reconciliation needs, and the reason recovery refused.
@@ -692,7 +980,14 @@ public sealed class MusicAcceptedCancellationLeaseRecoveryTests : IClassFixture<
             var usage = await db.UsageTransactions.AsNoTracking()
                 .SingleAsync(item => item.RequestId == $"generation:{job.Id:N}");
             Assert.Equal(UsageTransactionStatus.Cancelled, usage.Status);
+            Assert.True(usage.ProviderCostKnown);
+            Assert.Equal(0.004m, usage.ProviderCostUsd);
+            Assert.Equal(UsageCostBasis.Actual, usage.CostBasis);
             Assert.Equal(0m, usage.ChargedAmount);
+            Assert.Equal(0m, usage.ReversedAmount);
+            var attempt = await db.GenerationProviderAttempts.AsNoTracking().SingleAsync(item => item.GenerationJobId == job.Id);
+            Assert.True(attempt.ActualProviderCostKnown);
+            Assert.Equal(0.004m, attempt.ActualProviderCostUsd);
             Assert.Equal(0, await db.GenerationJobOutputs.AsNoTracking().CountAsync(item => item.GenerationJobId == job.Id));
         }
 
@@ -839,6 +1134,7 @@ public sealed class MusicAcceptedCancellationLeaseRecoveryTests : IClassFixture<
 
         await AssertRetryRefusedAsync(lost.Client, lost.JobId, GenerationJobErrorCodes.MusicSubmissionRetryBlocked);
         await AssertReservationCancelledAsync(lost.JobId);
+        await AssertUnknownProviderCostAsync(lost.JobId);
         Assert.Equal(submissionsBefore + 1, provider.SubmittedGenerations);
         await lost.StopAsync();
         Assert.Equal(submissionsBefore + 1, provider.SubmittedGenerations);
@@ -853,7 +1149,7 @@ public sealed class MusicAcceptedCancellationLeaseRecoveryTests : IClassFixture<
         var provider = Provider();
         var submissionsBefore = provider.SubmittedGenerations;
         provider.Reset(AcceptedCancellationMode.ReportThenHang);
-        provider.ReconciliationResult = new MusicSubmissionReconciliation(MusicSubmissionOutcome.Completed, ProviderDeclaresNoCharge: false);
+        provider.ReconciliationResult = new MusicSubmissionReconciliation(MusicSubmissionOutcome.Completed, ProviderDeclaresNoCharge: false, ActualCostUsd: 0.009m);
         using var lost = await StartClaimThatWillBeLostAsync(provider, "f361b-completed");
 
         var cancelled = await TerminaliseThroughRecoveryAsync(lost.Client, lost.JobId);
@@ -871,6 +1167,21 @@ public sealed class MusicAcceptedCancellationLeaseRecoveryTests : IClassFixture<
 
         await AssertRetryRefusedAsync(lost.Client, lost.JobId, GenerationJobErrorCodes.MusicRetrievalRetryBlocked);
         await AssertReservationCancelledAsync(lost.JobId);
+        using (var costScope = factory.Services.CreateScope())
+        {
+            var db = costScope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            var usage = await db.UsageTransactions.AsNoTracking().SingleAsync(item => item.GenerationJobId == lost.JobId);
+            Assert.True(usage.ProviderCostKnown);
+            Assert.Equal(0.009m, usage.ProviderCostUsd);
+            Assert.Equal(UsageCostBasis.Actual, usage.CostBasis);
+            Assert.Equal(0m, usage.ChargedAmount);
+            Assert.Equal(0m, usage.ReversedAmount);
+            var attempt = await db.GenerationProviderAttempts.AsNoTracking().SingleAsync(item => item.GenerationJobId == lost.JobId);
+            Assert.True(attempt.ActualProviderCostKnown);
+            Assert.Equal(0.009m, attempt.ActualProviderCostUsd);
+            using var attemptMetadata = JsonDocument.Parse(attempt.SafeMetadataJson!);
+            Assert.Equal("settled", attemptMetadata.RootElement.GetProperty("musicProviderCostSettlement").GetProperty("status").GetString());
+        }
         Assert.Equal(submissionsBefore + 1, provider.SubmittedGenerations);
         await lost.StopAsync();
         Assert.Equal(submissionsBefore + 1, provider.SubmittedGenerations);
@@ -897,6 +1208,16 @@ public sealed class MusicAcceptedCancellationLeaseRecoveryTests : IClassFixture<
         var (_, _, metadata) = await AttemptEvidenceAsync(lost.JobId);
         Assert.NotNull(metadata);
         Assert.Contains("ProviderDeclaredFailure", metadata!, StringComparison.Ordinal);
+        using (var noChargeScope = factory.Services.CreateScope())
+        {
+            var db = noChargeScope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+            var usage = await db.UsageTransactions.AsNoTracking().SingleAsync(item => item.GenerationJobId == lost.JobId);
+            Assert.True(usage.ProviderCostKnown);
+            Assert.Equal(0m, usage.ProviderCostUsd);
+            Assert.Equal(UsageCostBasis.Actual, usage.CostBasis);
+            Assert.Equal(0m, usage.ChargedAmount);
+            Assert.Equal(0m, usage.ReversedAmount);
+        }
         Assert.Equal(submissionsBefore + 1, provider.SubmittedGenerations);
 
         // Recovery did not re-dispatch anything itself; the release is the customer's decision, taken with
@@ -934,6 +1255,7 @@ public sealed class MusicAcceptedCancellationLeaseRecoveryTests : IClassFixture<
         Assert.Equal(1, provider.ReconciliationCalls);
         await AssertRetryRefusedAsync(lost.Client, lost.JobId, GenerationJobErrorCodes.MusicSubmissionRetryBlocked);
         await AssertReservationCancelledAsync(lost.JobId);
+        await AssertUnknownProviderCostAsync(lost.JobId);
         Assert.Equal(submissionsBefore + 1, provider.SubmittedGenerations);
         await lost.StopAsync();
         Assert.Equal(submissionsBefore + 1, provider.SubmittedGenerations);
@@ -956,6 +1278,7 @@ public sealed class MusicAcceptedCancellationLeaseRecoveryTests : IClassFixture<
         Assert.NotNull(metadata);
         Assert.Contains("InProgress", metadata!, StringComparison.Ordinal);
         await AssertRetryRefusedAsync(lost.Client, lost.JobId, GenerationJobErrorCodes.MusicSubmissionRetryBlocked);
+        await AssertUnknownProviderCostAsync(lost.JobId);
         Assert.Equal(1, provider.ReconciliationCalls);
         Assert.Equal(submissionsBefore + 1, provider.SubmittedGenerations);
         await lost.StopAsync();
@@ -980,6 +1303,7 @@ public sealed class MusicAcceptedCancellationLeaseRecoveryTests : IClassFixture<
         Assert.Equal(AcceptedCancellationMusicProvider.AcceptedOperationId, provider.ReconciledOperationId);
         await AssertRetryRefusedAsync(lost.Client, lost.JobId, GenerationJobErrorCodes.MusicSubmissionRetryBlocked);
         await AssertReservationCancelledAsync(lost.JobId);
+        await AssertUnknownProviderCostAsync(lost.JobId);
         var (_, marker, _) = await AttemptEvidenceAsync(lost.JobId);
         Assert.Equal(AcceptedCancellationMusicProvider.AcceptedOperationId, marker);
         Assert.Equal(submissionsBefore + 1, provider.SubmittedGenerations);
@@ -1005,6 +1329,7 @@ public sealed class MusicAcceptedCancellationLeaseRecoveryTests : IClassFixture<
         Assert.Equal(1, provider.ReconciliationCalls);
         await AssertRetryRefusedAsync(lost.Client, lost.JobId, GenerationJobErrorCodes.MusicSubmissionRetryBlocked);
         await AssertReservationCancelledAsync(lost.JobId);
+        await AssertUnknownProviderCostAsync(lost.JobId);
         Assert.Equal(submissionsBefore + 1, provider.SubmittedGenerations);
         await lost.StopAsync();
         Assert.Equal(submissionsBefore + 1, provider.SubmittedGenerations);
@@ -1165,6 +1490,26 @@ public sealed class MusicAcceptedCancellationLeaseRecoveryTests : IClassFixture<
         Assert.Equal(0m, usage.ChargedAmount);
         Assert.Equal(0m, usage.ReversedAmount);
     }
+
+    private async Task AssertUnknownProviderCostAsync(Guid jobId)
+    {
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<TaslimDbContext>();
+        var usage = await db.UsageTransactions.AsNoTracking().SingleAsync(item => item.GenerationJobId == jobId);
+        Assert.Equal(UsageTransactionStatus.Cancelled, usage.Status);
+        Assert.Equal(0m, usage.ProviderCostUsd);
+        Assert.False(usage.ProviderCostKnown);
+        Assert.Equal(UsageCostBasis.Unknown, usage.CostBasis);
+        Assert.Equal(0m, usage.ChargedAmount);
+        Assert.Equal(0m, usage.ReversedAmount);
+
+        var attempt = await db.GenerationProviderAttempts.AsNoTracking().SingleAsync(item => item.GenerationJobId == jobId);
+        Assert.False(attempt.ActualProviderCostKnown);
+        Assert.Null(attempt.ActualProviderCostUsd);
+        using var metadata = JsonDocument.Parse(attempt.SafeMetadataJson!);
+        Assert.Equal("manual_required", metadata.RootElement.GetProperty("musicProviderCostSettlement").GetProperty("status").GetString());
+    }
+
     private string? stampedOperationId(Guid attemptId)
     {
         using var scope = factory.Services.CreateScope();

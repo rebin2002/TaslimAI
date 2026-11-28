@@ -520,6 +520,7 @@ public static class UsageCostBasis
 {
     public const string Actual = "Actual";
     public const string Estimated = "Estimated";
+    public const string Manual = "Manual";
     public const string Unknown = "Unknown";
 }
 

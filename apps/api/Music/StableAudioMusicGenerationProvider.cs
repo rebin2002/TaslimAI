@@ -218,18 +218,21 @@ public sealed class StableAudioMusicGenerationProvider(
                 providerOperationId = generationId,
                 model,
                 pollAttempts,
-                credits = Math.Max(0, settings.StableAudioCreditsPerGeneration),
+                configuredCreditsEstimate = Math.Max(0, settings.StableAudioCreditsPerGeneration),
                 billedOnSuccess = true,
             }, JsonOptions);
-            var cost = CalculateCost();
+            var estimatedCost = CalculateConfiguredCostEstimate();
+            var actualCost = GetProviderConfirmedActualCostUsd();
             var usage = new MusicProviderUsage(
                 InputTokens: null,
                 OutputTokens: null,
-                EstimatedCostUsd: cost,
-                ActualCostUsd: cost,
+                EstimatedCostUsd: estimatedCost,
+                ActualCostUsd: actualCost,
                 LatencyMs: Math.Max(1, (int)Math.Min(int.MaxValue, stopwatch.ElapsedMilliseconds)),
                 FinishReason: "completed",
-                CostBasis: UsageCostBasis.Actual,
+                CostBasis: actualCost.HasValue
+                    ? UsageCostBasis.Actual
+                    : estimatedCost.HasValue ? UsageCostBasis.Estimated : UsageCostBasis.Unknown,
                 SafeMetadataJson: safeMetadata);
 
             logger.LogInformation(
@@ -253,7 +256,10 @@ public sealed class StableAudioMusicGenerationProvider(
                     "Stable Audio music provider generation was cancelled while delivering an already-completed generation; it was not re-generated. ProviderKey={ProviderKey}; ProviderOperationId={ProviderOperationId}",
                     Key,
                     providerGenerationId);
-                throw new MusicProviderCancellationWithAcceptedSubmissionException(providerGenerationId, outputConfirmedComplete: true);
+                throw new MusicProviderCancellationWithAcceptedSubmissionException(
+                    providerGenerationId,
+                    outputConfirmedComplete: true,
+                    actualCostUsd: GetProviderConfirmedActualCostUsd());
             }
             logger.LogWarning(
                 exception,
@@ -522,8 +528,10 @@ public sealed class StableAudioMusicGenerationProvider(
             if (result.StatusCode == HttpStatusCode.Accepted)
                 return new MusicSubmissionReconciliation(MusicSubmissionOutcome.InProgress, false);
             if (result.IsSuccessStatusCode)
-                return new MusicSubmissionReconciliation(MusicSubmissionOutcome.Completed, false);
-            _ = MapFailure(result);
+                return new MusicSubmissionReconciliation(MusicSubmissionOutcome.Completed, false, GetProviderConfirmedActualCostUsd());
+            var failure = MapFailure(result);
+            if (failure is MusicProviderRejectedException { ProviderDeclaresNoCharge: true })
+                return new MusicSubmissionReconciliation(MusicSubmissionOutcome.ProviderDeclaredFailure, true, 0m);
             // Stability's public error documentation covers rejected create requests, not a
             // structured terminal-failure response from the results endpoint. The accepted generation
             // remains financially unresolved until that endpoint returns a documented safe outcome.
@@ -555,7 +563,23 @@ public sealed class StableAudioMusicGenerationProvider(
         return new MusicProviderSubmissionUnconfirmedException();
     }
 
-    private decimal CalculateCost() => Math.Max(0, settings.StableAudioCreditsPerGeneration) * Math.Max(0, settings.StableAudioUsdPerCredit);
+    private const int StableAudio3CreditsPerSuccessfulGeneration = 8;
+    private const decimal StableAudioUsdPerCredit = 0.01m;
+
+    private decimal? GetProviderConfirmedActualCostUsd()
+    {
+        // Stability documents a flat 8-credit price for each successful Stable Audio 3.0 generation,
+        // but the response itself contains no billed-credit field. Only promote that tariff to actual
+        // when the selected model and local pricing configuration exactly match the public contract.
+        // Any mismatch remains estimate-only and is settled through the protected manual control.
+        if (!string.Equals(settings.StableAudioModel?.Trim(), "stable-audio-3", StringComparison.OrdinalIgnoreCase)
+            || settings.StableAudioCreditsPerGeneration != StableAudio3CreditsPerSuccessfulGeneration
+            || settings.StableAudioUsdPerCredit != StableAudioUsdPerCredit)
+            return null;
+        return StableAudio3CreditsPerSuccessfulGeneration * StableAudioUsdPerCredit;
+    }
+
+    private decimal? CalculateConfiguredCostEstimate() => Math.Max(0, settings.StableAudioCreditsPerGeneration) * Math.Max(0, settings.StableAudioUsdPerCredit);
 
     private static void AddField(MultipartFormDataContent form, string name, string value) =>
         form.Add(new StringContent(value, Encoding.UTF8), name);

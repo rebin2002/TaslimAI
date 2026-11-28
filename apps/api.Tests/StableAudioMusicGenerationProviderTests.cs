@@ -28,9 +28,11 @@ public sealed class StableAudioMusicGenerationProviderTests
         Assert.Equal("audio/mpeg", result.ContentType);
         Assert.Equal("mp3", result.Format);
         Assert.Equal(60, result.DurationSeconds);
-        Assert.Equal(0.26m, result.Usage.ActualCostUsd);
-        Assert.Equal(UsageCostBasis.Actual, result.Usage.CostBasis);
+        Assert.Equal(0.26m, result.Usage.EstimatedCostUsd);
+        Assert.Null(result.Usage.ActualCostUsd);
+        Assert.Equal(UsageCostBasis.Estimated, result.Usage.CostBasis);
         Assert.Contains("generation-1", result.Usage.SafeMetadataJson);
+        Assert.Contains("configuredCreditsEstimate", result.Usage.SafeMetadataJson);
         Assert.DoesNotContain("secret-api-key", result.Usage.SafeMetadataJson, StringComparison.Ordinal);
         Assert.Equal(3, handler.Requests.Count);
         Assert.Equal("Bearer secret-api-key", handler.Requests[0].Headers.Authorization?.ToString());
@@ -40,6 +42,23 @@ public sealed class StableAudioMusicGenerationProviderTests
         Assert.Contains("Genre: cinematic", handler.RequestBodies[0]);
         Assert.Contains("duration", handler.RequestBodies[0]);
         Assert.Contains("output_format", handler.RequestBodies[0]);
+    }
+
+    [Fact]
+    public async Task Successful_generation_uses_documented_flat_rate_only_when_configuration_matches()
+    {
+        var handler = new StableAudioHandler((_, requestNumber) => requestNumber switch
+        {
+            1 => Json(HttpStatusCode.Accepted, "{\"id\":\"generation-known-cost\"}"),
+            _ => Audio(HttpStatusCode.OK, ValidMp3(), "audio/mpeg"),
+        });
+        var provider = CreateProvider(handler, stableAudioCreditsPerGeneration: 8);
+
+        var result = await provider.GenerateAsync(Input());
+
+        Assert.Equal(0.08m, result.Usage.EstimatedCostUsd);
+        Assert.Equal(0.08m, result.Usage.ActualCostUsd);
+        Assert.Equal(UsageCostBasis.Actual, result.Usage.CostBasis);
     }
 
     [Theory]
@@ -603,8 +622,21 @@ public sealed class StableAudioMusicGenerationProviderTests
         var result = await provider.ReconcileAcceptedSubmissionAsync("result-completed");
         Assert.Equal(MusicSubmissionOutcome.Completed, result.Outcome);
         Assert.False(result.ProviderDeclaresNoCharge);
+        Assert.Null(result.ActualCostUsd);
         Assert.Single(handler.Requests);
         Assert.Equal(HttpMethod.Get, handler.Requests[0].Method);
+    }
+
+    [Fact]
+    public async Task Completed_reconciliation_reports_actual_cost_only_when_configuration_matches_documented_rate()
+    {
+        var handler = new StableAudioHandler((_, _) => Audio(HttpStatusCode.OK, ValidMp3(), "audio/mpeg"));
+        var provider = CreateProvider(handler, stableAudioCreditsPerGeneration: 8);
+
+        var result = await provider.ReconcileAcceptedSubmissionAsync("result-known-cost");
+
+        Assert.Equal(MusicSubmissionOutcome.Completed, result.Outcome);
+        Assert.Equal(0.08m, result.ActualCostUsd);
     }
 
     [Fact]
@@ -668,7 +700,8 @@ public sealed class StableAudioMusicGenerationProviderTests
         int pollIntervalMilliseconds = 1,
         int retryAttempts = 2,
         int retryDelayMilliseconds = 1,
-        int providerTimeoutSeconds = 15) => new(
+        int providerTimeoutSeconds = 15,
+        int stableAudioCreditsPerGeneration = 26) => new(
             new HttpClient(handler),
             Options.Create(new MusicGenerationOptions
             {
@@ -686,7 +719,7 @@ public sealed class StableAudioMusicGenerationProviderTests
                 StableAudioPollIntervalMilliseconds = pollIntervalMilliseconds,
                 StableAudioMaxRetryAttempts = retryAttempts,
                 StableAudioRetryBaseDelayMilliseconds = retryDelayMilliseconds,
-                StableAudioCreditsPerGeneration = 26,
+                StableAudioCreditsPerGeneration = stableAudioCreditsPerGeneration,
                 StableAudioUsdPerCredit = 0.01m,
             }),
             NullLogger<StableAudioMusicGenerationProvider>.Instance);

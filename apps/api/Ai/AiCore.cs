@@ -49,7 +49,12 @@ public sealed record AiUsageMetadata(
     string? PricingSnapshotJson = null,
     string? Currency = null,
     string? CostBasis = null,
-    string? SafeMetadataJson = null);
+    string? SafeMetadataJson = null)
+{
+    // Catalog prices are USD. Keep the vendor's original amount and unit together
+    // when enrichment assigns the catalog currency to the priced usage.
+    internal (decimal? Amount, string? Currency)? ProviderReport { get; init; }
+}
 
 public sealed record AiGenerationResult(string Content, AiUsageMetadata Usage);
 
@@ -213,6 +218,7 @@ public sealed class ChatCompletionService(
         {
             EstimatedCost = estimated,
             ActualCost = normalized.ActualCost,
+            ProviderReport = (normalized.ActualCost, normalized.Currency),
             PricingVersion = snapshot?.Version,
             PricingSnapshotJson = snapshot?.ToJson(),
             Currency = UsageCurrencies.Usd,

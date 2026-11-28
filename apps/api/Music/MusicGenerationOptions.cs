@@ -122,11 +122,15 @@ public sealed class MusicProviderSubmissionUnconfirmedException : MusicProviderU
 /// </summary>
 public sealed class MusicProviderCancellationWithAcceptedSubmissionException : OperationCanceledException
 {
-    public MusicProviderCancellationWithAcceptedSubmissionException(string? providerOperationId, bool outputConfirmedComplete)
+    public MusicProviderCancellationWithAcceptedSubmissionException(
+        string? providerOperationId,
+        bool outputConfirmedComplete,
+        decimal? actualCostUsd = null)
         : base("The music generation was cancelled after the provider accepted it, so its outcome is unconfirmed.")
     {
         ProviderOperationId = providerOperationId;
         OutputConfirmedComplete = outputConfirmedComplete;
+        ActualCostUsd = actualCostUsd is >= 0m ? actualCostUsd : null;
     }
 
     /// <summary>Accepted provider operation id (Mubert track id / Stable generation id), log-only.</summary>
@@ -138,4 +142,7 @@ public sealed class MusicProviderCancellationWithAcceptedSubmissionException : O
     /// so completion and charging are both unknown.
     /// </summary>
     public bool OutputConfirmedComplete { get; }
+
+    /// <summary>Provider-confirmed billed cost, if the provider contract yields one; null remains unknown.</summary>
+    public decimal? ActualCostUsd { get; }
 }
