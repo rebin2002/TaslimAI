@@ -46,6 +46,9 @@ public sealed class AutopilotIntakeController(IAutopilotEventIntake intake, Auto
             Request.Headers[EventTypeHeader].ToString(),
             HttpContext.TraceIdentifier), cancellationToken);
 
+        if (result.Outcome is AutopilotIntakeOutcomes.Accepted or AutopilotIntakeOutcomes.Duplicate)
+            AutopilotEventDispatchSignal.NotifyCommittedEvent();
+
         return result.Outcome switch
         {
             AutopilotIntakeOutcomes.Accepted => Accepted(new { status = result.Outcome, eventId = result.EventId }),
