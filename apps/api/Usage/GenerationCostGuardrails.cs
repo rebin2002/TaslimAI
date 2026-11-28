@@ -63,20 +63,24 @@ public sealed class GenerationCostGuardrailService(
         CancellationToken cancellationToken = default)
     {
         var normalizedEstimate = Normalize(estimate);
+        var userLimit = settings.UserEstimatedCostCeilingUsd ?? settings.UserInternalSafetyCeilingUsd;
         var workspaceExposure = await ExposureForAsync(
+            settings.WorkspaceInternalSafetyCeilingUsd,
             row => row.WorkspaceId == workspaceId,
-            cancellationToken);
+            includeCancelledPresentationSpend: true, cancellationToken);
         var userExposure = await ExposureForAsync(
-            row => row.WorkspaceId == workspaceId && row.UserId == userId,
-            cancellationToken);
+            userLimit,
+            row => row.UserId == userId,
+            includeCancelledPresentationSpend: true, cancellationToken);
         var projectExposure = projectId.HasValue
             ? await ExposureForAsync(
+                settings.ProjectEstimatedCostCeilingUsd,
                 row => row.WorkspaceId == workspaceId && row.ProjectId == projectId,
-                cancellationToken)
+                includeCancelledPresentationSpend: false, cancellationToken)
             : Exposure.Empty;
 
         var workspaceCap = CreateCap("workspace", settings.WorkspaceInternalSafetyCeilingUsd, workspaceExposure, normalizedEstimate);
-        var userCap = CreateCap("user", settings.UserEstimatedCostCeilingUsd ?? settings.UserInternalSafetyCeilingUsd, userExposure, normalizedEstimate);
+        var userCap = CreateCap("user", userLimit, userExposure, normalizedEstimate);
         var projectCap = projectId.HasValue
             ? CreateCap("project", settings.ProjectEstimatedCostCeilingUsd, projectExposure, normalizedEstimate)
             : null;
@@ -98,24 +102,12 @@ public sealed class GenerationCostGuardrailService(
                 "This generation may use a high amount of provider resources. Review the estimate before continuing."));
         }
 
-        if (!settings.Enabled)
-        {
-            return new GenerationCostPreflightResult(
-                normalizedEstimate,
-                true,
-                false,
-                confirmationAccepted,
-                workspaceCap,
-                userCap,
-                projectCap,
-                warnings);
-        }
-
-        if (settings.RejectUnknownEstimates && workspaceCap is { UsageKnown: false })
+        var rejectUnknownExposure = settings.Enabled && settings.RejectUnknownEstimates;
+        if (rejectUnknownExposure && workspaceCap is { UsageKnown: false })
             return Reject(normalizedEstimate, confirmationAccepted, workspaceCap, userCap, projectCap, warnings, "WORKSPACE_COST_UNKNOWN", "This workspace has provider exposure that cannot be estimated safely.");
-        if (settings.RejectUnknownEstimates && userCap is { UsageKnown: false })
+        if (rejectUnknownExposure && userCap is { UsageKnown: false })
             return Reject(normalizedEstimate, confirmationAccepted, workspaceCap, userCap, projectCap, warnings, "USER_COST_UNKNOWN", "This user has provider exposure that cannot be estimated safely.");
-        if (settings.RejectUnknownEstimates && projectCap is { UsageKnown: false })
+        if (rejectUnknownExposure && projectCap is { UsageKnown: false })
             return Reject(normalizedEstimate, confirmationAccepted, workspaceCap, userCap, projectCap, warnings, "PROJECT_COST_UNKNOWN", "This project has provider exposure that cannot be estimated safely.");
 
         var snapshot = new GenerationBudgetSnapshot(
@@ -128,8 +120,9 @@ public sealed class GenerationCostGuardrailService(
         if (!decision.Allowed)
             return Reject(normalizedEstimate, confirmationAccepted, workspaceCap, userCap, projectCap, warnings, decision.RejectionCode!, decision.RejectionMessage!);
 
-        var confirmationRequired = (warnings.Any(item => item.Code == "EXPENSIVE_GENERATION") && settings.RequireConfirmationForExpensiveGeneration)
-            || (warnings.Any(item => item.Code == "COST_ESTIMATE_UNKNOWN") && settings.RequireConfirmationForUnknownEstimates);
+        var confirmationRequired = settings.Enabled && (
+            (warnings.Any(item => item.Code == "EXPENSIVE_GENERATION") && settings.RequireConfirmationForExpensiveGeneration)
+            || (warnings.Any(item => item.Code == "COST_ESTIMATE_UNKNOWN") && settings.RequireConfirmationForUnknownEstimates));
         return new GenerationCostPreflightResult(
             normalizedEstimate,
             true,
@@ -183,35 +176,51 @@ public sealed class GenerationCostGuardrailService(
     }
 
     private async Task<Exposure> ExposureForAsync(
+        decimal? limit,
         System.Linq.Expressions.Expression<Func<UsageTransaction, bool>> predicate,
+        bool includeCancelledPresentationSpend,
         CancellationToken cancellationToken)
     {
-        var rows = await db.UsageTransactions.AsNoTracking()
-            .Where(predicate)
-            .Select(item => new ExposureRow(item.Status, item.ProviderCostUsd, item.ProviderCostKnown, item.EstimatedProviderCostUsd))
-            .ToListAsync(cancellationToken);
-        var knownCost = rows.Sum(row => row.Status == UsageTransactionStatus.Pending
-            ? row.EstimatedProviderCostUsd ?? 0m
-            : row.Status is UsageTransactionStatus.Completed or UsageTransactionStatus.Failed or UsageTransactionStatus.Refunded
-                ? row.ProviderCostKnown ? row.ProviderCostUsd : 0m
-                : 0m);
-        var unknownCount = rows.Count(row => row.Status != UsageTransactionStatus.Cancelled
-            && (row.Status == UsageTransactionStatus.Pending
+        if (!limit.HasValue) return Exposure.Empty;
+
+        var reservations = db.UsageTransactions.AsNoTracking().Where(predicate);
+        var amounts = reservations.Select(row => new
+        {
+            Cost = row.Status == UsageTransactionStatus.Pending
+                ? row.EstimatedProviderCostUsd ?? 0m
+                : (row.Status == UsageTransactionStatus.Completed || row.Status == UsageTransactionStatus.Failed || row.Status == UsageTransactionStatus.Refunded) && row.ProviderCostKnown
+                    ? row.ProviderCostUsd : 0m,
+            Unknown = row.Status == UsageTransactionStatus.Pending
                 ? !row.EstimatedProviderCostUsd.HasValue
-                : row.Status is UsageTransactionStatus.Completed or UsageTransactionStatus.Failed or UsageTransactionStatus.Refunded
-                    ? !row.ProviderCostKnown
-                    : false));
-        return new Exposure(knownCost, unknownCount);
+                : (row.Status == UsageTransactionStatus.Completed || row.Status == UsageTransactionStatus.Failed || row.Status == UsageTransactionStatus.Refunded) && !row.ProviderCostKnown,
+        });
+
+        if (includeCancelledPresentationSpend)
+            amounts = amounts.Concat(CancelledPresentationSpend.ForCancelledReservations(db, reservations)
+                .Select(cost => new { Cost = cost, Unknown = false }));
+
+        if (db.Database.IsNpgsql())
+        {
+            var total = await amounts.GroupBy(row => 1)
+                .Select(group => new { Cost = group.Sum(row => row.Cost), Unknown = group.Count(row => row.Unknown) })
+                .SingleOrDefaultAsync(cancellationToken);
+            return total is null ? Exposure.Empty : new Exposure(total.Cost, total.Unknown);
+        }
+
+        // SQLite has no exact decimal SUM. Stream its rows to keep the ledger precision
+        // without allocating an entire user's cross-workspace history.
+        decimal cost = 0m;
+        int unknown = 0;
+        await foreach (var row in amounts.AsAsyncEnumerable().WithCancellation(cancellationToken))
+        {
+            cost += row.Cost;
+            if (row.Unknown) unknown++;
+        }
+        return new Exposure(cost, unknown);
     }
 
     private sealed record Exposure(decimal KnownCostUsd, int UnknownCount)
     {
         public static Exposure Empty { get; } = new(0m, 0);
     }
-
-    private sealed record ExposureRow(
-        UsageTransactionStatus Status,
-        decimal ProviderCostUsd,
-        bool ProviderCostKnown,
-        decimal? EstimatedProviderCostUsd);
 }

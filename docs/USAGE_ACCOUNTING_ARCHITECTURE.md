@@ -50,6 +50,10 @@ All report queries accept bounded UTC date ranges and optional feature, status, 
 
 `AddUsageAccountingFoundation`, `AddUsageCostBasis`, and `AddGenerationUsageAdjustments` are additive. The latest migration adds reservation/actual/billable timestamps, billable eligibility, reversal totals, and the append-only `UsageTransactionAdjustments` table with workspace/idempotency uniqueness and positive-amount protection. They preserve the existing `DataProtectionKeys`, Generation Jobs, Assets, Stored Files, Identity, and usage tables. The migrations must be applied through the existing production advisory-lock migration runner. No Redis, queue broker, or new billing provider is required.
 
+## Cancelled Presentation provider spend
+
+When a Presentation job is cancelled, a nonnegative USD cost explicitly reported by the provider counts once per cancelled attempt toward operational user and workspace limits. Workspace daily and monthly limits use the existing UTC reservation window. The user-wide limit spans the user's workspaces, and both the user and workspace generation safety limits retain their existing all-time scope. The cancelled reservation carries zero customer charge. Pending estimates continue on their existing path. An unknown or estimate-only cancelled Presentation amount contributes no reported spend. Project limits retain their existing accounting.
+
 ## Future extensions
 
 Future customer billing can implement a different `IUsageChargingService` and a currency-aware settlement policy without changing provider handlers. Future pricing catalogs can publish new versioned snapshots while retaining old snapshots on existing transactions. Guardrails can be enabled with explicit operator-selected limits, and a support workflow can review anomalies without exposing internal fields to ordinary users.

@@ -28,6 +28,16 @@ public sealed class GeneratedAssetPublisher(
     IGeneratedMediaRetentionHook retentionHook,
     ILogger<GeneratedAssetPublisher> logger) : IGeneratedAssetPublisher
 {
+    /// <summary>
+    /// Mirrors the Asset.Name column width configured in TaslimDbContext.
+    /// </summary>
+    internal const int MaximumAssetNameLength = 255;
+
+    /// <summary>
+    /// Mirrors the Asset.Description column width configured in TaslimDbContext.
+    /// </summary>
+    internal const int MaximumAssetDescriptionLength = 2_000;
+
     public async Task<PreparedGenerationOutput> PrepareAsync(GenerationJob job, GenerationHandlerOutput output, CancellationToken cancellationToken = default)
     {
         var assetType = output.Asset?.AssetType.Trim().ToLowerInvariant();
@@ -38,12 +48,14 @@ public sealed class GeneratedAssetPublisher(
         StoredFile? storedFile = null;
         var storedFileId = output.StoredFileId;
         var storageResult = (GeneratedFileStorageResult?)null;
+        var isResearchReport = string.Equals(job.JobType, GenerationJobTypes.ResearchGenerate, StringComparison.OrdinalIgnoreCase);
+        var fileProjectId = isResearchReport ? null : job.ProjectId;
         if (output.FileArtifact is not null)
         {
             storageResult = await files.StoreGeneratedWithResultAsync(
                 job.WorkspaceId,
                 job.CreatedByUserId,
-                job.ProjectId,
+                fileProjectId,
                 output.FileArtifact.FileName,
                 output.FileArtifact.ContentType,
                 output.FileArtifact.Content,
@@ -58,7 +70,7 @@ public sealed class GeneratedAssetPublisher(
             storageResult = await files.StoreGeneratedStreamWithResultAsync(
                 job.WorkspaceId,
                 job.CreatedByUserId,
-                job.ProjectId,
+                fileProjectId,
                 output.StreamArtifact.FileName,
                 output.StreamArtifact.ContentType,
                 output.StreamArtifact.SizeBytes,
@@ -80,8 +92,21 @@ public sealed class GeneratedAssetPublisher(
                     && (!file.ProjectId.HasValue || file.ProjectId == job.ProjectId),
                 cancellationToken) ?? throw new InvalidOperationException("Generated output file is not available in the job scope.");
         }
+        // Storage may return an older row after workspace-wide content deduplication.
+        if (isResearchReport && storedFile is not null &&
+            (storedFile.UserId != job.CreatedByUserId || storedFile.ProjectId.HasValue || storedFile.ConversationId.HasValue))
+            throw new InvalidOperationException("Generated output file is not available in the job scope.");
         if (output.Asset is not null && (storedFile is null || storedFile.Status != StoredFileStatus.Ready))
             throw new InvalidOperationException("Generated assets require a completed private stored file.");
+        if (output.Asset is not null && storageResult is { WasCreated: false }
+            && string.Equals(job.JobType, GenerationJobTypes.ImageGenerate, StringComparison.OrdinalIgnoreCase))
+        {
+            // A ready file can still be removed if the generation that created it rolls back.
+            var reusedId = storageResult.File.Id;
+            var published = await db.StoredFiles.AnyAsync(file => file.Id == reusedId && file.Status == StoredFileStatus.Ready
+                && (file.GenerationJobOutputs.Any() || file.Assets.Any() || file.GeneratedMediaProvenance.Any()), cancellationToken);
+            if (!published) throw new InvalidOperationException("Generated image output cannot reuse an uncommitted private file.");
+        }
 
         try
         {
@@ -239,13 +264,30 @@ public sealed class GeneratedAssetPublisher(
     private static string NormalizeName(string name)
     {
         var value = string.IsNullOrWhiteSpace(name) ? "Generated asset" : name.Trim();
-        return value.Length <= 255 ? value : value[..255];
+        return TruncateOnCharacterBoundary(value, MaximumAssetNameLength);
     }
 
     private static string? NormalizeDescription(string? description)
     {
         if (string.IsNullOrWhiteSpace(description)) return null;
         var value = description.Trim();
-        return value.Length <= 2_000 ? value : value[..2_000];
+        return TruncateOnCharacterBoundary(value, MaximumAssetDescriptionLength);
+    }
+
+    /// <summary>
+    /// Trims to the column width without ever cutting a supplementary character in half. The name and
+    /// description of a generated asset come from provider output, so an emoji-heavy title can land its
+    /// 255th code unit between the two halves of a surrogate pair. The lone surrogate left behind by a
+    /// plain slice cannot be UTF-8 encoded, which fails the job completion transaction after the provider
+    /// spend is already booked and surfaces to the user as a storage failure.
+    /// </summary>
+    private static string TruncateOnCharacterBoundary(string value, int maxLength)
+    {
+        if (value.Length <= maxLength)
+        {
+            return value;
+        }
+        var length = maxLength > 0 && char.IsHighSurrogate(value[maxLength - 1]) ? maxLength - 1 : maxLength;
+        return value[..Math.Max(0, length)];
     }
 }

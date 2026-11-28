@@ -2,6 +2,7 @@ using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using Taslim.Api.Ai;
+using Taslim.Api.Presentations;
 using Xunit;
 
 namespace Taslim.Api.Tests;
@@ -62,6 +63,65 @@ public sealed class AiCoreTests
     }
 
     [Fact]
+    public void Router_rejects_streaming_chat_when_selected_model_lacks_streaming_capability()
+    {
+        var configuration = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
+        {
+            ["Ai:Models:gpt-5.6-terra:ProviderKey"] = "openai",
+            ["Ai:Models:gpt-5.6-terra:CapabilityTier"] = "Smart",
+            ["Ai:Models:gpt-5.6-terra:SupportsStreaming"] = "false",
+        }).Build();
+        var options = Options.Create(new AiOptions { DefaultChatTier = "Smart", AllowMockProvider = false, OpenAI = new OpenAiOptions { Enabled = true, ApiKey = "test-only" } });
+        var router = new AiModelRouter(options, new AiModelCatalog(configuration));
+
+        Assert.Throws<AiProviderUnavailableException>(() => router.Select(new AiChatRequest([], "system", "Smart", EnableStreaming: true)));
+    }
+
+    [Fact]
+    public void Router_rejects_streaming_vision_request_when_only_vision_model_lacks_streaming_capability()
+    {
+        var configuration = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
+        {
+            ["Ai:Models:gpt-5.6-terra:ProviderKey"] = "openai",
+            ["Ai:Models:gpt-5.6-terra:CapabilityTier"] = "Smart",
+            ["Ai:Models:gpt-5.6-terra:SupportsStreaming"] = "true",
+            ["Ai:Models:gpt-5.6-terra:SupportsVision"] = "false",
+            ["Ai:Models:gpt-5.6-sol:ProviderKey"] = "openai",
+            ["Ai:Models:gpt-5.6-sol:CapabilityTier"] = "Advanced",
+            ["Ai:Models:gpt-5.6-sol:SupportsStreaming"] = "false",
+            ["Ai:Models:gpt-5.6-sol:SupportsVision"] = "true",
+        }).Build();
+        var options = Options.Create(new AiOptions { DefaultChatTier = "Smart", AllowMockProvider = false, OpenAI = new OpenAiOptions { Enabled = true, ApiKey = "test-only" } });
+        var router = new AiModelRouter(options, new AiModelCatalog(configuration));
+        var attachment = new AiFileContext("image.png", "image/png", null, "data:image/png;base64,AA==");
+
+        Assert.Throws<AiProviderUnavailableException>(() => router.Select(new AiChatRequest([], "system", "Smart", EnableStreaming: true, Attachments: [attachment])));
+    }
+
+    [Fact]
+    public void Router_uses_streaming_vision_fallback_when_tier_model_cannot_stream()
+    {
+        var configuration = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
+        {
+            ["Ai:Models:gpt-5.6-terra:ProviderKey"] = "openai",
+            ["Ai:Models:gpt-5.6-terra:CapabilityTier"] = "Smart",
+            ["Ai:Models:gpt-5.6-terra:SupportsStreaming"] = "false",
+            ["Ai:Models:gpt-5.6-terra:SupportsVision"] = "false",
+            ["Ai:Models:gpt-5.6-sol:ProviderKey"] = "openai",
+            ["Ai:Models:gpt-5.6-sol:CapabilityTier"] = "Advanced",
+            ["Ai:Models:gpt-5.6-sol:SupportsStreaming"] = "true",
+            ["Ai:Models:gpt-5.6-sol:SupportsVision"] = "true",
+        }).Build();
+        var options = Options.Create(new AiOptions { DefaultChatTier = "Smart", AllowMockProvider = false, OpenAI = new OpenAiOptions { Enabled = true, ApiKey = "test-only" } });
+        var router = new AiModelRouter(options, new AiModelCatalog(configuration));
+        var attachment = new AiFileContext("image.png", "image/png", null, "data:image/png;base64,AA==");
+
+        var selection = router.Select(new AiChatRequest([], "system", "Smart", EnableStreaming: true, Attachments: [attachment]));
+
+        Assert.Equal("gpt-5.6-sol", selection.ModelKey);
+    }
+
+    [Fact]
     public async Task Completion_service_calculates_catalog_cost_and_preserves_usage()
     {
         var options = Options.Create(new AiOptions { AllowMockProvider = false, OpenAI = new OpenAiOptions { Enabled = true, ApiKey = "test-only" } });
@@ -97,6 +157,52 @@ public sealed class AiCoreTests
     }
 
     [Fact]
+    public void Context_builder_uses_default_chat_output_budget()
+    {
+        var context = new AiContextBuilder(Options.Create(new AiOptions())).Build([]);
+
+        Assert.Equal(2_048, context.MaxOutputTokens);
+    }
+
+    [Theory]
+    [InlineData(0, 256)]
+    [InlineData(255, 256)]
+    [InlineData(256, 256)]
+    [InlineData(16_000, 16_000)]
+    [InlineData(16_001, 16_000)]
+    public void Context_builder_clamps_configured_chat_output_budget(int configured, int expected)
+    {
+        var context = new AiContextBuilder(Options.Create(new AiOptions { MaxChatOutputTokens = configured })).Build([]);
+
+        Assert.Equal(expected, context.MaxOutputTokens);
+    }
+
+    [Fact]
+    public void Production_configuration_declares_the_explicit_chat_output_budget()
+    {
+        var root = LocateRepositoryRoot();
+        Assert.NotNull(root);
+        using var document = System.Text.Json.JsonDocument.Parse(File.ReadAllText(Path.Combine(root!, "apps", "api", "appsettings.Production.json")));
+        var declared = document.RootElement.GetProperty("Ai").GetProperty("MaxChatOutputTokens").GetInt32();
+        Assert.Equal(new AiOptions().MaxChatOutputTokens, declared);
+        Assert.Equal(declared, Math.Clamp(declared, 256, 16_000));
+        var context = new AiContextBuilder(Options.Create(new AiOptions { MaxChatOutputTokens = declared })).Build([]);
+        Assert.Equal(2_048, context.MaxOutputTokens);
+    }
+
+    private static string? LocateRepositoryRoot()
+    {
+        var dir = new DirectoryInfo(AppContext.BaseDirectory);
+        while (dir is not null)
+        {
+            if (Directory.Exists(Path.Combine(dir.FullName, "apps", "web")) && File.Exists(Path.Combine(dir.FullName, "package.json")))
+                return dir.FullName;
+            dir = dir.Parent;
+        }
+        return null;
+    }
+
+    [Fact]
     public async Task Completion_service_exposes_provider_independent_stream_events()
     {
         var options = Options.Create(new AiOptions { AllowMockProvider = false, OpenAI = new OpenAiOptions { Enabled = true, ApiKey = "test-only" } });
@@ -110,7 +216,26 @@ public sealed class AiCoreTests
             item => Assert.Equal("completed", ((AiMessageCompleted)item).Usage.FinishReason));
     }
 
-    private sealed class FakeProvider : IAiProvider
+    [Theory]
+    [InlineData("USD", true)]
+    [InlineData("EUR", false)]
+    [InlineData("", false)]
+    [InlineData(null, false)]
+    public async Task Presentation_cancellation_uses_the_raw_provider_currency_after_chat_usage_enrichment(string? currency, bool usd)
+    {
+        var options = Options.Create(new AiOptions { AllowMockProvider = false, OpenAI = new OpenAiOptions { Enabled = true, ApiKey = "test-only" } });
+        var catalog = ConfiguredCatalog();
+        var completion = new ChatCompletionService(new AiModelRouter(options, catalog), [new FakeProvider(0.04m, currency)],
+            new AiCostCalculator(catalog), NullLogger<ChatCompletionService>.Instance);
+        var result = await completion.CompleteAsync(new AiChatRequest([new("user", "test")], "system", "Smart"));
+        using var source = new CancellationTokenSource();
+        source.Cancel();
+        var cancelled = Assert.Throws<PresentationCancellationException>(() =>
+            PresentationCancellationException.ThrowIfCancelled(source.Token, result.Usage));
+        Assert.Equal(usd ? 0.04m : (decimal?)null, cancelled.ReportedCostUsd);
+    }
+
+    private sealed class FakeProvider(decimal? actual = null, string? currency = null) : IAiProvider
     {
         public string Key => "openai";
 
@@ -119,7 +244,7 @@ public sealed class AiCoreTests
             await Task.Yield();
             yield return new AiMessageDelta("hello ");
             yield return new AiMessageDelta("world");
-            yield return new AiMessageCompleted(new AiUsageMetadata(selection.ProviderKey, selection.ModelKey, 1000, 200, 1000, null, null, 4, "completed", false));
+            yield return new AiMessageCompleted(new AiUsageMetadata(selection.ProviderKey, selection.ModelKey, 1000, 200, 1000, null, actual, 4, "completed", false, Currency: currency));
         }
     }
 
