@@ -6,7 +6,7 @@ import { Activity, AlertTriangle, ArrowLeft, Boxes, CheckCircle2, CircleDollarSi
 import { useLocale } from "@/components/LocaleProvider";
 import { api, type AdminCountBreakdown, type AdminOperationsDashboard, type AdminProviderHealth } from "@/lib/api";
 import { presetRange } from "@/lib/adminUsageState";
-import { isAdminOperationsRequestCurrent, startAdminOperationsRequest } from "@/lib/adminOperationsRequest";
+import { isAdminOperationsRequestCurrent, startAdminOperationsRequest, type AdminOperationsRange } from "@/lib/adminOperationsRequest";
 import { formatAdminBytes, formatAdminDateTime, formatAdminMinutes, formatAdminMoney, formatAdminNumber, translateAdminOperations, type AdminOperationsKey } from "@/lib/adminOperationsI18n";
 import type { Locale } from "@/lib/i18n";
 
@@ -14,6 +14,10 @@ type Translate = (key: AdminOperationsKey, variables?: Record<string, string>) =
 type Metric = { label: ReactNode; value: ReactNode; dir?: "ltr" | "auto" };
 
 function dateInputValue(value: Date) { return value.toISOString().slice(0, 10); }
+// A reload the administrator did not ask for — the deferred first read, a language change that
+// re-creates the loader, a lease-recovery refresh — has to re-read the window already on screen.
+// Falling back to a fixed preset here silently changes what the filter controls claim to show.
+function reloadRange(presented: AdminOperationsRange | null) { return presented ?? presetRange("thirtyDays"); }
 function providerStatusLabel(provider: AdminProviderHealth, locale: Locale) {
   const key: AdminOperationsKey = provider.status === "disabled" ? "providerStatusDisabled" : provider.status === "unconfigured" ? "providerStatusUnconfigured" : provider.status === "recent_operational_failure" ? "providerStatusFailure" : provider.status === "operational" ? "providerStatusOperational" : "providerStatusAvailable";
   return translateAdminOperations(locale, key);
@@ -45,7 +49,9 @@ export function AdminOperationsView() {
   const [error, setError] = useState<string | null>(null);
   const [recoveringJobId, setRecoveringJobId] = useState<string | null>(null);
   const requestSequence = useRef(0);
-  const load = useCallback(async (range: { fromUtc: string; toUtc: string }) => {
+  const presentedRange = useRef<AdminOperationsRange | null>(null);
+  const load = useCallback(async (range: AdminOperationsRange) => {
+    presentedRange.current = range;
     const request = startAdminOperationsRequest(requestSequence.current, range);
     requestSequence.current = request.sequence;
     setLoading(true); setError(null);
@@ -64,14 +70,14 @@ export function AdminOperationsView() {
     setRecoveringJobId(jobId); setError(null);
     try {
       await api.recoverAdminStuckJob(jobId, "Administrator recovered an expired movie worker lease from the operations dashboard.");
-      await load(dashboard?.range ?? presetRange("thirtyDays"));
+      await load(reloadRange(presentedRange.current));
     } catch { setError(t("recoverError")); }
     finally { setRecoveringJobId(null); }
   };
   useEffect(() => {
     const sequenceAtSchedule = requestSequence.current;
     const timer = window.setTimeout(() => {
-      if (requestSequence.current === sequenceAtSchedule) void load(presetRange("thirtyDays"));
+      if (requestSequence.current === sequenceAtSchedule) void load(reloadRange(presentedRange.current));
     }, 0);
     return () => { window.clearTimeout(timer); requestSequence.current += 1; };
   }, [load]);

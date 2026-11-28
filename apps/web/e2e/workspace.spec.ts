@@ -94,4 +94,39 @@ test.describe("workspace and project journeys", () => {
     await expect(page.getByRole("heading", { name: /administrator access required/i })).toBeVisible();
     await expect(page.getByText(/only to active taslim administrators/i)).toBeVisible();
   });
+
+  test("takes the workspace member role badge down when a mutation says access ended", async ({ authenticatedPage: page }) => {
+    // Baseline: the detail page renders the member role badge from the
+    // overview snapshot the server issued while membership was intact.
+    const project = await createProject(page, "E2E Revoked Project Detail");
+    await page.goto(`/projects/${project.id}`);
+    const badge = page.locator(".workspace-role");
+    await expect(badge).toHaveText("Owner");
+    const archivePath = `**/api/projects/${project.id}/archive`;
+    // Simulate the owner having revoked this member mid-session: the
+    // archive mutation now returns the definitive 403 (removed members
+    // also see the 404 the server folds membership loss into). The page
+    // must not keep displaying a membership-scoped role for that
+    // principal.
+    await page.route(archivePath, (route) =>
+      route.fulfill({
+        status: 403,
+        contentType: "application/json",
+        body: JSON.stringify({ error: { message: "Workspace access has ended." } }),
+      }),
+    );
+    page.once("dialog", (dialog) => void dialog.accept());
+    await page.getByRole("button", { name: /archive/i }).click();
+    const alert = page.locator(".inline-error[role='alert']");
+    await expect(alert).toContainText("Workspace access has ended.");
+    await expect(badge).toHaveCount(0);
+    // Re-admission: the retry re-fetches the overview and the badge
+    // re-derives from the server's current answer, never from the stale
+    // snapshot.
+    await page.unroute(archivePath);
+    await alert.getByRole("button", { name: /try again/i }).click();
+    await expect(page.getByRole("heading", { name: project.name })).toBeVisible();
+    await expect(badge).toHaveText("Owner");
+    await expect(badge).toBeVisible();
+  });
 });

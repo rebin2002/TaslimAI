@@ -12,6 +12,11 @@ describe("Image Studio error localization", () => {
     expect(imageErrorTranslationKey("JOB_POISONED")).toBe("image.error.recoveryFailed");
   });
 
+  it("maps an active-generation conflict to the localized unavailable message", () => {
+    expect(imageErrorTranslationKey("IMAGE_GENERATION_IN_PROGRESS")).toBe("image.error.unavailable");
+    expect(localizedImageErrorMessage("IMAGE_GENERATION_IN_PROGRESS", translate, "image.createError")).toBe("translated:image.error.unavailable");
+  });
+
   it("uses a generic localized image message for future IMAGE codes", () => {
     expect(localizedImageErrorMessage("IMAGE_FUTURE_CODE", translate, "image.createError")).toBe("translated:image.error.failed");
   });

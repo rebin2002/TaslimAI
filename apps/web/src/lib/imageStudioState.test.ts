@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { GenerationJob } from "./api";
-import { canCancelImageJob, clearImageActiveJobId, imageActiveJobStorageKey, imageJobPollIntervalMs, imageJobPollMaxDelayMs, isImageJob, isImageTerminal, isRestorableImageJob, nextImagePollDelay, parseImageJobResult, persistImageActiveJobId, readImageActiveJobId, safeImageJobView, shouldClearImageJobAfterPollError, shouldPollImageJob, shouldResetImageWorkspaceState } from "./imageStudioState";
+import { canCancelImageJob, clearImageActiveJobId, imageActiveJobStorageKey, imageJobPollIntervalMs, imageJobPollMaxDelayMs, imageRestoreMaxAttempts, isImageJob, isImageTerminal, isRestorableImageJob, mergeImageJobUpdate, nextImagePollDelay, nextImageRestoreDelay, parseImageJobResult, persistImageActiveJobId, readImageActiveJobId, safeImageJobView, shouldClearImageJobAfterPollError, shouldPollImageJob, shouldResetImageWorkspaceState, shouldRetryImageRestore } from "./imageStudioState";
 
 function job(overrides: Partial<GenerationJob> = {}): GenerationJob {
   return {
@@ -49,6 +49,66 @@ describe("image studio state", () => {
     expect(shouldClearImageJobAfterPollError(408)).toBe(false);
     expect(shouldClearImageJobAfterPollError(500)).toBe(false);
     expect(shouldClearImageJobAfterPollError(null)).toBe(false);
+  });
+
+  // The studio writes the active job from three independent sources: the poll timer, the
+  // read-back that follows a cancellation request, and the restore that adopts a persisted job.
+  // Their responses can settle in any order, so the merge below is what keeps the visible job
+  // state monotonic instead of letting a late frame undo a newer decision.
+  it("never lets a late non-terminal frame resurrect a settled job", () => {
+    const settled = job({ status: "Cancelled", progressPercent: 100, cancelledAt: "2026-01-01T00:00:09Z" });
+    const stalePoll = job({ status: "Running", progressPercent: 42 });
+    expect(mergeImageJobUpdate(settled, stalePoll)).toBe(settled);
+    expect(isImageTerminal(mergeImageJobUpdate(settled, stalePoll))).toBe(true);
+    // A cancellation that settled immediately also settles the persisted pointer's job.
+    expect(mergeImageJobUpdate(job({ status: "Succeeded", progressPercent: 100 }), stalePoll).status).toBe("Succeeded");
+    expect(mergeImageJobUpdate(job({ status: "Failed", errorCode: "IMAGE_GENERATION_FAILED" }), stalePoll).status).toBe("Failed");
+  });
+
+  it("treats the first settled terminal frame as durable against a contradictory late frame", () => {
+    const success = job({ status: "Succeeded", progressPercent: 100, resultJson: '{"assetId":"asset-1"}' });
+    // A stored result must not be yanked away by a late Failed frame for the same job id.
+    expect(mergeImageJobUpdate(success, job({ status: "Failed", errorCode: "IMAGE_GENERATION_FAILED" }))).toBe(success);
+    // Re-reading the same settled snapshot keeps the rendered result stable.
+    expect(mergeImageJobUpdate(success, job({ status: "Succeeded", progressPercent: 100, resultJson: '{"assetId":"asset-1"}' }))).toBe(success);
+    // The same job can still move forward while it is active.
+    expect(mergeImageJobUpdate(job({ status: "Queued", progressPercent: 0 }), job({ status: "Running", progressPercent: 10 })).status).toBe("Running");
+  });
+
+  it("keeps a requested cancellation across a stale frame without blocking its settlement", () => {
+    const requested = job({ status: "Running", cancellationRequested: true });
+    const beforeRequest = job({ status: "Running", cancellationRequested: false, progressPercent: 30 });
+    // The worker has not drained yet: the request must stay visible so the cancel control and
+    // its announcement do not flicker back to a plain in-progress job.
+    expect(mergeImageJobUpdate(requested, beforeRequest)).toBe(requested);
+    expect(canCancelImageJob(mergeImageJobUpdate(requested, beforeRequest))).toBe(false);
+    // The API's immediate path flips a Pending/Queued job straight to Cancelled and leaves the
+    // request flag unset, so the authoritative terminal frame must always win.
+    expect(mergeImageJobUpdate(requested, job({ status: "Cancelled", cancelledAt: "2026-01-01T00:00:09Z" })).status).toBe("Cancelled");
+  });
+
+  it("replaces the snapshot when the studio adopts a different job", () => {
+    const previous = job({ id: "image-job-1", status: "Succeeded", resultJson: '{"assetId":"asset-1"}' });
+    const retry = job({ id: "image-job-2", status: "Queued", progressPercent: 0, resultJson: null });
+    expect(mergeImageJobUpdate(previous, retry)).toBe(retry);
+    expect(mergeImageJobUpdate(null, retry)).toBe(retry);
+  });
+
+  it("bounds restore retries on transient failures and never retries an orphaned pointer", () => {
+    // A persisted active-job pointer is adopted with one plain read today: a transport or 5xx
+    // failure leaves the in-progress generation unexplained with no retry and no announced error.
+    expect(shouldRetryImageRestore(500, 0)).toBe(true);
+    expect(shouldRetryImageRestore(503, 0)).toBe(true);
+    expect(shouldRetryImageRestore(408, 0)).toBe(true);
+    expect(shouldRetryImageRestore(null, 0)).toBe(true);
+    // Orphaned and revoked pointers are settled by the #268 policy instead of being retried.
+    expect(shouldRetryImageRestore(401, 0)).toBe(false);
+    expect(shouldRetryImageRestore(403, 0)).toBe(false);
+    expect(shouldRetryImageRestore(404, 0)).toBe(false);
+    // The retry budget is finite and its backoff stays inside the polling ceiling.
+    expect(shouldRetryImageRestore(500, imageRestoreMaxAttempts - 1)).toBe(false);
+    expect(nextImageRestoreDelay(0)).toBe(imageJobPollIntervalMs);
+    expect(nextImageRestoreDelay(imageRestoreMaxAttempts - 1)).toBeLessThanOrEqual(imageJobPollMaxDelayMs);
   });
 
   it("parses only the safe Asset result fields", () => {

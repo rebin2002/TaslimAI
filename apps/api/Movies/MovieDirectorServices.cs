@@ -599,9 +599,13 @@ public sealed class MovieDirectorService(
         if (shot is null) throw new DirectorValidationException("Select a shot before creating a Director proposal.");
         if (request.BudgetLimitUsd is < 0) throw new DirectorValidationException("Budget limit cannot be negative.");
 
+        var scene = context.Context.Scenes.First(item => item.Shots.Any(candidate => candidate.Id == shot.Id));
+        var durationSeconds = shot.DurationSeconds ?? scene.DurationSeconds ?? Math.Min(movie.DurationSeconds, 60);
+        if (!MovieDurationBudgetPolicy.IsSupportedSingleClipDuration(durationSeconds))
+            throw new DirectorValidationException(MovieDurationBudgetPolicy.SingleClipDurationUnsupportedMessage);
         var recommendation = qualityPlanner.Recommend(new DirectorShotPlanningRequest(
             shot.Id, request.Importance, request.Complexity, request.BudgetSensitivity,
-            shot.DurationSeconds ?? Math.Min(movie.DurationSeconds, 60), context.Context.Guide.ContinuityRules.Length > 0,
+            durationSeconds, context.Context.Guide.ContinuityRules.Length > 0,
             request.RequestedQuality, request.BudgetLimitUsd));
         var rationale = recommendation.Reasons.ToArray();
         var now = DateTime.UtcNow;
@@ -619,7 +623,7 @@ public sealed class MovieDirectorService(
         {
             Id = Guid.NewGuid(), WorkspaceId = movie.WorkspaceId, MovieProjectId = movie.Id, DirectorProposalId = proposal.Id,
             ActionType = DirectorActionTypes.GenerateShot, Status = DirectorActionStatuses.PendingApproval, ApprovalRequired = true,
-            PayloadJson = JsonSerializer.Serialize(new DirectorGenerateShotPayload(shot.Id, recommendation.QualityLevel, shot.DurationSeconds ?? 60, recommendation.EstimatedCostUsd)), CreatedAt = now,
+            PayloadJson = JsonSerializer.Serialize(new DirectorGenerateShotPayload(shot.Id, recommendation.QualityLevel, durationSeconds, recommendation.EstimatedCostUsd)), CreatedAt = now,
         };
         proposal.Actions.Add(action);
         db.DirectorProposals.Add(proposal);
@@ -1091,7 +1095,13 @@ public sealed class MovieDirectorActionExecutor(TaslimDbContext db, IMovieStudio
         var shot = await db.MovieShots.AsNoTracking().Include(item => item.Scene).ThenInclude(item => item.MovieProject)
             .FirstOrDefaultAsync(item => item.Id == payload.ShotId && item.Scene.MovieProjectId == action.MovieProjectId && item.Scene.MovieProject.WorkspaceId == action.WorkspaceId, cancellationToken);
         if (shot is null) return new(false, "DIRECTOR_ACTION_TARGET_INVALID", "The Director shot target is invalid.", null);
-        var duration = Math.Clamp(shot.DurationSeconds ?? shot.Scene.DurationSeconds ?? Math.Min(shot.Scene.MovieProject.DurationSeconds, 60), 1, 3600);
+        var duration = shot.DurationSeconds ?? shot.Scene.DurationSeconds ?? Math.Min(shot.Scene.MovieProject.DurationSeconds, 60);
+        if (!MovieDurationBudgetPolicy.IsSupportedSingleClipDuration(duration))
+            return new(
+                false,
+                MovieDurationBudgetPolicy.SingleClipDurationUnsupportedCode,
+                MovieDurationBudgetPolicy.SingleClipDurationUnsupportedMessage,
+                null);
         var estimate = costEstimator.Estimate(new GenerationCostEstimationRequest(provider.Key, VideoDurationSeconds: duration * QualityMultiplier(payload.QualityLevel)));
         var result = await movies.GenerateShotAsync(executingUserId, shot.Id, new MovieStudioGenerationRequest($"Director: {payload.QualityLevel}", estimate.AmountUsd, estimate), cancellationToken, action.IdempotencyKey ?? $"director:{action.Id:N}");
         return result is null

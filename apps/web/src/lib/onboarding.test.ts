@@ -33,6 +33,14 @@ describe("onboarding workflows", () => {
     });
   });
 
+  it("keeps an installed Chinese interface preference independent from generation language", () => {
+    const stored = onboardingFormDefaults({ displayName: "Filmmaker", preferredLanguage: "zh-CN", defaultGenerationLanguage: "ar" }, "en");
+    expect(stored).toEqual({ displayName: "Filmmaker", preferredLanguage: "zh-CN", defaultGenerationLanguage: "ar" });
+
+    // Unknown identifiers must not be carried into the onboarding API payload.
+    expect(onboardingFormDefaults({ displayName: "Filmmaker", preferredLanguage: "unknown-pack", defaultGenerationLanguage: "ku" }, "en").preferredLanguage).toBe("en");
+  });
+
   it("localizes first-run copy in every supported interface language with RTL for Arabic and Kurdish", () => {
     for (const locale of locales) {
       expect(translate(locale, "onboarding.preferencesTitle")).not.toBe("onboarding.preferencesTitle");

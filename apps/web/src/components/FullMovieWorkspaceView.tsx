@@ -59,6 +59,7 @@ import { MovieExportsWorkspace } from "@/components/MovieExportsWorkspace";
 import { MovieTeamWorkspace } from "@/components/MovieTeamWorkspace";
 import { useLocale } from "@/components/LocaleProvider";
 import { buildMovieEditModel, clampMovieEditPlayhead, moveMovieEditSelection } from "@/lib/movieEditState";
+import { formatMovieTimecode } from "@/lib/movieSalvage";
 
 export const fullMovieModules = [
   { slug: "overview", icon: Gauge },
@@ -394,7 +395,7 @@ function revisionToDraft(revision: MovieStoryRevision): MovieStoryRevisionInput 
   return { premise: revision.premise, logline: revision.logline, synopsis: revision.synopsis, treatment: revision.treatment, authorship: revision.authorship, parentRevisionId: revision.parentRevisionId, changeSummary: revision.changeSummary ?? "", scenes: revision.scenes.map((scene) => ({ sceneIdentifier: scene.sceneIdentifier, actNumber: scene.actNumber, sequenceNumber: scene.sequenceNumber, movieSceneId: scene.movieSceneId, slugline: scene.slugline, synopsis: scene.synopsis, elements: scene.elements.map((element) => ({ elementType: element.elementType, content: element.content, characterName: element.characterName, parenthetical: element.parenthetical })) })) };
 }
 
-function StoryModule({ projectId, guideLocked }: { projectId: string; guideLocked: boolean }) {
+export function StoryModule({ projectId, guideLocked }: { projectId: string; guideLocked: boolean }) {
   const { t } = useLocale();
   const [story, setStory] = useState<MovieStory | null>(null);
   const [draft, setDraft] = useState<MovieStoryRevisionInput>(emptyStoryDraft);
@@ -411,6 +412,14 @@ function StoryModule({ projectId, guideLocked }: { projectId: string; guideLocke
   const [storySceneId, setStorySceneId] = useState<string | null>(null);
   const [storyBusy, setStoryBusy] = useState(false);
   const [focusAfterDirectorApply, setFocusAfterDirectorApply] = useState<StorySection | null>(null);
+  // Slow networks can leave a save or a revision read in flight while the editor
+  // moves on (typing, a newer revision click, or a project switch). The epoch
+  // fences those async continuations so a stale response never replays over the
+  // live editor, and draftRef lets a save confirm only the snapshot it sent.
+  const editorEpoch = useRef(0);
+  const draftRef = useRef(draft);
+  useEffect(() => { draftRef.current = draft; }, [draft]);
+  useEffect(() => { editorEpoch.current += 1; }, [projectId]);
 
   useEffect(() => {
     let mounted = true;
@@ -434,22 +443,32 @@ function StoryModule({ projectId, guideLocked }: { projectId: string; guideLocke
 
   async function saveDraft() {
     if (!story?.canEdit || saving) return;
+    const snapshot = draft;
+    const epoch = editorEpoch.current;
+    const superseded = () => epoch !== editorEpoch.current;
     setSaving(true);
     setError("");
     try {
       if (draftRevisionId) {
-        const saved = await api.updateMovieStoryDraft(projectId, draftRevisionId, draft);
-        setStory(await api.getMovieStory(projectId));
+        const saved = await api.updateMovieStoryDraft(projectId, draftRevisionId, snapshot);
+        const latest = await api.getMovieStory(projectId);
+        if (superseded()) return;
+        setStory(latest);
         setSelectedRevision(saved);
       } else {
-        const next = await api.createMovieStoryRevision(projectId, { ...draft, parentRevisionId: story.currentRevisionId });
+        const next = await api.createMovieStoryRevision(projectId, { ...snapshot, parentRevisionId: story.currentRevisionId });
+        if (superseded()) return;
         setStory(next);
         setSelectedRevision(next.currentRevision);
         setDraftRevisionId(next.currentRevisionId);
       }
-      setDirty(false);
+      // Clear dirty only while the editor still holds the exact snapshot the
+      // request sent; edits typed during a slow save keep the flag raised so the
+      // debounce effect re-arms and a follow-up save carries them to the server.
+      if (draftRef.current === snapshot) setDirty(false);
       setSavedAt(new Date());
     } catch (cause) {
+      if (superseded()) return;
       setError(cause instanceof Error ? cause.message : "The draft could not be saved.");
     } finally {
       setSaving(false);
@@ -457,11 +476,13 @@ function StoryModule({ projectId, guideLocked }: { projectId: string; guideLocke
   }
 
   useEffect(() => {
-    if (!dirty || !story?.canEdit || !draft.premise.trim() || !draft.logline.trim() || !draft.synopsis.trim() || !draft.treatment.trim()) return;
+    if (!dirty || saving || !story?.canEdit || !draft.premise.trim() || !draft.logline.trim() || !draft.synopsis.trim() || !draft.treatment.trim()) return;
     const timer = window.setTimeout(() => { void saveDraft(); }, 1800);
     return () => window.clearTimeout(timer);
     // The draft object is intentionally observed through the dirty flag to debounce editor input.
-  }, [dirty, draft]);
+    // 'saving' is a dependency so an edit that arrived mid-flight re-arms the timer the moment
+    // the in-flight save settles, giving the late keystrokes a follow-up save.
+  }, [dirty, saving, draft]);
 
   function updateDraft(patch: Partial<MovieStoryRevisionInput>) {
     setDraft((current) => ({ ...current, ...patch }));
@@ -519,13 +540,21 @@ function StoryModule({ projectId, guideLocked }: { projectId: string; guideLocke
   }
 
   async function inspectRevision(revisionId: string) {
+    const epoch = editorEpoch.current += 1;
+    const superseded = () => epoch !== editorEpoch.current;
     try {
       const revision = await api.getMovieStoryRevision(projectId, revisionId);
+      // Only the most recent revision click may take over the editor; a slower
+      // response for an earlier click must not replay its content on top.
+      if (superseded()) return;
       setSelectedRevision(revision);
       setDraft(revisionToDraft(revision));
       setDraftRevisionId(revision.status === "Draft" ? revision.id : null);
       setDirty(false);
-    } catch (cause) { setError(cause instanceof Error ? cause.message : "That revision could not be opened."); }
+    } catch (cause) {
+      if (superseded()) return;
+      setError(cause instanceof Error ? cause.message : "That revision could not be opened.");
+    }
   }
 
   async function createStoryProposal() {
@@ -656,7 +685,7 @@ const emptyCharacterDraft: CharacterDraft = { name: "", role: "", description: "
 const emptyStateDraft: StateDraft = { key: "", label: "", wardrobe: "", ageOrTimeState: "", appearance: "", injuryOrCondition: "", locationOrStoryState: "", continuityNotes: "" };
 const emptyProductionSheetDraft: ProductionSheetDraft = { canonicalIdentityFaceAssetId: null, bodyReferenceAssetId: null, frontReferenceAssetId: null, sideReferenceAssetId: null, backReferenceAssetId: null, looks: [], provenanceNote: "" };
 
-function CastModule({ projectId }: { projectId: string }) {
+export function CastModule({ projectId }: { projectId: string }) {
   const { t } = useLocale();
   const [cast, setCast] = useState<MovieCast | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -757,7 +786,7 @@ function CastModule({ projectId }: { projectId: string }) {
   const lockedStateFields = new Set((detail?.continuityLocks ?? []).filter((item) => item.characterStateId === (editingStateId ?? lock.characterStateId)).map((item) => item.fieldKey));
   return <div className="movie-module-stack movie-cast-room">
     <section className="movie-cast-hero"><div><span className="movie-workspace-kicker">{t("movieModule.cast.eyebrow")} · {cast.characters.length} records</span><h3>{t("movieModule.cast.title")}</h3><p>{t("movieModule.cast.description")}</p></div><div className="movie-cast-hero-stat"><strong>{cast.characters.filter((item) => item.referenceAssetCount > 0).length}</strong><span>{t("movieDeep.withReferences")}</span></div></section>
-    <div className="movie-cast-layout"><section className="movie-cast-index movie-workspace-section"><div className="movie-section-head"><div><span className="movie-workspace-kicker">{t("movieModule.cast.label")}</span><h3>{cast.characters.length ? t("movieBody.kit.chooseRecord") : t("movieBody.noRecords")}</h3></div><span className="movie-section-count">{cast.characters.length} total</span></div>{cast.characters.length ? <div className="movie-cast-card-grid">{cast.characters.map((item) => <button key={item.id} type="button" className={`movie-cast-card ${selectedId === item.id ? "is-selected" : ""}`} onClick={() => void selectCharacter(item.id)}><CharacterAssetPreview assetId={item.referenceAssetId} name={item.name} /><span className="movie-record-index">{item.role || t("movieDeep.roleNotSet")}</span><strong>{item.name}</strong><small>{item.description}</small><div className="movie-cast-card-meta"><span>{item.stateCount} state{item.stateCount === 1 ? "" : "s"}</span><span>{item.lockedFactCount ? <><LockKeyhole size={11} /> {item.lockedFactCount} locked</> : t("movieDeep.noLocks")}</span></div><div className="movie-cast-current-state"><span>{t("movieDeep.currentState")}</span><strong>{item.latestState?.label || item.latestState?.key || t("movieDeep.noStateSet")}</strong></div>{item.relationshipTypes.length > 0 && <em>{item.relationshipTypes.join(" · ")}</em>}</button>)}</div> : <EmptyModule title={t("movieDeep.noCastRecords")} text={t("movieDeep.createCharacter")} />}</section>
+    <div className="movie-cast-layout"><section className="movie-cast-index movie-workspace-section"><div className="movie-section-head"><div><span className="movie-workspace-kicker">{t("movieModule.cast.label")}</span><h3>{cast.characters.length ? t("movieBody.kit.chooseRecord") : t("movieBody.noRecords")}</h3></div><span className="movie-section-count">{cast.characters.length} total</span></div>{cast.characters.length ? <div className="movie-cast-card-grid" role="group" aria-label={t("movieModule.cast.label")}>{cast.characters.map((item) => <button key={item.id} type="button" aria-pressed={selectedId === item.id} className={`movie-cast-card ${selectedId === item.id ? "is-selected" : ""}`} onClick={() => void selectCharacter(item.id)}><CharacterAssetPreview assetId={item.referenceAssetId} name={item.name} /><span className="movie-record-index">{item.role || t("movieDeep.roleNotSet")}</span><strong>{item.name}</strong><small>{item.description}</small><div className="movie-cast-card-meta"><span>{item.stateCount} state{item.stateCount === 1 ? "" : "s"}</span><span>{item.lockedFactCount ? <><LockKeyhole size={11} /> {item.lockedFactCount} locked</> : t("movieDeep.noLocks")}</span></div><div className="movie-cast-current-state"><span>{t("movieDeep.currentState")}</span><strong>{item.latestState?.label || item.latestState?.key || t("movieDeep.noStateSet")}</strong></div>{item.relationshipTypes.length > 0 && <em>{item.relationshipTypes.join(" · ")}</em>}</button>)}</div> : <EmptyModule title={t("movieDeep.noCastRecords")} text={t("movieDeep.createCharacter")} />}</section>
       <section className="movie-cast-editor movie-workspace-section"><div className="movie-section-head"><div><span className="movie-workspace-kicker">{t("movieDeep.characterCard")}</span><h3>{detail?.name || t("movieDeep.createCharacter")}</h3></div>{detail && <span className="movie-section-count">{detail.continuityLocks.length} locked facts</span>}</div><CharacterEditor draft={draft} lockedFields={lockedCardFields} onChange={setDraft} onSave={() => void saveCharacter()} saving={saving} assets={assets} onToggleAsset={toggleAsset} />{detail && <ProductionSheetEditor detail={detail} draft={productionSheetDraft} onChange={setProductionSheetDraft} assets={assets} saving={productionSheetSaving} onSave={() => void saveProductionSheet()} onStatusChange={(action) => void updateProductionSheetStatus(action)} />}<StateEditor detail={detail} draft={stateDraft} lockedFields={lockedStateFields} editingStateId={editingStateId} onChange={setStateDraft} onEdit={(state) => { setEditingStateId(state.id); setStateDraft(state); }} onSave={() => void saveState()} saving={saving} /><CastSecondaryEditors detail={detail} cast={cast} relationship={relationship} onRelationshipChange={setRelationship} onSaveRelationship={() => void saveRelationship()} lock={lock} onLockChange={setLock} onSaveLock={() => void saveLock()} saving={saving} /></section></div>
     {error && <div className="movie-workspace-error-inline"><XCircleIcon /> {error}</div>}
   </div>;
@@ -1227,9 +1256,7 @@ function MovieTakeCard({ take, shot, busyKey, onAction }: { take: MovieTake; sho
 }
 
 function formatEditTime(seconds: number) {
-  const minutes = Math.floor(seconds / 60);
-  const remainder = Math.floor(seconds % 60);
-  return `${String(minutes).padStart(2, "0")}:${String(remainder).padStart(2, "0")}`;
+  return formatMovieTimecode(Math.max(0, Math.floor(seconds * 1000)), { showMilliseconds: false });
 }
 
 function EditModule({ project, onRefresh }: { project: MovieProject; onRefresh: () => Promise<void> }) {

@@ -4,12 +4,14 @@ import {
   MAX_REFERENCE_AUDIO_BYTES,
   REFERENCE_AUDIO_ACCEPT,
   REFERENCE_AUDIO_EXTENSION_MIME_TYPES,
+  REFERENCE_AUDIO_MIME_ALIASES,
   clearReferenceAudioSelection,
   emptyReferenceAudioState,
   extensionForAudioMime,
   extensionOf,
   formatReferenceAudioSize,
   isReferenceAudioCandidate,
+  isReferenceAudioMimeForExtension,
   localCandidateFromFile,
   localReferenceAudioId,
   referenceAudioPreviewUrl,
@@ -80,6 +82,87 @@ describe("music reference audio state", () => {
     expect(isReferenceAudioCandidate(localFile("loop.wav", 1000, "audio/wav"))).toBe(true);
     // An undeclared MIME is accepted like the API does for octet-stream uploads.
     expect(isReferenceAudioCandidate(localFile("loop.wav", 1000, ""))).toBe(true);
+  });
+
+  // Synthetic handles only: nothing here is a real recording, and no file
+  // leaves the browser, so the whole boundary is reproducible in Node.
+  it("accepts every supported container declared with a browser's own alias type", () => {
+    // Each accepted format, asserted through both the canonical MIME and the
+    // aliases browsers and shared MIME databases actually report for it.
+    const declared = [
+      ["song.mp3", "audio/mpeg"],
+      ["song.MP3", "audio/mp3"],
+      ["song.mp3", "audio/x-mpeg"],
+      ["drum.wav", "audio/wav"],
+      ["drum.wav", "audio/x-wav"],
+      ["drum.wav", "audio/wave"],
+      ["voice.m4a", "audio/mp4"],
+      // Safari/WebKit on names an .m4a this way; canonical-only matching made
+      // it an unsupported file the user could not preview.
+      ["voice.m4a", "audio/x-m4a"],
+      ["loop.ogg", "audio/ogg"],
+      ["loop.ogg", "audio/vorbis"],
+      ["loop.ogg", "audio/opus"],
+      // An opaque declaration names no other content, so it must not be
+      // contradicted here any more than the API contradicts it on upload.
+      ["loop.mp3", "application/octet-stream"],
+    ];
+    for (const [name, mimeType] of declared) {
+      const candidate = localFile(name, 1000, mimeType);
+      expect([name, mimeType, referenceAudioSupportCheck(candidate).reasonKey]).toEqual([name, mimeType, null]);
+      expect(isReferenceAudioCandidate(candidate)).toBe(true);
+    }
+  });
+
+  it("still contradicts a declared type that names different content", () => {
+    // An alias never widens the boundary past the container itself.
+    for (const [name, mimeType] of [
+      ["loop.mp3", "video/mp4"],
+      ["loop.mp3", "text/plain"],
+      ["loop.mp3", "audio/x-m4a"],
+      ["loop.wav", "audio/mpeg"],
+      ["clip.m4a", "audio/wav"],
+      ["clip.ogg", "audio/mp4"],
+      ["clip.ogg", "image/png"],
+    ]) {
+      expect(referenceAudioSupportCheck(localFile(name, 1000, mimeType)).reasonKey)
+        .toBe("music.reference.reason.mimeMismatch");
+    }
+    expect(isReferenceAudioMimeForExtension(".m4a", "audio/x-m4a")).toBe(true);
+    expect(isReferenceAudioMimeForExtension(".m4a", "audio/mpeg")).toBe(false);
+    expect(isReferenceAudioMimeForExtension(".flac", "audio/flac")).toBe(false);
+  });
+
+  it("keeps the alias table and the accept filter describing one supported set", () => {
+    // The picker filter, the hint copy's formats and the alias table must stay
+    // the same four containers, so a file the dialog offers is never refused
+    // for a reason the announced alert cannot name.
+    expect(Object.keys(REFERENCE_AUDIO_MIME_ALIASES)).toEqual(Object.keys(REFERENCE_AUDIO_EXTENSION_MIME_TYPES));
+    expect(REFERENCE_AUDIO_ACCEPT.split(",")).toEqual(Object.keys(REFERENCE_AUDIO_EXTENSION_MIME_TYPES));
+    for (const [extension, mime] of Object.entries(REFERENCE_AUDIO_EXTENSION_MIME_TYPES)) {
+      expect(REFERENCE_AUDIO_MIME_ALIASES[extension]).toContain(mime);
+      expect(REFERENCE_AUDIO_MIME_ALIASES[extension][0]).toBe(mime);
+    }
+  });
+
+  it("announces a selectable or rejected outcome for every supported container", () => {
+    // The panel renders a rejection as a live alert and a selection inside the
+    // polite region, so each attempt must resolve to exactly one of the two:
+    // never a silent refusal with no key, and never a selection that also
+    // carries a stale rejection reason the reader would announce.
+    for (const mimeType of ["audio/mp4", "audio/x-m4a"]) {
+      const candidate = localFile("take.m4a", 2048, mimeType);
+      const result = selectReferenceAudio(emptyReferenceAudioState, candidate, () => "blob:take");
+      expect(result.selected).toBe(true);
+      expect(result.rejected).toBe(false);
+      expect(result.state.candidate?.id).toBe(candidate.id);
+      expect(result.state.rejectedReasonKey).toBeNull();
+    }
+    const refused = selectReferenceAudio(emptyReferenceAudioState, localFile("take.m4a", 2048, "video/mp4"), () => "blob:take");
+    expect(refused.selected).toBe(false);
+    expect(refused.rejected).toBe(true);
+    expect(refused.state.rejectedReasonKey).toBe("music.reference.reason.mimeMismatch");
+    expect(refused.createdObjectUrl).toBeNull();
   });
 
   it("accepts only own private, previewable audio assets as stored candidates", () => {

@@ -2,7 +2,7 @@
 set -euo pipefail
 
 BASE_SHA="5d4c53ce73fb3d02561c122fa1ed68f70cd9b98f"
-EXPECTED_BRANCH="feature/taslim-autopilot-next-wave"
+EXPECTED_BRANCH="${NEXT_WAVE_EXPECTED_BRANCH:-feature/taslim-autopilot-next-wave}"
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
