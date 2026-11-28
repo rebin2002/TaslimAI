@@ -99,16 +99,128 @@ pg18_classify_ref() {
 # the command word through `$name`, so `local name` would break execution.
 pg18_is_disposable_db_name() {
   local candidate="${1:-}"
-  case "$candidate" in
-    taslim-pg18-* | taslim_pg18_*) return 0 ;;
-    *) return 1 ;;
-  esac
+  [[ ${#candidate} -le 63 ]] || return 1
+  [[ "$candidate" =~ ^taslim_pg18_[A-Za-z0-9][A-Za-z0-9_-]*$ || \
+     "$candidate" =~ ^taslim-pg18-[A-Za-z0-9][A-Za-z0-9_-]*$ ]]
 }
 
-# Connection field access: prints the value of field <2> from kv string <1>.
+# SQL is constructed only from database names accepted by the strict
+# disposable-name contract above. Quoting remains explicit at every SQL site.
+pg18_sql_identifier() {
+  local candidate="${1:-}"
+  pg18_is_disposable_db_name "$candidate" || {
+    printf 'PG18 parity lane refused: database name is not a safe disposable SQL identifier.\n' >&2
+    return 1
+  }
+  printf '"%s"\n' "$candidate"
+}
+
+# The same restricted character set makes this SQL literal unambiguous.
+pg18_sql_literal() {
+  local candidate="${1:-}"
+  pg18_is_disposable_db_name "$candidate" || {
+    printf 'PG18 parity lane refused: database name is not a safe disposable SQL literal.\n' >&2
+    return 1
+  }
+  printf "'%s'\n" "$candidate"
+}
+
+# Accept exactly one canonical Npgsql-style connection string containing each
+# of Host, Port, Database, Username, and Password once. Aliases, duplicate
+# keys, whitespace/quoting, URI syntax, and unknown fields are rejected rather
+# than letting psql and Npgsql interpret the same input differently. The
+# returned string is normalized to a fixed field order and is the only form
+# the harness may pass to either client.
+pg18_canonical_connection() {
+  local conn="${1:-}" part key value host port db username password port_number
+  local -a parts=()
+  local -A fields=()
+  if [[ -z "$conn" ]]; then
+    printf 'PG18 parity lane refused: empty connection string.\n' >&2
+    return 1
+  fi
+  if [[ "$conn" == *[[:cntrl:]]* ]]; then
+    printf 'PG18 parity lane refused: connection string contains a control character.\n' >&2
+    return 1
+  fi
+  if [[ "$conn" == *';' ]]; then
+    printf 'PG18 parity lane refused: trailing empty connection field.\n' >&2
+    return 1
+  fi
+  IFS=';' read -r -a parts <<< "$conn"
+  if [[ ${#parts[@]} -ne 5 ]]; then
+    printf 'PG18 parity lane refused: connection must contain exactly five supported fields.\n' >&2
+    return 1
+  fi
+  for part in "${parts[@]}"; do
+    if [[ "$part" =~ ^(Host|Port|Database|Username|Password)=([^;[:space:]]+)$ ]]; then
+      key="${BASH_REMATCH[1]}"
+      value="${BASH_REMATCH[2]}"
+    else
+      printf 'PG18 parity lane refused: unsupported connection field or syntax.\n' >&2
+      return 1
+    fi
+    if [[ -n "${fields[$key]+present}" ]]; then
+      printf 'PG18 parity lane refused: duplicate connection field.\n' >&2
+      return 1
+    fi
+    fields["$key"]="$value"
+  done
+  for key in Host Port Database Username Password; do
+    if [[ -z "${fields[$key]+present}" ]]; then
+      printf 'PG18 parity lane refused: a required connection field is missing.\n' >&2
+      return 1
+    fi
+  done
+
+  host="${fields[Host]}"
+  port="${fields[Port]}"
+  db="${fields[Database]}"
+  username="${fields[Username]}"
+  password="${fields[Password]}"
+  case "$host" in
+    localhost | 127.0.0.1 | host.docker.internal | postgres | pg15 | pg18 | db) ;;
+    *)
+      printf 'PG18 parity lane refused: host is not a disposable local/service host.\n' >&2
+      return 1
+      ;;
+  esac
+  if [[ ! "$port" =~ ^[0-9]{1,5}$ ]]; then
+    printf 'PG18 parity lane refused: port is not a valid decimal port.\n' >&2
+    return 1
+  fi
+  port_number=$((10#$port))
+  if (( port_number < 1 || port_number > 65535 )); then
+    printf 'PG18 parity lane refused: port is outside the valid TCP range.\n' >&2
+    return 1
+  fi
+  if ! pg18_is_disposable_db_name "$db"; then
+    printf 'PG18 parity lane refused: database name lacks the disposable prefix or contains unsupported identifier characters.\n' >&2
+    return 1
+  fi
+  if [[ ! "$username" =~ ^[A-Za-z_][A-Za-z0-9_-]{0,62}$ ]]; then
+    printf 'PG18 parity lane refused: username contains unsupported characters.\n' >&2
+    return 1
+  fi
+  if [[ ! "$password" =~ ^[A-Za-z0-9._~-]{1,128}$ ]]; then
+    printf 'PG18 parity lane refused: password contains unsupported connection-string characters.\n' >&2
+    return 1
+  fi
+
+  printf 'Host=%s;Port=%s;Database=%s;Username=%s;Password=%s\n' \
+    "$host" "$port_number" "$db" "$username" "$password"
+}
+
+# Connection field access returns values only from a fully validated canonical
+# connection string; callers cannot accidentally revive the old first-match
+# parser.
 pg18_conn_field() {
-  printf '%s\n' "${1:-}" | tr ';' '\n' \
-    | sed -n "s/^[[:space:]]*$2=\(.*\)$/\1/p" | head -1
+  local canonical field="${2:-}"
+  case "$field" in Host | Port | Database | Username | Password) ;;
+    *) printf 'PG18 parity lane refused: unsupported connection field lookup.\n' >&2; return 1 ;;
+  esac
+  canonical="$(pg18_canonical_connection "${1:-}")" || return 1
+  printf '%s\n' "$canonical" | tr ';' '\n' | sed -n "s/^${field}=//p"
 }
 
 # Reject any connection string whose database is not disposable or whose host
@@ -116,23 +228,5 @@ pg18_conn_field() {
 # Postgres) never match, so an accidentally inherited DATABASE_URL fails the
 # run instead of migrating a real database.
 pg18_assert_disposable_connection() {
-  local conn="${1:-}" host db
-  if [[ -z "$conn" ]]; then
-    printf 'PG18 parity lane refused: empty connection string.\n' >&2
-    return 1
-  fi
-  host="$(pg18_conn_field "$conn" Host)"
-  db="$(pg18_conn_field "$conn" Database)"
-  case "$host" in
-    localhost | 127.0.0.1 | host.docker.internal | postgres | pg15 | pg18 | db) ;;
-    *)
-      printf 'PG18 parity lane refused: host %s is not a disposable local/service host.\n' "${host:-<missing>}" >&2
-      return 1
-      ;;
-  esac
-  if ! pg18_is_disposable_db_name "$db"; then
-    printf 'PG18 parity lane refused: database %s lacks the disposable prefix.\n' "${db:-<missing>}" >&2
-    return 1
-  fi
-  return 0
+  pg18_canonical_connection "${1:-}" >/dev/null
 }

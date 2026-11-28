@@ -91,42 +91,65 @@ context="$(pg18_classify_ref \
 printf '  lane context: %s\n' "$context"
 
 # --- connection helpers -----------------------------------------------------
-conn_psql_args() { # <conn> -> psql/pg_dump host/port/user args
-  printf -- '-h %s -p %s -U %s' \
-    "$(pg18_conn_field "$1" Host)" "$(pg18_conn_field "$1" Port)" "$(pg18_conn_field "$1" Username)"
+PSQL_ARGS=()
+conn_psql_args() { # <conn> -> validated psql/pg_dump host/port/user args
+  PSQL_ARGS=(
+    -h "$(pg18_conn_field "$1" Host)"
+    -p "$(pg18_conn_field "$1" Port)"
+    -U "$(pg18_conn_field "$1" Username)"
+  )
 }
 
 with_database() { # <conn> <new-database-name>
-  printf '%s\n' "${1//Database=$(pg18_conn_field "$1" Database)/Database=$2}"
+  local conn host port username password new_db="${2:-}"
+  conn="$(pg18_canonical_connection "${1:-}")" || return 1
+  pg18_is_disposable_db_name "$new_db" || {
+    printf 'PG18 parity lane refused: derived database name is not a safe disposable identifier.\n' >&2
+    return 1
+  }
+  host="$(pg18_conn_field "$conn" Host)"
+  port="$(pg18_conn_field "$conn" Port)"
+  username="$(pg18_conn_field "$conn" Username)"
+  password="$(pg18_conn_field "$conn" Password)"
+  printf 'Host=%s;Port=%s;Database=%s;Username=%s;Password=%s\n' \
+    "$host" "$port" "$new_db" "$username" "$password"
 }
 
 server_major() { # <conn>
   local out
-  out="$(PGPASSWORD="$(pg18_conn_field "$1" Password)" psql $(conn_psql_args "$1") \
+  conn_psql_args "$1"
+  out="$(PGPASSWORD="$(pg18_conn_field "$1" Password)" psql "${PSQL_ARGS[@]}" \
     -d "$(pg18_conn_field "$1" Database)" -tAc 'SHOW server_version;' 2>/dev/null)" || return 1
   printf '%s\n' "${out%%.*}"
 }
 
 ensure_db() { # <conn> creates the disposable database when absent
-  local db args
+  local db quoted_db quoted_literal
+  local -a args=()
   db="$(pg18_conn_field "$1" Database)"
-  args="$(conn_psql_args "$1")"
-  PGPASSWORD="$(pg18_conn_field "$1" Password)" psql $args -d postgres -tAc \
-    "SELECT 1 FROM pg_database WHERE datname='$db'" | grep -q 1 \
-    || PGPASSWORD="$(pg18_conn_field "$1" Password)" psql $args -d postgres \
-         -c "CREATE DATABASE \"$db\"" >/dev/null
+  quoted_db="$(pg18_sql_identifier "$db")" || return 1
+  quoted_literal="$(pg18_sql_literal "$db")" || return 1
+  conn_psql_args "$1"
+  args=("${PSQL_ARGS[@]}")
+  PGPASSWORD="$(pg18_conn_field "$1" Password)" psql "${args[@]}" -d postgres -tAc \
+    "SELECT 1 FROM pg_database WHERE datname=$quoted_literal" | grep -q 1 \
+    || PGPASSWORD="$(pg18_conn_field "$1" Password)" psql "${args[@]}" -d postgres \
+         -c "CREATE DATABASE $quoted_db" >/dev/null
 }
 
 # Recreate the test database from empty so EnsureCreated() builds the current
 # model. Allowed only after the disposable prefix guard passed, which is what
 # makes the DROP safe.
 reset_db() { # <conn>
-  local db args
+  local db quoted_db
+  local -a args=()
   pg18_assert_disposable_connection "$1" || exit 1
   db="$(pg18_conn_field "$1" Database)"
-  args="$(conn_psql_args "$1")"
-  PGPASSWORD="$(pg18_conn_field "$1" Password)" psql $args -d postgres -c \
-    "DROP DATABASE IF EXISTS \"$db\" WITH (FORCE)" >/dev/null
+  quoted_db="$(pg18_sql_identifier "$db")" || exit 1
+  conn_psql_args "$1"
+  args=("${PSQL_ARGS[@]}")
+  PGPASSWORD="$(pg18_conn_field "$1" Password)" psql "${args[@]}" -d postgres -c \
+    "DROP DATABASE IF EXISTS $quoted_db WITH (FORCE)" >/dev/null
   ensure_db "$1"
 }
 
@@ -138,7 +161,10 @@ assert_major() { # <conn> <label> <expected-major>
 }
 
 dump_columns() { # <conn> <out-file> stable per-column type inventory
-  PGPASSWORD="$(pg18_conn_field "$1" Password)" psql $(conn_psql_args "$1") \
+  local -a args=()
+  conn_psql_args "$1"
+  args=("${PSQL_ARGS[@]}")
+  PGPASSWORD="$(pg18_conn_field "$1" Password)" psql "${args[@]}" \
     -d "$(pg18_conn_field "$1" Database)" -tAc \
     "select table_name, column_name, data_type, coalesce(character_maximum_length::text,'-'), coalesce(numeric_precision::text,'-'), coalesce(numeric_scale::text,'-'), is_nullable from information_schema.columns where table_schema='public' order by 1,2" > "$2"
 }
@@ -149,12 +175,19 @@ for name in "${urls[@]}"; do
   if [[ -n "${!name:-}" ]]; then base="${!name}"; break; fi
 done
 [[ -n "$base" ]] || fail "no target connection string supplied for mode '$mode'"
+base="$(pg18_canonical_connection "$base")" || exit 1
 pg18_assert_disposable_connection "$base" || exit 1
 
 base_db="$(pg18_conn_field "$base" Database)"
 test_conn="$base"
-ladder_conn="${PG18_LADDER_URL:-$(with_database "$base" "${base_db}_ladder")}"
-if [[ "$ladder_conn" == "$test_conn" ]]; then
+if [[ -n "${PG18_LADDER_URL:-}" ]]; then
+  ladder_conn="$(pg18_canonical_connection "$PG18_LADDER_URL")" || exit 1
+else
+  ladder_conn="$(with_database "$base" "${base_db}_ladder")" || exit 1
+fi
+test_db="$(pg18_conn_field "$test_conn" Database)"
+ladder_db="$(pg18_conn_field "$ladder_conn" Database)"
+if [[ "$ladder_db" == "$test_db" ]]; then
   fail "the migration ladder and the test run must use different databases"
 fi
 pg18_assert_disposable_connection "$ladder_conn" || exit 1
@@ -166,20 +199,21 @@ printf '%s\n' "--- test database:   $(pg18_conn_field "$test_conn" Database)"
 printf '%s\n' "--- ladder database: $(pg18_conn_field "$ladder_conn" Database)"
 
 if [[ "$mode" == "schema-diff" ]]; then
+  pg15_conn="$(pg18_canonical_connection "${PG15_URL:-}")" || exit 1
+  pg18_conn="$(pg18_canonical_connection "${PG18_URL:-}")" || exit 1
   step "PostgreSQL 18 identity"
-  ensure_db "${PG18_URL:-}"
-  assert_major "${PG18_URL:-}" "PG18 target" 18
+  ensure_db "$pg18_conn"
+  assert_major "$pg18_conn" "PG18 target" 18
   step "PostgreSQL 15 control identity"
-  pg18_assert_disposable_connection "${PG15_URL:-}" || exit 1
-  ensure_db "${PG15_URL:-}"
-  assert_major "${PG15_URL:-}" "PG15 control" 15
+  ensure_db "$pg15_conn"
+  assert_major "$pg15_conn" "PG15 control" 15
   step "Migration ladder on PG15 control"
-  dotnet ef database update --project apps/api --startup-project apps/api --connection "$PG15_URL"
+  dotnet ef database update --project apps/api --startup-project apps/api --connection "$pg15_conn"
   step "Migration ladder on PG18"
-  dotnet ef database update --project apps/api --startup-project apps/api --connection "$PG18_URL"
+  dotnet ef database update --project apps/api --startup-project apps/api --connection "$pg18_conn"
   step "Schema parity diff"
-  dump_columns "$PG15_URL" /tmp/cols15.txt
-  dump_columns "$PG18_URL" /tmp/cols18.txt
+  dump_columns "$pg15_conn" /tmp/cols15.txt
+  dump_columns "$pg18_conn" /tmp/cols18.txt
   if diff -u /tmp/cols15.txt /tmp/cols18.txt > /tmp/pg18-schema.diff; then
     printf '  column-level schema identical across PG15 and PG18 (%s columns)\n' "$(wc -l < /tmp/cols18.txt)"
   else

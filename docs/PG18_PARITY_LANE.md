@@ -41,6 +41,13 @@ without waiting for it.
   prefix on a loopback/service host. An inherited production URL is refused
   before any connection is opened, so "no migrations on real databases" is
   enforced by the harness, not by convention.
+* Connection strings are intentionally limited to exactly one each of
+  `Host`, `Port`, `Database`, `Username`, and `Password`; aliases, duplicate
+  keys, URI syntax, extra fields, whitespace/quoted values, and unsupported
+  characters are rejected. The validated values are normalized to one fixed
+  connection string before either psql or EF receives them. Disposable database
+  names are restricted to SQL-safe characters and are explicitly quoted for
+  identifier/literal use.
 * For every regression mode, the harness reads `server_version` from both the
   migration-ladder server and the freshly reset test server, requiring the
   mode's expected major on both before the migration or test evidence is
@@ -53,6 +60,7 @@ without waiting for it.
 
 ```bash
 bash scripts/pg18-parity-gate.test.sh          # offline guard contracts, no DB
+bash scripts/pg18-parity-workflow-plan.test.sh # workflow shell/data boundary, no Actions or DB
 bash scripts/pg18-parity-gate.major-split.test.sh --strict # offline PG18/PG15 split negative control
 bash scripts/pg18-parity-gate.matched-controls.test.sh # offline matched PG18 and PG15 positive controls
 bash scripts/pg18-parity-gate.sh autopilot            # PG18: Autopilot + ladder

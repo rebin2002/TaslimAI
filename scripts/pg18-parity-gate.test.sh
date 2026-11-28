@@ -76,26 +76,67 @@ expect_refused "plain production database name refused" \
   pg18_is_disposable_db_name "taslim"
 expect_refused "empty database name refused" \
   pg18_is_disposable_db_name ""
+expect_refused "SQL metacharacters in database name refused" \
+  pg18_is_disposable_db_name 'taslim_pg18_safe";DROP DATABASE taslim'
+expect_refused "database name over PostgreSQL identifier limit refused" \
+  pg18_is_disposable_db_name "taslim_pg18_$(printf '%060d' 1)"
 
 expect_ok    "loopback disposable connection accepted" \
-  pg18_assert_disposable_connection "Host=localhost;Port=5432;Database=taslim_pg18_billing;Username=taslim;Password=change-me"
+  pg18_assert_disposable_connection "Host=localhost;Port=5432;Database=taslim_pg18_billing;Username=taslim;Password=offline-only"
 expect_ok    "service-host disposable connection accepted" \
-  pg18_assert_disposable_connection "Host=postgres;Port=5432;Database=taslim_pg18_autopilot;Username=taslim;Password=change-me"
+  pg18_assert_disposable_connection "Host=postgres;Port=5432;Database=taslim_pg18_autopilot;Username=taslim;Password=offline-only"
 expect_refused "railway production URL refused" \
-  pg18_assert_disposable_connection "Host=containers.vpc-railway.internal;Port=5432;Database=taslim;Username=postgres;Password=real"
+  pg18_assert_disposable_connection "Host=containers.vpc-railway.internal;Port=5432;Database=taslim_pg18_billing;Username=taslim;Password=offline-only"
 expect_refused "non-disposable database on loopback refused" \
-  pg18_assert_disposable_connection "Host=localhost;Port=5432;Database=taslim;Username=taslim;Password=change-me"
+  pg18_assert_disposable_connection "Host=localhost;Port=5432;Database=taslim;Username=taslim;Password=offline-only"
 expect_refused "empty connection refused" \
   pg18_assert_disposable_connection ""
 
+echo "== strict connection-string boundary =="
+expect_refused "duplicate Host key refused" \
+  pg18_canonical_connection "Host=localhost;Host=postgres;Database=taslim_pg18_safe;Username=taslim;Password=offline-only"
+expect_refused "duplicate Database key refused" \
+  pg18_canonical_connection "Host=localhost;Port=5432;Database=taslim_pg18_one;Database=taslim_pg18_two;Password=offline-only"
+expect_refused "Server alias refused" \
+  pg18_canonical_connection "Server=localhost;Port=5432;Database=taslim_pg18_safe;Username=taslim;Password=offline-only"
+expect_refused "Initial Catalog alias refused" \
+  pg18_canonical_connection "Host=localhost;Port=5432;Initial Catalog=taslim_pg18_safe;Username=taslim;Password=offline-only"
+expect_refused "unsupported connection field refused" \
+  pg18_canonical_connection "Host=localhost;Port=5432;Database=taslim_pg18_safe;Username=taslim;Password=offline-only;SSL Mode=Require"
+expect_refused "missing required connection field refused" \
+  pg18_canonical_connection "Host=localhost;Database=taslim_pg18_safe;Username=taslim;Password=offline-only"
+expect_refused "non-decimal port refused" \
+  pg18_canonical_connection "Host=localhost;Port=not-a-port;Database=taslim_pg18_safe;Username=taslim;Password=offline-only"
+expect_refused "port outside TCP range refused" \
+  pg18_canonical_connection "Host=localhost;Port=65536;Database=taslim_pg18_safe;Username=taslim;Password=offline-only"
+expect_refused "semicolon-bearing password / field injection refused" \
+  pg18_canonical_connection "Host=localhost;Port=5432;Database=taslim_pg18_safe;Username=taslim;Password=offline-only;Host=postgres"
+expect_refused "unsafe SQL identifier in connection refused" \
+  pg18_canonical_connection 'Host=localhost;Port=5432;Database=taslim_pg18_safe";Username=taslim;Password=offline-only'
+expect_refused "newline-tailed connection string refused" \
+  pg18_canonical_connection $'Host=localhost;Port=5432;Database=taslim_pg18_safe;Username=taslim;Password=offline-only\n;Host=postgres'
+
+canonical="$(pg18_canonical_connection "Password=offline-only;Username=taslim;Database=taslim_pg18_reordered;Port=05432;Host=localhost")"
+if [[ "$canonical" == "Host=localhost;Port=5432;Database=taslim_pg18_reordered;Username=taslim;Password=offline-only" ]]; then
+  printf '  ok   reordered fields normalize to one canonical connection\n'; pass=$((pass + 1))
+else
+  printf '  FAIL canonical connection was %s\n' "$canonical"; fail_count=$((fail_count + 1))
+fi
+if [[ "$(pg18_sql_identifier "taslim_pg18_billing")" == '"taslim_pg18_billing"' \
+   && "$(pg18_sql_literal "taslim_pg18_billing")" == "'taslim_pg18_billing'" ]]; then
+  printf '  ok   disposable database SQL identifier and literal are quoted\n'; pass=$((pass + 1))
+else
+  printf '  FAIL disposable database SQL quoting contract failed\n'; fail_count=$((fail_count + 1))
+fi
+
 echo "== connection parsing =="
-got="$(pg18_conn_field "Host=localhost;Port=55432;Database=taslim_pg18_billing;Username=taslim" Database)"
+got="$(pg18_conn_field "Host=localhost;Port=55432;Database=taslim_pg18_billing;Username=taslim;Password=offline-only" Database)"
 if [[ "$got" == "taslim_pg18_billing" ]]; then
   printf '  ok   Database field parsed\n'; pass=$((pass + 1))
 else
   printf '  FAIL Database field parsed as %s\n' "$got"; fail_count=$((fail_count + 1))
 fi
-got="$(pg18_conn_field "Host=localhost;Port=55432;Database=taslim_pg18_billing" Host)"
+got="$(pg18_conn_field "Host=localhost;Port=55432;Database=taslim_pg18_billing;Username=taslim;Password=offline-only" Host)"
 if [[ "$got" == "localhost" ]]; then
   printf '  ok   Host field parsed\n'; pass=$((pass + 1))
 else
@@ -113,7 +154,7 @@ fi
 # A refused context must be reported even when a production-looking URL is set,
 # proving the guard order (context first, connection second).
 if GITHUB_EVENT_NAME=push GITHUB_REF="refs/heads/main" \
-   FRESH_DATABASE_URL="Host=containers.vpc-railway.internal;Database=taslim;Username=postgres;Password=real" \
+   FRESH_DATABASE_URL="Host=containers.vpc-railway.internal;Port=5432;Database=taslim_pg18_guard;Username=taslim;Password=offline-only" \
    bash "$ROOT_DIR/scripts/pg18-parity-gate.sh" autopilot 2>/tmp/pg18-refuse.log; then
   printf '  FAIL harness accepted a production URL\n'; fail_count=$((fail_count + 1))
 else
@@ -144,6 +185,21 @@ else
     printf '  ok   ladder/test database collision refused\n'; pass=$((pass + 1))
   else
     printf '  FAIL collision refused for the wrong reason\n'; fail_count=$((fail_count + 1))
+  fi
+fi
+
+# Host aliases and credentials may differ while still reaching the same
+# PostgreSQL database. Compare the database identity, not the whole URL.
+if PG18_PARITY_LOCAL_OPT_IN=1 GITHUB_EVENT_NAME= GITHUB_REF= \
+   PG18_TEST_URL="Host=localhost;Port=55432;Database=taslim_pg18_guard;Username=taslim;Password=change-me" \
+   PG18_LADDER_URL="Host=127.0.0.1;Port=55432;Database=taslim_pg18_guard;Username=other;Password=other-pass" \
+   bash "$ROOT_DIR/scripts/pg18-parity-gate.sh" billing 2>/tmp/pg18-alias-collide.log; then
+  printf '  FAIL host-alias database collision accepted\n'; fail_count=$((fail_count + 1))
+else
+  if grep -qi "different databases" /tmp/pg18-alias-collide.log; then
+    printf '  ok   same database refused despite differing host alias and credentials\n'; pass=$((pass + 1))
+  else
+    printf '  FAIL alias collision refused for the wrong reason\n'; fail_count=$((fail_count + 1))
   fi
 fi
 
